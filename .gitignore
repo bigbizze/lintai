@@ -1,0 +1,29 @@
+# Go
+/cmd/lintai/lintai
+*.exe
+*.test
+*.out
+bin/
+
+# Node / pnpm
+node_modules/
+.pnpm-store/
+
+# TypeScript
+dist/
+*.tsbuildinfo
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.*

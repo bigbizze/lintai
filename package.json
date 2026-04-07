@@ -1,0 +1,16 @@
+{
+	"name": "lintai",
+	"private": true,
+	"type": "module",
+	"scripts": {
+		"check": "biome check .",
+		"format": "biome format --write ."
+	},
+	"devDependencies": {
+		"@biomejs/biome": "^1.9.0",
+		"typescript": "^5.7.0"
+	},
+	"pnpm": {
+		"onlyBuiltDependencies": ["@biomejs/biome"]
+	}
+}
