@@ -24,7 +24,7 @@ The Go toolchain must be on your `PATH`. No sibling checkout of `typescript-go` 
 
 Linux and macOS distribution is packaged as:
 
-- `lintai` — npm CLI launcher
+- `@lintai/cli` — npm CLI launcher that provides the `lintai` bin
 - `@lintai/eslint-plugin` — ESLint integration plus bundling assets
 - `@lintai/sdk` — rule authoring SDK
 - `@lintai/lintai-{darwin,linux}-{x64,arm64}` — native binaries
@@ -34,6 +34,13 @@ Build the publishable artifacts locally with:
 ```sh
 pnpm build:dist
 pnpm smoke:npm
+```
+
+Publish all packages in dependency order with:
+
+```sh
+npm login
+pnpm publish:npm
 ```
 
 If the consuming repository uses pnpm 10+, allow the `esbuild` install step:

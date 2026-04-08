@@ -9,6 +9,7 @@
 		"build:npm-binaries": "node scripts/build-npm-binaries.mjs",
 		"check": "biome check .",
 		"format": "biome format --write .",
+		"publish:npm": "node scripts/publish-npm.mjs",
 		"smoke:npm": "node scripts/smoke-npm-install.mjs",
 		"test": "go test ./..."
 	},

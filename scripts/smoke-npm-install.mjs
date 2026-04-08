@@ -20,7 +20,7 @@ await fs.mkdir(artifactsDir, { recursive: true });
 await fs.cp(templateRoot, repoDir, { recursive: true });
 
 const packagesToPack = [
-	{ name: "lintai", dir: "packages/lintai" },
+	{ name: "@lintai/cli", dir: "packages/lintai" },
 	{ name: "@lintai/sdk", dir: "packages/sdk" },
 	{ name: "@lintai/eslint-plugin", dir: "packages/eslint-plugin" },
 	{ name: "@lintai/authoring-rules", dir: "packages/authoring-rules" },
@@ -65,7 +65,7 @@ execFileSync(
 	[
 		"add",
 		"-D",
-		"lintai",
+		"@lintai/cli",
 		"@lintai/sdk",
 		"@lintai/eslint-plugin",
 		"eslint@^9.24.0",
