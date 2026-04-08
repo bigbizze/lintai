@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
+	"sort"
 
 	"github.com/bigbizze/lintai/internal/analysis"
 	"github.com/bigbizze/lintai/internal/backend"
@@ -59,7 +60,7 @@ func (b *Backend) BuildSnapshot(ctx context.Context, repoRoot, workspaceRoot str
 		functionsByKey[fn.SemanticKey] = fn
 	}
 
-	version, err := snapshotVersion(files)
+	version, err := snapshotVersion(workspaceRoot, files)
 	if err != nil {
 		return nil, err
 	}
@@ -168,15 +169,21 @@ func convertLocation(location lintaiapi.SourceLocation) diagnostics.SourceLocati
 	}
 }
 
-func snapshotVersion(files []string) (string, error) {
+func snapshotVersion(root string, files []string) (string, error) {
+	sorted := make([]string, len(files))
+	copy(sorted, files)
+	sort.Strings(sorted)
+
 	hash := sha1.New()
-	for _, file := range files {
-		hash.Write([]byte(file))
+	for _, file := range sorted {
+		hash.Write([]byte(workspace.RelativePath(root, file)))
+		hash.Write([]byte{0})
 		source, err := workspace.ReadFile(file)
 		if err != nil {
 			return "", err
 		}
 		hash.Write([]byte(source))
+		hash.Write([]byte{0})
 	}
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }

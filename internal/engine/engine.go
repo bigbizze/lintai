@@ -42,18 +42,59 @@ func (e *Engine) Run(ctx context.Context, options Options) ([]diagnostics.Diagno
 		return nil, err
 	}
 	allDiagnostics := make([]diagnostics.Diagnostic, 0)
-	for _, rulePath := range rulePaths {
-		provisional := make([]diagnostics.Diagnostic, 0)
-		artifacts, err := bundle.Build(ctx, options.RepoRoot, rulePath)
-		if err != nil {
+	if len(rulePaths) == 0 {
+		return allDiagnostics, nil
+	}
+
+	artifactsByRule, buildFailures, err := bundle.BuildAll(ctx, options.RepoRoot, rulePaths)
+	if err != nil {
+		for _, rulePath := range rulePaths {
+			if _, failed := buildFailures[rulePath]; failed {
+				continue
+			}
 			allDiagnostics = append(allDiagnostics, errorDiagnostic(filepath.Base(rulePath), "bundle", 0, snapshot.Version, e.backend.ID(), err.Error(), options.Severity))
-			continue
 		}
-		prepared, err := bundle.Prepare(ctx, options.RepoRoot, options.WorkspaceRoot, artifacts, options.Env)
-		if err != nil {
+		for rulePath, itemErr := range buildFailures {
+			allDiagnostics = append(allDiagnostics, errorDiagnostic(filepath.Base(rulePath), "bundle", 0, snapshot.Version, e.backend.ID(), itemErr.Error(), options.Severity))
+		}
+		sortDiagnostics(allDiagnostics)
+		return allDiagnostics, nil
+	}
+
+	for rulePath, itemErr := range buildFailures {
+		allDiagnostics = append(allDiagnostics, errorDiagnostic(filepath.Base(rulePath), "bundle", 0, snapshot.Version, e.backend.ID(), itemErr.Error(), options.Severity))
+	}
+
+	preparedByRule, prepareFailures, err := bundle.PrepareAll(ctx, options.RepoRoot, options.WorkspaceRoot, artifactsByRule, options.Env)
+	if err != nil {
+		for rulePath, prepareErr := range prepareFailures {
+			allDiagnostics = append(allDiagnostics, errorDiagnostic(ruleIDForPrepareFailure(rulePath, prepareErr), "setup", prepareErr.RuleVersion, snapshot.Version, e.backend.ID(), prepareErr.Message, options.Severity))
+		}
+		for rulePath := range artifactsByRule {
+			if _, failed := prepareFailures[rulePath]; failed {
+				continue
+			}
 			allDiagnostics = append(allDiagnostics, errorDiagnostic(filepath.Base(rulePath), "setup", 0, snapshot.Version, e.backend.ID(), err.Error(), options.Severity))
+		}
+		sortDiagnostics(allDiagnostics)
+		return allDiagnostics, nil
+	}
+
+	for rulePath, prepareErr := range prepareFailures {
+		allDiagnostics = append(allDiagnostics, errorDiagnostic(ruleIDForPrepareFailure(rulePath, prepareErr), "setup", prepareErr.RuleVersion, snapshot.Version, e.backend.ID(), prepareErr.Message, options.Severity))
+	}
+
+	for _, rulePath := range rulePaths {
+		artifacts, built := artifactsByRule[rulePath]
+		if !built {
 			continue
 		}
+		prepared, ready := preparedByRule[rulePath]
+		if !ready {
+			continue
+		}
+
+		provisional := make([]diagnostics.Diagnostic, 0)
 		if _, err := canonical.Marshal(prepared.Setup); err != nil {
 			allDiagnostics = append(allDiagnostics, errorDiagnostic(prepared.RuleID, "setup", prepared.RuleVersion, snapshot.Version, e.backend.ID(), err.Error(), options.Severity))
 			continue
@@ -116,6 +157,11 @@ func (e *Engine) Run(ctx context.Context, options Options) ([]diagnostics.Diagno
 		}
 		allDiagnostics = append(allDiagnostics, provisional...)
 	}
+	sortDiagnostics(allDiagnostics)
+	return allDiagnostics, nil
+}
+
+func sortDiagnostics(allDiagnostics []diagnostics.Diagnostic) {
 	sort.Slice(allDiagnostics, func(left, right int) bool {
 		lf := ""
 		rf := ""
@@ -130,7 +176,13 @@ func (e *Engine) Run(ctx context.Context, options Options) ([]diagnostics.Diagno
 		}
 		return lf < rf
 	})
-	return allDiagnostics, nil
+}
+
+func ruleIDForPrepareFailure(rulePath string, prepareErr bundle.PrepareError) string {
+	if prepareErr.RuleID != "" {
+		return prepareErr.RuleID
+	}
+	return filepath.Base(rulePath)
 }
 
 func errorDiagnostic(ruleID, phase string, ruleVersion int, snapshotVersion, backendID, message string, severity diagnostics.Severity) diagnostics.Diagnostic {

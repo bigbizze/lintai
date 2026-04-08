@@ -8,8 +8,8 @@ import (
 	"github.com/bigbizze/lintai/internal/analysis"
 	"github.com/bigbizze/lintai/internal/backend"
 	"github.com/bigbizze/lintai/internal/diagnostics"
-	"github.com/dop251/goja"
 	"github.com/bmatcuk/doublestar/v4"
+	"github.com/dop251/goja"
 )
 
 type Evaluator struct {
@@ -333,17 +333,7 @@ func (e *Evaluator) callsTarget(sourceKey string, targets map[string]struct{}, t
 }
 
 func matchPattern(pattern, path string) (bool, error) {
-	pattern = filepath.ToSlash(pattern)
-	path = filepath.ToSlash(path)
-	match, err := doublestar.Match(pattern, path)
-	if err != nil {
-		return false, err
-	}
-	if match {
-		return true, nil
-	}
-	if !strings.Contains(pattern, "**") && strings.HasSuffix(pattern, "/**") {
-		return strings.HasPrefix(path, strings.TrimSuffix(pattern, "/**")), nil
-	}
-	return false, nil
+	pattern = strings.TrimPrefix(filepath.ToSlash(pattern), "/")
+	path = strings.TrimPrefix(filepath.ToSlash(path), "/")
+	return doublestar.Match(pattern, path)
 }
