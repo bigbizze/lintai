@@ -51,6 +51,8 @@ func (e *Evaluator) Resolve(plan Plan) ([]any, error) {
 		return e.resolveImports(plan)
 	case "calls":
 		return e.resolveCalls(plan)
+	case "typeRefs":
+		return e.resolveTypeRefs(plan)
 	default:
 		return nil, fmt.Errorf("unsupported query kind %q", plan.Entity)
 	}
@@ -74,19 +76,9 @@ func (e *Evaluator) resolveFunctions(plan Plan) ([]any, error) {
 			}
 			results = filtered
 		case "where":
-			filtered := make([]analysis.Function, 0, len(results))
-			handler, ok := goja.AssertFunction(op.Handler)
-			if !ok {
-				return nil, fmt.Errorf(".where() received a non-function predicate")
-			}
-			for _, fn := range results {
-				value, err := handler(goja.Undefined(), e.runtime.ToValue(functionView(fn)))
-				if err != nil {
-					return nil, err
-				}
-				if value.ToBoolean() {
-					filtered = append(filtered, fn)
-				}
+			filtered, err := filterWhere(e.runtime, results, functionView, op.Handler)
+			if err != nil {
+				return nil, err
 			}
 			results = filtered
 		case "calling":
@@ -167,6 +159,12 @@ func (e *Evaluator) resolveImports(plan Plan) ([]any, error) {
 				}
 			}
 			results = filtered
+		case "where":
+			filtered, err := filterWhere(e.runtime, results, importEdgeView, op.Handler)
+			if err != nil {
+				return nil, err
+			}
+			results = filtered
 		default:
 			return nil, fmt.Errorf("unsupported operator %q for imports()", op.Type)
 		}
@@ -207,6 +205,12 @@ func (e *Evaluator) resolveCalls(plan Plan) ([]any, error) {
 				}
 			}
 			results = filtered
+		case "where":
+			filtered, err := filterWhere(e.runtime, results, callEdgeView, op.Handler)
+			if err != nil {
+				return nil, err
+			}
+			results = filtered
 		default:
 			return nil, fmt.Errorf("unsupported operator %q for calls()", op.Type)
 		}
@@ -218,20 +222,108 @@ func (e *Evaluator) resolveCalls(plan Plan) ([]any, error) {
 	return final, nil
 }
 
+func (e *Evaluator) resolveTypeRefs(plan Plan) ([]any, error) {
+	results := make([]analysis.TypeRef, 0, len(e.snapshot.TypeRefs))
+	results = append(results, e.snapshot.TypeRefs...)
+	for _, op := range plan.Ops {
+		switch op.Type {
+		case "in":
+			filtered := make([]analysis.TypeRef, 0, len(results))
+			for _, ref := range results {
+				match, err := matchPattern(op.Value, ref.FilePath)
+				if err != nil {
+					return nil, err
+				}
+				if match {
+					filtered = append(filtered, ref)
+				}
+			}
+			results = filtered
+		case "where":
+			filtered, err := filterWhere(e.runtime, results, typeRefView, op.Handler)
+			if err != nil {
+				return nil, err
+			}
+			results = filtered
+		default:
+			return nil, fmt.Errorf("unsupported operator %q for typeRefs()", op.Type)
+		}
+	}
+	final := make([]any, 0, len(results))
+	for _, item := range results {
+		final = append(final, item)
+	}
+	return final, nil
+}
+
 func functionView(fn analysis.Function) map[string]any {
 	return map[string]any{
-		"name":          fn.Name,
-		"kind":          fn.Kind,
-		"filePath":      fn.FilePath,
-		"semanticKey":   fn.SemanticKey,
-		"containsAwait": fn.ContainsAwait,
-		"sourceLocation": map[string]any{
-			"file":        fn.Range.File,
-			"startLine":   fn.Range.StartLine,
-			"startColumn": fn.Range.StartColumn,
-			"endLine":     fn.Range.EndLine,
-			"endColumn":   fn.Range.EndColumn,
-		},
+		"name":               fn.Name,
+		"kind":               fn.Kind,
+		"filePath":           fn.FilePath,
+		"containerName":      fn.ContainerName,
+		"semanticKey":        fn.SemanticKey,
+		"containsAwait":      fn.ContainsAwait,
+		"isExported":         fn.IsExported,
+		"isAsync":            fn.IsAsync,
+		"parameterCount":     fn.ParameterCount,
+		"returnTypeText":     fn.ReturnTypeText,
+		"parameterTypeTexts": append([]string(nil), fn.ParameterTypeTexts...),
+		"sourceLocation":     sourceLocationView(fn.Range),
+	}
+}
+
+func importEdgeView(edge analysis.ImportEdge) map[string]any {
+	importedSymbols := make([]map[string]any, 0, len(edge.ImportedSymbols))
+	for _, symbol := range edge.ImportedSymbols {
+		importedSymbols = append(importedSymbols, map[string]any{
+			"name":       symbol.Name,
+			"kind":       symbol.Kind,
+			"isTypeOnly": symbol.IsTypeOnly,
+		})
+	}
+	return map[string]any{
+		"specifier":          edge.Specifier,
+		"fromPath":           edge.FromPath,
+		"toPath":             edge.ToPath,
+		"semanticKey":        edge.SemanticKey,
+		"importedSymbols":    importedSymbols,
+		"hasDefaultImport":   edge.HasDefaultImport,
+		"hasNamespaceImport": edge.HasNamespaceImport,
+		"hasNamedImports":    edge.HasNamedImports,
+		"isTypeOnly":         edge.IsTypeOnly,
+		"sourceLocation":     sourceLocationView(edge.Range),
+	}
+}
+
+func callEdgeView(edge analysis.CallEdge) map[string]any {
+	return map[string]any{
+		"fromName":       edge.FromName,
+		"toName":         edge.ToName,
+		"fromPath":       edge.FromPath,
+		"toPath":         edge.ToPath,
+		"semanticKey":    edge.SemanticKey,
+		"sourceLocation": sourceLocationView(edge.Range),
+	}
+}
+
+func typeRefView(ref analysis.TypeRef) map[string]any {
+	return map[string]any{
+		"name":           ref.Name,
+		"filePath":       ref.FilePath,
+		"targetPath":     ref.TargetPath,
+		"semanticKey":    ref.SemanticKey,
+		"sourceLocation": sourceLocationView(ref.Range),
+	}
+}
+
+func sourceLocationView(location diagnostics.SourceLocation) map[string]any {
+	return map[string]any{
+		"file":        location.File,
+		"startLine":   location.StartLine,
+		"startColumn": location.StartColumn,
+		"endLine":     location.EndLine,
+		"endColumn":   location.EndColumn,
 	}
 }
 
@@ -244,6 +336,9 @@ func DiagnosticLocation(entity any) *diagnostics.SourceLocation {
 		location := typed.Range
 		return &location
 	case analysis.CallEdge:
+		location := typed.Range
+		return &location
+	case analysis.TypeRef:
 		location := typed.Range
 		return &location
 	default:
@@ -259,6 +354,8 @@ func DiagnosticIdentity(entity any) *diagnostics.EntityIdentity {
 		return &diagnostics.EntityIdentity{SemanticKey: typed.SemanticKey}
 	case analysis.CallEdge:
 		return &diagnostics.EntityIdentity{SemanticKey: typed.SemanticKey}
+	case analysis.TypeRef:
+		return &diagnostics.EntityIdentity{SemanticKey: typed.SemanticKey}
 	default:
 		return nil
 	}
@@ -269,37 +366,32 @@ func EntityView(entity any) map[string]any {
 	case analysis.Function:
 		return functionView(typed)
 	case analysis.ImportEdge:
-		return map[string]any{
-			"specifier":   typed.Specifier,
-			"fromPath":    typed.FromPath,
-			"toPath":      typed.ToPath,
-			"semanticKey": typed.SemanticKey,
-			"sourceLocation": map[string]any{
-				"file":        typed.Range.File,
-				"startLine":   typed.Range.StartLine,
-				"startColumn": typed.Range.StartColumn,
-				"endLine":     typed.Range.EndLine,
-				"endColumn":   typed.Range.EndColumn,
-			},
-		}
+		return importEdgeView(typed)
 	case analysis.CallEdge:
-		return map[string]any{
-			"fromName":    typed.FromName,
-			"toName":      typed.ToName,
-			"fromPath":    typed.FromPath,
-			"toPath":      typed.ToPath,
-			"semanticKey": typed.SemanticKey,
-			"sourceLocation": map[string]any{
-				"file":        typed.Range.File,
-				"startLine":   typed.Range.StartLine,
-				"startColumn": typed.Range.StartColumn,
-				"endLine":     typed.Range.EndLine,
-				"endColumn":   typed.Range.EndColumn,
-			},
-		}
+		return callEdgeView(typed)
+	case analysis.TypeRef:
+		return typeRefView(typed)
 	default:
 		return map[string]any{}
 	}
+}
+
+func filterWhere[T any](runtime *goja.Runtime, items []T, view func(T) map[string]any, handlerValue goja.Value) ([]T, error) {
+	handler, ok := goja.AssertFunction(handlerValue)
+	if !ok {
+		return nil, fmt.Errorf(".where() received a non-function predicate")
+	}
+	filtered := make([]T, 0, len(items))
+	for _, item := range items {
+		value, err := handler(goja.Undefined(), runtime.ToValue(view(item)))
+		if err != nil {
+			return nil, err
+		}
+		if value.ToBoolean() {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered, nil
 }
 
 func toFunctionKeySet(values []any) map[string]struct{} {

@@ -91,6 +91,127 @@ func TestSnapshotVersionUsesDelimitersBetweenPathsAndContents(t *testing.T) {
 	}
 }
 
+func TestBuildSnapshotExposesExpandedMetadataAndCapabilities(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "tsconfig.json", `{
+  "compilerOptions": {
+    "target": "es2022",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts"]
+}
+`)
+	writeWorkspaceFile(t, root, "src/data/db.ts", `export default async function db(query: string): Promise<number> {
+	return query.length;
+}
+
+export type DbConfig = {
+	dsn: string;
+};
+
+export function helper(config: DbConfig): number {
+	return config.dsn.length;
+}
+`)
+	writeWorkspaceFile(t, root, "src/service/repository.ts", `import db, { helper as runHelper, type DbConfig } from "../data/db";
+import * as dbModule from "../data/db";
+
+type LocalConfig = DbConfig;
+
+export class Repository {
+	async save(config: DbConfig): Promise<number> {
+		await db("select 1");
+		return runHelper(config) + (await dbModule.default(config.dsn));
+	}
+}
+
+export function mirror(config: LocalConfig): DbConfig {
+	return config;
+}
+`)
+
+	snapshot, err := New().BuildSnapshot(context.Background(), root, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !New().Capabilities().SupportsQueryKind("typeRefs") {
+		t.Fatal("expected backend to advertise typeRefs query support")
+	}
+
+	var dbFnFound bool
+	for _, fn := range snapshot.Functions {
+		if fn.Name != "db" {
+			continue
+		}
+		dbFnFound = true
+		if !fn.IsExported || !fn.IsAsync {
+			t.Fatalf("expected db to be exported async, got %+v", fn)
+		}
+		if fn.ParameterCount != 1 {
+			t.Fatalf("expected db parameter count 1, got %+v", fn)
+		}
+		if fn.ReturnTypeText != "Promise<number>" {
+			t.Fatalf("expected db return type Promise<number>, got %+v", fn)
+		}
+		if len(fn.ParameterTypeTexts) != 1 || fn.ParameterTypeTexts[0] != "string" {
+			t.Fatalf("expected db parameter types [string], got %+v", fn.ParameterTypeTexts)
+		}
+	}
+	if !dbFnFound {
+		t.Fatalf("expected to find db function in snapshot, got %+v", snapshot.Functions)
+	}
+
+	var mixedImportFound bool
+	var namespaceImportFound bool
+	for _, edge := range snapshot.ImportEdges {
+		if edge.FromPath != "src/service/repository.ts" {
+			continue
+		}
+		switch len(edge.ImportedSymbols) {
+		case 3:
+			mixedImportFound = true
+			if !edge.HasDefaultImport || !edge.HasNamedImports || edge.HasNamespaceImport || edge.IsTypeOnly {
+				t.Fatalf("expected mixed import flags, got %+v", edge)
+			}
+			if edge.ImportedSymbols[0].Name != "db" || edge.ImportedSymbols[0].Kind != "default" || edge.ImportedSymbols[0].IsTypeOnly {
+				t.Fatalf("unexpected default import symbol %+v", edge.ImportedSymbols[0])
+			}
+			if edge.ImportedSymbols[1].Name != "runHelper" || edge.ImportedSymbols[1].Kind != "named" || edge.ImportedSymbols[1].IsTypeOnly {
+				t.Fatalf("unexpected named import symbol %+v", edge.ImportedSymbols[1])
+			}
+			if edge.ImportedSymbols[2].Name != "DbConfig" || edge.ImportedSymbols[2].Kind != "named" || !edge.ImportedSymbols[2].IsTypeOnly {
+				t.Fatalf("unexpected type-only import symbol %+v", edge.ImportedSymbols[2])
+			}
+		case 1:
+			if edge.ImportedSymbols[0].Kind == "namespace" {
+				namespaceImportFound = true
+				if !edge.HasNamespaceImport || edge.HasDefaultImport || edge.HasNamedImports || edge.IsTypeOnly {
+					t.Fatalf("expected namespace import flags, got %+v", edge)
+				}
+			}
+		}
+	}
+	if !mixedImportFound || !namespaceImportFound {
+		t.Fatalf("expected repository imports to expose structured symbols, got %+v", snapshot.ImportEdges)
+	}
+
+	var targetFound bool
+	for _, ref := range snapshot.TypeRefs {
+		if ref.FilePath == "src/service/repository.ts" && ref.Name == "DbConfig" && ref.TargetPath == "src/data/db.ts" {
+			targetFound = true
+			break
+		}
+	}
+	if !targetFound {
+		t.Fatalf("expected DbConfig type ref to resolve to src/data/db.ts, got %+v", snapshot.TypeRefs)
+	}
+}
+
 func writeWorkspaceFile(t *testing.T, root, relativePath, contents string) string {
 	t.Helper()
 

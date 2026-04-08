@@ -1,6 +1,8 @@
 import { spawn, spawnSync, execFileSync, type SpawnSyncReturns } from "node:child_process";
+import { createHash } from "node:crypto";
 import { PassThrough, type Readable, type Writable } from "node:stream";
-import { existsSync, readlinkSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, statSync, realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 
 export type Diagnostic = {
@@ -89,7 +91,7 @@ const defaultDependencies: ClientDependencies = {
 	spawnServe(binary, args, cwd) {
 		return spawn(binary, args, {
 			cwd,
-			stdio: ["pipe", "pipe", "inherit"],
+			stdio: ["pipe", "pipe", "ignore"],
 		}) as unknown as ClientProcess;
 	},
 	spawnSync(command, args, options) {
@@ -240,6 +242,12 @@ export class LintAIClient {
 	}
 
 	private loadOneshotDiagnostics(): Map<string, Diagnostic[]> {
+		const cacheTTLMs = 30_000;
+		const cached = this.readDiskCache(cacheTTLMs);
+		if (cached) {
+			return cached;
+		}
+
 		const result = this.dependencies.spawnSync(
 			this.options.binary,
 			[
@@ -268,10 +276,47 @@ export class LintAIClient {
 		}
 		try {
 			const diagnostics = JSON.parse(result.stdout) as Diagnostic[];
+			this.writeDiskCache(result.stdout);
 			return indexDiagnostics(diagnostics);
 		} catch (error) {
 			this.warnOnce(`lintai oneshot fallback returned invalid JSON: ${asError(error).message}`);
 			return new Map();
+		}
+	}
+
+	private diskCachePath(): string {
+		const key = createHash("sha256")
+			.update(JSON.stringify({ ws: this.options.workspaceRoot, rules: this.options.ruleGlobs }))
+			.digest("hex")
+			.slice(0, 16);
+		const dir = path.join(tmpdir(), "lintai-cache");
+		try {
+			mkdirSync(dir, { recursive: true });
+		} catch {
+			// ignore
+		}
+		return path.join(dir, `${key}.json`);
+	}
+
+	private readDiskCache(ttlMs: number): Map<string, Diagnostic[]> | null {
+		const cachePath = this.diskCachePath();
+		try {
+			const stat = statSync(cachePath);
+			if (Date.now() - stat.mtimeMs > ttlMs) {
+				return null;
+			}
+			const raw = readFileSync(cachePath, "utf8");
+			return indexDiagnostics(JSON.parse(raw) as Diagnostic[]);
+		} catch {
+			return null;
+		}
+	}
+
+	private writeDiskCache(json: string): void {
+		try {
+			writeFileSync(this.diskCachePath(), json, "utf8");
+		} catch {
+			// ignore
 		}
 	}
 

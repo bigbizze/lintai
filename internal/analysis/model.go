@@ -10,25 +10,41 @@ type Module struct {
 }
 
 type Function struct {
-	EntityID      string
-	SemanticKey   string
-	Name          string
-	Kind          string
-	FilePath      string
-	ContainerName string
-	ContainsAwait bool
-	Range         diagnostics.SourceLocation
-	BodyStart     int
-	BodyEnd       int
+	EntityID           string
+	SemanticKey        string
+	Name               string
+	Kind               string
+	FilePath           string
+	ContainerName      string
+	ContainsAwait      bool
+	IsExported         bool
+	IsAsync            bool
+	ParameterCount     int
+	ReturnTypeText     string
+	ParameterTypeTexts []string
+	Range              diagnostics.SourceLocation
+	BodyStart          int
+	BodyEnd            int
+}
+
+type ImportedSymbol struct {
+	Name       string
+	Kind       string
+	IsTypeOnly bool
 }
 
 type ImportEdge struct {
-	EntityID    string
-	SemanticKey string
-	Specifier   string
-	FromPath    string
-	ToPath      string
-	Range       diagnostics.SourceLocation
+	EntityID           string
+	SemanticKey        string
+	Specifier          string
+	FromPath           string
+	ToPath             string
+	ImportedSymbols    []ImportedSymbol
+	HasDefaultImport   bool
+	HasNamespaceImport bool
+	HasNamedImports    bool
+	IsTypeOnly         bool
+	Range              diagnostics.SourceLocation
 }
 
 type CallEdge struct {
@@ -48,6 +64,7 @@ type TypeRef struct {
 	SemanticKey string
 	Name        string
 	FilePath    string
+	TargetPath  string
 	Range       diagnostics.SourceLocation
 }
 

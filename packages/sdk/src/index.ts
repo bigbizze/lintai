@@ -1,6 +1,6 @@
 export type Predicate<T = any> = (value: T) => boolean;
 
-type QueryKind = "functions" | "imports" | "calls";
+type QueryKind = "functions" | "imports" | "calls" | "typeRefs";
 
 type QueryOperation =
 	| { type: "in"; value: string }
@@ -14,9 +14,21 @@ export type FunctionView = {
 	name: string;
 	kind: string;
 	filePath: string;
+	containerName: string;
 	semanticKey: string;
 	containsAwait: boolean;
+	isExported: boolean;
+	isAsync: boolean;
+	parameterCount: number;
+	returnTypeText: string;
+	parameterTypeTexts: string[];
 	sourceLocation: SourceLocation;
+};
+
+export type ImportedSymbolView = {
+	name: string;
+	kind: "default" | "namespace" | "named";
+	isTypeOnly: boolean;
 };
 
 export type ImportEdgeView = {
@@ -24,6 +36,11 @@ export type ImportEdgeView = {
 	fromPath: string;
 	toPath: string;
 	semanticKey: string;
+	importedSymbols: ImportedSymbolView[];
+	hasDefaultImport: boolean;
+	hasNamespaceImport: boolean;
+	hasNamedImports: boolean;
+	isTypeOnly: boolean;
 	sourceLocation: SourceLocation;
 };
 
@@ -32,6 +49,14 @@ export type CallEdgeView = {
 	toName: string;
 	fromPath: string;
 	toPath: string;
+	semanticKey: string;
+	sourceLocation: SourceLocation;
+};
+
+export type TypeRefView = {
+	name: string;
+	filePath: string;
+	targetPath: string;
 	semanticKey: string;
 	sourceLocation: SourceLocation;
 };
@@ -180,4 +205,8 @@ export function imports(): QueryValue {
 
 export function calls(): QueryValue {
 	return createQuery("calls");
+}
+
+export function typeRefs(): QueryValue {
+	return createQuery("typeRefs");
 }

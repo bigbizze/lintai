@@ -26,7 +26,7 @@ func (b *Backend) ID() string {
 func (b *Backend) Capabilities() backend.CapabilityManifest {
 	return backend.CapabilityManifest{
 		EntityKinds: []string{"module", "function", "import_edge", "call_edge", "type_ref"},
-		QueryKinds:  []string{"functions", "imports", "calls"},
+		QueryKinds:  []string{"functions", "imports", "calls", "typeRefs"},
 		Operators: []string{
 			"in", "from", "to", "where", "calling", "transitivelyCalling", "isEmpty",
 		},
@@ -97,16 +97,21 @@ func convertFunctions(items []lintaiapi.Function) []analysis.Function {
 	result := make([]analysis.Function, 0, len(items))
 	for _, item := range items {
 		result = append(result, analysis.Function{
-			EntityID:      item.EntityID,
-			SemanticKey:   item.SemanticKey,
-			Name:          item.Name,
-			Kind:          item.Kind,
-			FilePath:      item.FilePath,
-			ContainerName: item.ContainerName,
-			ContainsAwait: item.ContainsAwait,
-			Range:         convertLocation(item.Range),
-			BodyStart:     item.BodyStart,
-			BodyEnd:       item.BodyEnd,
+			EntityID:           item.EntityID,
+			SemanticKey:        item.SemanticKey,
+			Name:               item.Name,
+			Kind:               item.Kind,
+			FilePath:           item.FilePath,
+			ContainerName:      item.ContainerName,
+			ContainsAwait:      item.ContainsAwait,
+			IsExported:         item.IsExported,
+			IsAsync:            item.IsAsync,
+			ParameterCount:     item.ParameterCount,
+			ReturnTypeText:     item.ReturnTypeText,
+			ParameterTypeTexts: append([]string(nil), item.ParameterTypeTexts...),
+			Range:              convertLocation(item.Range),
+			BodyStart:          item.BodyStart,
+			BodyEnd:            item.BodyEnd,
 		})
 	}
 	return result
@@ -115,13 +120,26 @@ func convertFunctions(items []lintaiapi.Function) []analysis.Function {
 func convertImportEdges(items []lintaiapi.ImportEdge) []analysis.ImportEdge {
 	result := make([]analysis.ImportEdge, 0, len(items))
 	for _, item := range items {
+		importedSymbols := make([]analysis.ImportedSymbol, 0, len(item.ImportedSymbols))
+		for _, symbol := range item.ImportedSymbols {
+			importedSymbols = append(importedSymbols, analysis.ImportedSymbol{
+				Name:       symbol.Name,
+				Kind:       symbol.Kind,
+				IsTypeOnly: symbol.IsTypeOnly,
+			})
+		}
 		result = append(result, analysis.ImportEdge{
-			EntityID:    item.EntityID,
-			SemanticKey: item.SemanticKey,
-			Specifier:   item.Specifier,
-			FromPath:    item.FromPath,
-			ToPath:      item.ToPath,
-			Range:       convertLocation(item.Range),
+			EntityID:           item.EntityID,
+			SemanticKey:        item.SemanticKey,
+			Specifier:          item.Specifier,
+			FromPath:           item.FromPath,
+			ToPath:             item.ToPath,
+			ImportedSymbols:    importedSymbols,
+			HasDefaultImport:   item.HasDefaultImport,
+			HasNamespaceImport: item.HasNamespaceImport,
+			HasNamedImports:    item.HasNamedImports,
+			IsTypeOnly:         item.IsTypeOnly,
+			Range:              convertLocation(item.Range),
 		})
 	}
 	return result
@@ -153,6 +171,7 @@ func convertTypeRefs(items []lintaiapi.TypeRef) []analysis.TypeRef {
 			SemanticKey: item.SemanticKey,
 			Name:        item.Name,
 			FilePath:    item.FilePath,
+			TargetPath:  item.TargetPath,
 			Range:       convertLocation(item.Range),
 		})
 	}
