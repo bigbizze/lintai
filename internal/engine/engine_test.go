@@ -18,8 +18,9 @@ func TestEngineRunsFixtureRules(t *testing.T) {
 	runner := New(typescript.New())
 	items, err := runner.Run(context.Background(), Options{
 		RepoRoot:      repoRoot,
+		AssetRoot:     filepath.Join(repoRoot, "packages", "eslint-plugin"),
 		WorkspaceRoot: filepath.Join(repoRoot, "testdata/fixtures/workspace"),
-		RuleGlobs:     []string{"testdata/fixtures/rules/*.ts"},
+		RuleGlobs:     []string{filepath.Join(repoRoot, "testdata/fixtures/rules/*.ts")},
 		Env:           map[string]any{},
 		Severity:      diagnostics.SeverityError,
 	})
@@ -55,6 +56,7 @@ export default rule("arch.broken-setup")
 	runner := New(typescript.New())
 	items, err := runner.Run(context.Background(), Options{
 		RepoRoot:      repoRoot,
+		AssetRoot:     filepath.Join(repoRoot, "packages", "eslint-plugin"),
 		WorkspaceRoot: filepath.Join(repoRoot, "testdata/fixtures/workspace"),
 		RuleGlobs:     []string{goodRule, brokenRule},
 		Env:           map[string]any{},
@@ -79,6 +81,61 @@ export default rule("arch.broken-setup")
 	}
 	if !foundSetupFailure {
 		t.Fatalf("expected setup failure diagnostic, got %+v", items)
+	}
+}
+
+func TestEngineResolvesRelativeRuleGlobsFromWorkspaceRoot(t *testing.T) {
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	workspaceRoot := t.TempDir()
+	writeTestFile(t, workspaceRoot, "tsconfig.json", `{
+  "compilerOptions": {
+    "target": "es2022",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts"]
+}
+`)
+	writeTestFile(t, workspaceRoot, "src/pure/bad.ts", `export async function bad(): Promise<number> {
+	return 1;
+}
+`)
+	writeTestFile(t, workspaceRoot, "lintai-rules/api-async-return.ts", `
+import { functions, rule } from "@lintai/sdk";
+
+export default rule("arch.api-async-return")
+	.version(1)
+	.assert(() =>
+		functions()
+			.in("src/pure/**")
+			.where((fn) => fn.isExported && fn.isAsync && fn.returnTypeText !== "Promise<string>")
+			.isEmpty(),
+	)
+	.message((fn) => "API async function must return Promise<string>: " + fn.name);
+`)
+
+	runner := New(typescript.New())
+	items, err := runner.Run(context.Background(), Options{
+		RepoRoot:      repoRoot,
+		AssetRoot:     filepath.Join(repoRoot, "packages", "eslint-plugin"),
+		WorkspaceRoot: workspaceRoot,
+		RuleGlobs:     []string{"lintai-rules/**/*.ts"},
+		Env:           map[string]any{},
+		Severity:      diagnostics.SeverityError,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected exactly one diagnostic, got %+v", items)
+	}
+	if items[0].RuleID != "arch.api-async-return" {
+		t.Fatalf("unexpected diagnostic %+v", items[0])
 	}
 }
 
@@ -222,6 +279,7 @@ export default rule("arch.no-pure-service-types")
 	runner := New(typescript.New())
 	items, err := runner.Run(context.Background(), Options{
 		RepoRoot:      repoRoot,
+		AssetRoot:     filepath.Join(repoRoot, "packages", "eslint-plugin"),
 		WorkspaceRoot: workspaceRoot,
 		RuleGlobs:     rulePaths,
 		Env:           map[string]any{},

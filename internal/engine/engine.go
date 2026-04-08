@@ -18,6 +18,7 @@ import (
 
 type Options struct {
 	RepoRoot      string
+	AssetRoot     string
 	WorkspaceRoot string
 	RuleGlobs     []string
 	Env           map[string]any
@@ -51,7 +52,7 @@ func (e *Engine) Analyze(ctx context.Context, options Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	rulePaths, err := discoverRulePaths(options.RepoRoot, options.RuleGlobs)
+	rulePaths, err := discoverRulePaths(options.WorkspaceRoot, options.RuleGlobs)
 	if err != nil {
 		return Result{}, err
 	}
@@ -65,7 +66,12 @@ func (e *Engine) Analyze(ctx context.Context, options Options) (Result, error) {
 		return result, nil
 	}
 
-	artifactsByRule, buildFailures, err := bundle.BuildAll(ctx, options.RepoRoot, rulePaths)
+	assetRoot := options.AssetRoot
+	if assetRoot == "" {
+		assetRoot = options.RepoRoot
+	}
+
+	artifactsByRule, buildFailures, err := bundle.BuildAll(ctx, assetRoot, options.RepoRoot, rulePaths)
 	if err != nil {
 		for _, rulePath := range rulePaths {
 			if _, failed := buildFailures[rulePath]; failed {
@@ -85,7 +91,7 @@ func (e *Engine) Analyze(ctx context.Context, options Options) (Result, error) {
 		allDiagnostics = append(allDiagnostics, errorDiagnostic(filepath.Base(rulePath), "bundle", 0, snapshot.Version, e.backend.ID(), itemErr.Error(), options.Severity))
 	}
 
-	preparedByRule, prepareFailures, err := bundle.PrepareAll(ctx, options.RepoRoot, options.WorkspaceRoot, artifactsByRule, options.Env)
+	preparedByRule, prepareFailures, err := bundle.PrepareAll(ctx, assetRoot, options.RepoRoot, options.WorkspaceRoot, artifactsByRule, options.Env)
 	if err != nil {
 		for rulePath, prepareErr := range prepareFailures {
 			allDiagnostics = append(allDiagnostics, errorDiagnostic(ruleIDForPrepareFailure(rulePath, prepareErr), "setup", prepareErr.RuleVersion, snapshot.Version, e.backend.ID(), prepareErr.Message, options.Severity))

@@ -1,11 +1,15 @@
 {
-	"name": "lintai",
+	"name": "lintai-workspace",
 	"private": true,
 	"type": "module",
 	"scripts": {
 		"build": "pnpm -r build && go build ./cmd/lintai",
+		"build:dist": "pnpm build && pnpm build:npm-binaries",
+		"build:npm-binary:host": "node scripts/build-npm-binaries.mjs --host-only",
+		"build:npm-binaries": "node scripts/build-npm-binaries.mjs",
 		"check": "biome check .",
 		"format": "biome format --write .",
+		"smoke:npm": "node scripts/smoke-npm-install.mjs",
 		"test": "go test ./..."
 	},
 	"devDependencies": {

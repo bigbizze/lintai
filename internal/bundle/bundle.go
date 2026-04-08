@@ -58,7 +58,7 @@ type prepareResponse struct {
 	Error       string `json:"error,omitempty"`
 }
 
-func BuildAll(ctx context.Context, repoRoot string, rulePaths []string) (map[string]Artifacts, map[string]error, error) {
+func BuildAll(ctx context.Context, assetRoot, repoRoot string, rulePaths []string) (map[string]Artifacts, map[string]error, error) {
 	if len(rulePaths) == 0 {
 		return map[string]Artifacts{}, map[string]error{}, nil
 	}
@@ -90,8 +90,12 @@ func BuildAll(ctx context.Context, repoRoot string, rulePaths []string) (map[str
 	if err != nil {
 		return nil, nil, err
 	}
-	command := exec.CommandContext(ctx, "node", filepath.Join(repoRoot, "scripts", "bundle-rule.mjs"))
-	command.Dir = repoRoot
+	scriptPath, err := resolveScriptPath(assetRoot, "bundle-rule.mjs")
+	if err != nil {
+		return nil, itemErrors, err
+	}
+	command := exec.CommandContext(ctx, "node", scriptPath)
+	command.Dir = assetRoot
 	command.Stdin = bytes.NewReader(payload)
 	output, err := command.CombinedOutput()
 	if err != nil {
@@ -131,7 +135,7 @@ func BuildAll(ctx context.Context, repoRoot string, rulePaths []string) (map[str
 	return results, itemErrors, nil
 }
 
-func PrepareAll(ctx context.Context, repoRoot, workspaceRoot string, artifacts map[string]Artifacts, rawEnv any) (map[string]PrepareResult, map[string]PrepareError, error) {
+func PrepareAll(ctx context.Context, assetRoot, repoRoot, workspaceRoot string, artifacts map[string]Artifacts, rawEnv any) (map[string]PrepareResult, map[string]PrepareError, error) {
 	if len(artifacts) == 0 {
 		return map[string]PrepareResult{}, map[string]PrepareError{}, nil
 	}
@@ -161,8 +165,12 @@ func PrepareAll(ctx context.Context, repoRoot, workspaceRoot string, artifacts m
 	if err != nil {
 		return nil, nil, err
 	}
-	command := exec.CommandContext(ctx, "node", filepath.Join(repoRoot, "scripts", "prepare-rule.mjs"))
-	command.Dir = repoRoot
+	scriptPath, err := resolveScriptPath(assetRoot, "prepare-rule.mjs")
+	if err != nil {
+		return nil, nil, err
+	}
+	command := exec.CommandContext(ctx, "node", scriptPath)
+	command.Dir = assetRoot
 	command.Stdin = bytes.NewReader(payload)
 	output, err := command.CombinedOutput()
 	if err != nil {
@@ -207,4 +215,18 @@ func PrepareAll(ctx context.Context, repoRoot, workspaceRoot string, artifacts m
 		}
 	}
 	return results, itemErrors, nil
+}
+
+func resolveScriptPath(assetRoot, name string) (string, error) {
+	if assetRoot == "" {
+		return "", fmt.Errorf("lintai asset root is required")
+	}
+	scriptPath := filepath.Join(assetRoot, "scripts", name)
+	if _, err := os.Stat(scriptPath); err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("lintai helper script %q was not found under asset root %q", name, assetRoot)
+		}
+		return "", err
+	}
+	return scriptPath, nil
 }

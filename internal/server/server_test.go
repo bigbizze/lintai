@@ -62,6 +62,7 @@ func TestServerInitializeAndFileDiagnostics(t *testing.T) {
 	input := &bytes.Buffer{}
 	writeRequest(t, input, 1, "initialize", InitializeParams{
 		RepoRoot:      "/repo",
+		AssetRoot:     "/assets",
 		WorkspaceRoot: "/workspace",
 		RuleGlobs:     []string{"lintai-rules/**/*.ts"},
 		Env:           map[string]any{"mode": "test"},
@@ -99,6 +100,9 @@ func TestServerInitializeAndFileDiagnostics(t *testing.T) {
 
 	if len(analyzer.calls) != 1 {
 		t.Fatalf("expected one analyze call, got %d", len(analyzer.calls))
+	}
+	if analyzer.calls[0].AssetRoot != "/assets" {
+		t.Fatalf("expected asset root to be propagated, got %q", analyzer.calls[0].AssetRoot)
 	}
 }
 
@@ -147,6 +151,7 @@ func TestServerReanalyzeSwapsCachedState(t *testing.T) {
 	input := &bytes.Buffer{}
 	writeRequest(t, input, 1, "initialize", InitializeParams{
 		RepoRoot:      "/repo",
+		AssetRoot:     "/assets",
 		WorkspaceRoot: "/workspace",
 		RuleGlobs:     []string{"lintai-rules/**/*.ts"},
 		Env:           map[string]any{},
@@ -200,6 +205,7 @@ func TestServerInitializeFailureReturnsJSONRPCError(t *testing.T) {
 	input := &bytes.Buffer{}
 	writeRequest(t, input, 1, "initialize", InitializeParams{
 		RepoRoot:      "/repo",
+		AssetRoot:     "/assets",
 		WorkspaceRoot: "/workspace",
 		RuleGlobs:     []string{"lintai-rules/**/*.ts"},
 		Env:           map[string]any{},

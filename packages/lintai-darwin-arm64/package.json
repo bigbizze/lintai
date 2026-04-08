@@ -1,0 +1,20 @@
+{
+	"name": "@lintai/lintai-darwin-arm64",
+	"version": "0.1.0",
+	"type": "module",
+	"bin": {
+		"lintai-native": "./bin/lintai"
+	},
+	"files": [
+		"bin"
+	],
+	"os": [
+		"darwin"
+	],
+	"cpu": [
+		"arm64"
+	],
+	"publishConfig": {
+		"access": "public"
+	}
+}

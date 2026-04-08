@@ -1,10 +1,9 @@
 {
-	"name": "@lintai/eslint-plugin",
+	"name": "lintai",
 	"version": "0.1.0",
 	"type": "module",
 	"files": [
-		"dist",
-		"scripts"
+		"dist"
 	],
 	"exports": {
 		".": {
@@ -13,29 +12,25 @@
 		},
 		"./package.json": "./package.json"
 	},
+	"bin": {
+		"lintai": "./dist/bin.js"
+	},
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",
 	"scripts": {
 		"build": "tsc",
-		"dev": "tsc --watch",
-		"test": "node --test dist/**/*.test.js"
+		"dev": "tsc --watch"
 	},
 	"dependencies": {
-		"@lintai/authoring-rules": "workspace:*",
-		"@lintai/sdk": "workspace:*",
-		"chokidar": "^4.0.3",
-		"esbuild": "^0.25.2"
+		"@lintai/eslint-plugin": "workspace:*"
 	},
-	"peerDependencies": {
-		"eslint": "^9.24.0"
-	},
-	"peerDependenciesMeta": {
-		"eslint": {
-			"optional": true
-		}
+	"optionalDependencies": {
+		"@lintai/lintai-darwin-arm64": "workspace:*",
+		"@lintai/lintai-darwin-x64": "workspace:*",
+		"@lintai/lintai-linux-arm64": "workspace:*",
+		"@lintai/lintai-linux-x64": "workspace:*"
 	},
 	"devDependencies": {
-		"eslint": "^9.24.0",
 		"typescript": "^5.7.0"
 	},
 	"publishConfig": {

@@ -41,6 +41,7 @@ type Server struct {
 
 type InitializeParams struct {
 	RepoRoot      string         `json:"repoRoot"`
+	AssetRoot     string         `json:"assetRoot"`
 	WorkspaceRoot string         `json:"workspaceRoot"`
 	RuleGlobs     []string       `json:"ruleGlobs"`
 	Env           map[string]any `json:"env"`
@@ -154,6 +155,7 @@ func (s *Server) handleInitialize(ctx context.Context, rawParams json.RawMessage
 	}
 	options := engine.Options{
 		RepoRoot:      params.RepoRoot,
+		AssetRoot:     params.AssetRoot,
 		WorkspaceRoot: params.WorkspaceRoot,
 		RuleGlobs:     append([]string(nil), params.RuleGlobs...),
 		Env:           params.Env,

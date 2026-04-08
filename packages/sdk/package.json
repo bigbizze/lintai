@@ -1,13 +1,16 @@
 {
 	"name": "@lintai/sdk",
-	"version": "0.0.0",
-	"private": true,
+	"version": "0.1.0",
 	"type": "module",
+	"files": [
+		"dist"
+	],
 	"exports": {
 		".": {
-			"types": "./src/index.ts",
+			"types": "./dist/index.d.ts",
 			"default": "./dist/index.js"
-		}
+		},
+		"./package.json": "./package.json"
 	},
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",
@@ -20,5 +23,8 @@
 	},
 	"devDependencies": {
 		"typescript": "^5.7.0"
+	},
+	"publishConfig": {
+		"access": "public"
 	}
 }

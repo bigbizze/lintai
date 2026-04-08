@@ -40,6 +40,7 @@ func runOnce(ctx context.Context, args []string) error {
 
 	workspaceRoot := flags.String("workspace-root", ".", "workspace root to analyze")
 	repoRoot := flags.String("repo-root", ".", "repository root containing scripts and packages")
+	assetRoot := flags.String("asset-root", "", "asset root containing lintai helper scripts")
 	rules := flags.String("rules", "testdata/fixtures/rules/*.ts", "comma-separated list of rule globs")
 	envJSON := flags.String("env-json", "{}", "JSON object passed to every rule as env")
 	jsonOutput := flags.Bool("json", false, "emit diagnostics as JSON")
@@ -55,6 +56,10 @@ func runOnce(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	absoluteAssetRoot, err := resolveAssetRoot(*assetRoot, absoluteRepo)
+	if err != nil {
+		return err
+	}
 	env := map[string]any{}
 	if err := json.Unmarshal([]byte(*envJSON), &env); err != nil {
 		return fmt.Errorf("invalid --env-json value: %w", err)
@@ -63,6 +68,7 @@ func runOnce(ctx context.Context, args []string) error {
 	runner := engine.New(typescript.New())
 	result, err := runner.Analyze(ctx, engine.Options{
 		RepoRoot:      absoluteRepo,
+		AssetRoot:     absoluteAssetRoot,
 		WorkspaceRoot: absoluteWorkspace,
 		RuleGlobs:     ruleGlobs,
 		Env:           env,
@@ -92,4 +98,34 @@ func runOnce(ctx context.Context, args []string) error {
 		}
 	}
 	return nil
+}
+
+func resolveAssetRoot(explicit, repoRoot string) (string, error) {
+	if explicit != "" {
+		return filepath.Abs(explicit)
+	}
+	candidates := []string{
+		filepath.Join(repoRoot, "node_modules", "@lintai", "eslint-plugin"),
+		filepath.Join(repoRoot, "packages", "eslint-plugin"),
+		repoRoot,
+	}
+	for _, candidate := range candidates {
+		if hasHelperScripts(candidate) {
+			return candidate, nil
+		}
+	}
+	return "", fmt.Errorf("could not find lintai asset root under %q or %q", candidates[0], candidates[1])
+}
+
+func hasHelperScripts(root string) bool {
+	required := []string{
+		filepath.Join(root, "scripts", "bundle-rule.mjs"),
+		filepath.Join(root, "scripts", "prepare-rule.mjs"),
+	}
+	for _, item := range required {
+		if _, err := os.Stat(item); err != nil {
+			return false
+		}
+	}
+	return true
 }
