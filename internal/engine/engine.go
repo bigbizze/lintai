@@ -24,6 +24,12 @@ type Options struct {
 	Severity      diagnostics.Severity
 }
 
+type Result struct {
+	Diagnostics     []diagnostics.Diagnostic
+	SnapshotVersion string
+	RulesLoaded     int
+}
+
 type Engine struct {
 	backend backend.Backend
 }
@@ -33,17 +39,30 @@ func New(selectedBackend backend.Backend) *Engine {
 }
 
 func (e *Engine) Run(ctx context.Context, options Options) ([]diagnostics.Diagnostic, error) {
-	snapshot, err := e.backend.BuildSnapshot(ctx, options.RepoRoot, options.WorkspaceRoot)
+	result, err := e.Analyze(ctx, options)
 	if err != nil {
 		return nil, err
+	}
+	return result.Diagnostics, nil
+}
+
+func (e *Engine) Analyze(ctx context.Context, options Options) (Result, error) {
+	snapshot, err := e.backend.BuildSnapshot(ctx, options.RepoRoot, options.WorkspaceRoot)
+	if err != nil {
+		return Result{}, err
 	}
 	rulePaths, err := discoverRulePaths(options.RepoRoot, options.RuleGlobs)
 	if err != nil {
-		return nil, err
+		return Result{}, err
 	}
 	allDiagnostics := make([]diagnostics.Diagnostic, 0)
+	result := Result{
+		Diagnostics:     allDiagnostics,
+		SnapshotVersion: snapshot.Version,
+		RulesLoaded:     len(rulePaths),
+	}
 	if len(rulePaths) == 0 {
-		return allDiagnostics, nil
+		return result, nil
 	}
 
 	artifactsByRule, buildFailures, err := bundle.BuildAll(ctx, options.RepoRoot, rulePaths)
@@ -58,7 +77,8 @@ func (e *Engine) Run(ctx context.Context, options Options) ([]diagnostics.Diagno
 			allDiagnostics = append(allDiagnostics, errorDiagnostic(filepath.Base(rulePath), "bundle", 0, snapshot.Version, e.backend.ID(), itemErr.Error(), options.Severity))
 		}
 		sortDiagnostics(allDiagnostics)
-		return allDiagnostics, nil
+		result.Diagnostics = allDiagnostics
+		return result, nil
 	}
 
 	for rulePath, itemErr := range buildFailures {
@@ -77,7 +97,8 @@ func (e *Engine) Run(ctx context.Context, options Options) ([]diagnostics.Diagno
 			allDiagnostics = append(allDiagnostics, errorDiagnostic(filepath.Base(rulePath), "setup", 0, snapshot.Version, e.backend.ID(), err.Error(), options.Severity))
 		}
 		sortDiagnostics(allDiagnostics)
-		return allDiagnostics, nil
+		result.Diagnostics = allDiagnostics
+		return result, nil
 	}
 
 	for rulePath, prepareErr := range prepareFailures {
@@ -158,7 +179,8 @@ func (e *Engine) Run(ctx context.Context, options Options) ([]diagnostics.Diagno
 		allDiagnostics = append(allDiagnostics, provisional...)
 	}
 	sortDiagnostics(allDiagnostics)
-	return allDiagnostics, nil
+	result.Diagnostics = allDiagnostics
+	return result, nil
 }
 
 func sortDiagnostics(allDiagnostics []diagnostics.Diagnostic) {

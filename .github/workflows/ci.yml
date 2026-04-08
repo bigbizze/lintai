@@ -32,5 +32,8 @@ jobs:
       - name: Build
         run: pnpm build
 
+      - name: ESLint plugin tests
+        run: pnpm --filter @lintai/eslint-plugin test
+
       - name: Fixture CLI
         run: go run ./cmd/lintai --json --repo-root . --workspace-root testdata/fixtures/workspace --rules 'testdata/fixtures/rules/*.ts'
