@@ -4,6 +4,8 @@ github.com/bigbizze/typescript-go v0.0.0-20260407202235-71a57e403d55 h1:L14Lw80C
 github.com/bigbizze/typescript-go v0.0.0-20260407202235-71a57e403d55/go.mod h1:9wK3fGSIWt7ZG0lYHAhvRSycdfdNi5jKRaCsiS+C66U=
 github.com/bigbizze/typescript-go v0.0.0-20260407203019-1c04cc450530 h1:qt4CwkHOr1H/ILx3+KTk2TUu42X1IrOdQOn4dRcAsvA=
 github.com/bigbizze/typescript-go v0.0.0-20260407203019-1c04cc450530/go.mod h1:9wK3fGSIWt7ZG0lYHAhvRSycdfdNi5jKRaCsiS+C66U=
+github.com/bigbizze/typescript-go v0.0.0-20260408220407-54a88c30a449 h1:ewtm2+iqHT2giz0UpOe4ikMq1onZTsCVi02Ri4bN/yc=
+github.com/bigbizze/typescript-go v0.0.0-20260408220407-54a88c30a449/go.mod h1:9wK3fGSIWt7ZG0lYHAhvRSycdfdNi5jKRaCsiS+C66U=
 github.com/bmatcuk/doublestar/v4 v4.10.0 h1:zU9WiOla1YA122oLM6i4EXvGW62DvKZVxIe6TYWexEs=
 github.com/bmatcuk/doublestar/v4 v4.10.0/go.mod h1:xBQ8jztBU6kakFMg+8WGxn0c6z1fTSPVIjEY1Wr7jzc=
 github.com/dlclark/regexp2 v1.11.4 h1:rPYF9/LECdNymJufQKmri9gV604RvvABwgOA8un7yAo=

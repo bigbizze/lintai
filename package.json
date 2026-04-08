@@ -2,6 +2,16 @@
 	"name": "lintai-workspace",
 	"private": true,
 	"type": "module",
+	"version": "0.1.2",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/bigbizze/lintai.git"
+	},
+	"homepage": "https://github.com/bigbizze/lintai#readme",
+	"bugs": {
+		"url": "https://github.com/bigbizze/lintai/issues"
+	},
 	"scripts": {
 		"build": "pnpm -r build && go build ./cmd/lintai",
 		"build:dist": "pnpm build && pnpm build:npm-binaries",

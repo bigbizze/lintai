@@ -7,7 +7,7 @@ toolchain go1.24.2
 require (
 	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/dop251/goja v0.0.0-20260311135729-065cd970411c
-	github.com/microsoft/typescript-go v0.0.0-00010101000000-000000000000
+	github.com/microsoft/typescript-go v0.0.0-20260408220407-54a88c30a449
 )
 
 require (
@@ -21,4 +21,4 @@ require (
 	golang.org/x/text v0.34.0 // indirect
 )
 
-replace github.com/microsoft/typescript-go => /home/userc/WebstormProjects/typescript-go-fork
+replace github.com/microsoft/typescript-go => github.com/bigbizze/typescript-go v0.0.0-20260408220407-54a88c30a449
