@@ -1,5 +1,6 @@
 # Go
 /cmd/lintai/lintai
+/lintai
 *.exe
 *.test
 *.out

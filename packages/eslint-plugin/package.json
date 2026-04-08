@@ -3,6 +3,9 @@
 	"version": "0.0.0",
 	"private": true,
 	"type": "module",
+	"exports": {
+		".": "./src/index.ts"
+	},
 	"main": "dist/index.js",
 	"types": "dist/index.d.ts",
 	"scripts": {
@@ -10,9 +13,11 @@
 		"dev": "tsc --watch"
 	},
 	"dependencies": {
+		"@lintai/authoring-rules": "workspace:*",
 		"@lintai/sdk": "workspace:*"
 	},
 	"devDependencies": {
+		"eslint": "^9.24.0",
 		"typescript": "^5.7.0"
 	}
 }

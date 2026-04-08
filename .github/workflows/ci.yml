@@ -1,0 +1,36 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.2"
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.9.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Go tests
+        run: go test ./...
+
+      - name: Build
+        run: pnpm build
+
+      - name: Fixture CLI
+        run: go run ./cmd/lintai --json --repo-root . --workspace-root testdata/fixtures/workspace --rules 'testdata/fixtures/rules/*.ts'

@@ -15,5 +15,7 @@ Deterministic architectural policy enforcement for codebases. Catches repository
 
 ```sh
 pnpm install
-/usr/local/go/bin/go build ./cmd/lintai
+go build ./cmd/lintai
 ```
+
+The Go toolchain must be on your `PATH`. No sibling checkout of `typescript-go` is required once the forked module pin is in place.
