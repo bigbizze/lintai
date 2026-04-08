@@ -1,5 +1,6 @@
-import { spawn, spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { spawn, spawnSync, execFileSync, type SpawnSyncReturns } from "node:child_process";
 import { PassThrough, type Readable, type Writable } from "node:stream";
+import { existsSync, readlinkSync, realpathSync } from "node:fs";
 import path from "node:path";
 
 export type Diagnostic = {
@@ -389,16 +390,80 @@ export class LintAIClient {
 }
 
 export function resolveBridgeOptions(options: BridgeOptions, cwd: string): ResolvedBridgeOptions {
-	const repoRoot = path.resolve(cwd, options.repoRoot ?? ".");
-	const workspaceRoot = path.resolve(cwd, options.workspaceRoot ?? ".");
+	const workspaceRoot = options.workspaceRoot
+		? path.resolve(cwd, options.workspaceRoot)
+		: findWorkspaceRoot(cwd);
+	const binary = options.binary ?? findBinary(workspaceRoot);
+	const repoRoot = options.repoRoot
+		? path.resolve(cwd, options.repoRoot)
+		: findLintaiHome(binary);
+	const rawGlobs = options.rules ?? ["lintai-rules/**/*.ts"];
+	const ruleGlobs = rawGlobs.map((g) => (path.isAbsolute(g) ? g : path.join(workspaceRoot, g)));
 	return {
-		mode: options.mode ?? "serve",
-		binary: options.binary ?? path.join(repoRoot, "lintai"),
+		mode: options.mode ?? "oneshot",
+		binary,
 		repoRoot,
 		workspaceRoot,
-		ruleGlobs: options.rules ?? ["lintai-rules/**/*.ts"],
+		ruleGlobs,
 		env: options.env ?? {},
 	};
+}
+
+function findWorkspaceRoot(from: string): string {
+	const markers = ["pnpm-workspace.yaml", "lerna.json", "nx.json"];
+	let dir = from;
+	while (true) {
+		for (const marker of markers) {
+			if (existsSync(path.join(dir, marker))) {
+				return dir;
+			}
+		}
+		if (existsSync(path.join(dir, "package.json"))) {
+			try {
+				const pkg = require(path.join(dir, "package.json"));
+				if (pkg.workspaces) {
+					return dir;
+				}
+			} catch {
+				// ignore
+			}
+		}
+		const parent = path.dirname(dir);
+		if (parent === dir) {
+			return from;
+		}
+		dir = parent;
+	}
+}
+
+function findLintaiHome(binary: string): string {
+	try {
+		const realBinary = realpathSync(binary);
+		return path.dirname(realBinary);
+	} catch {
+		return path.dirname(binary);
+	}
+}
+
+function findBinary(workspaceRoot: string): string {
+	// 1. Local binary in workspace root
+	const local = path.join(workspaceRoot, "lintai");
+	if (existsSync(local)) {
+		return local;
+	}
+	// 2. node_modules/.bin (installed via npm)
+	const nmBin = path.join(workspaceRoot, "node_modules", ".bin", "lintai");
+	if (existsSync(nmBin)) {
+		return nmBin;
+	}
+	// 3. On $PATH
+	try {
+		return execFileSync("which", ["lintai"], { encoding: "utf8" }).trim();
+	} catch {
+		// fall through
+	}
+	// 4. Give up — return "lintai" and let spawn fail with a clear error
+	return "lintai";
 }
 
 export function getClient(
