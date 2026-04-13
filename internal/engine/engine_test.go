@@ -230,7 +230,7 @@ export default rule("arch.no-pure-db-import")
 	.version(1)
 	.assert(() =>
 		imports()
-			.in("src/pure/**")
+			.from("src/pure/**")
 			.where((edge) => edge.importedSymbols.some((symbol) => symbol.name === "db" && !symbol.isTypeOnly))
 			.isEmpty(),
 	)
@@ -274,7 +274,28 @@ export default rule("arch.no-pure-service-types")
 	)
 	.message((ref) => "Pure module must not reference service type " + ref.name);
 `),
+		writeTestFile(t, ruleRoot, "no-direct-env-access.ts", `
+import { accesses, rule } from "@lintai/sdk";
+
+export default rule("arch.no-direct-env-access")
+	.version(1)
+	.assert(() =>
+		accesses()
+			.in("src/pure/**")
+			.where((access) => access.accessPath === "import.meta.env")
+			.isEmpty(),
+	)
+	.message((access) => "Pure module must not read " + access.accessPath);
+`),
 	}
+	writeTestFile(t, workspaceRoot, "src/pure/bad-env.ts", `export function readEnv() {
+	return import.meta.env.API_URL;
+}
+`)
+	writeTestFile(t, workspaceRoot, "src/pure/good-env.ts", `export function literalEnv() {
+	return "import.meta.env.API_URL";
+}
+`)
 
 	runner := New(typescript.New())
 	items, err := runner.Run(context.Background(), Options{
@@ -295,6 +316,7 @@ export default rule("arch.no-pure-service-types")
 		"arch.no-service-db-call-edge": "src/services/service.ts",
 		"arch.api-async-return":        "src/api/bad.ts",
 		"arch.no-pure-service-types":   "src/pure/bad-type.ts",
+		"arch.no-direct-env-access":    "src/pure/bad-env.ts",
 	}
 	if len(items) != len(expected) {
 		t.Fatalf("expected %d diagnostics, got %d: %+v", len(expected), len(items), items)
@@ -317,6 +339,7 @@ export default rule("arch.no-pure-service-types")
 		"src/pure/good-import.ts": {},
 		"src/pure/good-type.ts":   {},
 		"src/api/good.ts":         {},
+		"src/pure/good-env.ts":    {},
 	}
 	for _, item := range items {
 		if _, ok := cleanFiles[item.SourceLocation.File]; ok {

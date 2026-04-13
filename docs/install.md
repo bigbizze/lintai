@@ -118,6 +118,7 @@ export default [
 				},
 			],
 			"@lintai/no-ambient-in-pure-phase": "error",
+			"@lintai/no-top-level-node-imports": "error",
 			"@lintai/require-rule-shape": "error",
 		},
 	},

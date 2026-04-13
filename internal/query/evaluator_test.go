@@ -248,3 +248,78 @@ func TestResolveTypeRefsSupportsInAndWherePredicates(t *testing.T) {
 		t.Fatalf("expected diagnostic identity for type ref, got %+v", identity)
 	}
 }
+
+func TestResolveAccessesSupportsInAndWherePredicates(t *testing.T) {
+	t.Parallel()
+
+	vm := goja.New()
+	handler, err := vm.RunString(`(access) => access.origin === "special_form" || access.accessPath === "window.location"`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	evaluator := NewEvaluator(vm, &analysis.Snapshot{
+		Accesses: []analysis.Access{
+			{
+				SemanticKey: "access:env",
+				Root:        "import.meta",
+				AccessPath:  "import.meta.env",
+				Origin:      "special_form",
+				FilePath:    "src/env.ts",
+				Range: diagnostics.SourceLocation{
+					File:      "src/env.ts",
+					StartLine: 2,
+					EndLine:   2,
+				},
+			},
+			{
+				SemanticKey: "access:window",
+				Root:        "window",
+				AccessPath:  "window.location",
+				Origin:      "ambient_decl",
+				FilePath:    "src/browser.ts",
+				Range: diagnostics.SourceLocation{
+					File:      "src/browser.ts",
+					StartLine: 2,
+					EndLine:   2,
+				},
+			},
+			{
+				SemanticKey: "access:other",
+				Root:        "document",
+				AccessPath:  "document.cookie",
+				Origin:      "ambient_decl",
+				FilePath:    "src/server.ts",
+				Range: diagnostics.SourceLocation{
+					File:      "src/server.ts",
+					StartLine: 2,
+					EndLine:   2,
+				},
+			},
+		},
+	}, backend.CapabilityManifest{
+		QueryKinds: []string{"accesses"},
+		Operators:  []string{"in", "where"},
+	})
+
+	values, err := evaluator.Resolve(Plan{
+		Entity: "accesses",
+		Ops: []Operation{
+			{Type: "in", Value: "src/**"},
+			{Type: "where", Handler: handler},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(values) != 2 {
+		t.Fatalf("expected 2 matching accesses, got %d (%+v)", len(values), values)
+	}
+	access := values[0].(analysis.Access)
+	if location := DiagnosticLocation(access); location == nil || location.File != "src/env.ts" {
+		t.Fatalf("expected diagnostic location for access, got %+v", location)
+	}
+	if identity := DiagnosticIdentity(access); identity == nil || identity.SemanticKey != "access:env" {
+		t.Fatalf("expected diagnostic identity for access, got %+v", identity)
+	}
+}

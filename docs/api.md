@@ -34,6 +34,7 @@ Current caveats:
 
 - `version(...)`, `assert(...)`, and `message(...)` are required in practice
 - `config` is optional, but if present it should be a Zod-like schema with `parse` or `safeParse`
+- top-level rule-module imports must stay pure-phase-safe; load setup-only Node built-ins inside `setup()` with `require(...)`
 
 ## Execution model and caveats
 
@@ -47,13 +48,13 @@ Current caveats:
 Example:
 
 ```ts
-import fs from "node:fs";
-import path from "node:path";
 import { functions, rule } from "@lintai/sdk";
 
 export default rule("arch.no-banned-function-names")
 	.version(1)
 	.setup(({ workspaceRoot }) => {
+		const fs = require("node:fs");
+		const path = require("node:path");
 		const file = path.join(workspaceRoot, "banned-functions.json");
 		return JSON.parse(fs.readFileSync(file, "utf8")) as string[];
 	})
@@ -111,6 +112,7 @@ Available query constructors:
 - `imports()`
 - `calls()`
 - `typeRefs()`
+- `accesses()`
 
 Only `.isEmpty()` exists as an assertion terminal today.
 
@@ -119,15 +121,16 @@ Only `.isEmpty()` exists as an assertion terminal today.
 | Query kind | `in(...)` | `from(...)` | `to(...)` | `where(...)` | `calling(...)` | `transitivelyCalling(...)` | `isEmpty()` |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `functions()` | yes | no | no | yes | yes | yes | yes |
-| `imports()` | yes | yes | yes | yes | no | no | yes |
+| `imports()` | no | yes | yes | yes | no | no | yes |
 | `calls()` | no | yes | yes | yes | no | no | yes |
 | `typeRefs()` | yes | no | no | yes | no | no | yes |
+| `accesses()` | yes | no | no | yes | no | no | yes |
 
 Operator caveats:
 
 - `calling(...)` and `transitivelyCalling(...)` expect a nested `functions()` query
-- `in(...)` on `imports()` filters by `fromPath`
 - `typeRefs().where(...)` is often most useful with `targetPath`
+- `accesses().where(...)` is often most useful with `root`, `origin`, or `accessPath`
 
 ## Entity views and caveats
 
@@ -219,6 +222,25 @@ Type-ref caveats:
 - `targetPath` is only populated when the type resolves inside the workspace
 - unresolved, external, or ambient types may have `targetPath === ""`
 
+### `AccessView`
+
+```ts
+type AccessView = {
+	root: string;
+	accessPath: string;
+	origin: "special_form" | "ambient_decl";
+	filePath: string;
+	semanticKey: string;
+	sourceLocation: SourceLocation;
+};
+```
+
+Access caveats:
+
+- `origin === "special_form"` is used for syntax forms like `import.meta.*`
+- `origin === "ambient_decl"` is used for ambient roots like `window.*` or `document.*`
+- extraction is intentionally bounded to the root plus first member, for example `import.meta.env` or `window.location`
+
 ## CLI reference and caveats
 
 The main entrypoint is:
@@ -264,6 +286,7 @@ Rule names exported by the plugin:
 
 - `@lintai/architecture`
 - `@lintai/no-ambient-in-pure-phase`
+- `@lintai/no-top-level-node-imports`
 - `@lintai/require-rule-shape`
 
 Example config:
@@ -285,6 +308,7 @@ export default [
 				},
 			],
 			"@lintai/no-ambient-in-pure-phase": "error",
+			"@lintai/no-top-level-node-imports": "error",
 			"@lintai/require-rule-shape": "error",
 		},
 	},

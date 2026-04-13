@@ -53,6 +53,8 @@ func (e *Evaluator) Resolve(plan Plan) ([]any, error) {
 		return e.resolveCalls(plan)
 	case "typeRefs":
 		return e.resolveTypeRefs(plan)
+	case "accesses":
+		return e.resolveAccesses(plan)
 	default:
 		return nil, fmt.Errorf("unsupported query kind %q", plan.Entity)
 	}
@@ -139,18 +141,6 @@ func (e *Evaluator) resolveImports(plan Plan) ([]any, error) {
 			filtered := make([]analysis.ImportEdge, 0, len(results))
 			for _, edge := range results {
 				match, err := matchPattern(op.Value, edge.ToPath)
-				if err != nil {
-					return nil, err
-				}
-				if match {
-					filtered = append(filtered, edge)
-				}
-			}
-			results = filtered
-		case "in":
-			filtered := make([]analysis.ImportEdge, 0, len(results))
-			for _, edge := range results {
-				match, err := matchPattern(op.Value, edge.FromPath)
 				if err != nil {
 					return nil, err
 				}
@@ -256,6 +246,40 @@ func (e *Evaluator) resolveTypeRefs(plan Plan) ([]any, error) {
 	return final, nil
 }
 
+func (e *Evaluator) resolveAccesses(plan Plan) ([]any, error) {
+	results := make([]analysis.Access, 0, len(e.snapshot.Accesses))
+	results = append(results, e.snapshot.Accesses...)
+	for _, op := range plan.Ops {
+		switch op.Type {
+		case "in":
+			filtered := make([]analysis.Access, 0, len(results))
+			for _, access := range results {
+				match, err := matchPattern(op.Value, access.FilePath)
+				if err != nil {
+					return nil, err
+				}
+				if match {
+					filtered = append(filtered, access)
+				}
+			}
+			results = filtered
+		case "where":
+			filtered, err := filterWhere(e.runtime, results, accessView, op.Handler)
+			if err != nil {
+				return nil, err
+			}
+			results = filtered
+		default:
+			return nil, fmt.Errorf("unsupported operator %q for accesses()", op.Type)
+		}
+	}
+	final := make([]any, 0, len(results))
+	for _, item := range results {
+		final = append(final, item)
+	}
+	return final, nil
+}
+
 func functionView(fn analysis.Function) map[string]any {
 	return map[string]any{
 		"name":               fn.Name,
@@ -317,6 +341,17 @@ func typeRefView(ref analysis.TypeRef) map[string]any {
 	}
 }
 
+func accessView(access analysis.Access) map[string]any {
+	return map[string]any{
+		"root":           access.Root,
+		"accessPath":     access.AccessPath,
+		"origin":         access.Origin,
+		"filePath":       access.FilePath,
+		"semanticKey":    access.SemanticKey,
+		"sourceLocation": sourceLocationView(access.Range),
+	}
+}
+
 func sourceLocationView(location diagnostics.SourceLocation) map[string]any {
 	return map[string]any{
 		"file":        location.File,
@@ -341,6 +376,9 @@ func DiagnosticLocation(entity any) *diagnostics.SourceLocation {
 	case analysis.TypeRef:
 		location := typed.Range
 		return &location
+	case analysis.Access:
+		location := typed.Range
+		return &location
 	default:
 		return nil
 	}
@@ -355,6 +393,8 @@ func DiagnosticIdentity(entity any) *diagnostics.EntityIdentity {
 	case analysis.CallEdge:
 		return &diagnostics.EntityIdentity{SemanticKey: typed.SemanticKey}
 	case analysis.TypeRef:
+		return &diagnostics.EntityIdentity{SemanticKey: typed.SemanticKey}
+	case analysis.Access:
 		return &diagnostics.EntityIdentity{SemanticKey: typed.SemanticKey}
 	default:
 		return nil

@@ -1,6 +1,6 @@
 export type Predicate<T = any> = (value: T) => boolean;
 
-type QueryKind = "functions" | "imports" | "calls" | "typeRefs";
+type QueryKind = "functions" | "imports" | "calls" | "typeRefs" | "accesses";
 
 type QueryOperation =
 	| { type: "in"; value: string }
@@ -61,6 +61,15 @@ export type TypeRefView = {
 	sourceLocation: SourceLocation;
 };
 
+export type AccessView = {
+	root: string;
+	accessPath: string;
+	origin: "special_form" | "ambient_decl";
+	filePath: string;
+	semanticKey: string;
+	sourceLocation: SourceLocation;
+};
+
 export type SourceLocation = {
 	file: string;
 	startLine: number;
@@ -84,18 +93,48 @@ export type AssertionValue = {
 	query: QueryValue;
 };
 
-export type QueryValue = {
+type BaseQuery = {
 	__lintaiKind: "query";
 	entity: QueryKind;
 	ops: QueryOperation[];
-	in(pattern: string): QueryValue;
-	from(pattern: string): QueryValue;
-	to(pattern: string): QueryValue;
-	where(predicate: Predicate<any>): QueryValue;
-	calling(other: QueryValue): QueryValue;
-	transitivelyCalling(other: QueryValue): QueryValue;
 	isEmpty(): AssertionValue;
 };
+
+export type FunctionsQuery = BaseQuery & {
+	entity: "functions";
+	in(pattern: string): FunctionsQuery;
+	where(predicate: Predicate<FunctionView>): FunctionsQuery;
+	calling(other: FunctionsQuery): FunctionsQuery;
+	transitivelyCalling(other: FunctionsQuery): FunctionsQuery;
+};
+
+export type ImportsQuery = BaseQuery & {
+	entity: "imports";
+	from(pattern: string): ImportsQuery;
+	to(pattern: string): ImportsQuery;
+	where(predicate: Predicate<ImportEdgeView>): ImportsQuery;
+};
+
+export type CallsQuery = BaseQuery & {
+	entity: "calls";
+	from(pattern: string): CallsQuery;
+	to(pattern: string): CallsQuery;
+	where(predicate: Predicate<CallEdgeView>): CallsQuery;
+};
+
+export type TypeRefsQuery = BaseQuery & {
+	entity: "typeRefs";
+	in(pattern: string): TypeRefsQuery;
+	where(predicate: Predicate<TypeRefView>): TypeRefsQuery;
+};
+
+export type AccessesQuery = BaseQuery & {
+	entity: "accesses";
+	in(pattern: string): AccessesQuery;
+	where(predicate: Predicate<AccessView>): AccessesQuery;
+};
+
+export type QueryValue = FunctionsQuery | ImportsQuery | CallsQuery | TypeRefsQuery | AccessesQuery;
 
 type InternalRuleSpec<Env, Setup, Value> = {
 	id: string;
@@ -152,41 +191,96 @@ class RuleDefinition<Env, Setup, Value> {
 	}
 }
 
-function createQuery(entity: QueryKind, ops: QueryOperation[] = []): QueryValue {
-	const query: QueryValue = {
+function createBaseQuery(entity: QueryKind, ops: QueryOperation[]): BaseQuery {
+	return {
 		__lintaiKind: "query",
 		entity,
 		ops,
-		in(pattern: string) {
-			return createQuery(entity, [...ops, { type: "in", value: pattern }]);
-		},
-		from(pattern: string) {
-			return createQuery(entity, [...ops, { type: "from", value: pattern }]);
-		},
-		to(pattern: string) {
-			return createQuery(entity, [...ops, { type: "to", value: pattern }]);
-		},
-		where(predicate: Predicate<any>) {
-			return createQuery(entity, [...ops, { type: "where", handler: predicate }]);
-		},
-		calling(other: QueryValue) {
-			return createQuery(entity, [...ops, { type: "calling", query: other }]);
-		},
-		transitivelyCalling(other: QueryValue) {
-			return createQuery(entity, [
-				...ops,
-				{ type: "transitivelyCalling", query: other },
-			]);
-		},
 		isEmpty() {
 			return {
 				__lintaiKind: "assertion",
 				terminal: "isEmpty",
-				query,
+				query: this as QueryValue,
 			};
 		},
 	};
-	return query;
+}
+
+function createFunctionsQuery(ops: QueryOperation[] = []): FunctionsQuery {
+	return {
+		...createBaseQuery("functions", ops),
+		entity: "functions",
+		in(pattern: string) {
+			return createFunctionsQuery([...ops, { type: "in", value: pattern }]);
+		},
+		where(predicate: Predicate<FunctionView>) {
+			return createFunctionsQuery([...ops, { type: "where", handler: predicate }]);
+		},
+		calling(other: FunctionsQuery) {
+			return createFunctionsQuery([...ops, { type: "calling", query: other }]);
+		},
+		transitivelyCalling(other: FunctionsQuery) {
+			return createFunctionsQuery([...ops, { type: "transitivelyCalling", query: other }]);
+		},
+	};
+}
+
+function createImportsQuery(ops: QueryOperation[] = []): ImportsQuery {
+	return {
+		...createBaseQuery("imports", ops),
+		entity: "imports",
+		from(pattern: string) {
+			return createImportsQuery([...ops, { type: "from", value: pattern }]);
+		},
+		to(pattern: string) {
+			return createImportsQuery([...ops, { type: "to", value: pattern }]);
+		},
+		where(predicate: Predicate<ImportEdgeView>) {
+			return createImportsQuery([...ops, { type: "where", handler: predicate }]);
+		},
+	};
+}
+
+function createCallsQuery(ops: QueryOperation[] = []): CallsQuery {
+	return {
+		...createBaseQuery("calls", ops),
+		entity: "calls",
+		from(pattern: string) {
+			return createCallsQuery([...ops, { type: "from", value: pattern }]);
+		},
+		to(pattern: string) {
+			return createCallsQuery([...ops, { type: "to", value: pattern }]);
+		},
+		where(predicate: Predicate<CallEdgeView>) {
+			return createCallsQuery([...ops, { type: "where", handler: predicate }]);
+		},
+	};
+}
+
+function createTypeRefsQuery(ops: QueryOperation[] = []): TypeRefsQuery {
+	return {
+		...createBaseQuery("typeRefs", ops),
+		entity: "typeRefs",
+		in(pattern: string) {
+			return createTypeRefsQuery([...ops, { type: "in", value: pattern }]);
+		},
+		where(predicate: Predicate<TypeRefView>) {
+			return createTypeRefsQuery([...ops, { type: "where", handler: predicate }]);
+		},
+	};
+}
+
+function createAccessesQuery(ops: QueryOperation[] = []): AccessesQuery {
+	return {
+		...createBaseQuery("accesses", ops),
+		entity: "accesses",
+		in(pattern: string) {
+			return createAccessesQuery([...ops, { type: "in", value: pattern }]);
+		},
+		where(predicate: Predicate<AccessView>) {
+			return createAccessesQuery([...ops, { type: "where", handler: predicate }]);
+		},
+	};
 }
 
 export function rule<Env = Record<string, any>, Setup = Record<string, never>, Value = any>(
@@ -195,18 +289,22 @@ export function rule<Env = Record<string, any>, Setup = Record<string, never>, V
 	return new RuleDefinition<Env, Setup, Value>({ id });
 }
 
-export function functions(): QueryValue {
-	return createQuery("functions");
+export function functions(): FunctionsQuery {
+	return createFunctionsQuery();
 }
 
-export function imports(): QueryValue {
-	return createQuery("imports");
+export function imports(): ImportsQuery {
+	return createImportsQuery();
 }
 
-export function calls(): QueryValue {
-	return createQuery("calls");
+export function calls(): CallsQuery {
+	return createCallsQuery();
 }
 
-export function typeRefs(): QueryValue {
-	return createQuery("typeRefs");
+export function typeRefs(): TypeRefsQuery {
+	return createTypeRefsQuery();
+}
+
+export function accesses(): AccessesQuery {
+	return createAccessesQuery();
 }
