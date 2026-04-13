@@ -33,7 +33,7 @@ LintAI fills that gap by giving you a rule DSL over repository-level semantic fa
 Current caveats:
 
 - it does not replace tests, the type checker, or runtime validation
-- the current query surface is intentionally small: `functions()`, `imports()`, `calls()`, and `typeRefs()`
+- the current query surface is intentionally small: `functions()`, `imports()`, `calls()`, `typeRefs()`, and `accesses()`
 - type metadata is text-oriented for now, for example `returnTypeText`
 
 ## How and caveats
@@ -49,6 +49,7 @@ The TypeScript snapshot is built in Go through an isolated `tsgo` adapter. The E
 Current caveats:
 
 - `setup()` output must be JSON-serializable plain data
+- setup-only Node built-ins should be loaded inside `setup()` with `require(...)`; keep top-level rule-module imports pure-phase-safe
 - `assert()` and `message()` are pure-phase code; ambient APIs like `process`, `fetch`, `setTimeout`, `Date.now`, and `Math.random` are not available
 - editor refresh is intentionally asymmetric:
   - source-file edits refresh in the background
@@ -152,6 +153,7 @@ The full reference lives in [docs/api.md](docs/api.md). Highlights:
   - `imports()`
   - `calls()`
   - `typeRefs()`
+  - `accesses()`
 - supported operators:
   - `in(...)`
   - `from(...)`
@@ -167,7 +169,8 @@ Important caveats:
 
 - only `.isEmpty()` exists as an assertion terminal today
 - `calling(...)` and `transitivelyCalling(...)` apply to `functions()`
-- `typeRefs()` supports `in(...)` and `where(...)`, not `from(...)` or `to(...)`
+- `imports()` uses `from(...)` / `to(...)`
+- `typeRefs()` and `accesses()` support `in(...)` and `where(...)`, not `from(...)` or `to(...)`
 
 ## Examples and caveats
 
@@ -177,6 +180,7 @@ More examples live in [docs/examples.md](docs/examples.md). They cover:
 - symbol-aware import rules
 - exported async function return contracts
 - type-reference boundaries
+- direct `import.meta` access rules
 - named assertions and `config`-driven rules
 
 Important caveat:

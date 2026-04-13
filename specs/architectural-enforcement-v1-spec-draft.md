@@ -313,7 +313,7 @@ Multi-assertion rules MUST use named assertions: return a record with explicit s
   noSideEffects: functions().in(`${env.pureDir}/**`)
     .transitivelyCalling(functions().where(fn => fn.containsAwait))
     .isEmpty(),
-  noCircularImports: imports().in(`${env.pureDir}/**`)
+  noCircularImports: imports().from(`${env.pureDir}/**`)
     .to(`${env.serviceDir}/**`)
     .isEmpty(),
 }))
@@ -389,7 +389,7 @@ A later audit (relay dialogue) identified that "ordinary trusted JS relative to 
 - rerunnable at the engine’s discretion,
 - semantically defined only by its returned value.
 
-Static imports used by the rule are resolved at **bundle time**. Runtime `require()` and dynamic `import()` are **not part of the v1 contract** unless later added explicitly.
+Static imports used by the rule are resolved at **bundle time**. Top-level rule-module imports MUST remain pure-phase-safe. Synchronous runtime `require()` inside `setup()` is part of the v1 contract. Dynamic `import()` is not.
 
 ### Capability surface
 
@@ -398,7 +398,8 @@ Setup is permitted:
 - reading files from the workspace,
 - globbing directories,
 - parsing local manifests (package.json, tsconfig.json, etc.),
-- importing bundled dependencies.
+- importing bundled dependencies,
+- using synchronous `require()` inside `setup()` to load Node built-ins or other setup-only helpers.
 
 Setup is forbidden:
 - network access,
@@ -410,6 +411,8 @@ Setup is forbidden:
 - arbitrary `process.env` reads.
 
 If a rule needs environment-dependent values (CI vs. local, feature flags, etc.), those values MUST come through the explicit `config`/`env` channel (see Section 10), ideally declared in the rule’s Zod schema and injected as `env`. This keeps environment inputs explicit and cacheable rather than ambient.
+
+Top-level module scope MUST remain safe for the pure runtime bundle. Setup-only capabilities belong inside `setup()`, not in top-level imports.
 
 ### Path anchoring and cwd semantics
 

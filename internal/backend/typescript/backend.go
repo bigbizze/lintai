@@ -25,8 +25,8 @@ func (b *Backend) ID() string {
 
 func (b *Backend) Capabilities() backend.CapabilityManifest {
 	return backend.CapabilityManifest{
-		EntityKinds: []string{"module", "function", "import_edge", "call_edge", "type_ref"},
-		QueryKinds:  []string{"functions", "imports", "calls", "typeRefs"},
+		EntityKinds: []string{"module", "function", "import_edge", "call_edge", "type_ref", "access"},
+		QueryKinds:  []string{"functions", "imports", "calls", "typeRefs", "accesses"},
 		Operators: []string{
 			"in", "from", "to", "where", "calling", "transitivelyCalling", "isEmpty",
 		},
@@ -52,6 +52,7 @@ func (b *Backend) BuildSnapshot(ctx context.Context, repoRoot, workspaceRoot str
 	importEdges := convertImportEdges(extracted.ImportEdges)
 	callEdges := convertCallEdges(extracted.CallEdges)
 	typeRefs := convertTypeRefs(extracted.TypeRefs)
+	accesses := convertAccesses(extracted.Accesses)
 
 	functionsByName := make(map[string][]analysis.Function)
 	functionsByKey := make(map[string]analysis.Function)
@@ -74,6 +75,7 @@ func (b *Backend) BuildSnapshot(ctx context.Context, repoRoot, workspaceRoot str
 		ImportEdges:     importEdges,
 		CallEdges:       callEdges,
 		TypeRefs:        typeRefs,
+		Accesses:        accesses,
 		FunctionsByName: functionsByName,
 		FunctionsByKey:  functionsByKey,
 		TransitiveCalls: buildTransitiveCalls(functions, callEdges),
@@ -172,6 +174,22 @@ func convertTypeRefs(items []lintaiapi.TypeRef) []analysis.TypeRef {
 			Name:        item.Name,
 			FilePath:    item.FilePath,
 			TargetPath:  item.TargetPath,
+			Range:       convertLocation(item.Range),
+		})
+	}
+	return result
+}
+
+func convertAccesses(items []lintaiapi.Access) []analysis.Access {
+	result := make([]analysis.Access, 0, len(items))
+	for _, item := range items {
+		result = append(result, analysis.Access{
+			EntityID:    item.EntityID,
+			SemanticKey: item.SemanticKey,
+			Root:        item.Root,
+			AccessPath:  item.AccessPath,
+			Origin:      item.Origin,
+			FilePath:    item.FilePath,
 			Range:       convertLocation(item.Range),
 		})
 	}

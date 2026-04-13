@@ -142,6 +142,80 @@ export default rule("arch.broken-setup")
 	}
 }
 
+func TestPrepareAllAllowsRequireInsideSetup(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := repoRootForBundleTest(t)
+	assetRoot := filepath.Join(repoRoot, "packages", "eslint-plugin")
+	workspaceRoot := filepath.Join(repoRoot, "testdata/fixtures/workspace")
+	rulePath := writeRuleFile(t, "require-in-setup.ts", `
+import { rule, functions } from "@lintai/sdk";
+
+	export default rule("arch.require-in-setup")
+		.version(1)
+		.setup(({ workspaceRoot }) => {
+			const fs = require("node:fs");
+			const path = require("node:path");
+			const target = path.join(workspaceRoot, "src", "pure", "helper.ts");
+			return { exists: fs.existsSync(target) };
+		})
+	.assert(({ setup }) => functions().where((fn) => setup.exists && fn.name === "missing").isEmpty())
+	.message(() => "broken");
+`)
+
+	artifacts, buildFailures, err := BuildAll(context.Background(), assetRoot, repoRoot, []string{rulePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(buildFailures) != 0 {
+		t.Fatalf("expected no build failures, got %#v", buildFailures)
+	}
+
+	prepared, prepareFailures, err := PrepareAll(context.Background(), assetRoot, repoRoot, workspaceRoot, artifacts, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prepareFailures) != 0 {
+		t.Fatalf("expected no prepare failures, got %#v", prepareFailures)
+	}
+	result := prepared[rulePath]
+	setup, ok := result.Setup.(map[string]any)
+	if !ok {
+		t.Fatalf("expected setup object, got %#v", result.Setup)
+	}
+	if setup["exists"] != true {
+		t.Fatalf("expected setup to confirm fixture path exists, got %#v", setup)
+	}
+}
+
+func TestBuildAllDoesNotExplodeOnTopLevelNodeBuiltinImports(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := repoRootForBundleTest(t)
+	assetRoot := filepath.Join(repoRoot, "packages", "eslint-plugin")
+	rulePath := writeRuleFile(t, "top-level-node-import.ts", `
+import fs from "node:fs";
+import { functions, rule } from "@lintai/sdk";
+
+export default rule("arch.top-level-node-import")
+	.version(1)
+	.setup(() => ({ cwdExists: typeof fs.existsSync === "function" }))
+	.assert(() => functions().in("src/**").isEmpty())
+	.message(() => "broken");
+`)
+
+	artifacts, buildFailures, err := BuildAll(context.Background(), assetRoot, repoRoot, []string{rulePath})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(buildFailures) != 0 {
+		t.Fatalf("expected no build failures, got %#v", buildFailures)
+	}
+	if _, ok := artifacts[rulePath]; !ok {
+		t.Fatalf("expected build artifact for %q", rulePath)
+	}
+}
+
 func repoRootForBundleTest(t *testing.T) string {
 	t.Helper()
 

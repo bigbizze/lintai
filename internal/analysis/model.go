@@ -68,6 +68,16 @@ type TypeRef struct {
 	Range       diagnostics.SourceLocation
 }
 
+type Access struct {
+	EntityID    string
+	SemanticKey string
+	Root        string
+	AccessPath  string
+	Origin      string
+	FilePath    string
+	Range       diagnostics.SourceLocation
+}
+
 type Snapshot struct {
 	Version          string
 	BackendID        string
@@ -77,6 +87,7 @@ type Snapshot struct {
 	ImportEdges      []ImportEdge
 	CallEdges        []CallEdge
 	TypeRefs         []TypeRef
+	Accesses         []Access
 	FunctionsByName  map[string][]Function
 	FunctionsByKey   map[string]Function
 	TransitiveCalls  map[string]map[string]struct{}

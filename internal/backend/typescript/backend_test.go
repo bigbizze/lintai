@@ -142,6 +142,9 @@ export function mirror(config: LocalConfig): DbConfig {
 	if !New().Capabilities().SupportsQueryKind("typeRefs") {
 		t.Fatal("expected backend to advertise typeRefs query support")
 	}
+	if !New().Capabilities().SupportsQueryKind("accesses") {
+		t.Fatal("expected backend to advertise accesses query support")
+	}
 
 	var dbFnFound bool
 	for _, fn := range snapshot.Functions {
@@ -209,6 +212,63 @@ export function mirror(config: LocalConfig): DbConfig {
 	}
 	if !targetFound {
 		t.Fatalf("expected DbConfig type ref to resolve to src/data/db.ts, got %+v", snapshot.TypeRefs)
+	}
+}
+
+func TestBuildSnapshotExposesAccessesAndIgnoresShadowedAmbientRoots(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "tsconfig.json", `{
+  "compilerOptions": {
+    "target": "es2022",
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "noEmit": true
+  },
+  "include": ["src/**/*.ts"]
+}
+`)
+	writeWorkspaceFile(t, root, "src/env.ts", `export function readEnv() {
+	return import.meta.env.API_URL;
+}
+`)
+	writeWorkspaceFile(t, root, "src/browser.ts", `export function readLocation() {
+	return window.location.href;
+}
+`)
+	writeWorkspaceFile(t, root, "src/shadowed.ts", `const window = { location: { href: "local" } };
+
+export function localWindow() {
+	return window.location.href;
+}
+`)
+
+	snapshot, err := New().BuildSnapshot(context.Background(), root, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var importMetaFound bool
+	var windowFound bool
+	for _, access := range snapshot.Accesses {
+		switch {
+		case access.FilePath == "src/env.ts" && access.Root == "import.meta" && access.AccessPath == "import.meta.env" && access.Origin == "special_form":
+			importMetaFound = true
+			if access.Range.File != "src/env.ts" || access.Range.StartLine != 2 {
+				t.Fatalf("unexpected import.meta access range %+v", access.Range)
+			}
+		case access.FilePath == "src/browser.ts" && access.Root == "window" && access.AccessPath == "window.location" && access.Origin == "ambient_decl":
+			windowFound = true
+		case access.FilePath == "src/shadowed.ts":
+			t.Fatalf("expected shadowed window access to be ignored, got %+v", access)
+		}
+	}
+	if !importMetaFound {
+		t.Fatalf("expected import.meta access in snapshot, got %+v", snapshot.Accesses)
+	}
+	if !windowFound {
+		t.Fatalf("expected ambient window access in snapshot, got %+v", snapshot.Accesses)
 	}
 }
 

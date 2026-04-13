@@ -1,4 +1,5 @@
 import type { Rule } from "eslint";
+import { builtinModules } from "node:module";
 
 const forbiddenIdentifiers = new Set([
 	"process",
@@ -8,6 +9,10 @@ const forbiddenIdentifiers = new Set([
 	"setInterval",
 	"Date",
 ]);
+
+const nodeBuiltinSpecifiers = new Set(
+	builtinModules.flatMap((name) => [name, `node:${name}`]),
+);
 
 const noAmbientInPurePhase: Rule.RuleModule = {
 	meta: {
@@ -89,7 +94,32 @@ const requireRuleShape: Rule.RuleModule = {
 	},
 };
 
+const noTopLevelNodeImports: Rule.RuleModule = {
+	meta: {
+		type: "problem",
+		docs: {
+			description: "forbid top-level Node built-in imports in rule modules",
+		},
+		schema: [],
+	},
+	create(context) {
+		return {
+			ImportDeclaration(node) {
+				const specifier = node.source.value;
+				if (typeof specifier !== "string" || !nodeBuiltinSpecifiers.has(specifier)) {
+					return;
+				}
+				context.report({
+					node: node.source,
+					message: `Top-level Node built-in import "${specifier}" is not allowed in rule modules; load it inside setup() with require()`,
+				});
+			},
+		};
+	},
+};
+
 export const rules = {
 	"no-ambient-in-pure-phase": noAmbientInPurePhase,
+	"no-top-level-node-imports": noTopLevelNodeImports,
 	"require-rule-shape": requireRuleShape,
 };

@@ -35,7 +35,7 @@ export default rule("arch.no-runtime-db-import")
 	.version(1)
 	.assert(() =>
 		imports()
-			.in("src/pure/**")
+			.from("src/pure/**")
 			.where((edge) =>
 				edge.importedSymbols.some(
 					(symbol) => symbol.name === "db" && !symbol.isTypeOnly,
@@ -154,8 +154,6 @@ Caveat:
 Use Zod config plus a setup phase that reads the workspace:
 
 ```ts
-import fs from "node:fs";
-import path from "node:path";
 import { z } from "zod";
 
 import { functions, rule } from "@lintai/sdk";
@@ -167,6 +165,8 @@ export const config = z.object({
 export default rule("arch.no-banned-functions")
 	.version(1)
 	.setup(({ env, workspaceRoot }) => {
+		const fs = require("node:fs");
+		const path = require("node:path");
 		const file = path.join(workspaceRoot, env.denyListFile);
 		return JSON.parse(fs.readFileSync(file, "utf8")) as string[];
 	})
@@ -181,8 +181,36 @@ Caveats:
 - `config` is validated before `setup()` runs
 - `setup()` output must be JSON-serializable
 - `setup()` is the right place for filesystem reads; `assert()` is not
+- keep top-level rule-module imports pure-safe and load setup-only Node built-ins with `require(...)`
 
-## 8. ESLint integration example and caveats
+## 8. Direct `import.meta` access rule and caveats
+
+Reject direct environment reads in browser code:
+
+```ts
+import { accesses, rule } from "@lintai/sdk";
+
+export default rule("arch.no-direct-import-meta-env")
+	.version(1)
+	.assert(() =>
+		accesses()
+			.in("src/**")
+			.where(
+				(access) =>
+					access.accessPath === "import.meta.env" &&
+					access.filePath !== "src/platform/env.ts",
+			)
+			.isEmpty(),
+	)
+	.message((access) => `${access.filePath} must not read ${access.accessPath} directly`);
+```
+
+Caveats:
+
+- access extraction is semantic, so strings and comments containing `import.meta.env` do not match
+- access entities are bounded to the root plus first member, so `import.meta.env.API_URL` is represented as `import.meta.env`
+
+## 9. ESLint integration example and caveats
 
 ```js
 import lintai from "@lintai/eslint-plugin";
@@ -201,6 +229,7 @@ export default [
 				},
 			],
 			"@lintai/no-ambient-in-pure-phase": "error",
+			"@lintai/no-top-level-node-imports": "error",
 			"@lintai/require-rule-shape": "error",
 		},
 	},

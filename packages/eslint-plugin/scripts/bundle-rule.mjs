@@ -1,5 +1,5 @@
 import { build } from "esbuild";
-import { createRequire } from "node:module";
+import { builtinModules, createRequire } from "node:module";
 import fs from "node:fs/promises";
 import path from "node:path";
 
@@ -22,23 +22,38 @@ function formatError(error) {
 	return String(error);
 }
 
-function createAliasPlugin() {
+const builtinSpecifierSet = new Set(
+	builtinModules.flatMap((name) => [name, `node:${name}`]),
+);
+
+function createAliasPlugin(mode) {
 	const require = createRequire(import.meta.url);
 	const sdkEntry = require.resolve("@lintai/sdk");
 	return {
 		name: "lintai-aliases",
 		setup(buildCtx) {
-			const aliases = {
-				"@lintai/sdk": sdkEntry,
-			};
-			for (const [name, target] of Object.entries(aliases)) {
-				buildCtx.onResolve(
-					{ filter: new RegExp(`^${name.replace("/", "\\/")}$`) },
-					() => ({
-						path: target,
-					}),
-				);
+			buildCtx.onResolve({ filter: /^@lintai\/sdk$/ }, () => ({
+				path: sdkEntry,
+			}));
+			if (mode !== "pure") {
+				return;
 			}
+			buildCtx.onResolve({ filter: /.*/ }, (args) => {
+				if (args.path === "@lintai/sdk") {
+					return null;
+				}
+				if (!builtinSpecifierSet.has(args.path)) {
+					return null;
+				}
+				return {
+					path: args.path,
+					namespace: "lintai-empty-stub",
+				};
+			});
+			buildCtx.onLoad({ filter: /.*/, namespace: "lintai-empty-stub" }, () => ({
+				contents: "module.exports = {};",
+				loader: "js",
+			}));
 		},
 	};
 }
@@ -52,7 +67,8 @@ for (const request of requests) {
 	const resolvedRulePath = path.resolve(request.rulePath);
 	const outDir = path.resolve(request.outDir);
 	try {
-			const aliasPlugin = createAliasPlugin();
+		const prepareAliasPlugin = createAliasPlugin("prepare");
+		const pureAliasPlugin = createAliasPlugin("pure");
 		const prepareEntry = path.join(outDir, "prepare-entry.mjs");
 		const pureEntry = path.join(outDir, "pure-entry.mjs");
 
@@ -100,7 +116,7 @@ for (const request of requests) {
 			format: "cjs",
 			platform: "node",
 			target: "node20",
-			plugins: [aliasPlugin],
+			plugins: [prepareAliasPlugin],
 			logLevel: "silent",
 		});
 
@@ -111,7 +127,7 @@ for (const request of requests) {
 			format: "iife",
 			platform: "browser",
 			target: "es2022",
-			plugins: [aliasPlugin],
+			plugins: [pureAliasPlugin],
 			logLevel: "silent",
 		});
 
