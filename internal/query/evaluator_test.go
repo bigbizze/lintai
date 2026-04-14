@@ -253,7 +253,7 @@ func TestResolveAccessesSupportsInAndWherePredicates(t *testing.T) {
 	t.Parallel()
 
 	vm := goja.New()
-	handler, err := vm.RunString(`(access) => access.origin === "special_form" || access.accessPath === "window.location"`)
+	handler, err := vm.RunString(`(access) => access.origin === "special_form" && access.accessPath === "import.meta.env"`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,22 +273,22 @@ func TestResolveAccessesSupportsInAndWherePredicates(t *testing.T) {
 				},
 			},
 			{
-				SemanticKey: "access:window",
-				Root:        "window",
-				AccessPath:  "window.location",
-				Origin:      "ambient_decl",
-				FilePath:    "src/browser.ts",
+				SemanticKey: "access:url",
+				Root:        "import.meta",
+				AccessPath:  "import.meta.url",
+				Origin:      "special_form",
+				FilePath:    "src/url.ts",
 				Range: diagnostics.SourceLocation{
-					File:      "src/browser.ts",
+					File:      "src/url.ts",
 					StartLine: 2,
 					EndLine:   2,
 				},
 			},
 			{
 				SemanticKey: "access:other",
-				Root:        "document",
-				AccessPath:  "document.cookie",
-				Origin:      "ambient_decl",
+				Root:        "import.meta",
+				AccessPath:  "import.meta.glob",
+				Origin:      "special_form",
 				FilePath:    "src/server.ts",
 				Range: diagnostics.SourceLocation{
 					File:      "src/server.ts",
@@ -312,8 +312,8 @@ func TestResolveAccessesSupportsInAndWherePredicates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(values) != 2 {
-		t.Fatalf("expected 2 matching accesses, got %d (%+v)", len(values), values)
+	if len(values) != 1 {
+		t.Fatalf("expected 1 matching access, got %d (%+v)", len(values), values)
 	}
 	access := values[0].(analysis.Access)
 	if location := DiagnosticLocation(access); location == nil || location.File != "src/env.ts" {

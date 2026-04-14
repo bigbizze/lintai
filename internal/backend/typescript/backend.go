@@ -34,7 +34,6 @@ func (b *Backend) Capabilities() backend.CapabilityManifest {
 }
 
 func (b *Backend) BuildSnapshot(ctx context.Context, repoRoot, workspaceRoot string) (*analysis.Snapshot, error) {
-	_ = repoRoot
 	files, err := workspace.ListSourceFiles(workspaceRoot)
 	if err != nil {
 		return nil, err
@@ -52,7 +51,10 @@ func (b *Backend) BuildSnapshot(ctx context.Context, repoRoot, workspaceRoot str
 	importEdges := convertImportEdges(extracted.ImportEdges)
 	callEdges := convertCallEdges(extracted.CallEdges)
 	typeRefs := convertTypeRefs(extracted.TypeRefs)
-	accesses := convertAccesses(extracted.Accesses)
+	accesses, err := extractAccesses(workspaceRoot, files)
+	if err != nil {
+		return nil, err
+	}
 
 	functionsByName := make(map[string][]analysis.Function)
 	functionsByKey := make(map[string]analysis.Function)
@@ -174,22 +176,6 @@ func convertTypeRefs(items []lintaiapi.TypeRef) []analysis.TypeRef {
 			Name:        item.Name,
 			FilePath:    item.FilePath,
 			TargetPath:  item.TargetPath,
-			Range:       convertLocation(item.Range),
-		})
-	}
-	return result
-}
-
-func convertAccesses(items []lintaiapi.Access) []analysis.Access {
-	result := make([]analysis.Access, 0, len(items))
-	for _, item := range items {
-		result = append(result, analysis.Access{
-			EntityID:    item.EntityID,
-			SemanticKey: item.SemanticKey,
-			Root:        item.Root,
-			AccessPath:  item.AccessPath,
-			Origin:      item.Origin,
-			FilePath:    item.FilePath,
 			Range:       convertLocation(item.Range),
 		})
 	}

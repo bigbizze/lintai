@@ -228,7 +228,7 @@ Type-ref caveats:
 type AccessView = {
 	root: string;
 	accessPath: string;
-	origin: "special_form" | "ambient_decl";
+	origin: "special_form";
 	filePath: string;
 	semanticKey: string;
 	sourceLocation: SourceLocation;
@@ -237,9 +237,8 @@ type AccessView = {
 
 Access caveats:
 
-- `origin === "special_form"` is used for syntax forms like `import.meta.*`
-- `origin === "ambient_decl"` is used for ambient roots like `window.*` or `document.*`
-- extraction is intentionally bounded to the root plus first member, for example `import.meta.env` or `window.location`
+- access extraction currently covers `import.meta.*` special forms only
+- extraction is intentionally bounded to the root plus first member, for example `import.meta.env` or `import.meta.url`
 
 ## CLI reference and caveats
 

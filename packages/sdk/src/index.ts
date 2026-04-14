@@ -64,7 +64,7 @@ export type TypeRefView = {
 export type AccessView = {
 	root: string;
 	accessPath: string;
-	origin: "special_form" | "ambient_decl";
+	origin: "special_form";
 	filePath: string;
 	semanticKey: string;
 	sourceLocation: SourceLocation;

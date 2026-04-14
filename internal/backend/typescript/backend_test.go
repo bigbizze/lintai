@@ -215,7 +215,7 @@ export function mirror(config: LocalConfig): DbConfig {
 	}
 }
 
-func TestBuildSnapshotExposesAccessesAndIgnoresShadowedAmbientRoots(t *testing.T) {
+func TestBuildSnapshotExposesImportMetaAccessesAndIgnoresStrings(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
@@ -233,14 +233,8 @@ func TestBuildSnapshotExposesAccessesAndIgnoresShadowedAmbientRoots(t *testing.T
 	return import.meta.env.API_URL;
 }
 `)
-	writeWorkspaceFile(t, root, "src/browser.ts", `export function readLocation() {
-	return window.location.href;
-}
-`)
-	writeWorkspaceFile(t, root, "src/shadowed.ts", `const window = { location: { href: "local" } };
-
-export function localWindow() {
-	return window.location.href;
+	writeWorkspaceFile(t, root, "src/strings.ts", `export function literalEnv() {
+	return "import.meta.env.API_URL";
 }
 `)
 
@@ -250,7 +244,6 @@ export function localWindow() {
 	}
 
 	var importMetaFound bool
-	var windowFound bool
 	for _, access := range snapshot.Accesses {
 		switch {
 		case access.FilePath == "src/env.ts" && access.Root == "import.meta" && access.AccessPath == "import.meta.env" && access.Origin == "special_form":
@@ -258,17 +251,12 @@ export function localWindow() {
 			if access.Range.File != "src/env.ts" || access.Range.StartLine != 2 {
 				t.Fatalf("unexpected import.meta access range %+v", access.Range)
 			}
-		case access.FilePath == "src/browser.ts" && access.Root == "window" && access.AccessPath == "window.location" && access.Origin == "ambient_decl":
-			windowFound = true
-		case access.FilePath == "src/shadowed.ts":
-			t.Fatalf("expected shadowed window access to be ignored, got %+v", access)
+		case access.FilePath == "src/strings.ts":
+			t.Fatalf("expected string literal to be ignored, got %+v", access)
 		}
 	}
 	if !importMetaFound {
 		t.Fatalf("expected import.meta access in snapshot, got %+v", snapshot.Accesses)
-	}
-	if !windowFound {
-		t.Fatalf("expected ambient window access in snapshot, got %+v", snapshot.Accesses)
 	}
 }
 
