@@ -323,3 +323,32 @@ func TestResolveAccessesSupportsInAndWherePredicates(t *testing.T) {
 		t.Fatalf("expected diagnostic identity for access, got %+v", identity)
 	}
 }
+
+func TestEntityViewIncludesAccessFields(t *testing.T) {
+	t.Parallel()
+
+	view := EntityView(analysis.Access{
+		SemanticKey: "access:env",
+		Root:        "import.meta",
+		AccessPath:  "import.meta.env",
+		Origin:      "special_form",
+		FilePath:    "src/env.ts",
+		Range: diagnostics.SourceLocation{
+			File:        "src/env.ts",
+			StartLine:   1,
+			StartColumn: 1,
+			EndLine:     1,
+			EndColumn:   16,
+		},
+	})
+
+	if view["filePath"] != "src/env.ts" {
+		t.Fatalf("expected filePath in access view, got %+v", view)
+	}
+	if view["accessPath"] != "import.meta.env" {
+		t.Fatalf("expected accessPath in access view, got %+v", view)
+	}
+	if view["origin"] != "special_form" {
+		t.Fatalf("expected origin in access view, got %+v", view)
+	}
+}

@@ -411,6 +411,8 @@ func EntityView(entity any) map[string]any {
 		return callEdgeView(typed)
 	case analysis.TypeRef:
 		return typeRefView(typed)
+	case analysis.Access:
+		return accessView(typed)
 	default:
 		return map[string]any{}
 	}
