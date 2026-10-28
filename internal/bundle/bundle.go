@@ -57,6 +57,7 @@ type prepareResponse struct {
 	Env         any    `json:"env,omitempty"`
 	Setup       any    `json:"setup,omitempty"`
 	Error       string `json:"error,omitempty"`
+	Skipped     bool   `json:"skipped,omitempty"`
 }
 
 // BuildAll writes the bundles of each rule to its own subdirectory of outDir.
@@ -130,6 +131,9 @@ func BuildAll(ctx context.Context, assetRoot, repoRoot, outDir string, rulePaths
 	return results, itemErrors, nil
 }
 
+// PrepareAll runs setup() for each rule. A file under the rule globs that has
+// no default export is a helper module, not a rule: it is in neither result
+// map.
 func PrepareAll(ctx context.Context, assetRoot, repoRoot, workspaceRoot string, artifacts map[string]Artifacts, rawEnv any) (map[string]PrepareResult, map[string]PrepareError, error) {
 	if len(artifacts) == 0 {
 		return map[string]PrepareResult{}, map[string]PrepareError{}, nil
@@ -188,6 +192,9 @@ func PrepareAll(ctx context.Context, assetRoot, repoRoot, workspaceRoot string, 
 			return nil, nil, fmt.Errorf("prepare returned duplicate rule path %q", row.RulePath)
 		}
 		seen[row.RulePath] = struct{}{}
+		if row.Skipped {
+			continue
+		}
 		if row.Error != "" {
 			itemErrors[row.RulePath] = PrepareError{
 				RuleID:      row.RuleID,

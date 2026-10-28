@@ -91,6 +91,13 @@ assert.equal(cliDiagnostics.length, 1);
 assert.equal(cliDiagnostics[0].rule_id, "arch.no-async");
 assert.equal(cliDiagnostics[0].source_location?.file, "src/example.ts");
 
+const facts = spawnSync("pnpm", ["exec", "lintai", "facts", "--workspace-root", ".", "--relation", "module"], {
+	cwd: repoDir,
+	encoding: "utf8",
+});
+assert.equal(facts.status, 0, `expected lintai facts to succeed through the launcher, got ${facts.status}\n${facts.stderr}`);
+assert.ok(facts.stdout.includes(`module("src/example.ts").`), facts.stdout);
+
 const eslint = spawnSync("pnpm", ["exec", "eslint", "src/example.ts", "-f", "json"], {
 	cwd: repoDir,
 	encoding: "utf8",

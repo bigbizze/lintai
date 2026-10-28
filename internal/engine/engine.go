@@ -26,6 +26,7 @@ type Options struct {
 	AssetRoot     string
 	WorkspaceRoot string
 	RuleGlobs     []string
+	Excludes      []string
 	Env           map[string]any
 	Severity      diagnostics.Severity
 	FactLimit     int
@@ -59,7 +60,7 @@ func (e *Engine) Run(ctx context.Context, options Options) ([]diagnostics.Diagno
 }
 
 func (e *Engine) Analyze(ctx context.Context, options Options) (Result, error) {
-	snapshot, err := e.backend.BuildSnapshot(ctx, options.RepoRoot, options.WorkspaceRoot)
+	snapshot, err := e.backend.BuildSnapshot(ctx, options.RepoRoot, options.WorkspaceRoot, options.Excludes)
 	if err != nil {
 		return Result{}, err
 	}
@@ -127,6 +128,7 @@ func (e *Engine) Analyze(ctx context.Context, options Options) (Result, error) {
 	for rulePath, prepareErr := range prepareFailures {
 		allDiagnostics = append(allDiagnostics, errorDiagnostic(ruleIDForPrepareFailure(rulePath, prepareErr), "setup", prepareErr.RuleVersion, snapshot.Version, e.backend.ID(), prepareErr.Message, options.Severity))
 	}
+	result.RulesLoaded = len(preparedByRule) + len(prepareFailures)
 
 	var base factstore.ReadOnlyFactStore
 	for _, rulePath := range rulePaths {

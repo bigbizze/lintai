@@ -9,6 +9,8 @@ A rule file exports:
 - a default rule definition
 - optionally, a named `config` export
 
+A file in the rule glob with no default export is a helper module. LintAI skips it, so shared `dl` fragments can live next to the rules. A default export that is not a rule is an error.
+
 A rule is a Datalog program in the [Mangle](https://codeberg.org/TauCeti/mangle-go) dialect. The program runs over facts that LintAI extracts from the workspace. The rule names one or more predicates whose rows are violations.
 
 ```ts
@@ -33,17 +35,17 @@ export default rule("arch.pure-no-effects")
 
 | Method | Phase | Required | Contract |
 |---|---|---|---|
-| `.version(n)` | — | yes | Rule version. It appears in diagnostic provenance. |
+| `.version(n)` | — | yes | Rule version, a positive integer. It appears in diagnostic provenance. A rule without it fails with phase `setup`. |
 | `.setup(fn)` | Node | no | Receives `{ env, workspaceRoot }`. Returns JSON-serializable plain data. |
 | `.facts(fn)` | pure | no | Receives `{ env, setup }`. Returns `Record<string, Array<Array<string \| number \| Name>>>`: extra extensional relations for this rule. Declare each relation in the program with `descr [extensional()]`. Each tuple must match the declared arity. Booleans are not allowed; use the presence of a fact. |
 | `.program(p)` | pure | yes | A `dl` fragment, or a function `({ env, setup }) => Fragment`. |
 | `.report(...predicates)` | — | yes | One or more predicates defined in the program. Each one needs a `Decl` that names its arguments. Each row is one violation. The first argument is the anchor. |
 | `.expectNonEmpty(...predicates)` | — | no | After evaluation, each listed predicate (base, prelude or rule-defined) must have at least one fact. If one is empty, the rule reports a `rule_execution_error` with phase `premise` and no violations. Use this to catch a glob or layer table that stopped matching. |
-| `.message(fn)` | pure | yes | Receives `(row, ctx)`. `row` is keyed by the argument names in the reported predicate's `Decl`. `ctx.assertion_id` is the reported predicate's name. |
+| `.message(fn)` | pure | yes | Receives `(row, ctx)`. `row` is keyed by the argument names in the reported predicate's `Decl`. Reading a key that is not an argument name throws, and the error lists the argument names. `ctx.assertion_id` is the reported predicate's name. |
 
 ### The anchor
 
-The first argument of a reported predicate is the anchor. It must be an entity id that has a `location` fact: a module path, a function, an import, a call, a type reference, a meta access or an ambient site. The anchor's `location` gives the diagnostic's `source_location`, and the anchor becomes `entity_identity.semantic_key`. An anchor without a `location` fact is a `rule_execution_error` with phase `report`.
+The first argument of a reported predicate is the anchor. It must be an entity id that has a `location` fact: a module path, a function, an import, a call, an external call, a type reference, a meta access, an ambient site, a directive or a parse error. The anchor's `location` gives the diagnostic's `source_location`, and the anchor becomes `entity_identity.semantic_key`. An anchor without a `location` fact is a `rule_execution_error` with phase `report`.
 
 ### `dl` and values
 
@@ -108,17 +110,21 @@ Conventions:
 |---|---|
 | `module(File)` | A source file in the workspace. |
 | `fn(Fn, File, Name)` | A collected function. `Name` is the display name (`Container.local`). |
-| `fn_kind(Fn, Kind)` | The function kind, as a string. |
+| `fn_kind(Fn, Kind)` | `"function"`, `"function_expression"`, `"arrow_function"`, `"method"`, `"constructor"`, `"get_accessor"` or `"set_accessor"`. |
 | `fn_container(Fn, Container)` | The container name, when it is not empty. |
 | `fn_exported(Fn)`, `fn_async(Fn)`, `fn_awaits(Fn)` | Exported, has the `async` modifier, contains `await`. |
 | `fn_param(Fn, Index, TypeText)` | One row per parameter. `Index` starts at 0. |
 | `fn_returns(Fn, TypeText)` | Return type text. |
-| `import_edge(Imp, From, To, Specifier)` | One row per import declaration. `To` is the workspace-relative path when the import resolves inside the workspace, otherwise the specifier. |
-| `import_internal(Imp)` | The import resolves inside the workspace. |
-| `import_type_only(Imp)` | `import type ...`. |
-| `import_symbol(Imp, Name, Kind)` | `Kind` is `/default`, `/namespace` or `/named`. A side-effect import has no rows. |
+| `import_edge(Imp, From, To, Specifier)` | One row per module reference with a string specifier: `import`, `export ... from`, `import()`, `require()`, `import x = require()` and `typeof import()`. `To` is the workspace-relative path when `import_internal` is set, otherwise the specifier. |
+| `import_form(Imp, Form)` | `/static`, `/reexport`, `/dynamic`, `/require`, `/import_equals` or `/import_type`. Every import has one row. |
+| `import_internal(Imp)` | The import resolves to a workspace file that is not in `node_modules`. |
+| `import_unresolved(Imp)` | The import resolves to no file and no declared module: a typo in a path or alias, or a package that is not installed. |
+| `import_package(Imp, Pkg)` | The package name, for example `"next"` for `"next/server"`. |
+| `import_type_only(Imp)` | The reference loads only types: `import type`, `export type ... from` or `typeof import()`. |
+| `import_symbol(Imp, Name, Kind)` | `Kind` is `/default`, `/namespace` or `/named`. A side-effect import, `export *`, `import()` and `require()` have no rows. |
 | `import_symbol_type_only(Imp, Name)` | `import { type X }`. |
-| `call_edge(Call, Caller, Callee)` | A resolved call between two collected functions. |
+| `call_edge(Call, Caller, Callee)` | A call to a collected function. The callee is the declaration that the type checker resolves for the call. `Caller` is the module path for a call at module scope. A call through a function-typed value (a callback parameter, or a property of a record of functions) has no row. |
+| `external_call(Call, Caller, Module, Name)` | A call to a declaration outside the workspace sources. `Module` is `"lib"`, a package name, a `declare module` name or a `.d.ts` path. `Name` is the qualified name, for example `"JSON.parse"` or `"Set.add"`. |
 | `type_ref(Ref, File, Name)` | A type reference. |
 | `type_ref_target(Ref, TargetFile)` | The declaring file, when it is inside the workspace. |
 | `meta_access(Acc, File, AccessPath)` | An `import.meta.*` access. |
@@ -127,8 +133,17 @@ Conventions:
 | `ambient_key(Site, Key)` | The static key read or written at the site. |
 | `ambient_dynamic(Site)` | The key is not static, or the whole object escapes. |
 | `ambient_write(Site)` | The site assigns to or deletes the keyed member. |
-| `site_in_fn(Site, Fn)` | The innermost collected function that contains a call, ambient-use or meta-access site. A site inside an anonymous callback belongs to the nearest enclosing collected function. Module-scope sites have no row. |
+| `module_directive(Dir, File, Text)` | A prologue directive, for example `"use client"`. |
+| `module_parse_error(Err, File, Message)` | The first syntax error of a file. The other facts of that file can be incomplete. |
+| `site_in_fn(Site, Fn)` | The innermost collected function that contains a call, external-call, ambient-use or meta-access site. A site inside an anonymous callback belongs to the nearest enclosing collected function. Module-scope sites have no row. |
 | `location(Entity, File, StartLine, StartCol, EndLine, EndCol)` | The source range of every entity id. |
+
+Caveats:
+
+- `call_edge` follows only calls that the type checker resolves to one declaration. Dependency injection through records of functions or callback parameters hides the call, so `calls_reach` does not see it.
+- an unresolved import is not internal, so `To` is the specifier. Check `import_unresolved` when a rule depends on `import_internal`.
+- `export default function () {}` and `export default () => ...` are functions named `default`.
+- a call inside an anonymous function at module scope, for example `app.get("/", () => load())` or a class `static` block, has the module path as `Caller`, even when the function runs later.
 
 ## Prelude and caveats
 
@@ -150,7 +165,8 @@ The prelude is loaded before every rule program. A rule cannot redefine a prelud
 Caveats:
 
 - `glob` is an external predicate. Both arguments must be bound by earlier premises in the same clause. It cannot be negated directly; define a helper predicate that uses `glob` and negate the helper.
-- Mangle requires every variable in a negated atom to be bound. Use `_` only in positive atoms, or move the negated pattern into a helper predicate.
+- Mangle requires every variable in a negated atom to be bound. `_` in a negated atom is an error with phase `program_analysis`. Move the negated pattern into a helper predicate without the unused argument, and negate the helper.
+- `calls_reach(Caller, Callee)` also has rows where `Caller` is a module path, from calls at module scope.
 - LintAI evaluates only the prelude clauses that a rule uses.
 
 ## Ambient sources and caveats
@@ -218,9 +234,39 @@ Matching rules:
 
 Capability `read` covers reads and writes. `ambient_write` marks a write.
 
+`random`:
+
+| Capability | Root | Path | Form | Modules |
+|---|---|---|---|---|
+| `number` | `Math` | `["random"]` | reference | — |
+| `number` | `crypto` | `["randomInt"]` | reference | `node:crypto` and `crypto`: export `default` with path `[]`, export `randomInt` with path `["randomInt"]` |
+| `uuid` | `crypto` | `["randomUUID"]` | reference | the same, for `randomUUID` |
+| `bytes` | `crypto` | `["getRandomValues"]`, `["randomBytes"]`, `["randomFillSync"]` | reference | the same, for each name |
+
+`network`:
+
+| Capability | Root | Path | Form | Modules |
+|---|---|---|---|---|
+| `fetch` | `fetch` | `[]` | reference | — |
+
+`timer`:
+
+| Capability | Root | Path | Form | Modules |
+|---|---|---|---|---|
+| `schedule` | `setTimeout`, `setInterval`, `setImmediate` | `[]` | reference | `node:timers` and `timers`: the export with the same name, path `[]` |
+
+`process`:
+
+| Capability | Root | Path | Form | Modules |
+|---|---|---|---|---|
+| `cwd` | `process` | `["cwd"]` | reference | `node:process` and `process`: export `default` with path `[]`, export `cwd` with path `["cwd"]` |
+| `argv` | `process` | `["argv"]` | reference | the same, for `argv` |
+
+All four use key policy `none`. A namespace import (`import * as c from "node:crypto"`, then `c.randomUUID`) also matches.
+
 Caveats:
 
-- this release registers only the built-in sources
+- this release registers only the built-in sources. To add a source, change `internal/ambient/ambient.go`.
 - `import.meta` accesses use `meta_access`, not the ambient-source contract
 
 ## CLI reference and caveats
@@ -228,7 +274,7 @@ Caveats:
 ```sh
 lintai [flags]
 lintai schema
-lintai facts --workspace-root <dir> [--relation <name>]...
+lintai facts --workspace-root <dir> [--exclude <glob>]... [--relation <name>]...
 lintai serve
 ```
 
@@ -238,6 +284,7 @@ Flags for analysis:
 - `--repo-root`
 - `--asset-root`
 - `--rules`: a comma-separated list of globs (default `lintai-rules/**/*.ts`)
+- `--exclude`: a glob, relative to the workspace root, of files to leave out of the snapshot. Repeat the flag for more globs.
 - `--env-json`: a JSON object passed to every rule as `env`
 - `--json`
 - `--explain`: with `--json`, attach `explanation` to each violation
@@ -255,17 +302,31 @@ pnpm exec lintai \
 
 `lintai schema` prints the base relation declarations, then the prelude.
 
-`lintai facts` builds the snapshot and prints its base facts in Mangle syntax, sorted. Use `--relation` one or more times to print only those relations:
+`lintai facts` builds the snapshot and prints its base facts in Mangle syntax, sorted. It accepts `--exclude`, and it accepts and ignores `--asset-root`. Use `--relation` one or more times to print only those relations:
 
 ```sh
 pnpm exec lintai facts --workspace-root . --relation ambient_use --relation ambient_key
 ```
 
+Snapshot scope:
+
+- the snapshot contains every `.ts`, `.tsx`, `.js` and `.jsx` file under the workspace root, except `.d.ts` files
+- it skips `node_modules`, `dist` and every directory whose name starts with a dot, for example `.git` and `.next`
+- it does not read `include` or `exclude` from `tsconfig.json`. Use `--exclude` for generated or excluded files.
+
+Exit codes:
+
+| Code | Meaning |
+|---|---|
+| 0 | No error diagnostics. |
+| 1 | At least one rule reported an error-severity violation, and every rule ran. |
+| 2 | Usage or configuration error: a bad flag, a bad root, a rule glob that matches no file, an invalid exclude glob. No rules ran. |
+| 3 | At least one rule could not run (`rule_execution_error`). Violations from the other rules are still in the output. |
+
 CLI caveats:
 
 - relative rule globs are resolved from `workspaceRoot`
 - each rule glob must match at least one file; otherwise the run fails with an error
-- the CLI exits with status 1 when it reports an error diagnostic
 - `lintai serve` is for editor integration; it keeps the base facts of the current snapshot and rebuilds them when the snapshot changes
 
 ## ESLint plugin reference and caveats
@@ -318,6 +379,7 @@ type BridgeOptions = {
 	repoRoot?: string;
 	workspaceRoot?: string;
 	rules?: string[];
+	exclude?: string[];
 	env?: Record<string, unknown>;
 	factLimit?: number;
 };
@@ -327,6 +389,8 @@ Plugin caveats:
 
 - `serve` is the default in editor-like long-lived processes
 - `oneshot` is the default under plain ESLint CLI detection
+- `exclude` is the same as the CLI `--exclude` flag
+- lintai reads the saved files on disk, not the editor buffer. In `serve` mode, when the editor text of a file is different from the saved file, the plugin shows one message on line 1 that asks you to save the file, in place of the lintai diagnostics for that file. After you save, the diagnostics update on the next lint pass.
 - rule-file edits force invalidation on the next lint pass
 - the ESLint path never computes `explanation`
 

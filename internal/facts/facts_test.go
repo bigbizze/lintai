@@ -14,14 +14,17 @@ import (
 // entityArgs lists the argument positions that hold entity ids. Reports
 // anchor on entity ids, so each one needs a location row.
 var entityArgs = map[string][]int{
-	"module":      {0},
-	"fn":          {0},
-	"import_edge": {0},
-	"call_edge":   {0, 1, 2},
-	"type_ref":    {0},
-	"meta_access": {0},
-	"ambient_use": {0},
-	"site_in_fn":  {0, 1},
+	"module":             {0},
+	"fn":                 {0},
+	"import_edge":        {0},
+	"call_edge":          {0, 1, 2},
+	"external_call":      {0, 1},
+	"type_ref":           {0},
+	"meta_access":        {0},
+	"ambient_use":        {0},
+	"module_directive":   {0},
+	"module_parse_error": {0},
+	"site_in_fn":         {0, 1},
 }
 
 func TestFixtureFactsHaveLocationsAndAreDeterministic(t *testing.T) {
@@ -31,7 +34,7 @@ func TestFixtureFactsHaveLocationsAndAreDeterministic(t *testing.T) {
 	}
 	workspaceRoot := filepath.Join(repoRoot, "testdata/fixtures/workspace")
 	build := func() string {
-		snapshot, err := typescript.New().BuildSnapshot(context.Background(), workspaceRoot, workspaceRoot)
+		snapshot, err := typescript.New().BuildSnapshot(context.Background(), workspaceRoot, workspaceRoot, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

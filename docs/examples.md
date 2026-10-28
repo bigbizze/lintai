@@ -173,7 +173,7 @@ export default rule("arch.ambient")
 
 Caveats:
 
-- the built-in sources are `/clock` and `/env`. `docs/api.md` gives their matchers.
+- the built-in sources are `/clock`, `/env`, `/random`, `/network`, `/timer` and `/process`. `docs/api.md` gives their matchers.
 - a use inside an anonymous callback belongs to the nearest enclosing collected function, so `fn_reaches_ambient` sees it
 - a use at module scope has no `site_in_fn` row. `module_uses_ambient` and `module_reaches_ambient` see it, `fn_reaches_ambient` does not.
 - aliases such as `const env = process.env` are recorded as a dynamic use, because the whole object escapes
@@ -273,7 +273,51 @@ Caveats:
 - the access path stops at the first member, so `import.meta.env.API_URL` is recorded as `import.meta.env`
 - `site_in_fn(Acc, Fn)` gives the enclosing function of the access
 
-## 8. Explanations
+## 8. Directives, library calls and unresolved imports
+
+A client component must not import server code, a pure module must not call `JSON.parse`, and every import must resolve:
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+export default rule("arch.client-and-parsing")
+	.version(1)
+	.program(dl`
+		Decl client_module(File).
+		client_module(File) :- module_directive(_, File, "use client").
+
+		Decl client_imports_server(Imp, From, To).
+		client_imports_server(Imp, From, To) :-
+			client_module(From), import_edge(Imp, From, To, _), import_internal(Imp),
+			import_runtime(Imp), glob(To, "src/server/**").
+
+		Decl raw_json_parse(Call, File).
+		raw_json_parse(Call, File) :-
+			external_call(Call, Fn, "lib", "JSON.parse"), fn(Fn, File, _), glob(File, "src/pure/**").
+
+		Decl unresolved(Imp, From, Specifier).
+		unresolved(Imp, From, Specifier) :- import_edge(Imp, From, _, Specifier), import_unresolved(Imp).
+	`)
+	.report("client_imports_server", "raw_json_parse", "unresolved")
+	.message((row, ctx) => {
+		switch (ctx.assertion_id) {
+			case "client_imports_server":
+				return `Client module ${row.From} must not import ${row.To}`;
+			case "raw_json_parse":
+				return `${row.File} must parse JSON through the codec module`;
+			default:
+				return `${row.From} imports ${row.Specifier}, which does not resolve`;
+		}
+	});
+```
+
+Caveats:
+
+- `import_edge` includes `export ... from`, `import()` and `require()`; use `import_form` to select one form
+- `external_call` names come from the declaration: a method on a `Set` is `"Set.add"`, and `Date.now()` is `"DateConstructor.now"`. Run `lintai facts --relation external_call` to see the names in your workspace.
+- a call at module scope has the module path as `Caller`, so `fn(Fn, File, _)` does not match it. Use `module(Caller)` for those calls.
+
+## 9. Explanations
 
 `--explain` (with `--json`) attaches a proof to each violation. The first line is the reported fact. The lines that follow are the premises, depth first:
 
@@ -294,7 +338,7 @@ Caveats:
 - a negated premise has a `!` prefix
 - the ESLint path never computes explanations
 
-## 9. Test a rule with planted violations
+## 10. Test a rule with planted violations
 
 Put a small workspace next to your rules that contains each violation that you want to catch, and assert the exact set of diagnostics. If a change to a rule, to the prelude or to extraction adds or loses a violation, the test fails. `cmd/lintai/main_test.go` uses this pattern for the fixture rules in `testdata/fixtures/rules/`:
 
@@ -315,7 +359,7 @@ To see the facts that a rule sees, use `lintai facts`:
 pnpm exec lintai facts --workspace-root testdata/fixtures/workspace --relation call_edge --relation fn_awaits
 ```
 
-## 10. ESLint integration
+## 11. ESLint integration
 
 ```js
 import lintai from "@lintai/eslint-plugin";

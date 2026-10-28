@@ -29,8 +29,11 @@ func (b *Backend) Relations() []string {
 	return facts.BaseRelations()
 }
 
-func (b *Backend) BuildSnapshot(ctx context.Context, repoRoot, workspaceRoot string) (*analysis.Snapshot, error) {
-	files, err := workspace.ListSourceFiles(workspaceRoot)
+// BuildSnapshot extracts the facts of the source files under workspaceRoot.
+// excludes are doublestar globs, relative to workspaceRoot, of files to
+// leave out.
+func (b *Backend) BuildSnapshot(ctx context.Context, repoRoot, workspaceRoot string, excludes []string) (*analysis.Snapshot, error) {
+	files, err := workspace.ListSourceFiles(workspaceRoot, excludes)
 	if err != nil {
 		return nil, err
 	}
@@ -67,10 +70,13 @@ func (b *Backend) BuildSnapshot(ctx context.Context, repoRoot, workspaceRoot str
 		Functions:      functions,
 		ImportEdges:    importEdges,
 		CallEdges:      callEdges,
+		ExternalCalls:  convertExternalCalls(extracted.ExternalCalls),
 		TypeRefs:       typeRefs,
 		Accesses:       accesses,
 		AmbientSources: convertAmbientSources(sources),
 		AmbientUses:    convertAmbientUses(extracted.AmbientUses),
+		Directives:     convertDirectives(extracted.Directives),
+		ParseErrors:    convertParseErrors(extracted.ParseErrors),
 	}, nil
 }
 
@@ -128,6 +134,10 @@ func convertImportEdges(items []lintaiapi.ImportEdge) []analysis.ImportEdge {
 			Specifier:          item.Specifier,
 			FromPath:           item.FromPath,
 			ToPath:             item.ToPath,
+			Form:               item.Form,
+			Internal:           item.Internal,
+			Unresolved:         item.Unresolved,
+			Package:            item.Package,
 			ImportedSymbols:    importedSymbols,
 			HasDefaultImport:   item.HasDefaultImport,
 			HasNamespaceImport: item.HasNamespaceImport,
@@ -146,12 +156,58 @@ func convertCallEdges(items []lintaiapi.CallEdge) []analysis.CallEdge {
 			EntityID:        item.EntityID,
 			SemanticKey:     item.SemanticKey,
 			FromSemanticKey: item.FromSemanticKey,
+			FromModule:      item.FromModule,
 			ToSemanticKey:   item.ToSemanticKey,
 			FromName:        item.FromName,
 			ToName:          item.ToName,
 			FromPath:        item.FromPath,
 			ToPath:          item.ToPath,
 			Range:           convertLocation(item.Range),
+		})
+	}
+	return result
+}
+
+func convertExternalCalls(items []lintaiapi.ExternalCall) []analysis.ExternalCall {
+	result := make([]analysis.ExternalCall, 0, len(items))
+	for _, item := range items {
+		result = append(result, analysis.ExternalCall{
+			EntityID:        item.EntityID,
+			SemanticKey:     item.SemanticKey,
+			FromSemanticKey: item.FromSemanticKey,
+			FromModule:      item.FromModule,
+			FromPath:        item.FromPath,
+			Module:          item.Module,
+			Name:            item.Name,
+			Range:           convertLocation(item.Range),
+		})
+	}
+	return result
+}
+
+func convertDirectives(items []lintaiapi.ModuleDirective) []analysis.ModuleDirective {
+	result := make([]analysis.ModuleDirective, 0, len(items))
+	for _, item := range items {
+		result = append(result, analysis.ModuleDirective{
+			EntityID:    item.EntityID,
+			SemanticKey: item.SemanticKey,
+			FilePath:    item.FilePath,
+			Text:        item.Text,
+			Range:       convertLocation(item.Range),
+		})
+	}
+	return result
+}
+
+func convertParseErrors(items []lintaiapi.ParseError) []analysis.ParseError {
+	result := make([]analysis.ParseError, 0, len(items))
+	for _, item := range items {
+		result = append(result, analysis.ParseError{
+			EntityID:    item.EntityID,
+			SemanticKey: item.SemanticKey,
+			FilePath:    item.FilePath,
+			Message:     item.Message,
+			Range:       convertLocation(item.Range),
 		})
 	}
 	return result

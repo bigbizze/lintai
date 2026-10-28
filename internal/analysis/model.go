@@ -39,6 +39,10 @@ type ImportEdge struct {
 	Specifier          string
 	FromPath           string
 	ToPath             string
+	Form               string
+	Internal           bool
+	Unresolved         bool
+	Package            string
 	ImportedSymbols    []ImportedSymbol
 	HasDefaultImport   bool
 	HasNamespaceImport bool
@@ -51,12 +55,40 @@ type CallEdge struct {
 	EntityID        string
 	SemanticKey     string
 	FromSemanticKey string
+	FromModule      bool
 	ToSemanticKey   string
 	FromName        string
 	ToName          string
 	FromPath        string
 	ToPath          string
 	Range           diagnostics.SourceLocation
+}
+
+type ExternalCall struct {
+	EntityID        string
+	SemanticKey     string
+	FromSemanticKey string
+	FromModule      bool
+	FromPath        string
+	Module          string
+	Name            string
+	Range           diagnostics.SourceLocation
+}
+
+type ModuleDirective struct {
+	EntityID    string
+	SemanticKey string
+	FilePath    string
+	Text        string
+	Range       diagnostics.SourceLocation
+}
+
+type ParseError struct {
+	EntityID    string
+	SemanticKey string
+	FilePath    string
+	Message     string
+	Range       diagnostics.SourceLocation
 }
 
 type TypeRef struct {
@@ -102,10 +134,13 @@ type Snapshot struct {
 	Functions      []Function
 	ImportEdges    []ImportEdge
 	CallEdges      []CallEdge
+	ExternalCalls  []ExternalCall
 	TypeRefs       []TypeRef
 	Accesses       []Access
 	AmbientSources []AmbientSource
 	AmbientUses    []AmbientUse
+	Directives     []ModuleDirective
+	ParseErrors    []ParseError
 }
 
 type AmbientSource struct {

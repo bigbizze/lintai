@@ -110,8 +110,19 @@ func FromSnapshot(snapshot *analysis.Snapshot) (factstore.ReadOnlyFactStore, err
 	for _, edge := range snapshot.ImportEdges {
 		id := str(edge.SemanticKey)
 		b.add("import_edge", id, str(edge.FromPath), str(edge.ToPath), str(edge.Specifier))
-		if edge.ToPath != edge.Specifier {
+		form, err := name(edge.Form)
+		if err != nil {
+			return nil, err
+		}
+		b.add("import_form", id, form)
+		if edge.Internal {
 			b.add("import_internal", id)
+		}
+		if edge.Unresolved {
+			b.add("import_unresolved", id)
+		}
+		if edge.Package != "" {
+			b.add("import_package", id, str(edge.Package))
 		}
 		if edge.IsTypeOnly {
 			b.add("import_type_only", id)
@@ -131,8 +142,26 @@ func FromSnapshot(snapshot *analysis.Snapshot) (factstore.ReadOnlyFactStore, err
 	for _, edge := range snapshot.CallEdges {
 		id := str(edge.SemanticKey)
 		b.add("call_edge", id, str(edge.FromSemanticKey), str(edge.ToSemanticKey))
-		b.add("site_in_fn", id, str(edge.FromSemanticKey))
+		if !edge.FromModule {
+			b.add("site_in_fn", id, str(edge.FromSemanticKey))
+		}
 		b.location(edge.SemanticKey, edge.Range)
+	}
+	for _, call := range snapshot.ExternalCalls {
+		id := str(call.SemanticKey)
+		b.add("external_call", id, str(call.FromSemanticKey), str(call.Module), str(call.Name))
+		if !call.FromModule {
+			b.add("site_in_fn", id, str(call.FromSemanticKey))
+		}
+		b.location(call.SemanticKey, call.Range)
+	}
+	for _, directive := range snapshot.Directives {
+		b.add("module_directive", str(directive.SemanticKey), str(directive.FilePath), str(directive.Text))
+		b.location(directive.SemanticKey, directive.Range)
+	}
+	for _, parseError := range snapshot.ParseErrors {
+		b.add("module_parse_error", str(parseError.SemanticKey), str(parseError.FilePath), str(parseError.Message))
+		b.location(parseError.SemanticKey, parseError.Range)
 	}
 	for _, ref := range snapshot.TypeRefs {
 		id := str(ref.SemanticKey)
