@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/bigbizze/lintai/backend"
@@ -19,8 +20,8 @@ type mixedFactsBackend struct {
 
 func (b mixedFactsBackend) ID() string { return "mixed-fixture" }
 
-func (b mixedFactsBackend) BuildSnapshot(ctx context.Context, repoRoot, workspaceRoot string, excludes []string) (facts.Snapshot, error) {
-	snapshot, err := b.typescript.BuildSnapshot(ctx, repoRoot, workspaceRoot, excludes)
+func (b mixedFactsBackend) BuildSnapshot(ctx context.Context, repoRoot, workspaceRoot string, options backend.SnapshotOptions) (facts.Snapshot, error) {
+	snapshot, err := b.typescript.BuildSnapshot(ctx, repoRoot, workspaceRoot, options)
 	if err != nil {
 		return facts.Snapshot{}, err
 	}
@@ -53,6 +54,8 @@ func TestExternalBackendComposesMixedFacts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	assertTypeScriptSnapshotFacts(t, repoRoot, filepath.Join(repoRoot, "testdata/fixtures/workspace"))
+
 	workspaceRoot := filepath.Join(repoRoot, "testdata/fixtures/external-backend/mixed-facts")
 	result, err := engine.New(mixedFactsBackend{typescript: typescript.New()}).Analyze(context.Background(), engine.Options{
 		RepoRoot:      repoRoot,
@@ -77,11 +80,83 @@ func TestExternalBackendComposesMixedFacts(t *testing.T) {
 	}
 }
 
+// Keep the TypeScript backend's generic snapshot contract covered at its
+// public boundary, including location rows and deterministic formatting.
+func assertTypeScriptSnapshotFacts(t *testing.T, repoRoot, workspaceRoot string) {
+	t.Helper()
+	build := func() string {
+		snapshot, err := typescript.New().BuildSnapshot(context.Background(), repoRoot, workspaceRoot, backend.SnapshotOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := facts.Validate(snapshot); err != nil {
+			t.Fatal(err)
+		}
+		locations := make(map[string]struct{})
+		for _, item := range snapshot.Facts {
+			if item.Relation == facts.LocationRelation && len(item.Values) == 6 && item.Values[0].Kind == facts.StringKind {
+				locations[item.Values[0].String] = struct{}{}
+			}
+		}
+		entityArgs := map[string][]int{
+			"module":             {0},
+			"fn":                 {0},
+			"import_edge":        {0},
+			"call_edge":          {0, 1, 2},
+			"external_call":      {0, 1},
+			"type_ref":           {0},
+			"meta_access":        {0},
+			"ambient_use":        {0},
+			"module_directive":   {0},
+			"module_parse_error": {0},
+			"site_in_fn":         {0, 1},
+		}
+		rows := make(map[string]int, len(entityArgs))
+		for _, item := range snapshot.Facts {
+			rows[item.Relation]++
+			for _, position := range entityArgs[item.Relation] {
+				if position >= len(item.Values) || item.Values[position].Kind != facts.StringKind {
+					t.Errorf("%s has an invalid entity id at argument %d", item.Relation, position)
+					continue
+				}
+				if _, ok := locations[item.Values[position].String]; !ok {
+					t.Errorf("%s entity %q has no location row", item.Relation, item.Values[position].String)
+				}
+			}
+		}
+		for relation := range entityArgs {
+			if rows[relation] == 0 {
+				t.Errorf("fixture workspace has no %s facts", relation)
+			}
+		}
+		text, err := facts.Format(snapshot, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{
+			`import_symbol_type_only("src/server/handler.ts::import::./config","Config").`,
+			`type_ref_target("src/server/handler.ts::type_ref::Config","src/server/config.ts").`,
+			`site_in_fn("src/server/config.ts::access::import.meta.env","src/server/config.ts::function::mode").`,
+			`import_edge("src/server/handler.ts::import::server-only","src/server/handler.ts","server-only","server-only").`,
+		} {
+			if !strings.Contains(text, want) {
+				t.Errorf("snapshot is missing fact %s", want)
+			}
+		}
+		return text
+	}
+
+	first := build()
+	if second := build(); first != second {
+		t.Fatal("two public backend builds produced different facts")
+	}
+}
+
 type genericFactsBackend struct{}
 
 func (genericFactsBackend) ID() string { return "generic-fixture" }
 
-func (genericFactsBackend) BuildSnapshot(context.Context, string, string, []string) (facts.Snapshot, error) {
+func (genericFactsBackend) BuildSnapshot(context.Context, string, string, backend.SnapshotOptions) (facts.Snapshot, error) {
 	return facts.Snapshot{
 		Version: "generic-fixture-v1",
 		Schema: facts.Schema{Declarations: `

@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/bigbizze/lintai/backend"
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/engine"
 	"github.com/bigbizze/lintai/jsonrpc"
@@ -46,6 +47,7 @@ type InitializeParams struct {
 	WorkspaceRoot string         `json:"workspaceRoot"`
 	RuleGlobs     []string       `json:"ruleGlobs"`
 	Excludes      []string       `json:"excludes,omitempty"`
+	Files         string         `json:"files,omitempty"`
 	Env           map[string]any `json:"env"`
 	FactLimit     int            `json:"factLimit,omitempty"`
 }
@@ -156,12 +158,17 @@ func (s *Server) handleInitialize(ctx context.Context, rawParams json.RawMessage
 	if params.Env == nil {
 		params.Env = map[string]any{}
 	}
+	scope, err := backend.ParseFileScope(params.Files)
+	if err != nil {
+		return AnalysisResult{}, err
+	}
 	options := engine.Options{
 		RepoRoot:      params.RepoRoot,
 		AssetRoot:     params.AssetRoot,
 		WorkspaceRoot: params.WorkspaceRoot,
 		RuleGlobs:     append([]string(nil), params.RuleGlobs...),
 		Excludes:      append([]string(nil), params.Excludes...),
+		Files:         scope,
 		Env:           params.Env,
 		Severity:      diagnostics.SeverityError,
 		FactLimit:     params.FactLimit,

@@ -8,6 +8,7 @@ a snapshot version, relation declarations, prelude, and typed base facts.
 import (
 	"context"
 
+	"github.com/bigbizze/lintai/backend"
 	"github.com/bigbizze/lintai/engine"
 	"github.com/bigbizze/lintai/facts"
 )
@@ -19,7 +20,7 @@ func (CatalogBackend) ID() string { return "catalog" }
 func (CatalogBackend) BuildSnapshot(
 	ctx context.Context,
 	repoRoot, workspaceRoot string,
-	excludes []string,
+	options backend.SnapshotOptions,
 ) (facts.Snapshot, error) {
 	return facts.Snapshot{
 		Version: "catalog-snapshot-42",
@@ -67,7 +68,7 @@ module that imports `backend/typescript` must include the same compiler fork
 replacement used here:
 
 ```go
-replace github.com/microsoft/TypeScript/tsc => github.com/bigbizze/typescript-go v0.0.0-20261028155921-815b0203840d
+replace github.com/microsoft/TypeScript/tsc => github.com/bigbizze/typescript-go v0.0.0-20261028214434-1b2c2fa7c3bb
 ```
 
 The separate module in `testdata/consumer-module` demonstrates this
@@ -84,4 +85,9 @@ Other reusable packages are:
 - `server` for the JSON-RPC analysis server; `jsonrpc` exposes its framing
   types and helpers.
 
-The CLI remains in `cmd/lintai`; its flags and exit codes are unchanged.
+`SnapshotOptions.Excludes` contains doublestar globs relative to the workspace
+root. `SnapshotOptions.Files` selects `backend.FileScopeTsconfig` (the default)
+or `backend.FileScopeWalk`.
+
+The CLI remains in `cmd/lintai`; its flags and exit codes are documented in
+`docs/api.md`.

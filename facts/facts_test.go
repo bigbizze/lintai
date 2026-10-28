@@ -14,9 +14,9 @@ Decl location(Id, File, StartLine, StartColumn, EndLine, EndColumn)
   descr [extensional(), arg(Id, "entity id"), arg(File, "file"), arg(StartLine, "start line"), arg(StartColumn, "start column"), arg(EndLine, "end line"), arg(EndColumn, "end column")].
 `, Prelude: ""},
 		Facts: []Fact{
-			{Relation: "object", Values: []Value{String("catalog/orders"), Name("table")}},
-			{Relation: "object", Values: []Value{String("catalog/orders"), Name("table")}},
-			{Relation: "location", Values: []Value{String("catalog/orders"), String("schema.sql"), Number(3), Number(1), Number(3), Number(12)}},
+			{Relation: "object", Values: []Value{String("catalog/orders"), Name("collection")}},
+			{Relation: "object", Values: []Value{String("catalog/orders"), Name("collection")}},
+			{Relation: "location", Values: []Value{String("catalog/orders"), String("catalog/orders.schema"), Number(3), Number(1), Number(3), Number(12)}},
 		},
 	}
 	if err := Validate(snapshot); err != nil {
@@ -26,8 +26,8 @@ Decl location(Id, File, StartLine, StartColumn, EndLine, EndColumn)
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := "location(\"catalog/orders\",\"schema.sql\",3,1,3,12).\n" +
-		"object(\"catalog/orders\",/table)."
+	want := "location(\"catalog/orders\",\"catalog/orders.schema\",3,1,3,12).\n" +
+		"object(\"catalog/orders\",/collection)."
 	if formatted != want {
 		t.Fatalf("formatted snapshot = %q, want %q", formatted, want)
 	}
@@ -35,7 +35,7 @@ Decl location(Id, File, StartLine, StartColumn, EndLine, EndColumn)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if filtered != "object(\"catalog/orders\",/table)." {
+	if filtered != "object(\"catalog/orders\",/collection)." {
 		t.Fatalf("filtered snapshot = %q", filtered)
 	}
 	if _, err := Format(snapshot, []string{"missing"}); err == nil {

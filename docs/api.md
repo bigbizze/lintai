@@ -274,7 +274,7 @@ Caveats:
 ```sh
 lintai [flags]
 lintai schema
-lintai facts --workspace-root <dir> [--exclude <glob>]... [--relation <name>]...
+lintai facts --workspace-root <dir> [--exclude <glob>]... [--files tsconfig|walk] [--relation <name>]...
 lintai serve
 ```
 
@@ -285,6 +285,7 @@ Flags for analysis:
 - `--asset-root`
 - `--rules`: a comma-separated list of globs (default `lintai-rules/**/*.ts`)
 - `--exclude`: a glob, relative to the workspace root, of files to leave out of the snapshot. Repeat the flag for more globs.
+- `--files`: `tsconfig` (default) or `walk`. See "Snapshot scope".
 - `--env-json`: a JSON object passed to every rule as `env`
 - `--json`
 - `--explain`: with `--json`, attach `explanation` to each violation
@@ -302,7 +303,7 @@ pnpm exec lintai \
 
 `lintai schema` prints the base relation declarations, then the prelude.
 
-`lintai facts` builds the snapshot and prints its base facts in Mangle syntax, sorted. It accepts `--exclude`, and it accepts and ignores `--asset-root`. Use `--relation` one or more times to print only those relations:
+`lintai facts` builds the snapshot and prints its base facts in Mangle syntax, sorted. It accepts `--exclude` and `--files`, and it accepts and ignores `--asset-root`. Use `--relation` one or more times to print only those relations:
 
 ```sh
 pnpm exec lintai facts --workspace-root . --relation ambient_use --relation ambient_key
@@ -310,9 +311,18 @@ pnpm exec lintai facts --workspace-root . --relation ambient_use --relation ambi
 
 Snapshot scope:
 
-- the snapshot contains every `.ts`, `.tsx`, `.js` and `.jsx` file under the workspace root, except `.d.ts` files
+lintai first walks the workspace root:
+
+- it finds every `.ts`, `.tsx`, `.js` and `.jsx` file, except `.d.ts` files
 - it skips `node_modules`, `dist` and every directory whose name starts with a dot, for example `.git` and `.next`
-- it does not read `include` or `exclude` from `tsconfig.json`. Use `--exclude` for generated or excluded files.
+- it skips the files that match an `--exclude` glob
+
+Then `--files` selects the walked files that become modules:
+
+- `tsconfig` (default): a walked file under a `tsconfig.json` is a module only if `tsc` compiles it with that `tsconfig.json`. That is, `files` or `include` lists it and `exclude` does not remove it, or a compiled file imports it. `tsc` compiles an imported file even when `exclude` matches it, so lintai does too. For a solution-style `tsconfig.json` (`"files": []` with `references`), lintai uses the referenced `tsconfig` files. A walked file with no `tsconfig.json` above it in the workspace is always a module.
+- `walk`: every walked file is a module. A file that its `tsconfig.json` does not compile is analyzed with default compiler options.
+
+A `tsconfig.json` that includes generated files, for example `.next/types/**/*.ts`, does not add them: a module must also be a walked file. Use `--exclude` to remove more files.
 
 Exit codes:
 
@@ -380,6 +390,7 @@ type BridgeOptions = {
 	workspaceRoot?: string;
 	rules?: string[];
 	exclude?: string[];
+	files?: "tsconfig" | "walk";
 	env?: Record<string, unknown>;
 	factLimit?: number;
 };
@@ -390,6 +401,7 @@ Plugin caveats:
 - `serve` is the default in editor-like long-lived processes
 - `oneshot` is the default under plain ESLint CLI detection
 - `exclude` is the same as the CLI `--exclude` flag
+- `files` is the same as the CLI `--files` flag
 - lintai reads the saved files on disk, not the editor buffer. In `serve` mode, when the editor text of a file is different from the saved file, the plugin shows one message on line 1 that asks you to save the file, in place of the lintai diagnostics for that file. After you save, the diagnostics update on the next lint pass.
 - rule-file edits force invalidation on the next lint pass
 - the ESLint path never computes `explanation`

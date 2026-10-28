@@ -27,6 +27,7 @@ export type BridgeOptions = {
 	workspaceRoot?: string;
 	rules?: string[];
 	exclude?: string[];
+	files?: "tsconfig" | "walk";
 	env?: Record<string, unknown>;
 	factLimit?: number;
 };
@@ -39,6 +40,7 @@ type ResolvedBridgeOptions = {
 	workspaceRoot: string;
 	ruleGlobs: string[];
 	excludes: string[];
+	files: "tsconfig" | "walk";
 	env: Record<string, unknown>;
 	factLimit?: number;
 };
@@ -325,6 +327,7 @@ export class LintAIClient {
 				workspaceRoot: this.options.workspaceRoot,
 				ruleGlobs: this.options.ruleGlobs,
 				excludes: this.options.excludes,
+				files: this.options.files,
 				env: this.options.env,
 				...(this.options.factLimit === undefined ? {} : { factLimit: this.options.factLimit }),
 			});
@@ -361,6 +364,8 @@ export class LintAIClient {
 				"--rules",
 				this.options.ruleGlobs.join(","),
 				...this.options.excludes.flatMap((glob) => ["--exclude", glob]),
+				"--files",
+				this.options.files,
 				"--env-json",
 				JSON.stringify(this.options.env),
 				...(this.options.factLimit === undefined ? [] : ["--fact-limit", String(this.options.factLimit)]),
@@ -680,6 +685,7 @@ export function resolveBridgeOptions(options: BridgeOptions, cwd: string): Resol
 		workspaceRoot,
 		ruleGlobs,
 		excludes: options.exclude ?? [],
+		files: options.files ?? "tsconfig",
 		env: options.env ?? {},
 		...(options.factLimit === undefined ? {} : { factLimit: options.factLimit }),
 	};

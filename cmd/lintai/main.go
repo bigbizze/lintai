@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/bigbizze/lintai/backend"
 	"github.com/bigbizze/lintai/backend/typescript"
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/engine"
@@ -91,16 +92,21 @@ func runFacts(ctx context.Context, args []string, stdout io.Writer) error {
 	flags.String("asset-root", "", "ignored; the npm launcher passes it to every command")
 	var excludes stringList
 	flags.Var(&excludes, "exclude", "glob of workspace files to leave out of the snapshot (repeatable)")
+	files := flags.String("files", string(backend.FileScopeTsconfig), "files in the snapshot: tsconfig (files that tsc compiles) or walk (every walked file)")
 	var relations stringList
 	flags.Var(&relations, "relation", "base relation to print (repeatable; default: all)")
 	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	scope, err := backend.ParseFileScope(*files)
+	if err != nil {
 		return err
 	}
 	absoluteWorkspace, err := filepath.Abs(*workspaceRoot)
 	if err != nil {
 		return err
 	}
-	snapshot, err := typescript.New().BuildSnapshot(ctx, absoluteWorkspace, absoluteWorkspace, excludes)
+	snapshot, err := typescript.New().BuildSnapshot(ctx, absoluteWorkspace, absoluteWorkspace, backend.SnapshotOptions{Excludes: excludes, Files: scope})
 	if err != nil {
 		return err
 	}
@@ -133,6 +139,7 @@ func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 	factLimit := flags.Int("fact-limit", engine.DefaultFactLimit, "maximum number of facts a rule may derive")
 	var excludes stringList
 	flags.Var(&excludes, "exclude", "glob of workspace files to leave out of the snapshot (repeatable)")
+	files := flags.String("files", string(backend.FileScopeTsconfig), "files in the snapshot: tsconfig (files that tsc compiles) or walk (every walked file)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -141,6 +148,10 @@ func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 	}
 	if *factLimit <= 0 {
 		return fmt.Errorf("--fact-limit must be positive")
+	}
+	scope, err := backend.ParseFileScope(*files)
+	if err != nil {
+		return err
 	}
 
 	absoluteWorkspace, err := filepath.Abs(*workspaceRoot)
@@ -167,6 +178,7 @@ func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 		WorkspaceRoot: absoluteWorkspace,
 		RuleGlobs:     ruleGlobs,
 		Excludes:      excludes,
+		Files:         scope,
 		Env:           env,
 		Severity:      diagnostics.SeverityError,
 		FactLimit:     *factLimit,

@@ -24,4 +24,4 @@ require (
 
 replace github.com/bigbizze/lintai => ../..
 
-replace github.com/microsoft/TypeScript/tsc => github.com/bigbizze/typescript-go v0.0.0-20261028155921-815b0203840d
+replace github.com/microsoft/TypeScript/tsc => github.com/bigbizze/typescript-go v0.0.0-20261028214434-1b2c2fa7c3bb

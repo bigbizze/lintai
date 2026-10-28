@@ -27,6 +27,7 @@ type Options struct {
 	WorkspaceRoot string
 	RuleGlobs     []string
 	Excludes      []string
+	Files         backend.FileScope
 	Env           map[string]any
 	Severity      diagnostics.Severity
 	FactLimit     int
@@ -60,7 +61,7 @@ func (e *Engine) Run(ctx context.Context, options Options) ([]diagnostics.Diagno
 }
 
 func (e *Engine) Analyze(ctx context.Context, options Options) (Result, error) {
-	snapshot, err := e.backend.BuildSnapshot(ctx, options.RepoRoot, options.WorkspaceRoot, options.Excludes)
+	snapshot, err := e.backend.BuildSnapshot(ctx, options.RepoRoot, options.WorkspaceRoot, backend.SnapshotOptions{Excludes: options.Excludes, Files: options.Files})
 	if err != nil {
 		return Result{}, err
 	}

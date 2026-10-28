@@ -29,10 +29,8 @@ func (b *Backend) ID() string {
 }
 
 // BuildSnapshot extracts the facts of the source files under workspaceRoot.
-// excludes are doublestar globs, relative to workspaceRoot, of files to
-// leave out.
-func (b *Backend) BuildSnapshot(ctx context.Context, repoRoot, workspaceRoot string, excludes []string) (facts.Snapshot, error) {
-	snapshot, err := b.buildAnalysisSnapshot(ctx, repoRoot, workspaceRoot, excludes)
+func (b *Backend) BuildSnapshot(ctx context.Context, repoRoot, workspaceRoot string, options backend.SnapshotOptions) (facts.Snapshot, error) {
+	snapshot, err := b.buildAnalysisSnapshot(ctx, repoRoot, workspaceRoot, options)
 	if err != nil {
 		return facts.Snapshot{}, err
 	}
@@ -43,20 +41,26 @@ func (b *Backend) BuildSnapshot(ctx context.Context, repoRoot, workspaceRoot str
 	return facts.Snapshot{Version: snapshot.Version, Schema: Schema(), Facts: items}, nil
 }
 
-func (b *Backend) buildAnalysisSnapshot(ctx context.Context, repoRoot, workspaceRoot string, excludes []string) (*analysis.Snapshot, error) {
-	files, err := workspace.ListSourceFiles(workspaceRoot, excludes)
+func (b *Backend) buildAnalysisSnapshot(ctx context.Context, repoRoot, workspaceRoot string, options backend.SnapshotOptions) (*analysis.Snapshot, error) {
+	scope, err := backend.ParseFileScope(string(options.Files))
+	if err != nil {
+		return nil, err
+	}
+	walked, err := workspace.ListSourceFiles(workspaceRoot, options.Excludes)
 	if err != nil {
 		return nil, err
 	}
 	sources := ambient.Builtin()
 	extracted, err := lintaiapi.BuildSnapshot(ctx, lintaiapi.BuildSnapshotRequest{
 		WorkspaceRoot:   workspaceRoot,
-		Files:           files,
+		Files:           walked,
 		AmbientMatchers: convertAmbientMatchers(sources),
+		TsconfigFiles:   scope == backend.FileScopeTsconfig,
 	})
 	if err != nil {
 		return nil, err
 	}
+	files := moduleFiles(workspaceRoot, walked, extracted.Modules)
 
 	modules := convertModules(extracted.Modules)
 	functions := convertFunctions(extracted.Functions)
@@ -68,7 +72,7 @@ func (b *Backend) buildAnalysisSnapshot(ctx context.Context, repoRoot, workspace
 		return nil, err
 	}
 
-	version, err := snapshotVersion(workspaceRoot, files)
+	version, err := snapshotVersion(workspaceRoot, slices.Concat(files, extracted.ConfigFiles))
 	if err != nil {
 		return nil, err
 	}
@@ -89,6 +93,21 @@ func (b *Backend) buildAnalysisSnapshot(ctx context.Context, repoRoot, workspace
 		Directives:     convertDirectives(extracted.Directives),
 		ParseErrors:    convertParseErrors(extracted.ParseErrors),
 	}, nil
+}
+
+// moduleFiles returns the walked files that are modules of the snapshot.
+func moduleFiles(workspaceRoot string, walked []string, modules []lintaiapi.Module) []string {
+	paths := make(map[string]struct{}, len(modules))
+	for _, item := range modules {
+		paths[item.Path] = struct{}{}
+	}
+	result := make([]string, 0, len(modules))
+	for _, file := range walked {
+		if _, ok := paths[workspace.RelativePath(workspaceRoot, file)]; ok {
+			result = append(result, file)
+		}
+	}
+	return result
 }
 
 func convertModules(items []lintaiapi.Module) []analysis.Module {
