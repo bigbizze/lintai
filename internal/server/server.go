@@ -45,6 +45,7 @@ type InitializeParams struct {
 	WorkspaceRoot string         `json:"workspaceRoot"`
 	RuleGlobs     []string       `json:"ruleGlobs"`
 	Env           map[string]any `json:"env"`
+	FactLimit     int            `json:"factLimit,omitempty"`
 }
 
 type FileDiagnosticsParams struct {
@@ -160,6 +161,7 @@ func (s *Server) handleInitialize(ctx context.Context, rawParams json.RawMessage
 		RuleGlobs:     append([]string(nil), params.RuleGlobs...),
 		Env:           params.Env,
 		Severity:      diagnostics.SeverityError,
+		FactLimit:     params.FactLimit,
 	}
 	result, err := s.engine.Analyze(ctx, options)
 	if err != nil {

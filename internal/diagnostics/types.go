@@ -42,4 +42,5 @@ type Diagnostic struct {
 	EntityIdentity *EntityIdentity `json:"entity_identity,omitempty"`
 	Provenance     Provenance      `json:"provenance"`
 	Phase          string          `json:"phase,omitempty"`
+	Explanation    []string        `json:"explanation,omitempty"`
 }

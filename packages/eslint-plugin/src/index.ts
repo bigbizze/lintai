@@ -31,6 +31,7 @@ const architectureBridge: Rule.RuleModule = {
 						items: { type: "string" },
 					},
 					env: { type: "object" },
+					factLimit: { type: "integer", minimum: 1 },
 				},
 				additionalProperties: false,
 			},

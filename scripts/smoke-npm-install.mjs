@@ -99,4 +99,4 @@ assert.equal(eslint.status, 1, `expected eslint to report the lintai architectur
 const eslintReport = JSON.parse(eslint.stdout);
 assert.ok(Array.isArray(eslintReport) && eslintReport.length > 0);
 const lintaiMessages = eslintReport.flatMap((file) => file.messages ?? []).map((message) => String(message.message ?? ""));
-assert.ok(lintaiMessages.some((message) => message.includes("[arch.no-async/default]")));
+assert.ok(lintaiMessages.some((message) => message.includes("[arch.no-async/violation]")));

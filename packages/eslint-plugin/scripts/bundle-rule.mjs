@@ -99,7 +99,10 @@ for (const request of requests) {
 					rule: {
 						id: rule.id,
 						versionValue: rule.versionValue,
-						assertFn: rule.assertFn,
+						programValue: rule.programValue,
+						factsFn: rule.factsFn,
+						reportPredicates: rule.reportPredicates ? [...rule.reportPredicates] : [],
+						expectNonEmptyPredicates: rule.expectNonEmptyPredicates ? [...rule.expectNonEmptyPredicates] : [],
 						messageFn: rule.messageFn,
 					},
 				};

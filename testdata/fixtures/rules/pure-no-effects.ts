@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { functions, rule } from "@lintai/sdk";
+import { dl, rule } from "@lintai/sdk";
 
 export const config = z.object({
 	pureDir: z.string().default("src/pure"),
@@ -8,10 +8,11 @@ export const config = z.object({
 
 export default rule("arch.pure-no-effects")
 	.version(1)
-	.assert(({ env }) =>
-		functions()
-			.in(`${env.pureDir}/**`)
-			.transitivelyCalling(functions().where((fn) => fn.containsAwait))
-			.isEmpty(),
-	)
-	.message((value) => `Pure function ${value.name} transitively calls effectful code`);
+	.program(({ env }) => dl`
+		Decl violation(Fn, Name).
+		violation(Fn, Name) :-
+			fn(Fn, File, Name), glob(File, ${`${env.pureDir}/**`}),
+			calls_reach(Fn, Callee), fn_awaits(Callee).
+	`)
+	.report("violation")
+	.message((row) => `Pure function ${row.Name} transitively calls effectful code`);

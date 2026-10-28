@@ -27,6 +27,7 @@ export type BridgeOptions = {
 	workspaceRoot?: string;
 	rules?: string[];
 	env?: Record<string, unknown>;
+	factLimit?: number;
 };
 
 type ResolvedBridgeOptions = {
@@ -37,6 +38,7 @@ type ResolvedBridgeOptions = {
 	workspaceRoot: string;
 	ruleGlobs: string[];
 	env: Record<string, unknown>;
+	factLimit?: number;
 };
 
 type InitializeResult = {
@@ -321,6 +323,7 @@ export class LintAIClient {
 				workspaceRoot: this.options.workspaceRoot,
 				ruleGlobs: this.options.ruleGlobs,
 				env: this.options.env,
+				...(this.options.factLimit === undefined ? {} : { factLimit: this.options.factLimit }),
 			});
 			this.attachStdoutListener();
 			this.setDiagnostics(resultValue.diagnostics);
@@ -356,6 +359,7 @@ export class LintAIClient {
 				this.options.ruleGlobs.join(","),
 				"--env-json",
 				JSON.stringify(this.options.env),
+				...(this.options.factLimit === undefined ? [] : ["--fact-limit", String(this.options.factLimit)]),
 			],
 			{
 				cwd: this.options.repoRoot,
@@ -672,6 +676,7 @@ export function resolveBridgeOptions(options: BridgeOptions, cwd: string): Resol
 		workspaceRoot,
 		ruleGlobs,
 		env: options.env ?? {},
+		...(options.factLimit === undefined ? {} : { factLimit: options.factLimit }),
 	};
 }
 

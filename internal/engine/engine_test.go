@@ -2,125 +2,148 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/bigbizze/lintai/internal/backend/typescript"
 	"github.com/bigbizze/lintai/internal/diagnostics"
 )
 
-func TestEngineRunsFixtureRules(t *testing.T) {
+func TestRuleErrorPhases(t *testing.T) {
 	repoRoot, err := filepath.Abs("../..")
 	if err != nil {
 		t.Fatal(err)
 	}
-	runner := New(typescript.New())
-	items, err := runner.Run(context.Background(), Options{
+	ruleRoot := t.TempDir()
+	cases := []struct {
+		name    string
+		phase   string
+		message string
+		source  string
+	}{
+		{
+			name:    "program-throws",
+			phase:   "program",
+			message: "cannot interpolate",
+			source: `export default rule("t.program-throws").version(1)
+	.program(() => dl` + "`" + `Decl v(F). v(F) :- module(F), glob(F, ${[1] as never}).` + "`" + `)
+	.report("v").message(() => "x");`,
+		},
+		{
+			name:    "parse",
+			phase:   "program_parse",
+			message: "",
+			source: `export default rule("t.parse").version(1)
+	.program(dl` + "`" + `Decl v(F). v(F) :- module(F)` + "`" + `)
+	.report("v").message(() => "x");`,
+		},
+		{
+			name:    "redefine-prelude",
+			phase:   "program_analysis",
+			message: "calls_reach",
+			source: `export default rule("t.redefine").version(1)
+	.program(dl` + "`" + `Decl v(F). v(F) :- module(F). calls_reach(A, B) :- fn(A, _, _), fn(B, _, _).` + "`" + `)
+	.report("v").message(() => "x");`,
+		},
+		{
+			name:    "fact-limit",
+			phase:   "evaluation",
+			message: "fact size limit",
+			source: `export default rule("t.limit").version(1)
+	.program(dl` + "`" + `Decl v(A, B). v(A, B) :- module(A), module(B).` + "`" + `)
+	.report("v").message(() => "x");`,
+		},
+		{
+			name:    "premise",
+			phase:   "premise",
+			message: "nothing",
+			source: `export default rule("t.premise").version(1)
+	.program(dl` + "`" + `Decl nothing(F). nothing(F) :- module(F), glob(F, "no/such/dir/**"). Decl v(F). v(F) :- module(F).` + "`" + `)
+	.report("v").expectNonEmpty("nothing").message(() => "x");`,
+		},
+		{
+			name:    "anchor-without-location",
+			phase:   "report",
+			message: "no location",
+			source: `export default rule("t.report").version(1)
+	.program(dl` + "`" + `Decl v(F). v("not-an-entity") :- module(_).` + "`" + `)
+	.report("v").message(() => "x");`,
+		},
+		{
+			name:    "message-throws",
+			phase:   "message",
+			message: "message exploded",
+			source: `export default rule("t.message").version(1)
+	.program(dl` + "`" + `Decl v(F). v(F) :- module(F).` + "`" + `)
+	.report("v").message(() => { throw new Error("message exploded"); });`,
+		},
+	}
+	rulePaths := make([]string, 0, len(cases)+1)
+	for _, item := range cases {
+		rulePaths = append(rulePaths, writeTestFile(t, ruleRoot, item.name+".ts", `import { dl, rule } from "@lintai/sdk";
+`+item.source+"\n"))
+	}
+	rulePaths = append(rulePaths, filepath.Join(repoRoot, "testdata/fixtures/rules/pure-no-effects.ts"))
+
+	items, err := New(typescript.New()).Run(context.Background(), Options{
 		RepoRoot:      repoRoot,
 		AssetRoot:     filepath.Join(repoRoot, "packages", "eslint-plugin"),
 		WorkspaceRoot: filepath.Join(repoRoot, "testdata/fixtures/workspace"),
-		RuleGlobs:     []string{filepath.Join(repoRoot, "testdata/fixtures/rules/*.ts")},
+		RuleGlobs:     rulePaths,
 		Env:           map[string]any{},
 		Severity:      diagnostics.SeverityError,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(items) < 3 {
-		t.Fatalf("expected at least 3 diagnostics, got %d", len(items))
-	}
-}
-
-func TestEngineContinuesWhenOneRuleFailsDuringSetup(t *testing.T) {
-	repoRoot, err := filepath.Abs("../..")
-	if err != nil {
-		t.Fatal(err)
-	}
-	goodRule := filepath.Join(repoRoot, "testdata/fixtures/rules/pure-no-effects.ts")
-	brokenRule := filepath.Join(t.TempDir(), "broken-setup.ts")
-	if err := os.WriteFile(brokenRule, []byte(`
-import { functions, rule } from "@lintai/sdk";
-
-export default rule("arch.broken-setup")
-	.version(3)
-	.setup(() => {
-		throw new Error("setup exploded");
-	})
-	.assert(() => functions().in("src/**").isEmpty())
-	.message(() => "broken");
-`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	runner := New(typescript.New())
-	items, err := runner.Run(context.Background(), Options{
-		RepoRoot:      repoRoot,
-		AssetRoot:     filepath.Join(repoRoot, "packages", "eslint-plugin"),
-		WorkspaceRoot: filepath.Join(repoRoot, "testdata/fixtures/workspace"),
-		RuleGlobs:     []string{goodRule, brokenRule},
-		Env:           map[string]any{},
-		Severity:      diagnostics.SeverityError,
+		FactLimit:     50,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	foundArchitectureViolation := false
-	foundSetupFailure := false
+	byRule := make(map[string][]diagnostics.Diagnostic)
 	for _, item := range items {
-		if item.DiagnosticKind == diagnostics.KindArchitectureViolation {
-			foundArchitectureViolation = true
+		byRule[item.RuleID] = append(byRule[item.RuleID], item)
+	}
+	ruleIDs := map[string]string{
+		"program-throws":          "t.program-throws",
+		"parse":                   "t.parse",
+		"redefine-prelude":        "t.redefine",
+		"fact-limit":              "t.limit",
+		"premise":                 "t.premise",
+		"anchor-without-location": "t.report",
+		"message-throws":          "t.message",
+	}
+	for _, item := range cases {
+		got := byRule[ruleIDs[item.name]]
+		if len(got) != 1 {
+			t.Fatalf("%s: expected only one error diagnostic, got %+v", item.name, got)
 		}
-		if item.DiagnosticKind == diagnostics.KindRuleExecutionError && item.RuleID == "arch.broken-setup" && item.Phase == "setup" {
-			foundSetupFailure = true
+		if got[0].DiagnosticKind != diagnostics.KindRuleExecutionError || got[0].Phase != item.phase {
+			t.Fatalf("%s: expected phase %s, got %+v", item.name, item.phase, got[0])
+		}
+		if !strings.Contains(got[0].Message, item.message) {
+			t.Fatalf("%s: expected message to contain %q, got %q", item.name, item.message, got[0].Message)
 		}
 	}
-	if !foundArchitectureViolation {
-		t.Fatalf("expected unaffected rules to still report violations, got %+v", items)
-	}
-	if !foundSetupFailure {
-		t.Fatalf("expected setup failure diagnostic, got %+v", items)
+	if len(byRule["arch.pure-no-effects"]) != 2 {
+		t.Fatalf("expected the unaffected rule to still report its violations, got %+v", byRule["arch.pure-no-effects"])
 	}
 }
 
-func TestEngineResolvesRelativeRuleGlobsFromWorkspaceRoot(t *testing.T) {
+func TestRelativeRuleGlobsResolveFromWorkspaceRoot(t *testing.T) {
 	repoRoot, err := filepath.Abs("../..")
 	if err != nil {
 		t.Fatal(err)
 	}
-
 	workspaceRoot := t.TempDir()
-	writeTestFile(t, workspaceRoot, "tsconfig.json", `{
-  "compilerOptions": {
-    "target": "es2022",
-    "module": "nodenext",
-    "moduleResolution": "nodenext",
-    "noEmit": true
-  },
-  "include": ["src/**/*.ts"]
-}
+	writeTestFile(t, workspaceRoot, "src/bad.ts", "export async function bad() {\n\treturn 1;\n}\n")
+	writeTestFile(t, workspaceRoot, "lintai-rules/no-async.ts", `import { dl, rule } from "@lintai/sdk";
+export default rule("arch.no-async").version(1)
+	.program(dl`+"`"+`Decl v(Fn). v(Fn) :- fn_async(Fn).`+"`"+`)
+	.report("v").message(() => "no async");
 `)
-	writeTestFile(t, workspaceRoot, "src/pure/bad.ts", `export async function bad(): Promise<number> {
-	return 1;
-}
-`)
-	writeTestFile(t, workspaceRoot, "lintai-rules/api-async-return.ts", `
-import { functions, rule } from "@lintai/sdk";
-
-export default rule("arch.api-async-return")
-	.version(1)
-	.assert(() =>
-		functions()
-			.in("src/pure/**")
-			.where((fn) => fn.isExported && fn.isAsync && fn.returnTypeText !== "Promise<string>")
-			.isEmpty(),
-	)
-	.message((fn) => "API async function must return Promise<string>: " + fn.name);
-`)
-
-	runner := New(typescript.New())
-	items, err := runner.Run(context.Background(), Options{
+	items, err := New(typescript.New()).Run(context.Background(), Options{
 		RepoRoot:      repoRoot,
 		AssetRoot:     filepath.Join(repoRoot, "packages", "eslint-plugin"),
 		WorkspaceRoot: workspaceRoot,
@@ -131,220 +154,8 @@ export default rule("arch.api-async-return")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 1 {
-		t.Fatalf("expected exactly one diagnostic, got %+v", items)
-	}
-	if items[0].RuleID != "arch.api-async-return" {
-		t.Fatalf("unexpected diagnostic %+v", items[0])
-	}
-}
-
-func TestEngineSupportsExpandedMetadataQueries(t *testing.T) {
-	repoRoot, err := filepath.Abs("../..")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	workspaceRoot := t.TempDir()
-	writeTestFile(t, workspaceRoot, "tsconfig.json", `{
-  "compilerOptions": {
-    "target": "es2022",
-    "module": "nodenext",
-    "moduleResolution": "nodenext",
-    "noEmit": true
-  },
-  "include": ["src/**/*.ts"]
-}
-`)
-	writeTestFile(t, workspaceRoot, "src/data/db.ts", `export default async function db(query: string): Promise<number> {
-	return query.length;
-}
-
-export type DbConfig = {
-	dsn: string;
-};
-`)
-	writeTestFile(t, workspaceRoot, "src/services/types.ts", `export interface ServiceConfig {
-	id: string;
-}
-`)
-	writeTestFile(t, workspaceRoot, "src/services/service.ts", `import db from "../data/db";
-import type { DbConfig } from "../data/db";
-
-export class Service {
-	async save(config: DbConfig): Promise<number> {
-		return db(config.dsn);
-	}
-}
-`)
-	writeTestFile(t, workspaceRoot, "src/pure/bad-import.ts", `import db from "../data/db";
-
-export async function load(): Promise<number> {
-	return db("x");
-}
-`)
-	writeTestFile(t, workspaceRoot, "src/pure/good-import.ts", `import type { DbConfig } from "../data/db";
-
-export function useConfig(config: DbConfig): string {
-	return config.dsn;
-}
-`)
-	writeTestFile(t, workspaceRoot, "src/pure/bad-type.ts", `import type { ServiceConfig } from "../services/types";
-
-export function accept(config: ServiceConfig): string {
-	return config.id;
-}
-`)
-	writeTestFile(t, workspaceRoot, "src/pure/good-type.ts", `import type { DbConfig } from "../data/db";
-
-export type LocalConfig = DbConfig;
-`)
-	writeTestFile(t, workspaceRoot, "src/api/bad.ts", `export async function bad(): Promise<number> {
-	return 1;
-}
-`)
-	writeTestFile(t, workspaceRoot, "src/api/good.ts", `export async function good(): Promise<string> {
-	return "ok";
-}
-`)
-
-	ruleRoot := t.TempDir()
-	rulePaths := []string{
-		writeTestFile(t, ruleRoot, "service-methods-no-db.ts", `
-import { functions, rule } from "@lintai/sdk";
-
-export default rule("arch.service-methods-no-db")
-	.version(1)
-	.assert(() =>
-		functions()
-			.where((fn) => fn.containerName === "Service")
-			.calling(functions().where((fn) => fn.name === "db"))
-			.isEmpty(),
-	)
-	.message((fn) => "Service method must not call db: " + fn.name);
-`),
-		writeTestFile(t, ruleRoot, "no-pure-db-import.ts", `
-import { imports, rule } from "@lintai/sdk";
-
-export default rule("arch.no-pure-db-import")
-	.version(1)
-	.assert(() =>
-		imports()
-			.from("src/pure/**")
-			.where((edge) => edge.importedSymbols.some((symbol) => symbol.name === "db" && !symbol.isTypeOnly))
-			.isEmpty(),
-	)
-	.message((edge) => "Pure module must not import db from " + edge.toPath);
-`),
-		writeTestFile(t, ruleRoot, "no-service-db-call-edge.ts", `
-import { calls, rule } from "@lintai/sdk";
-
-export default rule("arch.no-service-db-call-edge")
-	.version(1)
-	.assert(() =>
-		calls()
-			.where((edge) => edge.fromPath === "src/services/service.ts" && edge.toName === "db")
-			.isEmpty(),
-	)
-	.message((edge) => "Service call to " + edge.toName + " is forbidden");
-`),
-		writeTestFile(t, ruleRoot, "api-async-return.ts", `
-import { functions, rule } from "@lintai/sdk";
-
-export default rule("arch.api-async-return")
-	.version(1)
-	.assert(() =>
-		functions()
-			.in("src/api/**")
-			.where((fn) => fn.isExported && fn.isAsync && fn.returnTypeText !== "Promise<string>")
-			.isEmpty(),
-	)
-	.message((fn) => "API async function must return Promise<string>: " + fn.name);
-`),
-		writeTestFile(t, ruleRoot, "no-pure-service-types.ts", `
-import { rule, typeRefs } from "@lintai/sdk";
-
-export default rule("arch.no-pure-service-types")
-	.version(1)
-	.assert(() =>
-		typeRefs()
-			.in("src/pure/**")
-			.where((ref) => ref.targetPath.startsWith("src/services/"))
-			.isEmpty(),
-	)
-	.message((ref) => "Pure module must not reference service type " + ref.name);
-`),
-		writeTestFile(t, ruleRoot, "no-direct-env-access.ts", `
-import { accesses, rule } from "@lintai/sdk";
-
-export default rule("arch.no-direct-env-access")
-	.version(1)
-	.assert(() =>
-		accesses()
-			.in("src/pure/**")
-			.where((access) => access.accessPath === "import.meta.env")
-			.isEmpty(),
-	)
-	.message((access) => "Pure module must not read " + access.accessPath);
-`),
-	}
-	writeTestFile(t, workspaceRoot, "src/pure/bad-env.ts", `export function readEnv() {
-	return import.meta.env.API_URL;
-}
-`)
-	writeTestFile(t, workspaceRoot, "src/pure/good-env.ts", `export function literalEnv() {
-	return "import.meta.env.API_URL";
-}
-`)
-
-	runner := New(typescript.New())
-	items, err := runner.Run(context.Background(), Options{
-		RepoRoot:      repoRoot,
-		AssetRoot:     filepath.Join(repoRoot, "packages", "eslint-plugin"),
-		WorkspaceRoot: workspaceRoot,
-		RuleGlobs:     rulePaths,
-		Env:           map[string]any{},
-		Severity:      diagnostics.SeverityError,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	expected := map[string]string{
-		"arch.service-methods-no-db":   "src/services/service.ts",
-		"arch.no-pure-db-import":       "src/pure/bad-import.ts",
-		"arch.no-service-db-call-edge": "src/services/service.ts",
-		"arch.api-async-return":        "src/api/bad.ts",
-		"arch.no-pure-service-types":   "src/pure/bad-type.ts",
-		"arch.no-direct-env-access":    "src/pure/bad-env.ts",
-	}
-	if len(items) != len(expected) {
-		t.Fatalf("expected %d diagnostics, got %d: %+v", len(expected), len(items), items)
-	}
-
-	seen := make(map[string]string, len(items))
-	for _, item := range items {
-		seen[item.RuleID] = item.SourceLocation.File
-		if item.DiagnosticKind != diagnostics.KindArchitectureViolation {
-			t.Fatalf("expected architecture violation diagnostics, got %+v", item)
-		}
-	}
-	for ruleID, wantFile := range expected {
-		if seen[ruleID] != wantFile {
-			t.Fatalf("expected %s to report on %s, got %q (all %+v)", ruleID, wantFile, seen[ruleID], seen)
-		}
-	}
-
-	cleanFiles := map[string]struct{}{
-		"src/pure/good-import.ts": {},
-		"src/pure/good-type.ts":   {},
-		"src/api/good.ts":         {},
-		"src/pure/good-env.ts":    {},
-	}
-	for _, item := range items {
-		if _, ok := cleanFiles[item.SourceLocation.File]; ok {
-			t.Fatalf("expected no diagnostics for clean file %s, got %+v", item.SourceLocation.File, item)
-		}
+	if len(items) != 1 || items[0].RuleID != "arch.no-async" || items[0].SourceLocation.File != "src/bad.ts" {
+		t.Fatalf("expected one arch.no-async violation in src/bad.ts, got %+v", items)
 	}
 }
 
@@ -359,4 +170,36 @@ func writeTestFile(t *testing.T, root, relativePath, contents string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func TestDlStringsRoundTripThroughMangle(t *testing.T) {
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tricky, err := json.Marshal("q\"s'b\\n\nt\tc\x01d\x7fé😀`${x}")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rulePath := writeTestFile(t, t.TempDir(), "round-trip.ts", `import { dl, rule } from "@lintai/sdk";
+const tricky = `+string(tricky)+`;
+export default rule("t.round-trip").version(1)
+	.program(dl`+"`"+`Decl v(F, S, N, K). v(F, ${tricky}, ${-12}, ${dl.name("a/b_c")}) :- module(F), F = "src/pure/math.ts".`+"`"+`)
+	.report("v")
+	.message((row) => JSON.stringify([row.S === tricky, row.N, row.K]));
+`)
+	items, err := New(typescript.New()).Run(context.Background(), Options{
+		RepoRoot:      repoRoot,
+		AssetRoot:     filepath.Join(repoRoot, "packages", "eslint-plugin"),
+		WorkspaceRoot: filepath.Join(repoRoot, "testdata/fixtures/workspace"),
+		RuleGlobs:     []string{rulePath},
+		Env:           map[string]any{},
+		Severity:      diagnostics.SeverityError,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Message != `[true,-12,"/a/b_c"]` {
+		t.Fatalf("expected the values to round-trip, got %+v", items)
+	}
 }

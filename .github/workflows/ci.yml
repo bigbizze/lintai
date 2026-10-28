@@ -36,6 +36,9 @@ jobs:
       - name: Build host npm binary
         run: pnpm build:npm-binary:host
 
+      - name: SDK tests
+        run: pnpm --filter @lintai/sdk test
+
       - name: ESLint plugin tests
         run: pnpm --filter @lintai/eslint-plugin test
 

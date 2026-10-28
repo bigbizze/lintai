@@ -76,21 +76,39 @@ type Access struct {
 	Origin      string
 	FilePath    string
 	Range       diagnostics.SourceLocation
+	Start       int
+	End         int
+}
+
+type AmbientUse struct {
+	EntityID            string
+	SemanticKey         string
+	Source              string
+	Capability          string
+	FilePath            string
+	Key                 string
+	HasKey              bool
+	Dynamic             bool
+	Write               bool
+	FunctionSemanticKey string
+	Range               diagnostics.SourceLocation
 }
 
 type Snapshot struct {
-	Version          string
-	BackendID        string
-	WorkspaceRoot    string
-	Modules          []Module
-	Functions        []Function
-	ImportEdges      []ImportEdge
-	CallEdges        []CallEdge
-	TypeRefs         []TypeRef
-	Accesses         []Access
-	FunctionsByName  map[string][]Function
-	FunctionsByKey   map[string]Function
-	TransitiveCalls  map[string]map[string]struct{}
-	FileDiagnostics  map[string][]diagnostics.Diagnostic
-	AvailableKindSet map[string]struct{}
+	Version        string
+	BackendID      string
+	WorkspaceRoot  string
+	Modules        []Module
+	Functions      []Function
+	ImportEdges    []ImportEdge
+	CallEdges      []CallEdge
+	TypeRefs       []TypeRef
+	Accesses       []Access
+	AmbientSources []AmbientSource
+	AmbientUses    []AmbientUse
+}
+
+type AmbientSource struct {
+	ID           string
+	Capabilities []string
 }
