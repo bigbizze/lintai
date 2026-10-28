@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -17,11 +18,43 @@ import (
 	"github.com/bigbizze/lintai/internal/server"
 )
 
+// Exit codes. CI can tell "the rules found violations" apart from "lintai
+// could not check the workspace".
+const (
+	exitClean      = 0
+	exitViolations = 1
+	exitUsage      = 2
+	exitRuleError  = 3
+)
+
+// exitError carries an exit code. An error without one is a usage or
+// configuration error.
+type exitError struct {
+	code    int
+	message string
+}
+
+func (e *exitError) Error() string {
+	return e.message
+}
+
 func main() {
-	if err := run(context.Background(), os.Args[1:], os.Stdout); err != nil {
-		fmt.Fprintln(os.Stderr, err.Error())
-		os.Exit(1)
+	os.Exit(exitCode(run(context.Background(), os.Args[1:], os.Stdout), os.Stderr))
+}
+
+func exitCode(err error, stderr io.Writer) int {
+	if err == nil {
+		return exitClean
 	}
+	if errors.Is(err, flag.ErrHelp) {
+		return exitClean
+	}
+	fmt.Fprintln(stderr, err.Error())
+	var coded *exitError
+	if errors.As(err, &coded) {
+		return coded.code
+	}
+	return exitUsage
 }
 
 func run(ctx context.Context, args []string, stdout io.Writer) error {
@@ -54,6 +87,9 @@ func runFacts(ctx context.Context, args []string, stdout io.Writer) error {
 	flags := flag.NewFlagSet("lintai facts", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	workspaceRoot := flags.String("workspace-root", ".", "workspace root to analyze")
+	flags.String("asset-root", "", "ignored; the npm launcher passes it to every command")
+	var excludes stringList
+	flags.Var(&excludes, "exclude", "glob of workspace files to leave out of the snapshot (repeatable)")
 	var relations stringList
 	flags.Var(&relations, "relation", "base relation to print (repeatable; default: all)")
 	if err := flags.Parse(args); err != nil {
@@ -63,7 +99,7 @@ func runFacts(ctx context.Context, args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	snapshot, err := typescript.New().BuildSnapshot(ctx, absoluteWorkspace, absoluteWorkspace)
+	snapshot, err := typescript.New().BuildSnapshot(ctx, absoluteWorkspace, absoluteWorkspace, excludes)
 	if err != nil {
 		return err
 	}
@@ -98,6 +134,8 @@ func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 	jsonOutput := flags.Bool("json", false, "emit diagnostics as JSON")
 	explain := flags.Bool("explain", false, "attach the proof of each violation to JSON diagnostics (requires --json)")
 	factLimit := flags.Int("fact-limit", engine.DefaultFactLimit, "maximum number of facts a rule may derive")
+	var excludes stringList
+	flags.Var(&excludes, "exclude", "glob of workspace files to leave out of the snapshot (repeatable)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -131,6 +169,7 @@ func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 		AssetRoot:     absoluteAssetRoot,
 		WorkspaceRoot: absoluteWorkspace,
 		RuleGlobs:     ruleGlobs,
+		Excludes:      excludes,
 		Env:           env,
 		Severity:      diagnostics.SeverityError,
 		FactLimit:     *factLimit,
@@ -154,10 +193,26 @@ func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 			fmt.Fprintf(stdout, "%s[%s/%s] %s\n", location, item.RuleID, item.AssertionID, item.Message)
 		}
 	}
-	for _, item := range result.Diagnostics {
-		if item.Severity == diagnostics.SeverityError {
-			return fmt.Errorf("lintai found %d diagnostics", len(result.Diagnostics))
+	return diagnosticsOutcome(result.Diagnostics)
+}
+
+// diagnosticsOutcome returns a rule error when a rule could not run, and a
+// violation error when a rule reported an error-severity violation.
+func diagnosticsOutcome(items []diagnostics.Diagnostic) error {
+	ruleErrors, violations := 0, 0
+	for _, item := range items {
+		switch {
+		case item.DiagnosticKind == diagnostics.KindRuleExecutionError:
+			ruleErrors++
+		case item.Severity == diagnostics.SeverityError:
+			violations++
 		}
+	}
+	switch {
+	case ruleErrors > 0:
+		return &exitError{code: exitRuleError, message: fmt.Sprintf("lintai: %d rule errors and %d violations", ruleErrors, violations)}
+	case violations > 0:
+		return &exitError{code: exitViolations, message: fmt.Sprintf("lintai: %d violations", violations)}
 	}
 	return nil
 }

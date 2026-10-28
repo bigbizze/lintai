@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -15,7 +16,7 @@ func TestBuildSnapshotExposesStableFunctionKeysAndCalls(t *testing.T) {
 	}
 	workspaceRoot := filepath.Join(repoRoot, "testdata/fixtures/workspace")
 
-	snapshot, err := New().BuildSnapshot(context.Background(), repoRoot, workspaceRoot)
+	snapshot, err := New().BuildSnapshot(context.Background(), repoRoot, workspaceRoot, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +131,7 @@ export function mirror(config: LocalConfig): DbConfig {
 }
 `)
 
-	snapshot, err := New().BuildSnapshot(context.Background(), root, root)
+	snapshot, err := New().BuildSnapshot(context.Background(), root, root, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -227,7 +228,7 @@ func TestBuildSnapshotExposesImportMetaAccessesAndIgnoresStrings(t *testing.T) {
 }
 `)
 
-	snapshot, err := New().BuildSnapshot(context.Background(), root, root)
+	snapshot, err := New().BuildSnapshot(context.Background(), root, root, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,6 +247,54 @@ func TestBuildSnapshotExposesImportMetaAccessesAndIgnoresStrings(t *testing.T) {
 	}
 	if !importMetaFound {
 		t.Fatalf("expected import.meta access in snapshot, got %+v", snapshot.Accesses)
+	}
+}
+
+func TestBuiltinAmbientSources(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "tsconfig.json", `{"compilerOptions":{"strict":true,"module":"esnext","moduleResolution":"bundler","target":"es2022","lib":["es2022","dom"]}}`)
+	writeWorkspaceFile(t, root, "src/a.ts", `import { randomUUID } from "node:crypto";
+import * as nodeCrypto from "node:crypto";
+import { setTimeout as later } from "node:timers";
+import { cwd } from "node:process";
+export function a() {
+	Math.random();
+	crypto.randomUUID();
+	randomUUID();
+	nodeCrypto.randomBytes(4);
+	crypto.getRandomValues(new Uint8Array(2));
+	fetch("x");
+	globalThis.fetch("y");
+	setTimeout(() => {}, 1);
+	later(() => {}, 1);
+	setInterval(() => {}, 2);
+	process.cwd();
+	cwd();
+	process.argv;
+	const record = { fetch: 1, random: 2 };
+	return [record.fetch, Math.max(1)];
+}
+`)
+
+	snapshot, err := New().BuildSnapshot(context.Background(), root, root, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, use := range snapshot.AmbientUses {
+		got = append(got, use.Source+"."+use.Capability)
+	}
+	slices.Sort(got)
+	want := []string{
+		"network.fetch", "network.fetch",
+		"process.argv", "process.cwd", "process.cwd",
+		"random.bytes", "random.bytes", "random.number", "random.uuid", "random.uuid",
+		"timer.schedule", "timer.schedule", "timer.schedule",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }
 

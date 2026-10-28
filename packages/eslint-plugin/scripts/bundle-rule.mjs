@@ -81,7 +81,7 @@ for (const request of requests) {
 				const config = ruleModule.config;
 				globalThis.LintAIPrepareModule = {
 					config,
-					rule: {
+					rule: rule && {
 						id: rule.id,
 						versionValue: rule.versionValue,
 						setupFn: rule.setupFn,
@@ -96,7 +96,7 @@ for (const request of requests) {
 				import * as ruleModule from ${JSON.stringify(resolvedRulePath)};
 				const rule = ruleModule.default;
 				globalThis.LintAIPureModule = {
-					rule: {
+					rule: rule && {
 						id: rule.id,
 						versionValue: rule.versionValue,
 						programValue: rule.programValue,

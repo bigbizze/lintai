@@ -19,7 +19,8 @@ For source builds:
 
 Current caveats:
 
-- Windows packaging is out of scope right now
+- Windows packaging is out of scope right now. Use WSL.
+- the Linux binaries are static, so they run on glibc and musl (Alpine) systems
 - only the TypeScript backend ships today
 - packaged binaries are distributed through `@lintai/cli` plus platform-specific optional dependencies
 
@@ -29,6 +30,8 @@ Current caveats:
 
 ```sh
 pnpm add -D @lintai/cli @lintai/sdk
+# or
+npm install -D @lintai/cli @lintai/sdk
 ```
 
 This gives you:
@@ -40,13 +43,17 @@ This gives you:
 
 ```sh
 pnpm add -D @lintai/cli @lintai/sdk @lintai/eslint-plugin eslint
+# or
+npm install -D @lintai/cli @lintai/sdk @lintai/eslint-plugin eslint
 ```
 
-If your rules export `config` schemas using Zod, add:
+`@lintai/sdk` does not depend on Zod. If your rules export `config` schemas using Zod, add it yourself:
 
 ```sh
 pnpm add -D zod
 ```
+
+Any schema object with `parse` or `safeParse` works.
 
 ### pnpm caveat
 
@@ -61,6 +68,8 @@ If your repo uses `pnpm` 10+, allow `esbuild` to run its postinstall/build step:
 ```
 
 Without that, rule bundling will fail because the helper scripts rely on `esbuild`.
+
+With npm, rule bundling works without extra settings.
 
 ## Quick consumer setup and caveats
 
@@ -93,6 +102,10 @@ pnpm exec lintai \
   --workspace-root . \
   --rules 'lintai-rules/**/*.ts'
 ```
+
+With npm, use `npx lintai` in place of `pnpm exec lintai`.
+
+The CLI exits with 0 when there are no violations, 1 when a rule found violations, 2 for a usage or configuration error, and 3 when a rule could not run. To leave generated files out of the snapshot, add `--exclude 'src/generated/**'` (repeatable). `node_modules`, `dist` and dot-directories such as `.next` are always skipped.
 
 Useful caveats:
 
@@ -136,6 +149,7 @@ Bridge options:
 - `repoRoot?: string`
 - `workspaceRoot?: string`
 - `rules?: string[]`
+- `exclude?: string[]`
 - `env?: Record<string, unknown>`
 
 Bridge caveats:
@@ -144,6 +158,7 @@ Bridge caveats:
 - long-lived editor/language-server use defaults to `serve`
 - rule-file edits trigger cache invalidation and a fresh analysis on the next lint pass
 - source-file edits refresh in the background; editor diagnostics may lag briefly
+- lintai reads saved files, not the editor buffer. While a file has unsaved changes, the editor shows one lintai message on line 1 that asks you to save the file.
 
 ## Build from source and caveats
 

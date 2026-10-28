@@ -16,6 +16,7 @@ type LoadedRule struct {
 	factsFn        goja.Callable
 	messageFn      goja.Callable
 	freezeFn       goja.Callable
+	strictRowFn    goja.Callable
 	report         []string
 	expectNonEmpty []string
 }
@@ -42,6 +43,16 @@ func LoadPureBundle(code string) (*LoadedRule, error) {
 				lintaiDeepFreeze(value[key]);
 			}
 			return value;
+		}
+		function lintaiStrictRow(row) {
+			return new Proxy(row, {
+				get(target, key) {
+					if (typeof key === "string" && key !== "toJSON" && key !== "then" && !Object.prototype.hasOwnProperty.call(target, key) && !(key in Object.prototype)) {
+						throw new TypeError("message() read row." + key + ", but the reported predicate has no argument " + key + ". Its arguments are: " + Object.keys(target).join(", "));
+					}
+					return target[key];
+				},
+			});
 		}
 	`); err != nil {
 		return nil, err
@@ -81,6 +92,7 @@ func LoadPureBundle(code string) (*LoadedRule, error) {
 		return nil, fmt.Errorf("expectNonEmpty(): %w", err)
 	}
 	freezeFn, _ := goja.AssertFunction(vm.Get("lintaiDeepFreeze"))
+	strictRowFn, _ := goja.AssertFunction(vm.Get("lintaiStrictRow"))
 	return &LoadedRule{
 		runtime:        vm,
 		id:             ruleObject.Get("id").String(),
@@ -89,6 +101,7 @@ func LoadPureBundle(code string) (*LoadedRule, error) {
 		factsFn:        factsFn,
 		messageFn:      messageFn,
 		freezeFn:       freezeFn,
+		strictRowFn:    strictRowFn,
 		report:         report,
 		expectNonEmpty: expectNonEmpty,
 	}, nil
@@ -144,9 +157,13 @@ func (r *LoadedRule) Program(env, setup any) (ProgramOutput, error) {
 }
 
 func (r *LoadedRule) Message(row map[string]any, assertionID string) (string, error) {
+	strictRow, err := r.strictRowFn(goja.Undefined(), r.runtime.ToValue(row))
+	if err != nil {
+		return "", err
+	}
 	result, err := r.messageFn(
 		goja.Undefined(),
-		r.runtime.ToValue(row),
+		strictRow,
 		r.runtime.ToValue(map[string]any{"assertion_id": assertionID}),
 	)
 	if err != nil {

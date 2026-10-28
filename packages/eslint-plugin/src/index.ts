@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import path from "node:path";
 
 import { rules as authoringRules } from "@lintai/authoring-rules";
@@ -30,6 +31,10 @@ const architectureBridge: Rule.RuleModule = {
 						type: "array",
 						items: { type: "string" },
 					},
+					exclude: {
+						type: "array",
+						items: { type: "string" },
+					},
 					env: { type: "object" },
 					factLimit: { type: "integer", minimum: 1 },
 				},
@@ -43,6 +48,14 @@ const architectureBridge: Rule.RuleModule = {
 
 		return {
 			Program(node) {
+				if (options.mode === "serve" && hasUnsavedChanges(context)) {
+					context.report({
+						node,
+						loc: { line: 1, column: 0 },
+						message: "[lintai] lintai checks saved files. Save this file to update its lintai diagnostics.",
+					});
+					return;
+				}
 				const filename = path.relative(options.workspaceRoot, context.filename).replace(/\\/g, "/");
 				const diagnostics = client.getDiagnostics(filename);
 				reportDiagnostics(context, node, diagnostics);
@@ -50,6 +63,21 @@ const architectureBridge: Rule.RuleModule = {
 		};
 	},
 };
+
+// lintai analyzes the files on disk. When the editor text is different from
+// the file on disk, the diagnostics would point at the wrong lines, so the
+// plugin does not show them. Only serve mode checks this: under the ESLint
+// CLI, --fix lints the fixed text before it writes the file.
+function hasUnsavedChanges(context: Rule.RuleContext): boolean {
+	let saved: string;
+	try {
+		saved = readFileSync(context.filename, "utf8");
+	} catch {
+		return false;
+	}
+	const text = context.sourceCode.text;
+	return saved !== text && saved.replace(/^\uFEFF/, "") !== text;
+}
 
 function reportDiagnostics(context: Rule.RuleContext, node: any, diagnostics: Diagnostic[]): void {
 	for (const diagnostic of diagnostics) {

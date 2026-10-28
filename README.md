@@ -57,6 +57,7 @@ Current caveats:
 - editor refresh is intentionally asymmetric:
   - source-file edits refresh in the background
   - rule-file edits invalidate the cache and force a fresh analysis on the next lint pass
+- lintai reads saved files, not unsaved editor text. A file with unsaved changes shows one message that asks you to save it.
 
 ## Install and caveats
 
@@ -152,6 +153,7 @@ Useful caveats:
 - plain `eslint` CLI usage defaults to one-shot analysis
 - long-lived editor sessions default to persistent `serve` mode
 - `lintai schema` prints every base relation and the prelude
+- the CLI exits with 0 (clean), 1 (violations), 2 (usage or configuration error) or 3 (a rule could not run)
 
 ## API and caveats
 
@@ -160,9 +162,9 @@ The full reference lives in [docs/api.md](docs/api.md). Highlights:
 - rule builder:
   - `rule(id).version(n).setup(fn).facts(fn).program(p).report(...preds).expectNonEmpty(...preds).message(fn)`
 - `dl` tagged template: interpolates strings, numbers, `dl.name("x")` (the name constant `/x`) and other `dl` fragments, with correct escaping
-- base relations: `module`, `fn`, `fn_*`, `import_edge`, `import_*`, `call_edge`, `type_ref`, `type_ref_target`, `meta_access`, `ambient_source`, `ambient_use`, `ambient_key`, `ambient_dynamic`, `ambient_write`, `site_in_fn`, `location`
+- base relations: `module`, `fn`, `fn_*`, `import_edge`, `import_*`, `call_edge`, `external_call`, `type_ref`, `type_ref_target`, `meta_access`, `ambient_source`, `ambient_use`, `ambient_key`, `ambient_dynamic`, `ambient_write`, `module_directive`, `module_parse_error`, `site_in_fn`, `location`
 - prelude: `glob`, `import_runtime`, `module_imports`, `imports_reach`, `calls_reach`, `fn_uses_ambient`, `fn_reaches_ambient`, `module_uses_ambient`, `module_reaches_ambient`
-- ambient sources: `clock` (`Date.now`, `new Date()`, `performance.now`) and `env` (`process.env`)
+- ambient sources: `clock` (`Date.now`, `new Date()`, `performance.now`), `env` (`process.env`), `random` (`Math.random`, `crypto.randomUUID` and other `crypto` random functions), `network` (`fetch`), `timer` (`setTimeout`, `setInterval`, `setImmediate`) and `process` (`process.cwd`, `process.argv`)
 - CLI: `lintai schema`, `lintai facts`, `--explain`, `--fact-limit`
 - optional `config` export:
   - `export const config = z.object({...})`

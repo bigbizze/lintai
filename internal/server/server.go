@@ -44,6 +44,7 @@ type InitializeParams struct {
 	AssetRoot     string         `json:"assetRoot"`
 	WorkspaceRoot string         `json:"workspaceRoot"`
 	RuleGlobs     []string       `json:"ruleGlobs"`
+	Excludes      []string       `json:"excludes,omitempty"`
 	Env           map[string]any `json:"env"`
 	FactLimit     int            `json:"factLimit,omitempty"`
 }
@@ -159,6 +160,7 @@ func (s *Server) handleInitialize(ctx context.Context, rawParams json.RawMessage
 		AssetRoot:     params.AssetRoot,
 		WorkspaceRoot: params.WorkspaceRoot,
 		RuleGlobs:     append([]string(nil), params.RuleGlobs...),
+		Excludes:      append([]string(nil), params.Excludes...),
 		Env:           params.Env,
 		Severity:      diagnostics.SeverityError,
 		FactLimit:     params.FactLimit,

@@ -14,7 +14,12 @@ function readStdin() {
 	});
 }
 
+class RuleShapeError extends Error {}
+
 function formatError(error) {
+	if (error instanceof RuleShapeError) {
+		return error.message;
+	}
 	if (error instanceof Error) {
 		return error.stack ?? error.message;
 	}
@@ -32,8 +37,23 @@ for (const payload of payloads) {
 		await import(pathToFileURL(payload.bundlePath).href);
 
 		moduleValue = globalThis.LintAIPrepareModule;
-		if (!moduleValue?.rule) {
+		if (!moduleValue) {
 			throw new Error("prepare bundle did not initialize LintAIPrepareModule");
+		}
+		if (!moduleValue.rule) {
+			results.push({ rulePath: payload.rulePath, skipped: true });
+			continue;
+		}
+		if (typeof moduleValue.rule.id !== "string" || moduleValue.rule.id === "") {
+			throw new RuleShapeError(
+				"the default export is not a lintai rule; create it with rule(id) from @lintai/sdk",
+			);
+		}
+		const version = moduleValue.rule.versionValue;
+		if (!Number.isSafeInteger(version) || version < 1) {
+			throw new RuleShapeError(
+				`rule ${moduleValue.rule.id} must call .version(n) with a positive integer`,
+			);
 		}
 
 		let env = payload.env ?? {};

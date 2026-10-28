@@ -26,6 +26,7 @@ export type BridgeOptions = {
 	repoRoot?: string;
 	workspaceRoot?: string;
 	rules?: string[];
+	exclude?: string[];
 	env?: Record<string, unknown>;
 	factLimit?: number;
 };
@@ -37,6 +38,7 @@ type ResolvedBridgeOptions = {
 	assetRoot: string;
 	workspaceRoot: string;
 	ruleGlobs: string[];
+	excludes: string[];
 	env: Record<string, unknown>;
 	factLimit?: number;
 };
@@ -322,6 +324,7 @@ export class LintAIClient {
 				assetRoot: this.options.assetRoot,
 				workspaceRoot: this.options.workspaceRoot,
 				ruleGlobs: this.options.ruleGlobs,
+				excludes: this.options.excludes,
 				env: this.options.env,
 				...(this.options.factLimit === undefined ? {} : { factLimit: this.options.factLimit }),
 			});
@@ -357,6 +360,7 @@ export class LintAIClient {
 				this.options.workspaceRoot,
 				"--rules",
 				this.options.ruleGlobs.join(","),
+				...this.options.excludes.flatMap((glob) => ["--exclude", glob]),
 				"--env-json",
 				JSON.stringify(this.options.env),
 				...(this.options.factLimit === undefined ? [] : ["--fact-limit", String(this.options.factLimit)]),
@@ -675,6 +679,7 @@ export function resolveBridgeOptions(options: BridgeOptions, cwd: string): Resol
 		assetRoot: findAssetRoot(),
 		workspaceRoot,
 		ruleGlobs,
+		excludes: options.exclude ?? [],
 		env: options.env ?? {},
 		...(options.factLimit === undefined ? {} : { factLimit: options.factLimit }),
 	};

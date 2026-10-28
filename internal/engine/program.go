@@ -74,6 +74,9 @@ func evaluateProgram(base factstore.ReadOnlyFactStore, output runtime.ProgramOut
 	if perr := checkGlobUses(unit); perr != nil {
 		return nil, perr
 	}
+	if perr := checkNegatedWildcards(unit); perr != nil {
+		return nil, perr
+	}
 	prelude = preludeFor(prelude, unit, append(append([]string(nil), report...), expectNonEmpty...))
 	info, err := mangleanalysis.Analyze([]parse.SourceUnit{prelude, unit}, schemaDecls)
 	if err != nil {
@@ -113,10 +116,14 @@ func evaluateProgram(base factstore.ReadOnlyFactStore, output runtime.ProgramOut
 		return nil, failPhase("evaluation", "%v", err)
 	}
 
+	empty := make([]string, 0)
 	for _, sym := range expectSyms {
 		if !hasFacts(store, sym) {
-			return nil, failPhase("premise", "expectNonEmpty: predicate %s has no facts", sym.Symbol)
+			empty = append(empty, sym.Symbol)
 		}
+	}
+	if len(empty) > 0 {
+		return nil, failPhase("premise", "expectNonEmpty: these predicates have no facts: %s", strings.Join(empty, ", "))
 	}
 
 	violations := make([]violation, 0)
@@ -321,6 +328,26 @@ func checkGlobUses(unit parse.SourceUnit) *phaseError {
 				}
 				if variable, ok := typed.Right.(ast.Variable); ok {
 					bound[variable] = struct{}{}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// checkNegatedWildcards rejects _ in a negated atom. Mangle replaces each _
+// with a generated variable and then reports that variable as unbound, which
+// does not point at the cause.
+func checkNegatedWildcards(unit parse.SourceUnit) *phaseError {
+	for _, clause := range unit.Clauses {
+		for _, premise := range clause.Premises {
+			negated, ok := premise.(ast.NegAtom)
+			if !ok {
+				continue
+			}
+			for _, arg := range negated.Atom.Args {
+				if variable, ok := arg.(ast.Variable); ok && variable.Symbol == "_" {
+					return failPhase("program_analysis", "_ cannot be used in the negated atom !%v in %v; every variable in a negated atom must be bound. Define a helper predicate without the unused argument and negate the helper", negated.Atom, clause)
 				}
 			}
 		}

@@ -49,6 +49,34 @@ func Builtin() []Source {
 		{Specifier: "process", Export: "default", Path: []string{}},
 		{Specifier: "process", Export: "env", Path: []string{"env"}},
 	}
+	processMember := func(name string) []ModuleBinding {
+		return []ModuleBinding{
+			{Specifier: "node:process", Export: "default", Path: []string{}},
+			{Specifier: "node:process", Export: name, Path: []string{name}},
+			{Specifier: "process", Export: "default", Path: []string{}},
+			{Specifier: "process", Export: name, Path: []string{name}},
+		}
+	}
+	cryptoMember := func(name string) []ModuleBinding {
+		return []ModuleBinding{
+			{Specifier: "node:crypto", Export: "default", Path: []string{}},
+			{Specifier: "node:crypto", Export: name, Path: []string{name}},
+			{Specifier: "crypto", Export: "default", Path: []string{}},
+			{Specifier: "crypto", Export: name, Path: []string{name}},
+		}
+	}
+	timerModules := func(name string) []ModuleBinding {
+		return []ModuleBinding{
+			{Specifier: "node:timers", Export: name, Path: []string{}},
+			{Specifier: "timers", Export: name, Path: []string{}},
+		}
+	}
+	cryptoRef := func(capability, name string) Matcher {
+		return Matcher{Capability: capability, Root: "crypto", Path: []string{name}, Modules: cryptoMember(name), Form: FormReference, Key: KeyNone}
+	}
+	timerRef := func(name string) Matcher {
+		return Matcher{Capability: "schedule", Root: name, Path: []string{}, Modules: timerModules(name), Form: FormReference, Key: KeyNone}
+	}
 	return []Source{
 		{
 			ID:          "clock",
@@ -65,6 +93,42 @@ func Builtin() []Source {
 			Description: "Reads or writes process environment variables.",
 			Matchers: []Matcher{
 				{Capability: "read", Root: "process", Path: []string{"env"}, Modules: processModules, Form: FormReference, Key: KeyMember},
+			},
+		},
+		{
+			ID:          "random",
+			Description: "Reads a random value.",
+			Matchers: []Matcher{
+				{Capability: "number", Root: "Math", Path: []string{"random"}, Form: FormReference, Key: KeyNone},
+				cryptoRef("number", "randomInt"),
+				cryptoRef("uuid", "randomUUID"),
+				cryptoRef("bytes", "getRandomValues"),
+				cryptoRef("bytes", "randomBytes"),
+				cryptoRef("bytes", "randomFillSync"),
+			},
+		},
+		{
+			ID:          "network",
+			Description: "Sends a network request.",
+			Matchers: []Matcher{
+				{Capability: "fetch", Root: "fetch", Path: []string{}, Form: FormReference, Key: KeyNone},
+			},
+		},
+		{
+			ID:          "timer",
+			Description: "Schedules a callback for later.",
+			Matchers: []Matcher{
+				timerRef("setTimeout"),
+				timerRef("setInterval"),
+				timerRef("setImmediate"),
+			},
+		},
+		{
+			ID:          "process",
+			Description: "Reads process state other than the environment.",
+			Matchers: []Matcher{
+				{Capability: "cwd", Root: "process", Path: []string{"cwd"}, Modules: processMember("cwd"), Form: FormReference, Key: KeyNone},
+				{Capability: "argv", Root: "process", Path: []string{"argv"}, Modules: processMember("argv"), Form: FormReference, Key: KeyNone},
 			},
 		},
 	}

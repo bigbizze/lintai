@@ -9,5 +9,5 @@ import (
 type Backend interface {
 	ID() string
 	Relations() []string
-	BuildSnapshot(ctx context.Context, repoRoot, workspaceRoot string) (*analysis.Snapshot, error)
+	BuildSnapshot(ctx context.Context, repoRoot, workspaceRoot string, excludes []string) (*analysis.Snapshot, error)
 }
