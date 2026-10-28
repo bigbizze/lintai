@@ -18,17 +18,14 @@ const noAmbientInPurePhase: Rule.RuleModule = {
 	meta: {
 		type: "problem",
 		docs: {
-			description: "forbid ambient APIs inside assert()/message() callbacks",
+			description: "forbid ambient APIs inside program()/facts()/message() callbacks",
 		},
 		schema: [],
 	},
 	create(context) {
 		let pureDepth = 0;
 		return {
-			"CallExpression[callee.property.name='assert'] > :matches(FunctionExpression, ArrowFunctionExpression)"() {
-				pureDepth += 1;
-			},
-			"CallExpression[callee.property.name='message'] > :matches(FunctionExpression, ArrowFunctionExpression)"() {
+			"CallExpression[callee.property.name=/^(program|facts|message)$/] > :matches(FunctionExpression, ArrowFunctionExpression)"() {
 				pureDepth += 1;
 			},
 			":matches(FunctionExpression, ArrowFunctionExpression):exit"() {
@@ -72,7 +69,7 @@ const requireRuleShape: Rule.RuleModule = {
 	meta: {
 		type: "problem",
 		docs: {
-			description: "require default rule exports to define version/assert/message",
+			description: "require default rule exports to define version/program/report/message",
 		},
 		schema: [],
 	},
@@ -80,13 +77,19 @@ const requireRuleShape: Rule.RuleModule = {
 		return {
 			ExportDefaultDeclaration(node) {
 				const source = context.sourceCode.getText(node.declaration as never);
-				for (const requiredCall of [".version(", ".assert(", ".message("]) {
+				for (const requiredCall of [".version(", ".program(", ".report(", ".message("]) {
 					if (source.includes(requiredCall)) {
 						continue;
 					}
 					context.report({
 						node,
 						message: `Rule default export must include ${requiredCall}`,
+					});
+				}
+				if (source.includes(".assert(")) {
+					context.report({
+						node,
+						message: "Rule default export must not use .assert(); write the rule as a Datalog program with .program() and .report()",
 					});
 				}
 			},

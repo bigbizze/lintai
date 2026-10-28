@@ -45,6 +45,8 @@ func extractAccesses(workspaceRoot string, files []string) ([]analysis.Access, e
 				Origin:      "special_form",
 				FilePath:    relative,
 				Range:       location,
+				Start:       match.start,
+				End:         match.end,
 			})
 		}
 	}

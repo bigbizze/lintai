@@ -1,84 +1,24 @@
-export type Predicate<T = any> = (value: T) => boolean;
-
-type QueryKind = "functions" | "imports" | "calls" | "typeRefs" | "accesses";
-
-type QueryOperation =
-	| { type: "in"; value: string }
-	| { type: "from"; value: string }
-	| { type: "to"; value: string }
-	| { type: "where"; handler: Predicate<any> }
-	| { type: "calling"; query: QueryValue }
-	| { type: "transitivelyCalling"; query: QueryValue };
-
-export type FunctionView = {
-	name: string;
-	kind: string;
-	filePath: string;
-	containerName: string;
-	semanticKey: string;
-	containsAwait: boolean;
-	isExported: boolean;
-	isAsync: boolean;
-	parameterCount: number;
-	returnTypeText: string;
-	parameterTypeTexts: string[];
-	sourceLocation: SourceLocation;
+export type Fragment = {
+	readonly __lintaiKind: "fragment";
+	readonly text: string;
 };
 
-export type ImportedSymbolView = {
-	name: string;
-	kind: "default" | "namespace" | "named";
-	isTypeOnly: boolean;
+export type Name = {
+	readonly __lintaiKind: "name";
+	readonly value: string;
 };
 
-export type ImportEdgeView = {
-	specifier: string;
-	fromPath: string;
-	toPath: string;
-	semanticKey: string;
-	importedSymbols: ImportedSymbolView[];
-	hasDefaultImport: boolean;
-	hasNamespaceImport: boolean;
-	hasNamedImports: boolean;
-	isTypeOnly: boolean;
-	sourceLocation: SourceLocation;
-};
+export type DlValue = string | number | Name | Fragment;
 
-export type CallEdgeView = {
-	fromName: string;
-	toName: string;
-	fromPath: string;
-	toPath: string;
-	semanticKey: string;
-	sourceLocation: SourceLocation;
-};
+export type FactValue = string | number | Name;
 
-export type TypeRefView = {
-	name: string;
-	filePath: string;
-	targetPath: string;
-	semanticKey: string;
-	sourceLocation: SourceLocation;
-};
+export type Facts = Record<string, FactValue[][]>;
 
-export type AccessView = {
-	root: string;
-	accessPath: string;
-	origin: "special_form";
-	filePath: string;
-	semanticKey: string;
-	sourceLocation: SourceLocation;
-};
+export type RowValue = string | number;
 
-export type SourceLocation = {
-	file: string;
-	startLine: number;
-	startColumn: number;
-	endLine: number;
-	endColumn: number;
-};
+export type Row = Record<string, RowValue>;
 
-export type AssertionContext = {
+export type MessageContext = {
 	assertion_id: string;
 };
 
@@ -87,224 +27,187 @@ export type RuleContext<Env, Setup> = {
 	setup: Setup;
 };
 
-export type AssertionValue = {
-	__lintaiKind: "assertion";
-	terminal: "isEmpty";
-	query: QueryValue;
+export type SetupContext<Env> = {
+	env: Env;
+	workspaceRoot: string;
 };
 
-type BaseQuery = {
-	__lintaiKind: "query";
-	entity: QueryKind;
-	ops: QueryOperation[];
-	isEmpty(): AssertionValue;
-};
+const namePattern = /^[a-z][a-z0-9_]*(\/[a-z0-9_]+)*$/;
 
-export type FunctionsQuery = BaseQuery & {
-	entity: "functions";
-	in(pattern: string): FunctionsQuery;
-	where(predicate: Predicate<FunctionView>): FunctionsQuery;
-	calling(other: FunctionsQuery): FunctionsQuery;
-	transitivelyCalling(other: FunctionsQuery): FunctionsQuery;
-};
+function isTagged(value: unknown, kind: "fragment" | "name"): boolean {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		(value as { __lintaiKind?: unknown }).__lintaiKind === kind
+	);
+}
 
-export type ImportsQuery = BaseQuery & {
-	entity: "imports";
-	from(pattern: string): ImportsQuery;
-	to(pattern: string): ImportsQuery;
-	where(predicate: Predicate<ImportEdgeView>): ImportsQuery;
-};
+function describe(value: unknown): string {
+	if (value === null) return "null";
+	if (Array.isArray(value)) return "an array";
+	return typeof value;
+}
 
-export type CallsQuery = BaseQuery & {
-	entity: "calls";
-	from(pattern: string): CallsQuery;
-	to(pattern: string): CallsQuery;
-	where(predicate: Predicate<CallEdgeView>): CallsQuery;
-};
+function hex(code: number, width: number): string {
+	return code.toString(16).padStart(width, "0");
+}
 
-export type TypeRefsQuery = BaseQuery & {
-	entity: "typeRefs";
-	in(pattern: string): TypeRefsQuery;
-	where(predicate: Predicate<TypeRefView>): TypeRefsQuery;
-};
+function escapeString(value: string): string {
+	let result = '"';
+	for (const char of value) {
+		const code = char.codePointAt(0) ?? 0;
+		switch (char) {
+			case "\\":
+				result += "\\\\";
+				break;
+			case '"':
+				result += '\\"';
+				break;
+			case "'":
+				result += "\\'";
+				break;
+			case "\n":
+				result += "\\n";
+				break;
+			case "\t":
+				result += "\\t";
+				break;
+			default:
+				if (code < 0x20 || code === 0x7f) {
+					result += `\\x${hex(code, 2)}`;
+				} else if (code > 0x7e) {
+					result += `\\u{${hex(code, 4)}}`;
+				} else {
+					result += char;
+				}
+		}
+	}
+	return `${result}"`;
+}
 
-export type AccessesQuery = BaseQuery & {
-	entity: "accesses";
-	in(pattern: string): AccessesQuery;
-	where(predicate: Predicate<AccessView>): AccessesQuery;
-};
+function formatNumber(value: number): string {
+	if (!Number.isFinite(value)) {
+		throw new TypeError(`dl: cannot interpolate non-finite number ${value}`);
+	}
+	if (Number.isInteger(value)) {
+		if (!Number.isSafeInteger(value)) {
+			throw new TypeError(`dl: integer ${value} is outside the safe integer range`);
+		}
+		return String(value);
+	}
+	const text = String(value);
+	if (text.includes("e")) {
+		throw new TypeError(`dl: cannot interpolate ${value}; use a number without an exponent`);
+	}
+	return text;
+}
 
-export type QueryValue = FunctionsQuery | ImportsQuery | CallsQuery | TypeRefsQuery | AccessesQuery;
+function formatValue(value: unknown): string {
+	if (typeof value === "string") return escapeString(value);
+	if (typeof value === "number") return formatNumber(value);
+	if (isTagged(value, "fragment")) return (value as Fragment).text;
+	if (isTagged(value, "name")) return `/${(value as Name).value}`;
+	throw new TypeError(
+		`dl: cannot interpolate ${describe(value)}; use a string, a finite number, dl.name() or a dl fragment`,
+	);
+}
 
-type InternalRuleSpec<Env, Setup, Value> = {
+function name(value: string): Name {
+	if (typeof value !== "string" || !namePattern.test(value)) {
+		throw new TypeError(
+			`dl.name: ${JSON.stringify(value)} is not a valid name; it must match ${namePattern}`,
+		);
+	}
+	return Object.freeze({ __lintaiKind: "name", value });
+}
+
+function dlTag(strings: TemplateStringsArray, ...values: DlValue[]): Fragment {
+	let text = strings[0] ?? "";
+	for (let index = 0; index < values.length; index++) {
+		text += formatValue(values[index]);
+		text += strings[index + 1] ?? "";
+	}
+	return Object.freeze({ __lintaiKind: "fragment", text });
+}
+
+export type Dl = typeof dlTag & { readonly name: typeof name };
+
+export const dl: Dl = Object.defineProperty(
+	(strings: TemplateStringsArray, ...values: DlValue[]) => dlTag(strings, ...values),
+	"name",
+	{ value: name, enumerable: true },
+) as Dl;
+
+export type ProgramInput<Env, Setup> = Fragment | ((ctx: RuleContext<Env, Setup>) => Fragment);
+
+type RuleSpec<Env, Setup> = {
 	id: string;
 	versionValue?: number;
-	setupFn?: (() => Setup) | ((ctx: { env: Env; workspaceRoot: string }) => Setup);
-	assertFn?: (ctx: RuleContext<Env, Setup>) => AssertionValue | Record<string, AssertionValue>;
-	messageFn?: (value: Value, ctx: AssertionContext) => string;
+	setupFn?: (ctx: SetupContext<Env>) => Setup | Promise<Setup>;
+	factsFn?: (ctx: RuleContext<Env, Setup>) => Facts;
+	programValue?: ProgramInput<Env, Setup>;
+	reportPredicates?: readonly string[];
+	expectNonEmptyPredicates?: readonly string[];
+	messageFn?: (row: Row, ctx: MessageContext) => string;
 };
 
-class RuleDefinition<Env, Setup, Value> {
+export class RuleDefinition<Env, Setup> {
 	readonly id: string;
 	readonly versionValue?: number;
-	readonly setupFn?: InternalRuleSpec<Env, Setup, Value>["setupFn"];
-	readonly assertFn?: InternalRuleSpec<Env, Setup, Value>["assertFn"];
-	readonly messageFn?: InternalRuleSpec<Env, Setup, Value>["messageFn"];
+	readonly setupFn?: RuleSpec<Env, Setup>["setupFn"];
+	readonly factsFn?: RuleSpec<Env, Setup>["factsFn"];
+	readonly programValue?: RuleSpec<Env, Setup>["programValue"];
+	readonly reportPredicates?: readonly string[];
+	readonly expectNonEmptyPredicates?: readonly string[];
+	readonly messageFn?: RuleSpec<Env, Setup>["messageFn"];
 
-	constructor(private readonly spec: InternalRuleSpec<Env, Setup, Value>) {
+	constructor(private readonly spec: RuleSpec<Env, Setup>) {
 		this.id = spec.id;
 		this.versionValue = spec.versionValue;
 		this.setupFn = spec.setupFn;
-		this.assertFn = spec.assertFn;
+		this.factsFn = spec.factsFn;
+		this.programValue = spec.programValue;
+		this.reportPredicates = spec.reportPredicates;
+		this.expectNonEmptyPredicates = spec.expectNonEmptyPredicates;
 		this.messageFn = spec.messageFn;
 	}
 
-	version(versionValue: number): RuleDefinition<Env, Setup, Value> {
+	version(versionValue: number): RuleDefinition<Env, Setup> {
 		return new RuleDefinition({ ...this.spec, versionValue });
 	}
 
 	setup<NextSetup>(
-		setupFn: InternalRuleSpec<Env, NextSetup, Value>["setupFn"],
-	): RuleDefinition<Env, NextSetup, Value> {
-		return new RuleDefinition<Env, NextSetup, Value>({
-			...(this.spec as unknown as InternalRuleSpec<Env, NextSetup, Value>),
-			setupFn,
+		setupFn: (ctx: SetupContext<Env>) => NextSetup | Promise<NextSetup>,
+	): RuleDefinition<Env, Awaited<NextSetup>> {
+		return new RuleDefinition<Env, Awaited<NextSetup>>({
+			...(this.spec as unknown as RuleSpec<Env, Awaited<NextSetup>>),
+			setupFn: setupFn as RuleSpec<Env, Awaited<NextSetup>>["setupFn"],
 		});
 	}
 
-	assert(
-		assertFn: InternalRuleSpec<Env, Setup, Value>["assertFn"],
-	): RuleDefinition<Env, Setup, Value> {
-		return new RuleDefinition({
-			...this.spec,
-			assertFn,
-		});
+	facts(factsFn: (ctx: RuleContext<Env, Setup>) => Facts): RuleDefinition<Env, Setup> {
+		return new RuleDefinition({ ...this.spec, factsFn });
 	}
 
-	message(
-		messageFn: InternalRuleSpec<Env, Setup, Value>["messageFn"],
-	): RuleDefinition<Env, Setup, Value> {
-		return new RuleDefinition({
-			...this.spec,
-			messageFn,
-		});
+	program(programValue: ProgramInput<Env, Setup>): RuleDefinition<Env, Setup> {
+		return new RuleDefinition({ ...this.spec, programValue });
+	}
+
+	report(...predicates: string[]): RuleDefinition<Env, Setup> {
+		return new RuleDefinition({ ...this.spec, reportPredicates: predicates });
+	}
+
+	expectNonEmpty(...predicates: string[]): RuleDefinition<Env, Setup> {
+		return new RuleDefinition({ ...this.spec, expectNonEmptyPredicates: predicates });
+	}
+
+	message(messageFn: (row: Row, ctx: MessageContext) => string): RuleDefinition<Env, Setup> {
+		return new RuleDefinition({ ...this.spec, messageFn });
 	}
 }
 
-function createBaseQuery(entity: QueryKind, ops: QueryOperation[]): BaseQuery {
-	return {
-		__lintaiKind: "query",
-		entity,
-		ops,
-		isEmpty() {
-			return {
-				__lintaiKind: "assertion",
-				terminal: "isEmpty",
-				query: this as QueryValue,
-			};
-		},
-	};
-}
-
-function createFunctionsQuery(ops: QueryOperation[] = []): FunctionsQuery {
-	return {
-		...createBaseQuery("functions", ops),
-		entity: "functions",
-		in(pattern: string) {
-			return createFunctionsQuery([...ops, { type: "in", value: pattern }]);
-		},
-		where(predicate: Predicate<FunctionView>) {
-			return createFunctionsQuery([...ops, { type: "where", handler: predicate }]);
-		},
-		calling(other: FunctionsQuery) {
-			return createFunctionsQuery([...ops, { type: "calling", query: other }]);
-		},
-		transitivelyCalling(other: FunctionsQuery) {
-			return createFunctionsQuery([...ops, { type: "transitivelyCalling", query: other }]);
-		},
-	};
-}
-
-function createImportsQuery(ops: QueryOperation[] = []): ImportsQuery {
-	return {
-		...createBaseQuery("imports", ops),
-		entity: "imports",
-		from(pattern: string) {
-			return createImportsQuery([...ops, { type: "from", value: pattern }]);
-		},
-		to(pattern: string) {
-			return createImportsQuery([...ops, { type: "to", value: pattern }]);
-		},
-		where(predicate: Predicate<ImportEdgeView>) {
-			return createImportsQuery([...ops, { type: "where", handler: predicate }]);
-		},
-	};
-}
-
-function createCallsQuery(ops: QueryOperation[] = []): CallsQuery {
-	return {
-		...createBaseQuery("calls", ops),
-		entity: "calls",
-		from(pattern: string) {
-			return createCallsQuery([...ops, { type: "from", value: pattern }]);
-		},
-		to(pattern: string) {
-			return createCallsQuery([...ops, { type: "to", value: pattern }]);
-		},
-		where(predicate: Predicate<CallEdgeView>) {
-			return createCallsQuery([...ops, { type: "where", handler: predicate }]);
-		},
-	};
-}
-
-function createTypeRefsQuery(ops: QueryOperation[] = []): TypeRefsQuery {
-	return {
-		...createBaseQuery("typeRefs", ops),
-		entity: "typeRefs",
-		in(pattern: string) {
-			return createTypeRefsQuery([...ops, { type: "in", value: pattern }]);
-		},
-		where(predicate: Predicate<TypeRefView>) {
-			return createTypeRefsQuery([...ops, { type: "where", handler: predicate }]);
-		},
-	};
-}
-
-function createAccessesQuery(ops: QueryOperation[] = []): AccessesQuery {
-	return {
-		...createBaseQuery("accesses", ops),
-		entity: "accesses",
-		in(pattern: string) {
-			return createAccessesQuery([...ops, { type: "in", value: pattern }]);
-		},
-		where(predicate: Predicate<AccessView>) {
-			return createAccessesQuery([...ops, { type: "where", handler: predicate }]);
-		},
-	};
-}
-
-export function rule<Env = Record<string, any>, Setup = Record<string, never>, Value = any>(
+export function rule<Env = Record<string, any>, Setup = Record<string, never>>(
 	id: string,
-): RuleDefinition<Env, Setup, Value> {
-	return new RuleDefinition<Env, Setup, Value>({ id });
-}
-
-export function functions(): FunctionsQuery {
-	return createFunctionsQuery();
-}
-
-export function imports(): ImportsQuery {
-	return createImportsQuery();
-}
-
-export function calls(): CallsQuery {
-	return createCallsQuery();
-}
-
-export function typeRefs(): TypeRefsQuery {
-	return createTypeRefsQuery();
-}
-
-export function accesses(): AccessesQuery {
-	return createAccessesQuery();
+): RuleDefinition<Env, Setup> {
+	return new RuleDefinition<Env, Setup>({ id });
 }

@@ -1,6 +1,10 @@
-import { functions, rule } from "@lintai/sdk";
+import { dl, rule } from "@lintai/sdk";
 
 export default rule("arch.no-async")
 	.version(1)
-	.assert(() => functions().in("src/**/*.ts").where((fn) => fn.isAsync).isEmpty())
-	.message((fn) => `${fn.name} in ${fn.filePath} must not be async`);
+	.program(dl`
+		Decl violation(Fn, File, Name).
+		violation(Fn, File, Name) :- fn(Fn, File, Name), fn_async(Fn), glob(File, "src/**/*.ts").
+	`)
+	.report("violation")
+	.message((row) => `${row.Name} in ${row.File} must not be async`);

@@ -1,20 +1,34 @@
 package runtime
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 
-	"github.com/bigbizze/lintai/internal/query"
 	"github.com/dop251/goja"
 )
 
 type LoadedRule struct {
-	runtime     *goja.Runtime
-	id          string
-	version     int
-	assertFn    goja.Callable
-	messageFn   goja.Callable
-	freezeFn    goja.Callable
+	runtime        *goja.Runtime
+	id             string
+	version        int
+	programValue   goja.Value
+	factsFn        goja.Callable
+	messageFn      goja.Callable
+	freezeFn       goja.Callable
+	report         []string
+	expectNonEmpty []string
+}
+
+// ProgramOutput is what the pure phase of a rule produces before evaluation.
+type ProgramOutput struct {
+	Text  string
+	Facts map[string][][]any
+}
+
+// Name is a Mangle name constant value, without its leading slash.
+type Name struct {
+	Value string
 }
 
 func LoadPureBundle(code string) (*LoadedRule, error) {
@@ -39,25 +53,44 @@ func LoadPureBundle(code string) (*LoadedRule, error) {
 	if goja.IsUndefined(moduleValue) || goja.IsNull(moduleValue) {
 		return nil, fmt.Errorf("pure bundle did not initialize LintAIPureModule")
 	}
-	moduleObject := moduleValue.ToObject(vm)
-	ruleValue := moduleObject.Get("rule")
-	ruleObject := ruleValue.ToObject(vm)
-	assertFn, ok := goja.AssertFunction(ruleObject.Get("assertFn"))
-	if !ok {
-		return nil, fmt.Errorf("rule is missing assert()")
+	ruleObject := moduleValue.ToObject(vm).Get("rule").ToObject(vm)
+	programValue := ruleObject.Get("programValue")
+	if programValue == nil || goja.IsUndefined(programValue) || goja.IsNull(programValue) {
+		return nil, fmt.Errorf("rule is missing program()")
 	}
 	messageFn, ok := goja.AssertFunction(ruleObject.Get("messageFn"))
 	if !ok {
 		return nil, fmt.Errorf("rule is missing message()")
 	}
+	var factsFn goja.Callable
+	if value := ruleObject.Get("factsFn"); value != nil && !goja.IsUndefined(value) && !goja.IsNull(value) {
+		factsFn, ok = goja.AssertFunction(value)
+		if !ok {
+			return nil, fmt.Errorf("facts() must be given a function")
+		}
+	}
+	report, err := stringList(vm, ruleObject.Get("reportPredicates"))
+	if err != nil {
+		return nil, fmt.Errorf("report(): %w", err)
+	}
+	if len(report) == 0 {
+		return nil, fmt.Errorf("rule is missing report()")
+	}
+	expectNonEmpty, err := stringList(vm, ruleObject.Get("expectNonEmptyPredicates"))
+	if err != nil {
+		return nil, fmt.Errorf("expectNonEmpty(): %w", err)
+	}
 	freezeFn, _ := goja.AssertFunction(vm.Get("lintaiDeepFreeze"))
 	return &LoadedRule{
-		runtime:   vm,
-		id:        ruleObject.Get("id").String(),
-		version:   int(ruleObject.Get("versionValue").ToInteger()),
-		assertFn:  assertFn,
-		messageFn: messageFn,
-		freezeFn:  freezeFn,
+		runtime:        vm,
+		id:             ruleObject.Get("id").String(),
+		version:        int(ruleObject.Get("versionValue").ToInteger()),
+		programValue:   programValue,
+		factsFn:        factsFn,
+		messageFn:      messageFn,
+		freezeFn:       freezeFn,
+		report:         report,
+		expectNonEmpty: expectNonEmpty,
 	}, nil
 }
 
@@ -69,11 +102,60 @@ func (r *LoadedRule) RuleVersion() int {
 	return r.version
 }
 
-func (r *LoadedRule) Runtime() *goja.Runtime {
-	return r.runtime
+func (r *LoadedRule) Report() []string {
+	return append([]string(nil), r.report...)
 }
 
-func (r *LoadedRule) BuildAssertions(env, setup any) ([]query.Assertion, error) {
+func (r *LoadedRule) ExpectNonEmpty() []string {
+	return append([]string(nil), r.expectNonEmpty...)
+}
+
+// Program runs facts() and program() and returns the program text and the
+// rule's extra extensional tuples.
+func (r *LoadedRule) Program(env, setup any) (ProgramOutput, error) {
+	contextObject, err := r.ruleContext(env, setup)
+	if err != nil {
+		return ProgramOutput{}, err
+	}
+	output := ProgramOutput{Facts: map[string][][]any{}}
+	if r.factsFn != nil {
+		result, err := r.factsFn(goja.Undefined(), contextObject)
+		if err != nil {
+			return ProgramOutput{}, err
+		}
+		output.Facts, err = decodeFacts(r.runtime, result)
+		if err != nil {
+			return ProgramOutput{}, fmt.Errorf("facts(): %w", err)
+		}
+	}
+	fragment := r.programValue
+	if fn, ok := goja.AssertFunction(fragment); ok {
+		fragment, err = fn(goja.Undefined(), contextObject)
+		if err != nil {
+			return ProgramOutput{}, err
+		}
+	}
+	text, ok := fragmentText(r.runtime, fragment)
+	if !ok {
+		return ProgramOutput{}, fmt.Errorf("program() must be a dl fragment or a function that returns one")
+	}
+	output.Text = text
+	return output, nil
+}
+
+func (r *LoadedRule) Message(row map[string]any, assertionID string) (string, error) {
+	result, err := r.messageFn(
+		goja.Undefined(),
+		r.runtime.ToValue(row),
+		r.runtime.ToValue(map[string]any{"assertion_id": assertionID}),
+	)
+	if err != nil {
+		return "", err
+	}
+	return result.String(), nil
+}
+
+func (r *LoadedRule) ruleContext(env, setup any) (*goja.Object, error) {
 	envValue, err := toFrozenValue(r.runtime, env)
 	if err != nil {
 		return nil, err
@@ -97,23 +179,90 @@ func (r *LoadedRule) BuildAssertions(env, setup any) ([]query.Assertion, error) 
 	if err := contextObject.Set("setup", setupValue); err != nil {
 		return nil, err
 	}
-	result, err := r.assertFn(goja.Undefined(), contextObject)
+	return contextObject, nil
+}
+
+func fragmentText(vm *goja.Runtime, value goja.Value) (string, bool) {
+	if value == nil || goja.IsUndefined(value) || goja.IsNull(value) {
+		return "", false
+	}
+	object, ok := value.(*goja.Object)
+	if !ok || object.Get("__lintaiKind").String() != "fragment" {
+		return "", false
+	}
+	text := object.Get("text")
+	if text == nil || goja.IsUndefined(text) {
+		return "", false
+	}
+	return text.String(), true
+}
+
+func decodeFacts(vm *goja.Runtime, value goja.Value) (map[string][][]any, error) {
+	if value == nil || goja.IsUndefined(value) || goja.IsNull(value) {
+		return nil, fmt.Errorf("must return an object of relations")
+	}
+	raw, err := json.Marshal(value.Export())
 	if err != nil {
 		return nil, err
 	}
-	return extractAssertions(r.runtime, result)
+	var relations map[string][]json.RawMessage
+	if err := json.Unmarshal(raw, &relations); err != nil {
+		return nil, fmt.Errorf("must return Record<string, Array<Array<string | number | Name>>>")
+	}
+	result := make(map[string][][]any, len(relations))
+	for relation, rows := range relations {
+		decodedRows := make([][]any, 0, len(rows))
+		for rowIndex, rawRow := range rows {
+			var cells []json.RawMessage
+			if err := json.Unmarshal(rawRow, &cells); err != nil {
+				return nil, fmt.Errorf("%s[%d] is not an array", relation, rowIndex)
+			}
+			row := make([]any, 0, len(cells))
+			for cellIndex, rawCell := range cells {
+				cell, err := decodeCell(rawCell)
+				if err != nil {
+					return nil, fmt.Errorf("%s[%d][%d]: %w", relation, rowIndex, cellIndex, err)
+				}
+				row = append(row, cell)
+			}
+			decodedRows = append(decodedRows, row)
+		}
+		result[relation] = decodedRows
+	}
+	return result, nil
 }
 
-func (r *LoadedRule) Message(entityView map[string]any, assertionID string) (string, error) {
-	result, err := r.messageFn(
-		goja.Undefined(),
-		r.runtime.ToValue(entityView),
-		r.runtime.ToValue(map[string]any{"assertion_id": assertionID}),
-	)
-	if err != nil {
-		return "", err
+func decodeCell(raw json.RawMessage) (any, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var value any
+	if err := decoder.Decode(&value); err != nil {
+		return nil, err
 	}
-	return result.String(), nil
+	switch typed := value.(type) {
+	case string:
+		return typed, nil
+	case json.Number:
+		return typed, nil
+	case map[string]any:
+		if typed["__lintaiKind"] == "name" {
+			if text, ok := typed["value"].(string); ok {
+				return Name{Value: text}, nil
+			}
+		}
+	}
+	return nil, fmt.Errorf("unsupported value %s: use a string, a number or dl.name()", string(raw))
+}
+
+func stringList(vm *goja.Runtime, value goja.Value) ([]string, error) {
+	if value == nil || goja.IsUndefined(value) || goja.IsNull(value) {
+		return nil, nil
+	}
+	var items []string
+	if err := vm.ExportTo(value, &items); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 func disableAmbientCapabilities(vm *goja.Runtime) {
@@ -142,85 +291,4 @@ func toFrozenValue(vm *goja.Runtime, value any) (goja.Value, error) {
 		return nil, err
 	}
 	return vm.RunString(fmt.Sprintf("JSON.parse(%q)", string(raw)))
-}
-
-func extractAssertions(vm *goja.Runtime, value goja.Value) ([]query.Assertion, error) {
-	if isAssertion(vm, value) {
-		assertion, err := decodeAssertion(vm, "default", value)
-		if err != nil {
-			return nil, err
-		}
-		return []query.Assertion{assertion}, nil
-	}
-	object := value.ToObject(vm)
-	keys := object.Keys()
-	results := make([]query.Assertion, 0, len(keys))
-	for _, key := range keys {
-		assertion, err := decodeAssertion(vm, key, object.Get(key))
-		if err != nil {
-			return nil, err
-		}
-		results = append(results, assertion)
-	}
-	return results, nil
-}
-
-func decodeAssertion(vm *goja.Runtime, assertionID string, value goja.Value) (query.Assertion, error) {
-	if value == nil || goja.IsUndefined(value) || goja.IsNull(value) {
-		return query.Assertion{}, fmt.Errorf("assertion %s is empty", assertionID)
-	}
-	object := value.ToObject(vm)
-	planValue := object.Get("query")
-	plan, err := decodePlan(vm, planValue)
-	if err != nil {
-		return query.Assertion{}, err
-	}
-	return query.Assertion{
-		AssertionID: assertionID,
-		Terminal:    object.Get("terminal").String(),
-		Query:       &plan,
-	}, nil
-}
-
-func decodePlan(vm *goja.Runtime, value goja.Value) (query.Plan, error) {
-	if value == nil || goja.IsUndefined(value) || goja.IsNull(value) {
-		return query.Plan{}, fmt.Errorf("query plan is missing")
-	}
-	object := value.ToObject(vm)
-	opsValue := object.Get("ops")
-	opsObject := opsValue.ToObject(vm)
-	ops := make([]query.Operation, 0, opsObject.Get("length").ToInteger())
-	length := int(opsObject.Get("length").ToInteger())
-	for index := 0; index < length; index++ {
-		item := opsObject.Get(fmt.Sprintf("%d", index)).ToObject(vm)
-		operation := query.Operation{
-			Type: item.Get("type").String(),
-		}
-		if nested := item.Get("query"); nested != nil && !goja.IsUndefined(nested) && !goja.IsNull(nested) {
-			plan, err := decodePlan(vm, nested)
-			if err != nil {
-				return query.Plan{}, err
-			}
-			operation.Query = &plan
-		}
-		if value := item.Get("value"); value != nil && !goja.IsUndefined(value) && !goja.IsNull(value) {
-			operation.Value = value.String()
-		}
-		if handler := item.Get("handler"); handler != nil && !goja.IsUndefined(handler) && !goja.IsNull(handler) {
-			operation.Handler = handler
-		}
-		ops = append(ops, operation)
-	}
-	return query.Plan{
-		Entity: object.Get("entity").String(),
-		Ops:    ops,
-	}, nil
-}
-
-func isAssertion(vm *goja.Runtime, value goja.Value) bool {
-	if value == nil || goja.IsUndefined(value) || goja.IsNull(value) {
-		return false
-	}
-	object := value.ToObject(vm)
-	return object.Get("__lintaiKind").String() == "assertion"
 }

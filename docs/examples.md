@@ -1,162 +1,221 @@
 # Examples and Caveats
 
-These examples are written against the surface that ships today.
+These examples use the 0.2 rule API. A rule is a Datalog program that LintAI evaluates with mangle-go over the base facts of the workspace. Each row of a reported predicate is one violation. Run `lintai schema` to see every base relation and the prelude.
 
-## 1. Transitive purity rule and caveats
+## 1. Transitive purity rule
 
-Reject functions in `src/pure/` that transitively call anything effectful:
+Reject functions in a pure directory that call, through any call chain, a function that contains `await`:
 
 ```ts
-import { functions, rule } from "@lintai/sdk";
+import { dl, rule } from "@lintai/sdk";
+import { z } from "zod";
+
+export const config = z.object({ pureDir: z.string().default("src/pure") });
 
 export default rule("arch.pure-no-effects")
 	.version(1)
-	.assert(() =>
-		functions()
-			.in("src/pure/**")
-			.transitivelyCalling(functions().where((fn) => fn.containsAwait))
-			.isEmpty(),
-	)
-	.message((fn) => `Pure function ${fn.name} transitively calls effectful code`);
+	.program(({ env }) => dl`
+		Decl violation(Fn, Name).
+		violation(Fn, Name) :-
+			fn(Fn, File, Name), glob(File, ${`${env.pureDir}/**`}),
+			calls_reach(Fn, Callee), fn_awaits(Callee).
+	`)
+	.report("violation")
+	.message((row) => `Pure function ${row.Name} transitively calls effectful code`);
 ```
 
-Caveat:
+Caveats:
 
-- this example uses `containsAwait` as the signal for effectful code; that is useful, but narrower than a full effect system
+- `fn_awaits` is a narrow signal for effectful code. Use the ambient relations (section 4) for clock and environment reads.
+- `call_edge` contains only calls between collected functions in the workspace. Calls into `node_modules` have no facts.
+- the interpolated string becomes an escaped Mangle string constant, so a config value cannot change the program structure
 
-## 2. Symbol-aware import boundary and caveats
+## 2. Import boundary
 
-Reject runtime imports of `db`, but allow type-only imports:
+Reject internal imports from a pure directory into a service directory:
 
 ```ts
-import { imports, rule } from "@lintai/sdk";
+import { dl, rule } from "@lintai/sdk";
+import { z } from "zod";
 
-export default rule("arch.no-runtime-db-import")
+export const config = z.object({
+	pureDir: z.string().default("src/pure"),
+	serviceDir: z.string().default("src/services"),
+});
+
+export default rule("arch.pure-no-service-imports")
 	.version(1)
-	.assert(() =>
-		imports()
-			.from("src/pure/**")
-			.where((edge) =>
-				edge.importedSymbols.some(
-					(symbol) => symbol.name === "db" && !symbol.isTypeOnly,
-				),
-			)
-			.isEmpty(),
-	)
-	.message((edge) => `Pure module must not import db from ${edge.toPath}`);
+	.program(({ env }) => dl`
+		Decl violation(Imp, From, To).
+		violation(Imp, From, To) :-
+			import_edge(Imp, From, To, _), import_internal(Imp),
+			glob(From, ${`${env.pureDir}/**`}), glob(To, ${`${env.serviceDir}/**`}).
+	`)
+	.report("violation")
+	.message((row) => `Pure module ${row.From} must not import ${row.To}`);
 ```
 
-Caveat:
+To allow type-only imports, add `import_runtime(Imp)` to the clause. `import_runtime` is false for `import type ...` and for imports whose bindings are all `type` bindings.
 
-- `importedSymbols` describes the import surface, not the deeper symbol-definition graph
+To reject a reach through other modules, use `imports_reach`:
 
-## 3. Exported async return contract and caveats
-
-Require exported async API functions to return `Promise<string>`:
-
-```ts
-import { functions, rule } from "@lintai/sdk";
-
-export default rule("arch.api-async-return")
-	.version(1)
-	.assert(() =>
-		functions()
-			.in("src/api/**")
-			.where(
-				(fn) =>
-					fn.isExported &&
-					fn.isAsync &&
-					fn.returnTypeText !== "Promise<string>",
-			)
-			.isEmpty(),
-	)
-	.message((fn) => `API async function must return Promise<string>: ${fn.name}`);
+```
+Decl violation(File, Target).
+violation(File, Target) :-
+	module(File), glob(File, "src/core/**"),
+	imports_reach(File, Target), glob(Target, "src/services/**").
 ```
 
-Caveat:
+Caveats:
 
-- `returnTypeText` is text-only; it is good for convention enforcement, not full semantic type equivalence
+- `imports_reach` follows only runtime imports (`module_imports`)
+- the anchor of the second rule is a module, so the diagnostic is on the first line of the importing file
 
-## 4. Method/container rule and caveats
+## 3. Layer table
 
-Reject service methods that call `db`:
-
-```ts
-import { functions, rule } from "@lintai/sdk";
-
-export default rule("arch.service-methods-no-db")
-	.version(1)
-	.assert(() =>
-		functions()
-			.where((fn) => fn.containerName === "Service")
-			.calling(functions().where((fn) => fn.name === "db"))
-			.isEmpty(),
-	)
-	.message((fn) => `Service method must not call db: ${fn.name}`);
-```
-
-Caveat:
-
-- this depends on `containerName` metadata and is most useful in class-heavy codebases
-
-## 5. Type-reference boundary and caveats
-
-Reject pure modules that reference service types:
+One rule enforces every layer pair. The layer table comes from `.facts()`, so it can also come from `setup()` or config:
 
 ```ts
-import { rule, typeRefs } from "@lintai/sdk";
+import { dl, rule } from "@lintai/sdk";
 
-export default rule("arch.no-pure-service-types")
+export default rule("arch.layers")
 	.version(1)
-	.assert(() =>
-		typeRefs()
-			.in("src/pure/**")
-			.where((ref) => ref.targetPath.startsWith("src/services/"))
-			.isEmpty(),
-	)
-	.message((ref) => `Pure module must not reference service type ${ref.name}`);
-```
-
-Caveat:
-
-- `targetPath` may be empty for external or unresolved types, so rules should treat `""` as unknown rather than safe
-
-## 6. Named assertions and caveats
-
-Give one rule multiple assertion IDs:
-
-```ts
-import { imports, rule, typeRefs } from "@lintai/sdk";
-
-export default rule("arch.pure-boundaries")
-	.version(1)
-	.assert(() => ({
-		imports: imports().from("src/pure/**").to("src/services/**").isEmpty(),
-		types: typeRefs()
-			.in("src/pure/**")
-			.where((ref) => ref.targetPath.startsWith("src/services/"))
-			.isEmpty(),
+	.facts(() => ({
+		layer_glob: [
+			[dl.name("pure"), "src/pure/**"],
+			[dl.name("services"), "src/services/**"],
+			[dl.name("server"), "src/server/**"],
+		],
+		allowed: [
+			[dl.name("server"), dl.name("services")],
+			[dl.name("server"), dl.name("pure")],
+		],
 	}))
-	.message((value, ctx) => {
-		if (ctx.assertion_id === "imports") {
-			return `Pure module import violation in ${value.fromPath}`;
+	.program(dl`
+		Decl layer_glob(Layer, Pattern) descr [extensional()].
+		Decl allowed(From, To) descr [extensional()].
+		Decl layer(File, Layer).
+		layer(File, Layer) :- module(File), layer_glob(Layer, Pattern), glob(File, Pattern).
+		Decl violation(Imp, From, To, FromLayer, ToLayer).
+		violation(Imp, From, To, FromLayer, ToLayer) :-
+			import_edge(Imp, From, To, _), import_internal(Imp), import_runtime(Imp),
+			layer(From, FromLayer), layer(To, ToLayer), FromLayer != ToLayer,
+			!allowed(FromLayer, ToLayer).
+	`)
+	.report("violation")
+	.message((row) => `Layer ${row.FromLayer} must not import layer ${row.ToLayer} (${row.From} -> ${row.To})`);
+```
+
+Caveats:
+
+- each `.facts()` relation must have a `Decl` with `descr [extensional()]`, and every tuple must match its arity
+- the program cannot add clauses to an extensional predicate
+- `row.FromLayer` is `"/pure"`: name constants keep their leading slash in `message()`
+- add `.expectNonEmpty("layer")` to fail the rule when the globs stop matching any module
+
+## 4. Ambient sources
+
+Core code reads neither the clock nor the environment, directly or through what it imports:
+
+```
+Decl impure_core(File, Source).
+impure_core(File, Source) :- module(File), glob(File, "src/core/**"), module_reaches_ambient(File, Source).
+```
+
+Environment variables are read only in the config module, and never with a dynamic key:
+
+```
+Decl env_outside_config(Site, Key, File).
+env_outside_config(Site, Key, File) :-
+	ambient_use(Site, /env, _, File), ambient_key(Site, Key), File != "src/server/config.ts".
+
+Decl env_dynamic(Site, File).
+env_dynamic(Site, File) :- ambient_use(Site, /env, _, File), ambient_dynamic(Site).
+```
+
+A pure function must not reach the clock through any call chain:
+
+```
+Decl clock_in_pure(Fn, Name).
+clock_in_pure(Fn, Name) :- fn(Fn, File, Name), glob(File, "src/pure/**"), fn_reaches_ambient(Fn, /clock).
+```
+
+One rule can report several predicates. `ctx.assertion_id` tells `message()` which predicate the row comes from, and the row keys are the `Decl` argument names of that predicate:
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+export default rule("arch.ambient")
+	.version(1)
+	.program(dl`
+		Decl env_outside_config(Site, Key, File).
+		env_outside_config(Site, Key, File) :-
+			ambient_use(Site, /env, _, File), ambient_key(Site, Key), File != "src/server/config.ts".
+
+		Decl env_dynamic(Site, File).
+		env_dynamic(Site, File) :- ambient_use(Site, /env, _, File), ambient_dynamic(Site).
+
+		Decl clock_in_pure(Fn, Name).
+		clock_in_pure(Fn, Name) :- fn(Fn, File, Name), glob(File, "src/pure/**"), fn_reaches_ambient(Fn, /clock).
+	`)
+	.report("env_outside_config", "env_dynamic", "clock_in_pure")
+	.message((row, ctx) => {
+		switch (ctx.assertion_id) {
+			case "env_outside_config":
+				return `Read environment variable ${row.Key} only in src/server/config.ts`;
+			case "env_dynamic":
+				return `Dynamic environment access in ${row.File}`;
+			default:
+				return `Pure function ${row.Name} reads the clock`;
 		}
-		return `Pure module type-reference violation in ${value.filePath}`;
 	});
 ```
 
-Caveat:
+Caveats:
 
-- make sure `message()` can handle the value shape for every named assertion it serves
+- the built-in sources are `/clock` and `/env`. `docs/api.md` gives their matchers.
+- a use inside an anonymous callback belongs to the nearest enclosing collected function, so `fn_reaches_ambient` sees it
+- a use at module scope has no `site_in_fn` row. `module_uses_ambient` and `module_reaches_ambient` see it, `fn_reaches_ambient` does not.
+- aliases such as `const env = process.env` are recorded as a dynamic use, because the whole object escapes
 
-## 7. Config-driven rule with setup and caveats
+## 5. Required import
 
-Use Zod config plus a setup phase that reads the workspace:
+Every server module must import `server-only`:
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+export default rule("arch.server-only")
+	.version(1)
+	.program(dl`
+		Decl server_module(File).
+		server_module(File) :- module(File), glob(File, "src/server/**").
+
+		Decl imports_marker(File).
+		imports_marker(File) :- import_edge(_, File, "server-only", _).
+
+		Decl missing_marker(File).
+		missing_marker(File) :- server_module(File), !imports_marker(File).
+	`)
+	.report("missing_marker")
+	.expectNonEmpty("server_module")
+	.message((row) => `${row.File} must import "server-only"`);
+```
+
+Caveats:
+
+- every variable in a negated atom must be bound by an earlier positive atom, and `_` is not allowed in a negated atom. Put the pattern with `_` in a helper predicate (`imports_marker`) and negate the helper.
+- `glob` cannot be negated. To express "not in a directory", define a helper predicate that uses `glob` and negate the helper.
+- `.expectNonEmpty("server_module")` produces a `premise` error if the glob matches no module, so the rule cannot pass because of a wrong path
+
+## 6. Config and setup
+
+`setup()` runs in Node and can read the workspace. Its output goes to `.facts()` and `.program()` as `setup`:
 
 ```ts
 import { z } from "zod";
 
-import { functions, rule } from "@lintai/sdk";
+import { dl, rule } from "@lintai/sdk";
 
 export const config = z.object({
 	denyListFile: z.string().default("lintai-deny-list.json"),
@@ -170,47 +229,93 @@ export default rule("arch.no-banned-functions")
 		const file = path.join(workspaceRoot, env.denyListFile);
 		return JSON.parse(fs.readFileSync(file, "utf8")) as string[];
 	})
-	.assert(({ setup }) =>
-		functions().where((fn) => setup.includes(fn.name)).isEmpty(),
-	)
-	.message((fn) => `${fn.name} is banned by repository policy`);
+	.facts(({ setup }) => ({
+		banned: setup.map((name) => [name]),
+	}))
+	.program(dl`
+		Decl banned(Name) descr [extensional()].
+		Decl violation(Fn, Name).
+		violation(Fn, Name) :- fn(Fn, _, Name), banned(Name).
+	`)
+	.report("violation")
+	.message((row) => `${row.Name} is banned by repository policy`);
 ```
 
 Caveats:
 
 - `config` is validated before `setup()` runs
 - `setup()` output must be JSON-serializable
-- `setup()` is the right place for filesystem reads; `assert()` is not
-- keep top-level rule-module imports pure-safe and load setup-only Node built-ins with `require(...)`
+- `setup()` is the place for filesystem reads. `.facts()`, `.program()` and `.message()` run in the pure runtime.
+- keep top-level rule-module imports pure-safe, and load setup-only Node built-ins with `require(...)`
+- send data to the program through `.facts()`, not through string interpolation of many values
 
-## 8. Direct `import.meta` access rule and caveats
+## 7. Direct `import.meta` access
 
-Reject direct environment reads in browser code:
+Reject direct `import.meta.env` reads outside one module:
 
 ```ts
-import { accesses, rule } from "@lintai/sdk";
+import { dl, rule } from "@lintai/sdk";
 
 export default rule("arch.no-direct-import-meta-env")
 	.version(1)
-	.assert(() =>
-		accesses()
-			.in("src/**")
-			.where(
-				(access) =>
-					access.accessPath === "import.meta.env" &&
-					access.filePath !== "src/platform/env.ts",
-			)
-			.isEmpty(),
-	)
-	.message((access) => `${access.filePath} must not read ${access.accessPath} directly`);
+	.program(dl`
+		Decl violation(Acc, File).
+		violation(Acc, File) :-
+			meta_access(Acc, File, "import.meta.env"), glob(File, "src/**"), File != "src/platform/env.ts".
+	`)
+	.report("violation")
+	.message((row) => `${row.File} must not read import.meta.env directly`);
 ```
 
 Caveats:
 
-- access extraction is semantic, so strings and comments containing `import.meta.env` do not match
-- access entities are bounded to the root plus first member, so `import.meta.env.API_URL` is represented as `import.meta.env`
+- extraction is semantic, so strings and comments that contain `import.meta.env` do not match
+- the access path stops at the first member, so `import.meta.env.API_URL` is recorded as `import.meta.env`
+- `site_in_fn(Acc, Fn)` gives the enclosing function of the access
 
-## 9. ESLint integration example and caveats
+## 8. Explanations
+
+`--explain` (with `--json`) attaches a proof to each violation. The first line is the reported fact. The lines that follow are the premises, depth first:
+
+```json
+"explanation": [
+  "violation(\"src/pure/helper.ts::function::loadValue\",\"loadValue\")",
+  "fn(\"src/pure/helper.ts::function::loadValue\",\"src/pure/helper.ts\",\"loadValue\")",
+  "glob(\"src/pure/helper.ts\",\"src/pure/**\")",
+  "calls_reach(\"src/pure/helper.ts::function::loadValue\",\"src/services/fetchData.ts::function::fetchData\")",
+  "call_edge(\"src/pure/helper.ts::function::loadValue::calls::src/services/fetchData.ts::function::fetchData\",\"src/pure/helper.ts::function::loadValue\",\"src/services/fetchData.ts::function::fetchData\")",
+  "fn_awaits(\"src/services/fetchData.ts::function::fetchData\")"
+]
+```
+
+Caveats:
+
+- when there are several proofs, LintAI shows the shortest one
+- a negated premise has a `!` prefix
+- the ESLint path never computes explanations
+
+## 9. Test a rule with planted violations
+
+Put a small workspace next to your rules that contains each violation that you want to catch, and assert the exact set of diagnostics. If a change to a rule, to the prelude or to extraction adds or loses a violation, the test fails. `cmd/lintai/main_test.go` uses this pattern for the fixture rules in `testdata/fixtures/rules/`:
+
+```go
+args := []string{
+	"--json", "--explain",
+	"--repo-root", repoRoot,
+	"--workspace-root", filepath.Join(repoRoot, "testdata/fixtures/workspace"),
+	"--rules", filepath.Join(repoRoot, "testdata/fixtures/rules/*.ts"),
+}
+```
+
+The test compares a sorted list of `rule_id assertion_id file:line` strings with an exact expected list. It also runs the CLI two times and requires byte-identical output.
+
+To see the facts that a rule sees, use `lintai facts`:
+
+```sh
+pnpm exec lintai facts --workspace-root testdata/fixtures/workspace --relation call_edge --relation fn_awaits
+```
+
+## 10. ESLint integration
 
 ```js
 import lintai from "@lintai/eslint-plugin";
@@ -226,6 +331,7 @@ export default [
 				"error",
 				{
 					rules: ["lintai-rules/**/*.ts"],
+					factLimit: 1000000,
 				},
 			],
 			"@lintai/no-ambient-in-pure-phase": "error",
@@ -240,3 +346,4 @@ Caveats:
 
 - include `lintai-rules/**/*.ts` if you want ESLint to lint the rule files themselves
 - the architecture rule reports diagnostics on target source files, not on the rule file that produced them
+- `factLimit` is optional. The default is 5,000,000 derived facts for each rule.

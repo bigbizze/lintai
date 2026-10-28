@@ -107,6 +107,7 @@ test("serve initialization failure falls back to oneshot mode", () => {
 	const child = createTestProcess();
 	const warnings: string[] = [];
 	let oneshotCalls = 0;
+	let oneshotArgs: string[] = [];
 	const oneshotDiagnostics: Diagnostic[] = [
 		{
 			rule_id: "arch.fallback",
@@ -129,6 +130,7 @@ test("serve initialization failure falls back to oneshot mode", () => {
 				repoRoot: "/repo",
 				workspaceRoot: "/workspace",
 				rules: ["lintai-rules/**/*.ts"],
+				factLimit: 1234,
 			},
 			"/repo",
 		),
@@ -143,8 +145,9 @@ test("serve initialization failure falls back to oneshot mode", () => {
 						message: "initialize exploded",
 					},
 				}),
-			spawnSync: () => {
+			spawnSync: (_command, args) => {
 				oneshotCalls += 1;
+				oneshotArgs = [...args];
 				return {
 					stdout: JSON.stringify(oneshotDiagnostics),
 					stderr: "",
@@ -159,6 +162,7 @@ test("serve initialization failure falls back to oneshot mode", () => {
 	assert.deepEqual(client.getDiagnostics("src/fallback.ts"), oneshotDiagnostics);
 	assert.deepEqual(client.getDiagnostics("src/fallback.ts"), oneshotDiagnostics);
 	assert.equal(oneshotCalls, 1);
+	assert.equal(oneshotArgs[oneshotArgs.indexOf("--fact-limit") + 1], "1234");
 	assert.match(warnings.join("\n"), /falling back to oneshot mode/);
 	client.dispose();
 });

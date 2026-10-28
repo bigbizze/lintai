@@ -1,3 +1,5 @@
+> **Superseded:** sections 4 (`.assert`) and 7 (assertion lowering) are superseded by [`architectural-enforcement-v0.2-datalog.md`](architectural-enforcement-v0.2-datalog.md).
+
 # DRAFT — Architectural Enforcement v1 Specification
 
 > **Draft status:** This document is intentionally incomplete. Many details are still underspecified, and several internal contracts are left softer than they should be for a final implementation spec. The purpose of this draft is to lock the current **v1 philosophy and external contract** while honestly recording the places where the internal design still needs hardening.

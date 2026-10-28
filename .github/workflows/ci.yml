@@ -36,11 +36,11 @@ jobs:
       - name: Build host npm binary
         run: pnpm build:npm-binary:host
 
+      - name: SDK tests
+        run: pnpm --filter @lintai/sdk test
+
       - name: ESLint plugin tests
         run: pnpm --filter @lintai/eslint-plugin test
 
       - name: npm smoke
         run: pnpm smoke:npm
-
-      - name: Fixture CLI
-        run: go run ./cmd/lintai --json --repo-root . --workspace-root testdata/fixtures/workspace --rules 'testdata/fixtures/rules/*.ts'

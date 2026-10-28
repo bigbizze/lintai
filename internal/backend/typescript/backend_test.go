@@ -20,10 +20,6 @@ func TestBuildSnapshotExposesStableFunctionKeysAndCalls(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(snapshot.FunctionsByKey) != len(snapshot.Functions) {
-		t.Fatalf("expected FunctionsByKey to cover all functions, got %d keys for %d functions", len(snapshot.FunctionsByKey), len(snapshot.Functions))
-	}
-
 	for _, fn := range snapshot.Functions {
 		if strings.Contains(fn.SemanticKey, "@") {
 			t.Fatalf("expected stable semantic key without position marker, got %q", fn.SemanticKey)
@@ -137,13 +133,6 @@ export function mirror(config: LocalConfig): DbConfig {
 	snapshot, err := New().BuildSnapshot(context.Background(), root, root)
 	if err != nil {
 		t.Fatal(err)
-	}
-
-	if !New().Capabilities().SupportsQueryKind("typeRefs") {
-		t.Fatal("expected backend to advertise typeRefs query support")
-	}
-	if !New().Capabilities().SupportsQueryKind("accesses") {
-		t.Fatal("expected backend to advertise accesses query support")
 	}
 
 	var dbFnFound bool

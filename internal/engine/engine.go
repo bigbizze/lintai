@@ -2,16 +2,21 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+
+	"codeberg.org/TauCeti/mangle-go/factstore"
+	"github.com/bigbizze/lintai/internal/analysis"
 
 	"github.com/bigbizze/lintai/internal/backend"
 	"github.com/bigbizze/lintai/internal/bundle"
 	"github.com/bigbizze/lintai/internal/canonical"
 	"github.com/bigbizze/lintai/internal/diagnostics"
-	"github.com/bigbizze/lintai/internal/query"
+	"github.com/bigbizze/lintai/internal/facts"
 	"github.com/bigbizze/lintai/internal/runtime"
 	"github.com/bmatcuk/doublestar/v4"
 )
@@ -23,6 +28,8 @@ type Options struct {
 	RuleGlobs     []string
 	Env           map[string]any
 	Severity      diagnostics.Severity
+	FactLimit     int
+	Explain       bool
 }
 
 type Result struct {
@@ -33,6 +40,10 @@ type Result struct {
 
 type Engine struct {
 	backend backend.Backend
+
+	mu            sync.Mutex
+	cachedVersion string
+	cachedStore   factstore.ReadOnlyFactStore
 }
 
 func New(selectedBackend backend.Backend) *Engine {
@@ -66,12 +77,18 @@ func (e *Engine) Analyze(ctx context.Context, options Options) (Result, error) {
 		return result, nil
 	}
 
+	bundleDir, err := os.MkdirTemp("", "lintai-bundle-*")
+	if err != nil {
+		return Result{}, err
+	}
+	defer os.RemoveAll(bundleDir)
+
 	assetRoot := options.AssetRoot
 	if assetRoot == "" {
 		assetRoot = options.RepoRoot
 	}
 
-	artifactsByRule, buildFailures, err := bundle.BuildAll(ctx, assetRoot, options.RepoRoot, rulePaths)
+	artifactsByRule, buildFailures, err := bundle.BuildAll(ctx, assetRoot, options.RepoRoot, bundleDir, rulePaths)
 	if err != nil {
 		for _, rulePath := range rulePaths {
 			if _, failed := buildFailures[rulePath]; failed {
@@ -111,6 +128,7 @@ func (e *Engine) Analyze(ctx context.Context, options Options) (Result, error) {
 		allDiagnostics = append(allDiagnostics, errorDiagnostic(ruleIDForPrepareFailure(rulePath, prepareErr), "setup", prepareErr.RuleVersion, snapshot.Version, e.backend.ID(), prepareErr.Message, options.Severity))
 	}
 
+	var base factstore.ReadOnlyFactStore
 	for _, rulePath := range rulePaths {
 		artifacts, built := artifactsByRule[rulePath]
 		if !built {
@@ -120,64 +138,69 @@ func (e *Engine) Analyze(ctx context.Context, options Options) (Result, error) {
 		if !ready {
 			continue
 		}
-
-		provisional := make([]diagnostics.Diagnostic, 0)
+		fail := func(ruleID, phase string, ruleVersion int, message string) {
+			allDiagnostics = append(allDiagnostics, errorDiagnostic(ruleID, phase, ruleVersion, snapshot.Version, e.backend.ID(), message, options.Severity))
+		}
 		if _, err := canonical.Marshal(prepared.Setup); err != nil {
-			allDiagnostics = append(allDiagnostics, errorDiagnostic(prepared.RuleID, "setup", prepared.RuleVersion, snapshot.Version, e.backend.ID(), err.Error(), options.Severity))
+			fail(prepared.RuleID, "setup", prepared.RuleVersion, err.Error())
 			continue
 		}
 		pureCode, err := os.ReadFile(artifacts.PureBundlePath)
 		if err != nil {
-			allDiagnostics = append(allDiagnostics, errorDiagnostic(prepared.RuleID, "bundle", prepared.RuleVersion, snapshot.Version, e.backend.ID(), err.Error(), options.Severity))
+			fail(prepared.RuleID, "bundle", prepared.RuleVersion, err.Error())
 			continue
 		}
 		loadedRule, err := runtime.LoadPureBundle(string(pureCode))
 		if err != nil {
-			allDiagnostics = append(allDiagnostics, errorDiagnostic(prepared.RuleID, "assert", prepared.RuleVersion, snapshot.Version, e.backend.ID(), err.Error(), options.Severity))
+			fail(prepared.RuleID, "program", prepared.RuleVersion, err.Error())
 			continue
 		}
-		assertions, err := loadedRule.BuildAssertions(prepared.Env, prepared.Setup)
+		ruleID := loadedRule.RuleID()
+		ruleVersion := loadedRule.RuleVersion()
+		output, err := loadedRule.Program(prepared.Env, prepared.Setup)
 		if err != nil {
-			allDiagnostics = append(allDiagnostics, errorDiagnostic(loadedRule.RuleID(), "assert", loadedRule.RuleVersion(), snapshot.Version, e.backend.ID(), err.Error(), options.Severity))
+			fail(ruleID, "program", ruleVersion, err.Error())
 			continue
 		}
-		evaluator := query.NewEvaluator(loadedRule.Runtime(), snapshot, e.backend.Capabilities())
-		ruleFailed := false
-		for _, assertion := range assertions {
-			matches, err := evaluator.EvaluateAssertion(assertion)
+		if base == nil {
+			base, err = e.baseFacts(snapshot)
 			if err != nil {
-				allDiagnostics = append(allDiagnostics, errorDiagnostic(loadedRule.RuleID(), "query_resolution", loadedRule.RuleVersion(), snapshot.Version, e.backend.ID(), err.Error(), options.Severity))
+				return Result{}, err
+			}
+		}
+		violations, perr := evaluateProgram(base, output, loadedRule.Report(), loadedRule.ExpectNonEmpty(), evalOptions{
+			factLimit: options.FactLimit,
+			explain:   options.Explain,
+		})
+		if perr != nil {
+			fail(ruleID, perr.phase, ruleVersion, perr.Error())
+			continue
+		}
+		provisional := make([]diagnostics.Diagnostic, 0, len(violations))
+		ruleFailed := false
+		for _, item := range violations {
+			message, err := loadedRule.Message(item.row, item.predicate)
+			if err != nil {
+				fail(ruleID, "message", ruleVersion, err.Error())
 				ruleFailed = true
 				break
 			}
-			if len(matches) == 0 {
-				continue
-			}
-			for _, entity := range matches {
-				message, err := loadedRule.Message(query.EntityView(entity), assertion.AssertionID)
-				if err != nil {
-					allDiagnostics = append(allDiagnostics, errorDiagnostic(loadedRule.RuleID(), "message", loadedRule.RuleVersion(), snapshot.Version, e.backend.ID(), err.Error(), options.Severity))
-					ruleFailed = true
-					break
-				}
-				provisional = append(provisional, diagnostics.Diagnostic{
-					RuleID:         loadedRule.RuleID(),
-					AssertionID:    assertion.AssertionID,
-					DiagnosticKind: diagnostics.KindArchitectureViolation,
-					Severity:       options.Severity,
-					Message:        message,
-					SourceLocation: query.DiagnosticLocation(entity),
-					EntityIdentity: query.DiagnosticIdentity(entity),
-					Provenance: diagnostics.Provenance{
-						SnapshotVersion: snapshot.Version,
-						RuleVersion:     loadedRule.RuleVersion(),
-						BackendID:       e.backend.ID(),
-					},
-				})
-			}
-			if ruleFailed {
-				break
-			}
+			location := item.location
+			provisional = append(provisional, diagnostics.Diagnostic{
+				RuleID:         ruleID,
+				AssertionID:    item.predicate,
+				DiagnosticKind: diagnostics.KindArchitectureViolation,
+				Severity:       options.Severity,
+				Message:        message,
+				SourceLocation: &location,
+				EntityIdentity: &diagnostics.EntityIdentity{SemanticKey: item.anchor},
+				Provenance: diagnostics.Provenance{
+					SnapshotVersion: snapshot.Version,
+					RuleVersion:     ruleVersion,
+					BackendID:       e.backend.ID(),
+				},
+				Explanation: item.explanation,
+			})
 		}
 		if ruleFailed {
 			continue
@@ -189,21 +212,66 @@ func (e *Engine) Analyze(ctx context.Context, options Options) (Result, error) {
 	return result, nil
 }
 
+// baseFacts returns the base fact store for a snapshot. The store is cached
+// by snapshot version and rebuilt when the snapshot changes.
+func (e *Engine) baseFacts(snapshot *analysis.Snapshot) (factstore.ReadOnlyFactStore, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.cachedStore != nil && e.cachedVersion == snapshot.Version {
+		return e.cachedStore, nil
+	}
+	store, err := facts.FromSnapshot(snapshot)
+	if err != nil {
+		return nil, err
+	}
+	e.cachedVersion = snapshot.Version
+	e.cachedStore = store
+	return store, nil
+}
+
 func sortDiagnostics(allDiagnostics []diagnostics.Diagnostic) {
-	sort.Slice(allDiagnostics, func(left, right int) bool {
-		lf := ""
-		rf := ""
-		if allDiagnostics[left].SourceLocation != nil {
-			lf = allDiagnostics[left].SourceLocation.File
-		}
-		if allDiagnostics[right].SourceLocation != nil {
-			rf = allDiagnostics[right].SourceLocation.File
-		}
-		if lf == rf {
-			return allDiagnostics[left].RuleID < allDiagnostics[right].RuleID
-		}
-		return lf < rf
+	sort.SliceStable(allDiagnostics, func(left, right int) bool {
+		return compareDiagnostics(allDiagnostics[left], allDiagnostics[right]) < 0
 	})
+}
+
+func compareDiagnostics(left, right diagnostics.Diagnostic) int {
+	var leftLocation, rightLocation diagnostics.SourceLocation
+	if left.SourceLocation != nil {
+		leftLocation = *left.SourceLocation
+	}
+	if right.SourceLocation != nil {
+		rightLocation = *right.SourceLocation
+	}
+	if c := strings.Compare(leftLocation.File, rightLocation.File); c != 0 {
+		return c
+	}
+	if c := leftLocation.StartLine - rightLocation.StartLine; c != 0 {
+		return c
+	}
+	if c := leftLocation.StartColumn - rightLocation.StartColumn; c != 0 {
+		return c
+	}
+	if c := strings.Compare(left.RuleID, right.RuleID); c != 0 {
+		return c
+	}
+	if c := strings.Compare(left.AssertionID, right.AssertionID); c != 0 {
+		return c
+	}
+	leftAnchor, rightAnchor := "", ""
+	if left.EntityIdentity != nil {
+		leftAnchor = left.EntityIdentity.SemanticKey
+	}
+	if right.EntityIdentity != nil {
+		rightAnchor = right.EntityIdentity.SemanticKey
+	}
+	if c := strings.Compare(leftAnchor, rightAnchor); c != 0 {
+		return c
+	}
+	if c := strings.Compare(left.Phase, right.Phase); c != 0 {
+		return c
+	}
+	return strings.Compare(left.Message, right.Message)
 }
 
 func ruleIDForPrepareFailure(rulePath string, prepareErr bundle.PrepareError) string {
@@ -245,6 +313,9 @@ func discoverRulePaths(root string, patterns []string) ([]string, error) {
 		matches, err := doublestar.Glob(os.DirFS(prefix), glob)
 		if err != nil {
 			return nil, err
+		}
+		if len(matches) == 0 {
+			return nil, fmt.Errorf("rule glob %q matched no files (relative globs resolve from the workspace root %s)", pattern, root)
 		}
 		for _, match := range matches {
 			discovered[filepath.Join(prefix, filepath.FromSlash(match))] = struct{}{}

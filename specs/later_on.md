@@ -12,6 +12,8 @@
 
 ## 1. Exact internal query representation
 
+**Resolved by `specs/architectural-enforcement-v0.2-datalog.md`:** rules are Mangle Datalog programs over base relations, evaluated in Go.
+
 ### Why deferred
 The public query API direction is clearer than the final internal representation. The host should probably own structured plans/handles rather than rely only on JS closures, but the exact node model, compilation path, and introspection surface are not yet frozen.
 
@@ -194,6 +196,8 @@ Open questions include:
 
 ## 15. Query vocabulary completeness
 
+**Resolved by `specs/architectural-enforcement-v0.2-datalog.md`:** the vocabulary is the base relations plus the prelude, and rules define their own predicates.
+
 ### Why deferred
 The current examples strongly indicate the intended style, but the full standard library of query methods is not frozen.
 
@@ -203,6 +207,8 @@ The current examples strongly indicate the intended style, but the full standard
 ---
 
 ## 16. Rich explainability features
+
+**Resolved by `specs/architectural-enforcement-v0.2-datalog.md`:** `--explain` attaches the Mangle proof of each violation to JSON diagnostics.
 
 ### Why deferred
 It is plausible that users will want:
