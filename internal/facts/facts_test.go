@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"codeberg.org/TauCeti/mangle-go/ast"
+	"github.com/bigbizze/lintai/internal/backend"
 	"github.com/bigbizze/lintai/internal/backend/typescript"
 	"github.com/bigbizze/lintai/internal/facts"
 )
@@ -34,7 +35,7 @@ func TestFixtureFactsHaveLocationsAndAreDeterministic(t *testing.T) {
 	}
 	workspaceRoot := filepath.Join(repoRoot, "testdata/fixtures/workspace")
 	build := func() string {
-		snapshot, err := typescript.New().BuildSnapshot(context.Background(), workspaceRoot, workspaceRoot, nil)
+		snapshot, err := typescript.New().BuildSnapshot(context.Background(), workspaceRoot, workspaceRoot, backend.SnapshotOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}

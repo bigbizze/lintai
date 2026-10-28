@@ -104,6 +104,7 @@ func TestExitCodes(t *testing.T) {
 		{"violations", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--rules", rule("layers.ts")}, exitViolations},
 		{"clean", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--rules", rule("layers.ts"), "--exclude", "src/pure/**"}, exitClean},
 		{"unknown flag", []string{"--no-such-flag"}, exitUsage},
+		{"bad file scope", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--rules", rule("layers.ts"), "--files", "all"}, exitUsage},
 		{"glob matches nothing", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--rules", "missing/*.ts"}, exitUsage},
 		{"unknown relation", []string{"facts", "--workspace-root", workspace, "--relation", "no_such_relation"}, exitUsage},
 		{"facts accepts --asset-root", []string{"facts", "--workspace-root", workspace, "--relation", "module", "--asset-root", repoRoot}, exitClean},

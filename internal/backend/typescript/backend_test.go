@@ -7,6 +7,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/bigbizze/lintai/internal/backend"
 )
 
 func TestBuildSnapshotExposesStableFunctionKeysAndCalls(t *testing.T) {
@@ -16,7 +18,7 @@ func TestBuildSnapshotExposesStableFunctionKeysAndCalls(t *testing.T) {
 	}
 	workspaceRoot := filepath.Join(repoRoot, "testdata/fixtures/workspace")
 
-	snapshot, err := New().BuildSnapshot(context.Background(), repoRoot, workspaceRoot, nil)
+	snapshot, err := New().BuildSnapshot(context.Background(), repoRoot, workspaceRoot, backend.SnapshotOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +133,7 @@ export function mirror(config: LocalConfig): DbConfig {
 }
 `)
 
-	snapshot, err := New().BuildSnapshot(context.Background(), root, root, nil)
+	snapshot, err := New().BuildSnapshot(context.Background(), root, root, backend.SnapshotOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +230,7 @@ func TestBuildSnapshotExposesImportMetaAccessesAndIgnoresStrings(t *testing.T) {
 }
 `)
 
-	snapshot, err := New().BuildSnapshot(context.Background(), root, root, nil)
+	snapshot, err := New().BuildSnapshot(context.Background(), root, root, backend.SnapshotOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,7 +280,7 @@ export function a() {
 }
 `)
 
-	snapshot, err := New().BuildSnapshot(context.Background(), root, root, nil)
+	snapshot, err := New().BuildSnapshot(context.Background(), root, root, backend.SnapshotOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

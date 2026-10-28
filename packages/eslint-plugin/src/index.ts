@@ -35,6 +35,9 @@ const architectureBridge: Rule.RuleModule = {
 						type: "array",
 						items: { type: "string" },
 					},
+					files: {
+						enum: ["tsconfig", "walk"],
+					},
 					env: { type: "object" },
 					factLimit: { type: "integer", minimum: 1 },
 				},
