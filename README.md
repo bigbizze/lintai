@@ -222,5 +222,6 @@ pnpm smoke:npm
 Contributor caveats:
 
 - the npm launcher package is `@lintai/cli`, but the executable is still `lintai`
-- source builds pin a public fork of `typescript-go` through `go.mod`; you do not need a local fork checkout
+- source builds pin `bigbizze/typescript-go` (TypeScript v7.1-beta `tsc` plus the `lintaiapi` adapter) through `go.mod`; you do not need a local fork checkout
+- source builds need Go 1.27.3 or later
 - publishing requires npm auth and the `@lintai` scope

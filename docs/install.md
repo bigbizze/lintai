@@ -155,7 +155,8 @@ go test ./...
 Useful source-build caveats:
 
 - `@lintai/cli` is the npm launcher package, but the repo-root Go binary is still built from `./cmd/lintai`
-- source builds use the public pinned `typescript-go` fork declared in `go.mod`; no local fork checkout is required
+- source builds use the pinned `bigbizze/typescript-go` fork declared in `go.mod` (TypeScript v7.1-beta `tsc` plus the `lintaiapi` adapter); no local fork checkout is required
+- source builds need Go 1.27.3 or later
 - npm packaging smoke tests use:
   - `pnpm build:dist`
   - `pnpm smoke:npm`
