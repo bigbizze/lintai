@@ -2,6 +2,7 @@ package engine_test
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -73,5 +74,66 @@ func TestExternalBackendComposesMixedFacts(t *testing.T) {
 	}
 	if item.Provenance.BackendID != "mixed-fixture" || item.Provenance.SnapshotVersion == "" {
 		t.Fatalf("expected mixed backend provenance, got %+v", item.Provenance)
+	}
+}
+
+type genericFactsBackend struct{}
+
+func (genericFactsBackend) ID() string { return "generic-fixture" }
+
+func (genericFactsBackend) BuildSnapshot(context.Context, string, string, []string) (facts.Snapshot, error) {
+	return facts.Snapshot{
+		Version: "generic-fixture-v1",
+		Schema: facts.Schema{Declarations: `
+Decl location(Entity, File, StartLine, StartColumn, EndLine, EndColumn)
+  descr [extensional()].
+Decl generic_resource(Resource)
+  descr [extensional()].
+`},
+		Facts: []facts.Fact{
+			{Relation: facts.LocationRelation, Values: []facts.Value{facts.String("generic:item"), facts.String("src/item.go"), facts.Number(1), facts.Number(1), facts.Number(1), facts.Number(2)}},
+			{Relation: "generic_resource", Values: []facts.Value{facts.String("generic:item")}},
+		},
+	}, nil
+}
+
+func TestGenericBackendEvaluatesRulesWithoutGlobDeclaration(t *testing.T) {
+	repoRoot, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceRoot := t.TempDir()
+	rulePath := filepath.Join(workspaceRoot, "lintai-rules", "generic.ts")
+	if err := os.MkdirAll(filepath.Dir(rulePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rulePath, []byte(`import { dl, rule } from "@lintai/sdk";
+export default rule("fixture.generic-backend").version(1)
+	.program(dl`+"`"+`Decl violation(Resource). violation(Resource) :- generic_resource(Resource).`+"`"+`)
+	.report("violation").message((row) => String(row.Resource));
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := engine.New(genericFactsBackend{}).Analyze(context.Background(), engine.Options{
+		RepoRoot:      repoRoot,
+		AssetRoot:     filepath.Join(repoRoot, "packages/eslint-plugin"),
+		WorkspaceRoot: workspaceRoot,
+		RuleGlobs:     []string{"lintai-rules/**/*.ts"},
+		Env:           map[string]any{},
+		Severity:      diagnostics.SeverityError,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 1 {
+		t.Fatalf("expected one generic-backend diagnostic, got %+v", result.Diagnostics)
+	}
+	item := result.Diagnostics[0]
+	if item.DiagnosticKind != diagnostics.KindArchitectureViolation || item.RuleID != "fixture.generic-backend" {
+		t.Fatalf("expected the generic rule to evaluate successfully, got %+v", item)
+	}
+	if item.SourceLocation == nil || item.SourceLocation.File != "src/item.go" {
+		t.Fatalf("expected the generic backend location, got %+v", item.SourceLocation)
 	}
 }

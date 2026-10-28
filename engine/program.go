@@ -166,12 +166,14 @@ func runEvaluation(info *mangleanalysis.ProgramInfo, strata []mangleanalysis.Nod
 	if factLimit <= 0 {
 		factLimit = DefaultFactLimit
 	}
+	externalPredicates := make(map[ast.PredicateSym]mangleengine.ExternalPredicateCallback)
+	if decl := info.Decls[globSym]; decl != nil && decl.IsExternal() {
+		externalPredicates[globSym] = globPredicate{}
+	}
 	_, err = mangleengine.EvalStratifiedProgramWithStats(info, strata, predToStratum, store,
 		mangleengine.WithDeterministicOrder(),
 		mangleengine.WithCreatedFactLimit(factLimit),
-		mangleengine.WithExternalPredicates(map[ast.PredicateSym]mangleengine.ExternalPredicateCallback{
-			globSym: globPredicate{},
-		}),
+		mangleengine.WithExternalPredicates(externalPredicates),
 	)
 	return err
 }
