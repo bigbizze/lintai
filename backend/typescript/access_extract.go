@@ -6,8 +6,8 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/internal/analysis"
-	"github.com/bigbizze/lintai/internal/diagnostics"
 	"github.com/bigbizze/lintai/internal/workspace"
 )
 

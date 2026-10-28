@@ -8,12 +8,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bigbizze/lintai/internal/backend/typescript"
-	"github.com/bigbizze/lintai/internal/diagnostics"
+	"github.com/bigbizze/lintai/backend/typescript"
+	"github.com/bigbizze/lintai/diagnostics"
 )
 
 func TestRuleErrorPhases(t *testing.T) {
-	repoRoot, err := filepath.Abs("../..")
+	repoRoot, err := filepath.Abs("..")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,7 +132,7 @@ func TestRuleErrorPhases(t *testing.T) {
 }
 
 func TestRelativeRuleGlobsResolveFromWorkspaceRoot(t *testing.T) {
-	repoRoot, err := filepath.Abs("../..")
+	repoRoot, err := filepath.Abs("..")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +173,7 @@ func writeTestFile(t *testing.T, root, relativePath, contents string) string {
 }
 
 func TestDlStringsRoundTripThroughMangle(t *testing.T) {
-	repoRoot, err := filepath.Abs("../..")
+	repoRoot, err := filepath.Abs("..")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -12,7 +12,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bigbizze/lintai/internal/diagnostics"
+	"github.com/bigbizze/lintai/diagnostics"
 )
 
 // The fixture workspace contains planted violations of every fixture rule.

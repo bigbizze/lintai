@@ -7,16 +7,18 @@ import (
 	"slices"
 	"sort"
 
+	"github.com/bigbizze/lintai/backend"
+	"github.com/bigbizze/lintai/diagnostics"
+	"github.com/bigbizze/lintai/facts"
 	"github.com/bigbizze/lintai/internal/ambient"
 	"github.com/bigbizze/lintai/internal/analysis"
-	"github.com/bigbizze/lintai/internal/backend"
-	"github.com/bigbizze/lintai/internal/diagnostics"
-	"github.com/bigbizze/lintai/internal/facts"
 	"github.com/bigbizze/lintai/internal/workspace"
 	"github.com/microsoft/TypeScript/tsc/lintaiapi"
 )
 
 type Backend struct{}
+
+var _ backend.Backend = (*Backend)(nil)
 
 func New() *Backend {
 	return &Backend{}
@@ -26,12 +28,20 @@ func (b *Backend) ID() string {
 	return "typescript"
 }
 
-func (b *Backend) Relations() []string {
-	return facts.BaseRelations()
+// BuildSnapshot extracts the facts of the source files under workspaceRoot.
+func (b *Backend) BuildSnapshot(ctx context.Context, repoRoot, workspaceRoot string, options backend.SnapshotOptions) (facts.Snapshot, error) {
+	snapshot, err := b.buildAnalysisSnapshot(ctx, repoRoot, workspaceRoot, options)
+	if err != nil {
+		return facts.Snapshot{}, err
+	}
+	items, err := factsFromAnalysis(snapshot)
+	if err != nil {
+		return facts.Snapshot{}, err
+	}
+	return facts.Snapshot{Version: snapshot.Version, Schema: Schema(), Facts: items}, nil
 }
 
-// BuildSnapshot extracts the facts of the source files under workspaceRoot.
-func (b *Backend) BuildSnapshot(ctx context.Context, repoRoot, workspaceRoot string, options backend.SnapshotOptions) (*analysis.Snapshot, error) {
+func (b *Backend) buildAnalysisSnapshot(ctx context.Context, repoRoot, workspaceRoot string, options backend.SnapshotOptions) (*analysis.Snapshot, error) {
 	scope, err := backend.ParseFileScope(string(options.Files))
 	if err != nil {
 		return nil, err

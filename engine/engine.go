@@ -2,6 +2,8 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,14 +12,12 @@ import (
 	"sync"
 
 	"codeberg.org/TauCeti/mangle-go/factstore"
-	"github.com/bigbizze/lintai/internal/analysis"
-
-	"github.com/bigbizze/lintai/internal/backend"
-	"github.com/bigbizze/lintai/internal/bundle"
+	"github.com/bigbizze/lintai/backend"
+	"github.com/bigbizze/lintai/bundle"
+	"github.com/bigbizze/lintai/diagnostics"
+	"github.com/bigbizze/lintai/facts"
 	"github.com/bigbizze/lintai/internal/canonical"
-	"github.com/bigbizze/lintai/internal/diagnostics"
-	"github.com/bigbizze/lintai/internal/facts"
-	"github.com/bigbizze/lintai/internal/runtime"
+	"github.com/bigbizze/lintai/runtime"
 	"github.com/bmatcuk/doublestar/v4"
 )
 
@@ -64,6 +64,17 @@ func (e *Engine) Analyze(ctx context.Context, options Options) (Result, error) {
 	snapshot, err := e.backend.BuildSnapshot(ctx, options.RepoRoot, options.WorkspaceRoot, backend.SnapshotOptions{Excludes: options.Excludes, Files: options.Files})
 	if err != nil {
 		return Result{}, err
+	}
+	if err := facts.Validate(snapshot); err != nil {
+		return Result{}, fmt.Errorf("backend %q returned an invalid snapshot: %w", e.backend.ID(), err)
+	}
+	schemaDecls, prelude, err := facts.ParseSchema(snapshot.Schema)
+	if err != nil {
+		return Result{}, fmt.Errorf("backend %q schema: %w", e.backend.ID(), err)
+	}
+	base, err := e.baseFacts(snapshot)
+	if err != nil {
+		return Result{}, fmt.Errorf("backend %q facts: %w", e.backend.ID(), err)
 	}
 	rulePaths, err := discoverRulePaths(options.WorkspaceRoot, options.RuleGlobs)
 	if err != nil {
@@ -131,7 +142,6 @@ func (e *Engine) Analyze(ctx context.Context, options Options) (Result, error) {
 	}
 	result.RulesLoaded = len(preparedByRule) + len(prepareFailures)
 
-	var base factstore.ReadOnlyFactStore
 	for _, rulePath := range rulePaths {
 		artifacts, built := artifactsByRule[rulePath]
 		if !built {
@@ -165,13 +175,7 @@ func (e *Engine) Analyze(ctx context.Context, options Options) (Result, error) {
 			fail(ruleID, "program", ruleVersion, err.Error())
 			continue
 		}
-		if base == nil {
-			base, err = e.baseFacts(snapshot)
-			if err != nil {
-				return Result{}, err
-			}
-		}
-		violations, perr := evaluateProgram(base, output, loadedRule.Report(), loadedRule.ExpectNonEmpty(), evalOptions{
+		violations, perr := evaluateProgram(base, prelude, schemaDecls, output, loadedRule.Report(), loadedRule.ExpectNonEmpty(), evalOptions{
 			factLimit: options.FactLimit,
 			explain:   options.Explain,
 		})
@@ -217,19 +221,30 @@ func (e *Engine) Analyze(ctx context.Context, options Options) (Result, error) {
 
 // baseFacts returns the base fact store for a snapshot. The store is cached
 // by snapshot version and rebuilt when the snapshot changes.
-func (e *Engine) baseFacts(snapshot *analysis.Snapshot) (factstore.ReadOnlyFactStore, error) {
+func (e *Engine) baseFacts(snapshot facts.Snapshot) (factstore.ReadOnlyFactStore, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.cachedStore != nil && e.cachedVersion == snapshot.Version {
+	version := cacheVersion(snapshot)
+	if e.cachedStore != nil && e.cachedVersion == version {
 		return e.cachedStore, nil
 	}
-	store, err := facts.FromSnapshot(snapshot)
+	store, err := facts.Store(snapshot.Facts)
 	if err != nil {
 		return nil, err
 	}
-	e.cachedVersion = snapshot.Version
+	e.cachedVersion = version
 	e.cachedStore = store
 	return store, nil
+}
+
+func cacheVersion(snapshot facts.Snapshot) string {
+	hash := sha256.New()
+	hash.Write([]byte(snapshot.Version))
+	hash.Write([]byte{0})
+	hash.Write([]byte(snapshot.Schema.Declarations))
+	hash.Write([]byte{0})
+	hash.Write([]byte(snapshot.Schema.Prelude))
+	return hex.EncodeToString(hash.Sum(nil))
 }
 
 func sortDiagnostics(allDiagnostics []diagnostics.Diagnostic) {

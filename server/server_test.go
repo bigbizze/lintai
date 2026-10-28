@@ -6,22 +6,31 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"reflect"
 	"strconv"
 	"testing"
 
-	"github.com/bigbizze/lintai/internal/diagnostics"
-	"github.com/bigbizze/lintai/internal/engine"
-	"github.com/bigbizze/lintai/internal/jsonrpc"
+	"github.com/bigbizze/lintai/diagnostics"
+	"github.com/bigbizze/lintai/engine"
+	"github.com/bigbizze/lintai/jsonrpc"
 )
 
 type fakeAnalyzer struct {
 	results []engine.Result
 	err     error
+	errors  []error
 	calls   []engine.Options
 }
 
 func (f *fakeAnalyzer) Analyze(_ context.Context, options engine.Options) (engine.Result, error) {
 	f.calls = append(f.calls, options)
+	if len(f.errors) > 0 {
+		err := f.errors[0]
+		f.errors = f.errors[1:]
+		if err != nil {
+			return engine.Result{}, err
+		}
+	}
 	if f.err != nil {
 		return engine.Result{}, f.err
 	}
@@ -182,6 +191,89 @@ func TestServerReanalyzeSwapsCachedState(t *testing.T) {
 	decodeResult(t, fileResponse.Result, &fileResult)
 	if len(fileResult.Diagnostics) != 1 || fileResult.Diagnostics[0].RuleID != "arch.second" {
 		t.Fatalf("expected refreshed diagnostics, got %+v", fileResult.Diagnostics)
+	}
+}
+
+func TestServerFailedRefreshInvalidatesDiagnosticsUntilRetry(t *testing.T) {
+	analyzer := &fakeAnalyzer{
+		errors: []error{nil, io.ErrUnexpectedEOF, nil},
+		results: []engine.Result{
+			{
+				SnapshotVersion: "snap-1",
+				Diagnostics: []diagnostics.Diagnostic{{
+					RuleID:  "arch.initial",
+					Message: "initial",
+					SourceLocation: &diagnostics.SourceLocation{
+						File: "src/example.ts",
+					},
+				}},
+			},
+			{
+				SnapshotVersion: "snap-2",
+				Diagnostics: []diagnostics.Diagnostic{{
+					RuleID:  "arch.retried",
+					Message: "retried",
+					SourceLocation: &diagnostics.SourceLocation{
+						File: "src/example.ts",
+					},
+				}},
+			},
+		},
+	}
+	input := &bytes.Buffer{}
+	writeRequest(t, input, 1, "initialize", InitializeParams{
+		RepoRoot:      "/repo",
+		AssetRoot:     "/assets",
+		WorkspaceRoot: "/workspace",
+		RuleGlobs:     []string{"lintai-rules/**/*.ts"},
+		Env:           map[string]any{"mode": "test"},
+	})
+	writeRequest(t, input, 2, "diagnostics/file", FileDiagnosticsParams{File: "src/example.ts"})
+	writeRequest(t, input, 3, "reanalyze", ReanalyzeParams{Reason: "transient failure"})
+	writeRequest(t, input, 4, "diagnostics/file", FileDiagnosticsParams{File: "src/example.ts"})
+	writeRequest(t, input, 5, "reanalyze", ReanalyzeParams{Reason: "retry"})
+	writeRequest(t, input, 6, "diagnostics/file", FileDiagnosticsParams{File: "src/example.ts"})
+	output := &bytes.Buffer{}
+	if err := New(analyzer).Serve(context.Background(), input, output); err != nil {
+		t.Fatal(err)
+	}
+
+	reader := bufio.NewReader(output)
+	if response := readResponse(t, reader); response.Error != nil {
+		t.Fatalf("initialize failed: %+v", response.Error)
+	}
+	initialResponse := readResponse(t, reader)
+	if initialResponse.Error != nil {
+		t.Fatalf("initial diagnostics/file failed: %+v", initialResponse.Error)
+	}
+	var initialResult FileDiagnosticsResult
+	decodeResult(t, initialResponse.Result, &initialResult)
+	if len(initialResult.Diagnostics) != 1 || initialResult.Diagnostics[0].RuleID != "arch.initial" {
+		t.Fatalf("expected initial clean diagnostics, got %+v", initialResult.Diagnostics)
+	}
+	failedRefresh := readResponse(t, reader)
+	if failedRefresh.Error == nil || failedRefresh.Error.Message != io.ErrUnexpectedEOF.Error() {
+		t.Fatalf("expected backend refresh error to be returned, got %+v", failedRefresh.Error)
+	}
+	invalidatedResponse := readResponse(t, reader)
+	if invalidatedResponse.Error == nil || invalidatedResponse.Error.Message != "analysis results unavailable" {
+		t.Fatalf("expected diagnostics/file to fail while analysis is invalid, got %+v", invalidatedResponse.Error)
+	}
+	retryResponse := readResponse(t, reader)
+	if retryResponse.Error != nil {
+		t.Fatalf("reanalyze retry failed: %+v", retryResponse.Error)
+	}
+	fileResponse := readResponse(t, reader)
+	if fileResponse.Error != nil {
+		t.Fatalf("diagnostics/file after retry failed: %+v", fileResponse.Error)
+	}
+	var fileResult FileDiagnosticsResult
+	decodeResult(t, fileResponse.Result, &fileResult)
+	if len(fileResult.Diagnostics) != 1 || fileResult.Diagnostics[0].RuleID != "arch.retried" {
+		t.Fatalf("expected retried diagnostics, got %+v", fileResult.Diagnostics)
+	}
+	if len(analyzer.calls) != 3 || !reflect.DeepEqual(analyzer.calls[0], analyzer.calls[1]) || !reflect.DeepEqual(analyzer.calls[0], analyzer.calls[2]) {
+		t.Fatalf("expected configured options to survive failed refresh, got %+v", analyzer.calls)
 	}
 }
 
