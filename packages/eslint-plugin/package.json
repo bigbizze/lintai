@@ -28,7 +28,7 @@
 	"scripts": {
 		"build": "tsc",
 		"dev": "tsc --watch",
-		"test": "node --test dist/**/*.test.js"
+		"test": "node --test 'dist/**/*.test.js'"
 	},
 	"dependencies": {
 		"@lintai/authoring-rules": "workspace:*",
