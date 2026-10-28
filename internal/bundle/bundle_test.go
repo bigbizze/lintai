@@ -19,7 +19,7 @@ func TestBuildAllAndPrepareAllFixtureRules(t *testing.T) {
 		filepath.Join(repoRoot, "testdata/fixtures/rules/pure-no-service-imports.ts"),
 	}
 
-	artifacts, buildFailures, err := BuildAll(context.Background(), assetRoot, repoRoot, rulePaths)
+	artifacts, buildFailures, err := BuildAll(context.Background(), assetRoot, repoRoot, t.TempDir(), rulePaths)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ func TestBuildAllReportsPerRuleErrors(t *testing.T) {
 	validRule := filepath.Join(repoRoot, "testdata/fixtures/rules/pure-no-effects.ts")
 	brokenRule := writeRuleFile(t, "broken-build.ts", "export default ;\n")
 
-	artifacts, buildFailures, err := BuildAll(context.Background(), assetRoot, repoRoot, []string{validRule, brokenRule})
+	artifacts, buildFailures, err := BuildAll(context.Background(), assetRoot, repoRoot, t.TempDir(), []string{validRule, brokenRule})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ export default rule("arch.broken-setup")
 	.message(() => "broken");
 `)
 
-	artifacts, buildFailures, err := BuildAll(context.Background(), assetRoot, repoRoot, []string{validRule, brokenRule})
+	artifacts, buildFailures, err := BuildAll(context.Background(), assetRoot, repoRoot, t.TempDir(), []string{validRule, brokenRule})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +165,7 @@ import { dl, rule } from "@lintai/sdk";
 	.message(() => "broken");
 `)
 
-	artifacts, buildFailures, err := BuildAll(context.Background(), assetRoot, repoRoot, []string{rulePath})
+	artifacts, buildFailures, err := BuildAll(context.Background(), assetRoot, repoRoot, t.TempDir(), []string{rulePath})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +207,7 @@ export default rule("arch.top-level-node-import")
 	.message(() => "broken");
 `)
 
-	artifacts, buildFailures, err := BuildAll(context.Background(), assetRoot, repoRoot, []string{rulePath})
+	artifacts, buildFailures, err := BuildAll(context.Background(), assetRoot, repoRoot, t.TempDir(), []string{rulePath})
 	if err != nil {
 		t.Fatal(err)
 	}

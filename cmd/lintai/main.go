@@ -93,7 +93,7 @@ func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 	workspaceRoot := flags.String("workspace-root", ".", "workspace root to analyze")
 	repoRoot := flags.String("repo-root", ".", "repository root containing scripts and packages")
 	assetRoot := flags.String("asset-root", "", "asset root containing lintai helper scripts")
-	rules := flags.String("rules", "testdata/fixtures/rules/*.ts", "comma-separated list of rule globs")
+	rules := flags.String("rules", "lintai-rules/**/*.ts", "comma-separated list of rule globs, relative to --workspace-root")
 	envJSON := flags.String("env-json", "{}", "JSON object passed to every rule as env")
 	jsonOutput := flags.Bool("json", false, "emit diagnostics as JSON")
 	explain := flags.Bool("explain", false, "attach the proof of each violation to JSON diagnostics (requires --json)")

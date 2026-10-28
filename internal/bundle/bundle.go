@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 )
 
 type Artifacts struct {
@@ -58,33 +59,27 @@ type prepareResponse struct {
 	Error       string `json:"error,omitempty"`
 }
 
-func BuildAll(ctx context.Context, assetRoot, repoRoot string, rulePaths []string) (map[string]Artifacts, map[string]error, error) {
+// BuildAll writes the bundles of each rule to its own subdirectory of outDir.
+// The caller owns outDir and removes it when the bundles are no longer needed.
+func BuildAll(ctx context.Context, assetRoot, repoRoot, outDir string, rulePaths []string) (map[string]Artifacts, map[string]error, error) {
 	if len(rulePaths) == 0 {
 		return map[string]Artifacts{}, map[string]error{}, nil
 	}
 
 	requests := make([]buildRequest, 0, len(rulePaths))
-	itemErrors := make(map[string]error)
 	requested := make(map[string]struct{}, len(rulePaths))
-	for _, rulePath := range rulePaths {
+	for index, rulePath := range rulePaths {
 		if _, exists := requested[rulePath]; exists {
 			return nil, nil, fmt.Errorf("duplicate rule path %q", rulePath)
 		}
 		requested[rulePath] = struct{}{}
-		workDir, err := os.MkdirTemp("", "lintai-bundle-*")
-		if err != nil {
-			itemErrors[rulePath] = err
-			continue
-		}
 		requests = append(requests, buildRequest{
 			RepoRoot: repoRoot,
 			RulePath: rulePath,
-			OutDir:   workDir,
+			OutDir:   filepath.Join(outDir, strconv.Itoa(index)),
 		})
 	}
-	if len(requests) == 0 {
-		return map[string]Artifacts{}, itemErrors, nil
-	}
+	itemErrors := make(map[string]error)
 
 	payload, err := json.Marshal(requests)
 	if err != nil {

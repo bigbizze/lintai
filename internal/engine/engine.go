@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -76,12 +77,18 @@ func (e *Engine) Analyze(ctx context.Context, options Options) (Result, error) {
 		return result, nil
 	}
 
+	bundleDir, err := os.MkdirTemp("", "lintai-bundle-*")
+	if err != nil {
+		return Result{}, err
+	}
+	defer os.RemoveAll(bundleDir)
+
 	assetRoot := options.AssetRoot
 	if assetRoot == "" {
 		assetRoot = options.RepoRoot
 	}
 
-	artifactsByRule, buildFailures, err := bundle.BuildAll(ctx, assetRoot, options.RepoRoot, rulePaths)
+	artifactsByRule, buildFailures, err := bundle.BuildAll(ctx, assetRoot, options.RepoRoot, bundleDir, rulePaths)
 	if err != nil {
 		for _, rulePath := range rulePaths {
 			if _, failed := buildFailures[rulePath]; failed {
@@ -306,6 +313,9 @@ func discoverRulePaths(root string, patterns []string) ([]string, error) {
 		matches, err := doublestar.Glob(os.DirFS(prefix), glob)
 		if err != nil {
 			return nil, err
+		}
+		if len(matches) == 0 {
+			return nil, fmt.Errorf("rule glob %q matched no files (relative globs resolve from the workspace root %s)", pattern, root)
 		}
 		for _, match := range matches {
 			discovered[filepath.Join(prefix, filepath.FromSlash(match))] = struct{}{}

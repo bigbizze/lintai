@@ -237,7 +237,7 @@ Flags for analysis:
 - `--workspace-root`
 - `--repo-root`
 - `--asset-root`
-- `--rules`: a comma-separated list of globs
+- `--rules`: a comma-separated list of globs (default `lintai-rules/**/*.ts`)
 - `--env-json`: a JSON object passed to every rule as `env`
 - `--json`
 - `--explain`: with `--json`, attach `explanation` to each violation
@@ -264,6 +264,7 @@ pnpm exec lintai facts --workspace-root . --relation ambient_use --relation ambi
 CLI caveats:
 
 - relative rule globs are resolved from `workspaceRoot`
+- each rule glob must match at least one file; otherwise the run fails with an error
 - the CLI exits with status 1 when it reports an error diagnostic
 - `lintai serve` is for editor integration; it keeps the base facts of the current snapshot and rebuilds them when the snapshot changes
 
