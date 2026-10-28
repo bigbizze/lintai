@@ -10,7 +10,7 @@ import (
 	"github.com/bigbizze/lintai/internal/backend"
 	"github.com/bigbizze/lintai/internal/diagnostics"
 	"github.com/bigbizze/lintai/internal/workspace"
-	"github.com/microsoft/typescript-go/lintaiapi"
+	"github.com/microsoft/TypeScript/tsc/lintaiapi"
 )
 
 type Backend struct{}
