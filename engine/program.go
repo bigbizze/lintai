@@ -15,9 +15,9 @@ import (
 	"codeberg.org/TauCeti/mangle-go/parse"
 	"codeberg.org/TauCeti/mangle-go/provenance"
 	"codeberg.org/TauCeti/mangle-go/symbols"
-	"github.com/bigbizze/lintai/internal/diagnostics"
-	"github.com/bigbizze/lintai/internal/facts"
-	"github.com/bigbizze/lintai/internal/runtime"
+	"github.com/bigbizze/lintai/diagnostics"
+	"github.com/bigbizze/lintai/facts"
+	"github.com/bigbizze/lintai/runtime"
 	"github.com/bmatcuk/doublestar/v4"
 )
 
@@ -51,18 +51,10 @@ type evalOptions struct {
 	explain   bool
 }
 
-func evaluateProgram(base factstore.ReadOnlyFactStore, output runtime.ProgramOutput, report, expectNonEmpty []string, options evalOptions) ([]violation, *phaseError) {
-	prelude, err := facts.PreludeUnit()
-	if err != nil {
-		return nil, failPhase("program_parse", "%v", err)
-	}
+func evaluateProgram(base factstore.ReadOnlyFactStore, prelude parse.SourceUnit, schemaDecls map[ast.PredicateSym]ast.Decl, output runtime.ProgramOutput, report, expectNonEmpty []string, options evalOptions) ([]violation, *phaseError) {
 	unit, err := parse.Unit(strings.NewReader(output.Text))
 	if err != nil {
 		return nil, failPhase("program_parse", "%v", err)
-	}
-	schemaDecls, err := facts.SchemaDecls()
-	if err != nil {
-		return nil, failPhase("program_analysis", "%v", err)
 	}
 	if perr := checkReservedPredicates(unit, prelude, schemaDecls); perr != nil {
 		return nil, perr
@@ -435,7 +427,7 @@ func lookupLocation(base factstore.ReadOnlyFactStore, anchor ast.Constant) (diag
 	if anchor.Type != ast.StringType {
 		return diagnostics.SourceLocation{}, false
 	}
-	query := ast.NewQuery(ast.PredicateSym{Symbol: "location", Arity: 6})
+	query := ast.NewQuery(ast.PredicateSym{Symbol: facts.LocationRelation, Arity: 6})
 	query.Args[0] = anchor
 	var found *diagnostics.SourceLocation
 	_ = base.GetFacts(query, func(atom ast.Atom) error {

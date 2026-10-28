@@ -1,86 +1,29 @@
-package facts
+package typescript
 
 import (
 	_ "embed"
 	"fmt"
-	"slices"
-	"sort"
-	"strings"
-	"sync"
 
-	"codeberg.org/TauCeti/mangle-go/ast"
-	"codeberg.org/TauCeti/mangle-go/factstore"
-	"codeberg.org/TauCeti/mangle-go/parse"
-	"codeberg.org/TauCeti/mangle-go/symbols"
+	"github.com/bigbizze/lintai/diagnostics"
+	"github.com/bigbizze/lintai/facts"
 	"github.com/bigbizze/lintai/internal/analysis"
-	"github.com/bigbizze/lintai/internal/diagnostics"
 )
 
 //go:embed schema.mg
-var Schema string
+var schemaText string
 
 //go:embed prelude.mg
-var Prelude string
+var preludeText string
 
-type parsedSources struct {
-	schemaDecls []ast.Decl
-	prelude     parse.SourceUnit
-	err         error
+// Schema returns the declarations and prelude owned by this backend.
+func Schema() facts.Schema {
+	return facts.Schema{Declarations: schemaText, Prelude: preludeText}
 }
 
-var parsed = sync.OnceValue(func() parsedSources {
-	schema, err := parse.Unit(strings.NewReader(Schema))
-	if err != nil {
-		return parsedSources{err: fmt.Errorf("schema.mg: %w", err)}
-	}
-	prelude, err := parse.Unit(strings.NewReader(Prelude))
-	if err != nil {
-		return parsedSources{err: fmt.Errorf("prelude.mg: %w", err)}
-	}
-	return parsedSources{schemaDecls: schema.Decls, prelude: prelude}
-})
-
-// SchemaDecls returns a fresh map of the base relation declarations.
-func SchemaDecls() (map[ast.PredicateSym]ast.Decl, error) {
-	sources := parsed()
-	if sources.err != nil {
-		return nil, sources.err
-	}
-	result := make(map[ast.PredicateSym]ast.Decl, len(sources.schemaDecls))
-	for _, decl := range sources.schemaDecls {
-		if decl.DeclaredAtom.Predicate == symbols.Package || decl.DeclaredAtom.Predicate == symbols.Use {
-			continue
-		}
-		result[decl.DeclaredAtom.Predicate] = decl
-	}
-	return result, nil
-}
-
-// PreludeUnit returns the parsed prelude.
-func PreludeUnit() (parse.SourceUnit, error) {
-	sources := parsed()
-	if sources.err != nil {
-		return parse.SourceUnit{}, sources.err
-	}
-	return sources.prelude, nil
-}
-
-// BaseRelations lists the base relation names in schema order.
-func BaseRelations() []string {
-	sources := parsed()
-	names := make([]string, 0, len(sources.schemaDecls))
-	for _, decl := range sources.schemaDecls {
-		if decl.DeclaredAtom.Predicate == symbols.Package || decl.DeclaredAtom.Predicate == symbols.Use {
-			continue
-		}
-		names = append(names, decl.DeclaredAtom.Predicate.Symbol)
-	}
-	return names
-}
-
-// FromSnapshot converts a snapshot into the base relations.
-func FromSnapshot(snapshot *analysis.Snapshot) (factstore.ReadOnlyFactStore, error) {
-	b := builder{store: factstore.NewMultiIndexedArrayInMemoryStore()}
+// factsFromAnalysis converts the TypeScript-specific analysis model into the
+// language-neutral backend contract.
+func factsFromAnalysis(snapshot *analysis.Snapshot) ([]facts.Fact, error) {
+	b := builder{}
 	for _, module := range snapshot.Modules {
 		b.add("module", str(module.Path))
 		b.location(module.Path, module.Range)
@@ -102,7 +45,7 @@ func FromSnapshot(snapshot *analysis.Snapshot) (factstore.ReadOnlyFactStore, err
 			b.add("fn_awaits", id)
 		}
 		for index, typeText := range fn.ParameterTypeTexts {
-			b.add("fn_param", id, ast.Number(int64(index)), str(typeText))
+			b.add("fn_param", id, facts.Number(int64(index)), str(typeText))
 		}
 		b.add("fn_returns", id, str(fn.ReturnTypeText))
 		b.location(fn.SemanticKey, fn.Range)
@@ -218,70 +161,37 @@ func FromSnapshot(snapshot *analysis.Snapshot) (factstore.ReadOnlyFactStore, err
 		}
 		b.location(use.SemanticKey, use.Range)
 	}
-	return b.store, nil
-}
-
-// Format renders the facts of the named relations (all base relations when
-// relations is empty) in Mangle syntax, one sorted fact per line.
-func Format(store factstore.ReadOnlyFactStore, relations []string) (string, error) {
-	decls, err := SchemaDecls()
-	if err != nil {
-		return "", err
-	}
-	selected := BaseRelations()
-	if len(relations) > 0 {
-		for _, relation := range relations {
-			if !slices.Contains(selected, relation) {
-				return "", fmt.Errorf("unknown base relation %q", relation)
-			}
-		}
-		selected = relations
-	}
-	lines := make([]string, 0)
-	for sym := range decls {
-		if !slices.Contains(selected, sym.Symbol) {
-			continue
-		}
-		if err := store.GetFacts(ast.NewQuery(sym), func(atom ast.Atom) error {
-			lines = append(lines, atom.String()+".")
-			return nil
-		}); err != nil {
-			return "", err
-		}
-	}
-	sort.Strings(lines)
-	return strings.Join(lines, "\n"), nil
+	return b.items, nil
 }
 
 type builder struct {
-	store *factstore.MultiIndexedArrayInMemoryStore
+	items []facts.Fact
 }
 
-func (b builder) add(predicate string, args ...ast.BaseTerm) {
-	b.store.Add(ast.NewAtom(predicate, args...))
+func (b *builder) add(predicate string, args ...facts.Value) {
+	b.items = append(b.items, facts.Fact{Relation: predicate, Values: args})
 }
 
-func (b builder) location(entity string, location diagnostics.SourceLocation) {
+func (b *builder) location(entity string, location diagnostics.SourceLocation) {
 	b.add("location",
 		str(entity),
 		str(location.File),
-		ast.Number(int64(location.StartLine)),
-		ast.Number(int64(location.StartColumn)),
-		ast.Number(int64(location.EndLine)),
-		ast.Number(int64(location.EndColumn)),
+		facts.Number(int64(location.StartLine)),
+		facts.Number(int64(location.StartColumn)),
+		facts.Number(int64(location.EndLine)),
+		facts.Number(int64(location.EndColumn)),
 	)
 }
 
-func str(value string) ast.Constant {
-	return ast.String(value)
+func str(value string) facts.Value {
+	return facts.String(value)
 }
 
-func name(value string) (ast.Constant, error) {
-	constant, err := ast.Name("/" + value)
-	if err != nil {
-		return ast.Constant{}, fmt.Errorf("invalid name constant %q: %w", value, err)
+func name(value string) (facts.Value, error) {
+	if value == "" {
+		return facts.Value{}, fmt.Errorf("invalid empty name constant")
 	}
-	return constant, nil
+	return facts.Name(value), nil
 }
 
 type functionBody struct {

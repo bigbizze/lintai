@@ -7,15 +7,18 @@ import (
 	"slices"
 	"sort"
 
+	"github.com/bigbizze/lintai/backend"
+	"github.com/bigbizze/lintai/diagnostics"
+	"github.com/bigbizze/lintai/facts"
 	"github.com/bigbizze/lintai/internal/ambient"
 	"github.com/bigbizze/lintai/internal/analysis"
-	"github.com/bigbizze/lintai/internal/diagnostics"
-	"github.com/bigbizze/lintai/internal/facts"
 	"github.com/bigbizze/lintai/internal/workspace"
 	"github.com/microsoft/TypeScript/tsc/lintaiapi"
 )
 
 type Backend struct{}
+
+var _ backend.Backend = (*Backend)(nil)
 
 func New() *Backend {
 	return &Backend{}
@@ -25,14 +28,22 @@ func (b *Backend) ID() string {
 	return "typescript"
 }
 
-func (b *Backend) Relations() []string {
-	return facts.BaseRelations()
-}
-
 // BuildSnapshot extracts the facts of the source files under workspaceRoot.
 // excludes are doublestar globs, relative to workspaceRoot, of files to
 // leave out.
-func (b *Backend) BuildSnapshot(ctx context.Context, repoRoot, workspaceRoot string, excludes []string) (*analysis.Snapshot, error) {
+func (b *Backend) BuildSnapshot(ctx context.Context, repoRoot, workspaceRoot string, excludes []string) (facts.Snapshot, error) {
+	snapshot, err := b.buildAnalysisSnapshot(ctx, repoRoot, workspaceRoot, excludes)
+	if err != nil {
+		return facts.Snapshot{}, err
+	}
+	items, err := factsFromAnalysis(snapshot)
+	if err != nil {
+		return facts.Snapshot{}, err
+	}
+	return facts.Snapshot{Version: snapshot.Version, Schema: Schema(), Facts: items}, nil
+}
+
+func (b *Backend) buildAnalysisSnapshot(ctx context.Context, repoRoot, workspaceRoot string, excludes []string) (*analysis.Snapshot, error) {
 	files, err := workspace.ListSourceFiles(workspaceRoot, excludes)
 	if err != nil {
 		return nil, err

@@ -97,7 +97,7 @@ A failing rule contributes only its error diagnostic. Other rules still run. Dia
 
 ## Base relations and caveats
 
-`lintai schema` prints the authoritative schema (`internal/facts/schema.mg`) with a `doc` and an `arg` description for every relation, followed by the prelude. `lintai facts` prints the facts of a workspace.
+`lintai schema` prints the TypeScript backend schema (`backend/typescript/schema.mg`) with a `doc` and an `arg` description for every relation, followed by its prelude. `lintai facts` prints the facts of a workspace.
 
 Conventions:
 

@@ -10,9 +10,9 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/bigbizze/lintai/internal/diagnostics"
-	"github.com/bigbizze/lintai/internal/engine"
-	"github.com/bigbizze/lintai/internal/jsonrpc"
+	"github.com/bigbizze/lintai/diagnostics"
+	"github.com/bigbizze/lintai/engine"
+	"github.com/bigbizze/lintai/jsonrpc"
 )
 
 const (
@@ -23,12 +23,12 @@ const (
 	errCodeNotInitialized = -32002
 )
 
-type analyzer interface {
+type Analyzer interface {
 	Analyze(ctx context.Context, options engine.Options) (engine.Result, error)
 }
 
 type Server struct {
-	engine analyzer
+	engine Analyzer
 
 	mu                sync.RWMutex
 	diagnostics       []diagnostics.Diagnostic
@@ -68,7 +68,7 @@ type FileDiagnosticsResult struct {
 	Diagnostics []diagnostics.Diagnostic `json:"diagnostics"`
 }
 
-func New(selectedEngine analyzer) *Server {
+func New(selectedEngine Analyzer) *Server {
 	return &Server{
 		engine:            selectedEngine,
 		diagnosticsByFile: make(map[string][]diagnostics.Diagnostic),

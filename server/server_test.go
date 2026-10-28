@@ -9,9 +9,9 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/bigbizze/lintai/internal/diagnostics"
-	"github.com/bigbizze/lintai/internal/engine"
-	"github.com/bigbizze/lintai/internal/jsonrpc"
+	"github.com/bigbizze/lintai/diagnostics"
+	"github.com/bigbizze/lintai/engine"
+	"github.com/bigbizze/lintai/jsonrpc"
 )
 
 type fakeAnalyzer struct {

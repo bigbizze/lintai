@@ -222,7 +222,7 @@ export default rule("arch.top-level-node-import")
 func repoRootForBundleTest(t *testing.T) string {
 	t.Helper()
 
-	repoRoot, err := filepath.Abs("../..")
+	repoRoot, err := filepath.Abs("..")
 	if err != nil {
 		t.Fatal(err)
 	}
