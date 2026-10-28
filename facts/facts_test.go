@@ -1,7 +1,6 @@
 package facts
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -16,6 +15,7 @@ Decl location(Id, File, StartLine, StartColumn, EndLine, EndColumn)
 `, Prelude: ""},
 		Facts: []Fact{
 			{Relation: "object", Values: []Value{String("catalog/orders"), Name("table")}},
+			{Relation: "object", Values: []Value{String("catalog/orders"), Name("table")}},
 			{Relation: "location", Values: []Value{String("catalog/orders"), String("schema.sql"), Number(3), Number(1), Number(3), Number(12)}},
 		},
 	}
@@ -26,12 +26,19 @@ Decl location(Id, File, StartLine, StartColumn, EndLine, EndColumn)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{
-		`object("catalog/orders",/table).`,
-		`location("catalog/orders","schema.sql",3,1,3,12).`,
-	} {
-		if !strings.Contains(formatted, want) {
-			t.Errorf("formatted snapshot is missing %s:\n%s", want, formatted)
-		}
+	want := "location(\"catalog/orders\",\"schema.sql\",3,1,3,12).\n" +
+		"object(\"catalog/orders\",/table)."
+	if formatted != want {
+		t.Fatalf("formatted snapshot = %q, want %q", formatted, want)
+	}
+	filtered, err := Format(snapshot, []string{"object"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filtered != "object(\"catalog/orders\",/table)." {
+		t.Fatalf("filtered snapshot = %q", filtered)
+	}
+	if _, err := Format(snapshot, []string{"missing"}); err == nil {
+		t.Fatal("expected an unknown relation error")
 	}
 }

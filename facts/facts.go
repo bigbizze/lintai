@@ -4,6 +4,7 @@ package facts
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -156,37 +157,34 @@ func Format(snapshot Snapshot, relations []string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	selected := decls
-	if len(relations) > 0 {
-		declared := make(map[string]struct{}, len(decls))
+	wanted := make(map[string]struct{}, len(decls))
+	if len(relations) == 0 {
 		for _, relation := range decls {
-			declared[relation] = struct{}{}
+			wanted[relation] = struct{}{}
 		}
+	} else {
 		for _, relation := range relations {
-			if _, ok := declared[relation]; !ok {
+			if !slices.Contains(decls, relation) {
 				return "", fmt.Errorf("unknown base relation %q", relation)
 			}
+			wanted[relation] = struct{}{}
 		}
-		selected = relations
 	}
-	wanted := make(map[string]struct{}, len(selected))
-	for _, relation := range selected {
-		wanted[relation] = struct{}{}
+	store, err := Store(snapshot.Facts)
+	if err != nil {
+		return "", err
 	}
-	lines := make([]string, 0, len(snapshot.Facts))
-	for _, fact := range snapshot.Facts {
-		if _, ok := wanted[fact.Relation]; !ok {
+	lines := make([]string, 0, store.EstimateFactCount())
+	for _, predicate := range store.ListPredicates() {
+		if _, ok := wanted[predicate.Symbol]; !ok {
 			continue
 		}
-		args := make([]ast.BaseTerm, 0, len(fact.Values))
-		for _, value := range fact.Values {
-			constant, err := value.constant()
-			if err != nil {
-				return "", fmt.Errorf("%s: %w", fact.Relation, err)
-			}
-			args = append(args, constant)
+		if err := store.GetFacts(ast.NewQuery(predicate), func(fact ast.Atom) error {
+			lines = append(lines, fact.String()+".")
+			return nil
+		}); err != nil {
+			return "", err
 		}
-		lines = append(lines, ast.NewAtom(fact.Relation, args...).String()+".")
 	}
 	sort.Strings(lines)
 	return strings.Join(lines, "\n"), nil

@@ -62,6 +62,20 @@ and facts from another provider, and return the resulting snapshot; the
 `testdata/fixtures/external-backend/mixed-facts` fixture exercises that path
 with synthetic provider data.
 
+Because Go applies `replace` directives only from the main module, a consuming
+module that imports `backend/typescript` must include the same compiler fork
+replacement used here:
+
+```go
+replace github.com/microsoft/TypeScript/tsc => github.com/bigbizze/typescript-go v0.0.0-20261028155921-815b0203840d
+```
+
+The separate module in `testdata/consumer-module` demonstrates this
+requirement. From that directory, run `go run .`; its `go.mod` replaces
+`github.com/bigbizze/lintai` with this checkout and pins the compiler fork
+above, then imports both `backend/typescript` and `engine` to analyze the
+TypeScript fixture workspace.
+
 Other reusable packages are:
 
 - `diagnostics` for the stable diagnostic and source-location JSON types.

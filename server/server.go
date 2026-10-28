@@ -37,6 +37,7 @@ type Server struct {
 	snapshotVersion   string
 	rulesLoaded       int
 	initialized       bool
+	analysisValid     bool
 }
 
 type InitializeParams struct {
@@ -165,6 +166,15 @@ func (s *Server) handleInitialize(ctx context.Context, rawParams json.RawMessage
 		Severity:      diagnostics.SeverityError,
 		FactLimit:     params.FactLimit,
 	}
+	s.mu.Lock()
+	s.options = options
+	s.initialized = true
+	s.analysisValid = false
+	s.diagnostics = nil
+	s.diagnosticsByFile = make(map[string][]diagnostics.Diagnostic)
+	s.snapshotVersion = ""
+	s.rulesLoaded = 0
+	s.mu.Unlock()
 	result, err := s.engine.Analyze(ctx, options)
 	if err != nil {
 		return AnalysisResult{}, err
@@ -174,10 +184,6 @@ func (s *Server) handleInitialize(ctx context.Context, rawParams json.RawMessage
 }
 
 func (s *Server) handleFileDiagnostics(rawParams json.RawMessage) (FileDiagnosticsResult, error) {
-	if !s.isInitialized() {
-		return FileDiagnosticsResult{}, fmt.Errorf("server not initialized")
-	}
-
 	var params FileDiagnosticsParams
 	if err := decodeParams(rawParams, &params); err != nil {
 		return FileDiagnosticsResult{}, err
@@ -185,6 +191,14 @@ func (s *Server) handleFileDiagnostics(rawParams json.RawMessage) (FileDiagnosti
 	key := normalizeWorkspacePath(params.File)
 
 	s.mu.RLock()
+	if !s.initialized {
+		s.mu.RUnlock()
+		return FileDiagnosticsResult{}, fmt.Errorf("server not initialized")
+	}
+	if !s.analysisValid {
+		s.mu.RUnlock()
+		return FileDiagnosticsResult{}, fmt.Errorf("analysis results unavailable")
+	}
 	items := append([]diagnostics.Diagnostic(nil), s.diagnosticsByFile[key]...)
 	s.mu.RUnlock()
 
@@ -192,9 +206,13 @@ func (s *Server) handleFileDiagnostics(rawParams json.RawMessage) (FileDiagnosti
 }
 
 func (s *Server) handleReanalyze(ctx context.Context, rawParams json.RawMessage) (AnalysisResult, error) {
-	if !s.isInitialized() {
+	s.mu.RLock()
+	if !s.initialized {
+		s.mu.RUnlock()
 		return AnalysisResult{}, fmt.Errorf("server not initialized")
 	}
+	options := s.options
+	s.mu.RUnlock()
 	if len(rawParams) > 0 {
 		var params ReanalyzeParams
 		if err := json.Unmarshal(rawParams, &params); err != nil {
@@ -202,12 +220,9 @@ func (s *Server) handleReanalyze(ctx context.Context, rawParams json.RawMessage)
 		}
 	}
 
-	s.mu.RLock()
-	options := s.options
-	s.mu.RUnlock()
-
 	result, err := s.engine.Analyze(ctx, options)
 	if err != nil {
+		s.invalidateAnalysis()
 		return AnalysisResult{}, err
 	}
 	s.applyAnalysis(options, result)
@@ -231,13 +246,18 @@ func (s *Server) applyAnalysis(options engine.Options, result engine.Result) {
 	s.snapshotVersion = result.SnapshotVersion
 	s.rulesLoaded = result.RulesLoaded
 	s.initialized = true
+	s.analysisValid = true
 	s.mu.Unlock()
 }
 
-func (s *Server) isInitialized() bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.initialized
+func (s *Server) invalidateAnalysis() {
+	s.mu.Lock()
+	s.analysisValid = false
+	s.diagnostics = nil
+	s.diagnosticsByFile = make(map[string][]diagnostics.Diagnostic)
+	s.snapshotVersion = ""
+	s.rulesLoaded = 0
+	s.mu.Unlock()
 }
 
 func analysisResult(result engine.Result) AnalysisResult {
