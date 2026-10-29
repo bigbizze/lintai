@@ -27,7 +27,7 @@ export default rule("arch.pure-no-effects")
 Caveats:
 
 - `fn_awaits` is a narrow signal for effectful code. Use the ambient relations (section 4) for clock and environment reads.
-- `call_edge` contains only calls between collected functions in the workspace. Calls into `node_modules` have no facts.
+- `call_edge` contains only calls between collected functions in the workspace. Calls into packages and the default library are in `external_call`. Calls through function values are not followed; see section 12.
 - the interpolated string becomes an escaped Mangle string constant, so a config value cannot change the program structure
 
 ## 2. Import boundary
@@ -392,3 +392,124 @@ Caveats:
 - the architecture rule reports diagnostics on target source files, not on the rule file that produced them
 - `factLimit` is optional. The default is 5,000,000 derived facts for each rule.
 - to make one rule a warning, add `severity: { "arch.rule-id": "warning" }` to the options, and add `"@lintai/architecture-warnings": ["warn", options]` with the same options object. `"off"` turns the rule off.
+
+## 12. Strict purity rule
+
+`call_edge` contains only calls that the type checker resolves to a workspace function. A call through a parameter, a record of functions or a callback has no `call_edge` row, so `calls_reach` and `fn_reaches_ambient` do not see it. The strict relations close this gap:
+
+- `call_unresolved` is a call that lintai cannot resolve
+- `fn_ref` is a reference to a workspace function as a value, for example a function passed as an argument
+- `calls_or_refs_reach` follows `call_edge` and `fn_ref` together
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+export default rule("arch.pure-no-effects-strict")
+	.version(1)
+	.program(dl`
+		Decl pure_fn(Fn, Name).
+		pure_fn(Fn, Name) :- fn(Fn, File, Name), glob(File, "src/pure/**").
+
+		Decl reaches_effect(Fn, Name).
+		reaches_effect(Fn, Name) :- pure_fn(Fn, Name), fn_reaches_ambient_strict(Fn, _).
+
+		Decl leaves_analysis(Fn, Name).
+		leaves_analysis(Fn, Name) :- pure_fn(Fn, Name), fn_reaches_unresolved(Fn).
+	`)
+	.report("reaches_effect", "leaves_analysis")
+	.message((row, ctx) =>
+		ctx.assertion_id === "reaches_effect"
+			? `Pure function ${row.Name} reaches an ambient source through calls or function values`
+			: `Pure function ${row.Name} calls a function value that lintai cannot resolve`,
+	);
+```
+
+Planted violation. The server module passes an effectful function into pure code as a callback:
+
+```ts
+// src/services/clock.ts
+export function now(): number {
+	return Date.now();
+}
+
+// src/pure/launder.ts
+export function launder(read: () => number): number {
+	return read() + 1;
+}
+
+// src/pure/wired.ts
+import { launder } from "./launder";
+export function wired(source: () => number): number {
+	return launder(source);
+}
+
+// src/server/wire-clock.ts
+import { wired } from "../pure/wired";
+import { now } from "../services/clock";
+export const reading = wired(now);
+```
+
+The non-strict rule in section 1 reports nothing here. The strict rule reports `launder` and `wired` with `leaves_analysis`, because `read()` is a call that lintai cannot resolve. A rule over `calls_or_refs_reach("src/server/wire-clock.ts", Fn)` also sees that the server module reaches `now`.
+
+Caveats:
+
+- strict mode also reports harmless callbacks, for example a pure `map` callback passed as a parameter. This is why it is a separate opt-in rule and not the default.
+- `calls_or_refs_reach` is an over-approximation: a function that is referenced but never called still counts as reached
+- `import_opaque` marks `import(expr)` and `require(expr)` with a computed argument. Use it to reject code loading that lintai cannot follow.
+
+## 13. Package capability table
+
+lintai does not analyze code inside `node_modules`. To describe what a package can do, supply a table with `.facts()` and join it with `fn_calls_package` or `module_calls_package`:
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+export default rule("arch.pure-no-package-effects")
+	.version(1)
+	.facts(() => ({
+		package_capability: [
+			["axios", "/network"],
+			["pg", "/network"],
+		],
+	}))
+	.program(dl`
+		Decl package_capability(Pkg, Capability) descr [extensional()].
+
+		Decl fn_effect(Fn, Name, Pkg, Capability).
+		fn_effect(Fn, Name, Pkg, Capability) :-
+			fn(Fn, File, Name), glob(File, "src/pure/**"),
+			calls_reach(Fn, Callee), fn_calls_package(Callee, Pkg),
+			package_capability(Pkg, Capability).
+		fn_effect(Fn, Name, Pkg, Capability) :-
+			fn(Fn, File, Name), glob(File, "src/pure/**"),
+			fn_calls_package(Fn, Pkg), package_capability(Pkg, Capability).
+
+		Decl module_effect(File, Pkg, Capability).
+		module_effect(File, Pkg, Capability) :-
+			module_calls_package(File, Pkg), glob(File, "src/pure/**"),
+			package_capability(Pkg, Capability).
+	`)
+	.report("fn_effect", "module_effect")
+	.message((row, ctx) =>
+		ctx.assertion_id === "fn_effect"
+			? `Pure function ${row.Name} reaches ${row.Pkg}, which has capability ${row.Capability}`
+			: `${row.File} calls ${row.Pkg}, which has capability ${row.Capability}`,
+	);
+```
+
+Planted violation:
+
+```ts
+// src/pure/fetch-user.ts
+import axios from "axios";
+export function fetchUser(id: string) {
+	return axios.get(`/users/${id}`);
+}
+```
+
+The rule reports `fetchUser` with `axios` and `/network`. `module_effect` reports every file in `src/pure` that calls `axios` at any scope, including module scope.
+
+Caveats:
+
+- `fn_calls_package` uses the package name from `external_call`, so a call through a re-export from another package has the name of the package that declares the function
+- the table is data that you maintain. A package that is not in the table is not reported.

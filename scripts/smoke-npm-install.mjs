@@ -110,6 +110,44 @@ const walked = spawnSync(
 assert.equal(walked.status, 0, `expected lintai facts --files walk to succeed, got ${walked.status}\n${walked.stderr}`);
 assert.equal(walked.stdout.trim(), `module("src/example.ts").`);
 
+// Rules lock and setup sandbox through the installed package layout.
+const lock = spawnSync("pnpm", ["exec", "lintai", "lock", "--workspace-root", ".", "--rules", "lintai-rules/**/*.ts"], {
+	cwd: repoDir,
+	encoding: "utf8",
+});
+assert.equal(lock.status, 0, `expected lintai lock to succeed, got ${lock.status}\n${lock.stderr}`);
+const lockFile = JSON.parse(await fs.readFile(path.join(repoDir, "lintai-rules.lock.json"), "utf8"));
+assert.match(lockFile.rules["lintai-rules/no-async.ts"]?.hash ?? "", /^sha256:[0-9a-f]{64}$/);
+const lockedRunArgs = [
+	"exec",
+	"lintai",
+	"--json",
+	"--workspace-root",
+	".",
+	"--rules",
+	"lintai-rules/**/*.ts",
+	"--rules-lock",
+	"lintai-rules.lock.json",
+	"--setup-sandbox",
+	"on",
+];
+const locked = spawnSync("pnpm", lockedRunArgs, { cwd: repoDir, encoding: "utf8" });
+assert.equal(locked.status, 1, `expected a locked, sandboxed run to report the violation, got ${locked.status}\n${locked.stderr}`);
+assert.deepEqual(
+	JSON.parse(locked.stdout).map((diagnostic) => diagnostic.rule_id),
+	["arch.no-async"],
+);
+const rulePath = path.join(repoDir, "lintai-rules", "no-async.ts");
+const ruleSource = await fs.readFile(rulePath, "utf8");
+await fs.writeFile(rulePath, ruleSource.replace("must not be async", "should not be async"));
+const changed = spawnSync("pnpm", lockedRunArgs, { cwd: repoDir, encoding: "utf8" });
+assert.equal(changed.status, 3, `expected a changed rule to fail the lock check, got ${changed.status}\n${changed.stderr}`);
+assert.ok(
+	JSON.parse(changed.stdout).some((diagnostic) => diagnostic.phase === "integrity"),
+	changed.stdout,
+);
+await fs.writeFile(rulePath, ruleSource);
+
 const eslint = spawnSync("pnpm", ["exec", "eslint", "src/example.ts", "-f", "json"], {
 	cwd: repoDir,
 	encoding: "utf8",

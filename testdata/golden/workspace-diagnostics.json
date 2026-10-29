@@ -126,6 +126,27 @@
     }
   },
   {
+    "assertion_id": "leaves_analysis",
+    "diagnostic_kind": "architecture_violation",
+    "entity_identity": {
+      "semantic_key": "src/pure/launder.ts::function::launder"
+    },
+    "message": "Pure function launder calls a function value that lintai cannot resolve",
+    "provenance": {
+      "backend_id": "typescript",
+      "rule_version": 1
+    },
+    "rule_id": "arch.pure-no-effects-strict",
+    "severity": "error",
+    "source_location": {
+      "endColumn": 24,
+      "endLine": 1,
+      "file": "src/pure/launder.ts",
+      "startColumn": 17,
+      "startLine": 1
+    }
+  },
+  {
     "assertion_id": "violation",
     "diagnostic_kind": "architecture_violation",
     "entity_identity": {
@@ -165,6 +186,48 @@
       "file": "src/pure/time.ts",
       "startColumn": 17,
       "startLine": 1
+    }
+  },
+  {
+    "assertion_id": "reaches_effect",
+    "diagnostic_kind": "architecture_violation",
+    "entity_identity": {
+      "semantic_key": "src/pure/time.ts::function::stamp"
+    },
+    "message": "Pure function stamp reaches an ambient source through calls or function values",
+    "provenance": {
+      "backend_id": "typescript",
+      "rule_version": 1
+    },
+    "rule_id": "arch.pure-no-effects-strict",
+    "severity": "error",
+    "source_location": {
+      "endColumn": 22,
+      "endLine": 1,
+      "file": "src/pure/time.ts",
+      "startColumn": 17,
+      "startLine": 1
+    }
+  },
+  {
+    "assertion_id": "leaves_analysis",
+    "diagnostic_kind": "architecture_violation",
+    "entity_identity": {
+      "semantic_key": "src/pure/wired.ts::function::wired"
+    },
+    "message": "Pure function wired calls a function value that lintai cannot resolve",
+    "provenance": {
+      "backend_id": "typescript",
+      "rule_version": 1
+    },
+    "rule_id": "arch.pure-no-effects-strict",
+    "severity": "error",
+    "source_location": {
+      "endColumn": 22,
+      "endLine": 3,
+      "file": "src/pure/wired.ts",
+      "startColumn": 17,
+      "startLine": 3
     }
   },
   {
@@ -228,6 +291,27 @@
       "file": "src/server/handler.ts",
       "startColumn": 49,
       "startLine": 5
+    }
+  },
+  {
+    "assertion_id": "wires",
+    "diagnostic_kind": "architecture_violation",
+    "entity_identity": {
+      "semantic_key": "src/server/wire-clock.ts"
+    },
+    "message": "src/server/wire-clock.ts passes now from src/services as a value",
+    "provenance": {
+      "backend_id": "typescript",
+      "rule_version": 1
+    },
+    "rule_id": "arch.server-wires-services",
+    "severity": "error",
+    "source_location": {
+      "endColumn": 1,
+      "endLine": 6,
+      "file": "src/server/wire-clock.ts",
+      "startColumn": 1,
+      "startLine": 1
     }
   }
 ]

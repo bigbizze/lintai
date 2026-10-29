@@ -35,7 +35,8 @@ Current caveats:
 
 - it does not replace tests, the type checker, or runtime validation
 - type metadata is text-oriented, for example `fn_returns(Fn, TypeText)`
-- calls to functions outside the workspace have no facts
+- calls to functions outside the workspace are in `external_call`, but lintai does not analyze code inside `node_modules`
+- lintai is a deterministic gate against cooperative but careless authors, not a security boundary against an adversary with write access to the repository and its CI. See [docs/trust.md](docs/trust.md).
 
 ## How and caveats
 
@@ -164,10 +165,11 @@ The full reference lives in [docs/api.md](docs/api.md). Highlights:
 - rule builder:
   - `rule(id).version(n).setup(fn).facts(fn).program(p).report(...preds).expectNonEmpty(...preds).message(fn)`
 - `dl` tagged template: interpolates strings, numbers, `dl.name("x")` (the name constant `/x`) and other `dl` fragments, with correct escaping
-- base relations: `module`, `fn`, `fn_*`, `import_edge`, `import_*`, `call_edge`, `external_call`, `type_ref`, `type_ref_target`, `meta_access`, `ambient_source`, `ambient_use`, `ambient_key`, `ambient_dynamic`, `ambient_write`, `global_ref`, `module_directive`, `module_parse_error`, `site_in_fn`, `location`
-- prelude: `glob`, `import_runtime`, `module_imports`, `imports_reach`, `calls_reach`, `fn_uses_ambient`, `fn_reaches_ambient`, `module_uses_ambient`, `module_reaches_ambient`
+- base relations: `module`, `fn`, `fn_*`, `import_edge`, `import_*`, `import_opaque`, `call_edge`, `call_unresolved`, `fn_ref`, `external_call`, `type_ref`, `type_ref_target`, `meta_access`, `ambient_source`, `ambient_use`, `ambient_key`, `ambient_dynamic`, `ambient_write`, `global_ref`, `module_directive`, `module_parse_error`, `site_in_fn`, `location`
+- prelude: `glob`, `import_runtime`, `module_imports`, `imports_reach`, `calls_reach`, `fn_uses_ambient`, `fn_reaches_ambient`, `module_uses_ambient`, `module_reaches_ambient`, `fn_calls_package`, `module_calls_package`
+- strict mode: `calls_or_refs_reach`, `fn_reaches_ambient_strict`, `fn_has_unresolved_call`, `module_has_unresolved_call` and `fn_reaches_unresolved` also follow function values and report calls that lintai cannot resolve
 - ambient sources: `clock` (`Date.now`, `new Date()`, `performance.now`), `env` (`process.env`), `random` (`Math.random`, `crypto.randomUUID` and other `crypto` random functions), `crypto` (`crypto.subtle`), `network` (`fetch`), `timer` (`setTimeout`, `setInterval`, `setImmediate`, `queueMicrotask`) and `process` (`process.cwd`, `process.argv`)
-- CLI: `lintai schema`, `lintai facts`, `--explain`, `--fact-limit`, `--severity <rule-id>=error|warning|off`
+- CLI: `lintai schema`, `lintai facts`, `lintai lock`, `--explain`, `--fact-limit`, `--severity <rule-id>=error|warning|off`, `--rules-lock`, `--setup-sandbox auto|on|off`
 - optional `config` export:
   - `export const config = z.object({...})`
 

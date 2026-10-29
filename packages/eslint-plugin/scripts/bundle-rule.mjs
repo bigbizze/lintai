@@ -1,4 +1,5 @@
 import { build } from "esbuild";
+import { createHash } from "node:crypto";
 import { builtinModules, createRequire } from "node:module";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -25,6 +26,52 @@ function formatError(error) {
 const builtinSpecifierSet = new Set(
 	builtinModules.flatMap((name) => [name, `node:${name}`]),
 );
+
+// lockPath returns the path of a bundle input as the rules lock records it.
+// A file in a node_modules directory starts at the outermost node_modules,
+// so the lock does not depend on the machine, and two nested copies of one
+// package, or two pnpm store entries of one package, have different paths.
+// A file in the workspace is workspace-relative. Any other file is relative
+// to the asset root.
+function lockPath(absolute, workspaceRoot) {
+	const normalized = absolute.split(path.sep).join("/");
+	const index = normalized.indexOf("/node_modules/");
+	if (index >= 0) {
+		return normalized.slice(index + 1);
+	}
+	const relative = path.relative(workspaceRoot, absolute);
+	if (!relative.startsWith("..") && !path.isAbsolute(relative)) {
+		return relative.split(path.sep).join("/");
+	}
+	return `asset:${path.relative(process.cwd(), absolute).split(path.sep).join("/")}`;
+}
+
+// ruleHash hashes the source files that esbuild read for both bundles of a
+// rule. The generated entry files and the stubs of Node built-ins are not
+// source files. The bundler output is not hashed, so an esbuild upgrade
+// does not change the hash when no input changed.
+async function ruleHash(metafiles, generated, workspaceRoot) {
+	const inputs = new Map();
+	for (const metafile of metafiles) {
+		for (const key of Object.keys(metafile.inputs)) {
+			if (/^[a-z-]+:/.test(key) && !path.isAbsolute(key)) {
+				continue;
+			}
+			const absolute = await fs.realpath(path.resolve(key));
+			if (generated.has(absolute)) {
+				continue;
+			}
+			const bytes = await fs.readFile(absolute);
+			inputs.set(lockPath(absolute, workspaceRoot), createHash("sha256").update(bytes).digest("hex"));
+		}
+	}
+	const sorted = [...inputs.entries()].sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
+	const hash = createHash("sha256").update(JSON.stringify(sorted)).digest("hex");
+	return {
+		hash: `sha256:${hash}`,
+		inputs: sorted.map(([inputPath, sha256]) => ({ path: inputPath, sha256 })),
+	};
+}
 
 function createAliasPlugin(mode) {
 	const require = createRequire(import.meta.url);
@@ -112,7 +159,7 @@ for (const request of requests) {
 		const prepareBundlePath = path.join(outDir, "prepare.cjs");
 		const pureBundlePath = path.join(outDir, "pure.js");
 
-		await build({
+		const prepareBuild = await build({
 			entryPoints: [prepareEntry],
 			outfile: prepareBundlePath,
 			bundle: true,
@@ -121,9 +168,10 @@ for (const request of requests) {
 			target: "node20",
 			plugins: [prepareAliasPlugin],
 			logLevel: "silent",
+			metafile: true,
 		});
 
-		await build({
+		const pureBuild = await build({
 			entryPoints: [pureEntry],
 			outfile: pureBundlePath,
 			bundle: true,
@@ -132,12 +180,20 @@ for (const request of requests) {
 			target: "es2022",
 			plugins: [pureAliasPlugin],
 			logLevel: "silent",
+			metafile: true,
 		});
+		const { hash, inputs } = await ruleHash(
+			[prepareBuild.metafile, pureBuild.metafile],
+			new Set([await fs.realpath(prepareEntry), await fs.realpath(pureEntry)]),
+			await fs.realpath(path.resolve(request.workspaceRoot)),
+		);
 
 		results.push({
 			rulePath,
 			prepareBundlePath,
 			pureBundlePath,
+			hash,
+			inputs,
 		});
 	} catch (error) {
 		results.push({

@@ -92,5 +92,21 @@ Other reusable packages are:
 root. `SnapshotOptions.Files` selects `backend.FileScopeTsconfig` (the default)
 or `backend.FileScopeWalk`.
 
+`engine.Options` has two fields for rule integrity (see `docs/trust.md`):
+
+- `RulesLock` is the path of a lock file that `lintai lock` wrote, relative to
+  the workspace root. When it is set, the engine checks each bundled rule
+  against the lock before `setup()`. A mismatch is a rule error with phase
+  `integrity`, and that rule does not run.
+- `SetupSandbox` is `bundle.SetupSandboxAuto` (the default),
+  `bundle.SetupSandboxOn` or `bundle.SetupSandboxOff`. It selects whether
+  `setup()` runs under the Node permission model. With `auto` on an old Node,
+  `Result.Warnings` contains a warning; print it to the user.
+
+`engine.BuildRulesLock(ctx, options)` bundles the rules of `options` and
+returns the lock; `engine.WriteRulesLock` writes it. `bundle.BuildAll` takes
+the workspace root, so that the input paths that each rule hash covers are
+workspace-relative.
+
 The CLI remains in `cmd/lintai`; its flags and exit codes are documented in
 `docs/api.md`.

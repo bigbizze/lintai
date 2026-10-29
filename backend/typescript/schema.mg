@@ -147,7 +147,7 @@ Decl import_symbol_type_only(Imp, Name)
 Decl call_edge(Call, Caller, Callee)
   descr [
     extensional(),
-    doc("A call to a collected function. The callee is the declaration that the type checker resolves for the call. A call through a value whose type is a function type, for example a callback parameter or a property of a record of functions, has no row."),
+    doc("A call to a collected function. The callee is the declaration that the type checker resolves for the call. A call through a value whose type is a function type, for example a callback parameter or a property of a record of functions, has no row; it is a call_unresolved row."),
     arg(Call, "Call entity id."),
     arg(Caller, "Entity id of the calling function, or the module path for a call at module scope."),
     arg(Callee, "Entity id of the called function.")
@@ -161,6 +161,31 @@ Decl external_call(Call, Caller, Module, Name)
     arg(Caller, "Entity id of the calling function, or the module path for a call at module scope."),
     arg(Module, "\"lib\" for the default library, the package name for a package (the @types/ prefix is removed), the module name of a declare module block, or the path of a workspace declaration file."),
     arg(Name, "Name of the declaration with its containers, for example \"JSON.parse\", \"Set.add\" or \"DateConstructor.now\".")
+  ].
+
+Decl call_unresolved(Site, Caller)
+  descr [
+    extensional(),
+    doc("A call that lintai cannot follow: a call, new or tagged template whose target the checker does not resolve to a collected workspace function or an external declaration (callbacks, function-typed values, element-access callees, any-typed callees); f.call() or f.apply() when f is not a collected function; a function value that is not a collected function, passed to an external call (the row is at the argument); new of a workspace class without a constructor whose fields have initializers that run code. Every call site has exactly one of: call_edge, external_call, call_unresolved."),
+    arg(Site, "Call site entity id."),
+    arg(Caller, "Entity id of the calling function, or the module path for a call at module scope.")
+  ].
+
+Decl import_opaque(Site, From)
+  descr [
+    extensional(),
+    doc("A dynamic import() or require() whose specifier is not a string literal. These references have no import_edge row; this fact makes them visible."),
+    arg(Site, "Reference site entity id."),
+    arg(From, "Path of the file that contains the reference.")
+  ].
+
+Decl fn_ref(Ref, From, To)
+  descr [
+    extensional(),
+    doc("A reference to a collected function as a value, outside the callee position of a call: passed as an argument, stored, returned, or used as a property value. An inline arrow function, function expression or object literal method that is passed as a value is a reference from the function that contains it. Import and export specifiers are not references; import facts model them."),
+    arg(Ref, "Reference entity id."),
+    arg(From, "Entity id of the containing function, or the module path for a reference at module scope."),
+    arg(To, "Entity id of the referenced function.")
   ].
 
 Decl type_ref(Ref, File, Name)
@@ -268,7 +293,7 @@ Decl config_adjusted(Config, Option, Action)
 Decl site_in_fn(Site, Fn)
   descr [
     extensional(),
-    doc("The innermost collected function that contains a call, external-call, ambient-use, global-ref or meta-access site. Sites at module scope have no row."),
+    doc("The innermost collected function that contains a call, external-call, unresolved-call, function-reference, ambient-use, global-ref or meta-access site. Sites at module scope have no row."),
     arg(Site, "Site entity id."),
     arg(Fn, "Function entity id.")
   ].

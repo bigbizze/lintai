@@ -92,22 +92,25 @@ func (b *Backend) buildAnalysisSnapshot(ctx context.Context, repoRoot, workspace
 	}
 
 	return &analysis.Snapshot{
-		Version:        version,
-		BackendID:      b.ID(),
-		WorkspaceRoot:  workspaceRoot,
-		Modules:        modules,
-		Functions:      functions,
-		ImportEdges:    importEdges,
-		CallEdges:      callEdges,
-		ExternalCalls:  convertExternalCalls(extracted.ExternalCalls),
-		TypeRefs:       typeRefs,
-		Accesses:       accesses,
-		AmbientSources: convertAmbientSources(sources),
-		AmbientUses:    convertAmbientUses(extracted.AmbientUses),
-		GlobalRefs:     convertGlobalRefs(extracted.GlobalRefs),
-		Directives:     convertDirectives(extracted.Directives),
-		ParseErrors:    convertParseErrors(extracted.ParseErrors),
-		Adjustments:    adjustments,
+		Version:         version,
+		BackendID:       b.ID(),
+		WorkspaceRoot:   workspaceRoot,
+		Modules:         modules,
+		Functions:       functions,
+		ImportEdges:     importEdges,
+		CallEdges:       callEdges,
+		ExternalCalls:   convertExternalCalls(extracted.ExternalCalls),
+		CallsUnresolved: convertCallsUnresolved(extracted.CallsUnresolved),
+		ImportsOpaque:   convertImportsOpaque(extracted.ImportsOpaque),
+		FnRefs:          convertFnRefs(extracted.FnRefs),
+		TypeRefs:        typeRefs,
+		Accesses:        accesses,
+		AmbientSources:  convertAmbientSources(sources),
+		AmbientUses:     convertAmbientUses(extracted.AmbientUses),
+		GlobalRefs:      convertGlobalRefs(extracted.GlobalRefs),
+		Directives:      convertDirectives(extracted.Directives),
+		ParseErrors:     convertParseErrors(extracted.ParseErrors),
+		Adjustments:     adjustments,
 	}, nil
 }
 
@@ -241,6 +244,51 @@ func convertDirectives(items []lintaiapi.ModuleDirective) []analysis.ModuleDirec
 			FilePath:    item.FilePath,
 			Text:        item.Text,
 			Range:       convertLocation(item.Range),
+		})
+	}
+	return result
+}
+
+func convertCallsUnresolved(items []lintaiapi.CallUnresolved) []analysis.CallUnresolved {
+	result := make([]analysis.CallUnresolved, 0, len(items))
+	for _, item := range items {
+		result = append(result, analysis.CallUnresolved{
+			EntityID:        item.EntityID,
+			SemanticKey:     item.SemanticKey,
+			FromSemanticKey: item.FromSemanticKey,
+			FromModule:      item.FromModule,
+			FromPath:        item.FromPath,
+			Range:           convertLocation(item.Range),
+		})
+	}
+	return result
+}
+
+func convertImportsOpaque(items []lintaiapi.ImportOpaque) []analysis.ImportOpaque {
+	result := make([]analysis.ImportOpaque, 0, len(items))
+	for _, item := range items {
+		result = append(result, analysis.ImportOpaque{
+			EntityID:    item.EntityID,
+			SemanticKey: item.SemanticKey,
+			FromPath:    item.FromPath,
+			Range:       convertLocation(item.Range),
+		})
+	}
+	return result
+}
+
+func convertFnRefs(items []lintaiapi.FnRef) []analysis.FnRef {
+	result := make([]analysis.FnRef, 0, len(items))
+	for _, item := range items {
+		result = append(result, analysis.FnRef{
+			EntityID:        item.EntityID,
+			SemanticKey:     item.SemanticKey,
+			FromSemanticKey: item.FromSemanticKey,
+			FromModule:      item.FromModule,
+			FromPath:        item.FromPath,
+			ToSemanticKey:   item.ToSemanticKey,
+			ToPath:          item.ToPath,
+			Range:           convertLocation(item.Range),
 		})
 	}
 	return result

@@ -137,6 +137,40 @@ type ExternalCall struct {
 	Range           SourceLocation
 }
 
+// CallUnresolved is a call or new expression whose target the checker does
+// not resolve to a collected function or to an external declaration, for
+// example a call through a callback parameter or an any-typed value.
+type CallUnresolved struct {
+	EntityID        string
+	SemanticKey     string
+	FromSemanticKey string
+	FromModule      bool
+	FromPath        string
+	Range           SourceLocation
+}
+
+// ImportOpaque is an import() or require() whose specifier is not a string
+// literal. It has no ImportEdge.
+type ImportOpaque struct {
+	EntityID    string
+	SemanticKey string
+	FromPath    string
+	Range       SourceLocation
+}
+
+// FnRef is a reference to a collected function as a value, outside the
+// callee position of a call.
+type FnRef struct {
+	EntityID        string
+	SemanticKey     string
+	FromSemanticKey string
+	FromModule      bool
+	FromPath        string
+	ToSemanticKey   string
+	ToPath          string
+	Range           SourceLocation
+}
+
 type ModuleDirective struct {
 	EntityID    string
 	SemanticKey string
@@ -170,6 +204,9 @@ type PendingDtsCall struct {
 	FromName        string
 	FromPath        string
 	Range           SourceLocation
+	// Fallback is the external call that the call becomes when no source
+	// function matches the declaration.
+	Fallback ExternalCall
 }
 
 type Snapshot struct {
@@ -178,6 +215,9 @@ type Snapshot struct {
 	ImportEdges     []ImportEdge
 	CallEdges       []CallEdge
 	ExternalCalls   []ExternalCall
+	CallsUnresolved []CallUnresolved
+	ImportsOpaque   []ImportOpaque
+	FnRefs          []FnRef
 	TypeRefs        []TypeRef
 	AmbientUses     []AmbientUse
 	GlobalRefs      []GlobalRef
@@ -213,6 +253,9 @@ type extractor struct {
 	importCount     map[string]int
 	callCount       map[string]int
 	externalCount   map[string]int
+	unresolvedCount map[string]int
+	opaqueCount     map[string]int
+	refCount        map[string]int
 	typeRefCount    map[string]int
 	ambientCount    map[string]int
 	globalRefCount  map[string]int
@@ -220,6 +263,9 @@ type extractor struct {
 	imports         []ImportEdge
 	calls           []CallEdge
 	externalCalls   []ExternalCall
+	unresolved      []CallUnresolved
+	opaque          []ImportOpaque
+	refs            []FnRef
 	typeRefs        []TypeRef
 	ambientUses     []AmbientUse
 	globalRefs      []GlobalRef
@@ -229,7 +275,6 @@ type extractor struct {
 	ambientMembers  map[*ast.Symbol][]*AmbientMatcher
 	ambientDone     map[*ast.Node]struct{}
 	globalSyms      map[string]*ast.Symbol
-	debugCalls      bool
 }
 
 type functionMeta struct {
@@ -361,14 +406,11 @@ func resolveDtsCalls(snap *Snapshot) {
 		fnIndex[fnKey{fn.Name, fn.FilePath}] = i
 	}
 
-	// Process pending dts calls
 	for _, pending := range snap.PendingDtsCalls {
 		srcPath := mapDtsToSource(pending.DtsPath)
-		if srcPath == "" {
-			continue
-		}
 		idx, ok := fnIndex[fnKey{pending.TargetName, srcPath}]
-		if !ok {
+		if srcPath == "" || !ok {
+			snap.ExternalCalls = append(snap.ExternalCalls, pending.Fallback)
 			continue
 		}
 		target := &snap.Functions[idx]
@@ -422,27 +464,29 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 	defer func() { timing.walk += time.Since(walkStarted) }()
 
 	ex := &extractor{
-		workspaceRoot:  workspaceRoot,
-		program:        program,
-		resolver:       resolver,
-		checker:        typeChecker,
-		requestedFiles: make(map[string]struct{}, len(requestedFiles)),
-		primaryFiles:   make(map[string]struct{}, len(group.PrimaryFiles)),
-		filesByPath:    make(map[string]*ast.SourceFile, len(requestedFiles)),
-		functionNodes:  make(map[*ast.Node]*Function),
-		functionKeys:   make(map[string]*Function),
-		functionSyms:   make(map[*ast.Symbol]*Function),
-		functionCount:  make(map[string]int),
-		importCount:    make(map[string]int),
-		callCount:      make(map[string]int),
-		externalCount:  make(map[string]int),
-		typeRefCount:   make(map[string]int),
-		ambientCount:   make(map[string]int),
-		globalRefCount: make(map[string]int),
-		ambientDone:    make(map[*ast.Node]struct{}),
-		globalSyms:     make(map[string]*ast.Symbol),
-		ambient:        newAmbientIndex(ambientMatchers),
-		debugCalls:     os.Getenv("LINTAI_DEBUG_CALLS") == "1",
+		workspaceRoot:   workspaceRoot,
+		program:         program,
+		resolver:        resolver,
+		checker:         typeChecker,
+		requestedFiles:  make(map[string]struct{}, len(requestedFiles)),
+		primaryFiles:    make(map[string]struct{}, len(group.PrimaryFiles)),
+		filesByPath:     make(map[string]*ast.SourceFile, len(requestedFiles)),
+		functionNodes:   make(map[*ast.Node]*Function),
+		functionKeys:    make(map[string]*Function),
+		functionSyms:    make(map[*ast.Symbol]*Function),
+		functionCount:   make(map[string]int),
+		importCount:     make(map[string]int),
+		callCount:       make(map[string]int),
+		externalCount:   make(map[string]int),
+		unresolvedCount: make(map[string]int),
+		opaqueCount:     make(map[string]int),
+		refCount:        make(map[string]int),
+		typeRefCount:    make(map[string]int),
+		ambientCount:    make(map[string]int),
+		globalRefCount:  make(map[string]int),
+		ambientDone:     make(map[*ast.Node]struct{}),
+		globalSyms:      make(map[string]*ast.Symbol),
+		ambient:         newAmbientIndex(ambientMatchers),
 	}
 	for _, file := range requestedFiles {
 		ex.requestedFiles[file] = struct{}{}
@@ -501,6 +545,9 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 		ImportEdges:     ex.imports,
 		CallEdges:       ex.calls,
 		ExternalCalls:   ex.externalCalls,
+		CallsUnresolved: ex.unresolved,
+		ImportsOpaque:   ex.opaque,
+		FnRefs:          ex.refs,
 		TypeRefs:        ex.typeRefs,
 		AmbientUses:     ex.ambientUses,
 		GlobalRefs:      ex.globalRefs,
@@ -759,6 +806,9 @@ func mergeSnapshot(into *Snapshot, partial *Snapshot) {
 	into.ImportEdges = mergeByEntityID(into.ImportEdges, partial.ImportEdges, func(item ImportEdge) string { return item.EntityID })
 	into.CallEdges = mergeByEntityID(into.CallEdges, partial.CallEdges, func(item CallEdge) string { return item.EntityID })
 	into.ExternalCalls = mergeByEntityID(into.ExternalCalls, partial.ExternalCalls, func(item ExternalCall) string { return item.EntityID })
+	into.CallsUnresolved = mergeByEntityID(into.CallsUnresolved, partial.CallsUnresolved, func(item CallUnresolved) string { return item.EntityID })
+	into.ImportsOpaque = mergeByEntityID(into.ImportsOpaque, partial.ImportsOpaque, func(item ImportOpaque) string { return item.EntityID })
+	into.FnRefs = mergeByEntityID(into.FnRefs, partial.FnRefs, func(item FnRef) string { return item.EntityID })
 	into.TypeRefs = mergeByEntityID(into.TypeRefs, partial.TypeRefs, func(item TypeRef) string { return item.EntityID })
 	into.AmbientUses = mergeByEntityID(into.AmbientUses, partial.AmbientUses, func(item AmbientUse) string { return item.EntityID })
 	into.GlobalRefs = mergeByEntityID(into.GlobalRefs, partial.GlobalRefs, func(item GlobalRef) string { return item.EntityID })
@@ -773,6 +823,9 @@ func sortSnapshot(snapshot *Snapshot) {
 	slices.SortFunc(snapshot.ImportEdges, func(a, b ImportEdge) int { return strings.Compare(a.SemanticKey, b.SemanticKey) })
 	slices.SortFunc(snapshot.CallEdges, func(a, b CallEdge) int { return strings.Compare(a.SemanticKey, b.SemanticKey) })
 	slices.SortFunc(snapshot.ExternalCalls, func(a, b ExternalCall) int { return strings.Compare(a.SemanticKey, b.SemanticKey) })
+	slices.SortFunc(snapshot.CallsUnresolved, func(a, b CallUnresolved) int { return strings.Compare(a.SemanticKey, b.SemanticKey) })
+	slices.SortFunc(snapshot.ImportsOpaque, func(a, b ImportOpaque) int { return strings.Compare(a.SemanticKey, b.SemanticKey) })
+	slices.SortFunc(snapshot.FnRefs, func(a, b FnRef) int { return strings.Compare(a.SemanticKey, b.SemanticKey) })
 	slices.SortFunc(snapshot.TypeRefs, func(a, b TypeRef) int { return strings.Compare(a.SemanticKey, b.SemanticKey) })
 	slices.SortFunc(snapshot.AmbientUses, func(a, b AmbientUse) int { return strings.Compare(a.SemanticKey, b.SemanticKey) })
 	slices.SortFunc(snapshot.GlobalRefs, func(a, b GlobalRef) int { return strings.Compare(a.SemanticKey, b.SemanticKey) })
@@ -824,21 +877,28 @@ func (e *extractor) walkFacts(node *ast.Node, currentFunction *functionState) {
 		e.collectImport(node, node.AsImportTypeNode().Argument.AsLiteralTypeNode().Literal, ImportFormImportType, true)
 	case ast.IsImportCall(node):
 		if arguments := node.Arguments(); len(arguments) > 0 {
-			e.collectImport(node, arguments[0], ImportFormDynamic, false)
+			if ast.IsStringLiteralLike(arguments[0]) {
+				e.collectImport(node, arguments[0], ImportFormDynamic, false)
+			} else {
+				e.collectOpaqueImport(node)
+			}
 		}
 	case ast.IsRequireCall(node, true):
 		e.collectImport(node, node.Arguments()[0], ImportFormRequire, false)
+	case ast.IsRequireCall(node, false):
+		e.collectOpaqueImport(node)
 	case ast.IsTypeReferenceNode(node):
 		e.collectTypeRef(node.AsTypeReferenceNode().TypeName, node.AsTypeReferenceNode().TypeName.AsNode())
 	case ast.IsExpressionWithTypeArguments(node):
 		expression := node.AsExpressionWithTypeArguments().Expression
 		e.collectTypeRef(expression.AsNode(), expression.AsNode())
-	case ast.IsCallExpression(node):
+	case ast.IsCallExpression(node), ast.IsNewExpression(node), ast.IsTaggedTemplateExpression(node):
 		e.collectCall(e.callSourceFor(node, currentFunction), node)
 	case ast.IsIdentifier(node):
 		if e.ambientFile != nil {
 			e.matchAmbient(node, currentFunction)
 			e.matchGlobalRef(node, currentFunction)
+			e.matchFnRef(node, currentFunction)
 		}
 	}
 	if e.ambientFile != nil {
@@ -851,7 +911,17 @@ func (e *extractor) walkFacts(node *ast.Node, currentFunction *functionState) {
 	nextFunction := currentFunction
 	if ast.IsFunctionLike(node) {
 		if record := e.lookupFunction(node); record != nil {
+			if e.ambientFile != nil && createsFunctionValue(node) {
+				e.recordFnRef(e.callSourceFor(node, currentFunction), record, record.Range)
+			}
 			nextFunction = &functionState{record: record}
+		}
+	}
+	if ast.IsPropertyDeclaration(node) && !ast.IsStatic(node) && node.Initializer() != nil && ast.IsClassLike(node.Parent) {
+		if constructor := ast.GetFirstConstructorWithBody(node.Parent); constructor != nil {
+			if record := e.lookupFunction(constructor); record != nil {
+				nextFunction = &functionState{record: record}
+			}
 		}
 	}
 
@@ -1035,6 +1105,30 @@ func (e *extractor) callSourceFor(node *ast.Node, currentFunction *functionState
 	return callSource{key: relative, name: relative, path: relative, module: true}
 }
 
+// collectOpaqueImport records an import() or require() whose specifier is
+// not a string literal.
+func (e *extractor) collectOpaqueImport(node *ast.Node) {
+	file := ast.GetSourceFileOfNode(node)
+	if file == nil {
+		return
+	}
+	fileName := normalizeSlash(file.FileName().AsString())
+	if _, ok := e.primaryFiles[fileName]; !ok {
+		return
+	}
+	fromPath := e.relativePath(fileName)
+	baseKey := fromPath + "::import_opaque"
+	semanticKey := withOrdinal(baseKey, nextOrdinal(e.opaqueCount, baseKey))
+	e.opaque = append(e.opaque, ImportOpaque{
+		EntityID:    "import_opaque:" + semanticKey,
+		SemanticKey: semanticKey,
+		FromPath:    fromPath,
+		Range:       e.nodeLocation(file, node),
+	})
+}
+
+// collectCall records one fact for a call or new expression: a call edge to
+// a collected function, an external call, or an unresolved call.
 func (e *extractor) collectCall(source callSource, node *ast.Node) {
 	file := ast.GetSourceFileOfNode(node)
 	if file == nil {
@@ -1045,11 +1139,35 @@ func (e *extractor) collectCall(source callSource, node *ast.Node) {
 	}
 	target, declaration := e.resolveCallTarget(node)
 	location := e.nodeLocation(file, calleeNameNode(node))
+	workspaceClass := e.constructedWorkspaceClass(node)
+	if workspaceClass != nil && hasInstanceInitializer(workspaceClass) {
+		e.recordUnresolvedCall(source, location)
+		return
+	}
 	if target == nil {
-		if declaration == nil || e.recordPendingDtsCall(source, declaration, location) {
+		callee := e.calleeSymbol(node)
+		declarationExternal := declaration != nil && e.isExternalDeclaration(declaration)
+		if workspaceClass != nil && declarationExternal {
+			callee = e.externalBaseClass(workspaceClass)
+		}
+		calleeExternal := callee != nil && e.isExternalSymbol(callee)
+		if (declarationExternal && (calleeExternal || !isValueSignature(declaration))) || (declaration == nil && calleeExternal) {
+			if external, ok := e.externalCallFor(source, callee, declaration, location); ok {
+				if e.invokesFunctionValue(node, external) {
+					e.recordUnresolvedCall(source, location)
+					return
+				}
+				if !e.recordPendingDtsCall(source, declaration, location, external) {
+					e.externalCalls = append(e.externalCalls, external)
+				}
+				e.collectEscapingCallbacks(source, file, node)
+				return
+			}
+		}
+		if declaration == nil && workspaceClass != nil {
 			return
 		}
-		e.recordExternalCall(source, node, declaration, location)
+		e.recordUnresolvedCall(source, location)
 		return
 	}
 	baseKey := fmt.Sprintf("%s::calls::%s", source.key, target.SemanticKey)
@@ -1068,8 +1186,326 @@ func (e *extractor) collectCall(source callSource, node *ast.Node) {
 	})
 }
 
+// invokesFunctionValue reports f.call(...) or f.apply(...) where f is not a
+// collected function. The default library declares call and apply, but the
+// function that runs is f, and lintai does not know it. When f is a
+// collected function, the reference to f is an fn_ref.
+func (e *extractor) invokesFunctionValue(node *ast.Node, external ExternalCall) bool {
+	if external.Module != "lib" {
+		return false
+	}
+	switch external.Name {
+	case "CallableFunction.call", "CallableFunction.apply", "NewableFunction.call", "NewableFunction.apply", "Function.call", "Function.apply":
+	default:
+		return false
+	}
+	callee := ast.SkipParentheses(calleeOf(node))
+	if !ast.IsPropertyAccessExpression(callee) {
+		return true
+	}
+	receiver := ast.SkipParentheses(callee.Expression())
+	if !ast.IsIdentifier(receiver) && !ast.IsPropertyAccessExpression(receiver) {
+		return true
+	}
+	return e.lookupFunction(e.checker.GetSymbolAtLocation(receiver)) == nil
+}
+
+// collectEscapingCallbacks records a call_unresolved row for each argument
+// of an external call that is a function value that lintai cannot follow,
+// for example a callback parameter passed to Array.map. Code outside the
+// workspace can call that value. An argument that is a collected function
+// is an fn_ref, an inline function is collected with its body, and a
+// function from outside the workspace is not workspace code.
+func (e *extractor) collectEscapingCallbacks(source callSource, file *ast.SourceFile, node *ast.Node) {
+	if ast.IsTaggedTemplateExpression(node) {
+		return
+	}
+	for _, argument := range node.Arguments() {
+		value := ast.SkipOuterExpressions(argument, ast.OEKAll)
+		if ast.IsSpreadElement(value) || ast.IsFunctionExpressionOrArrowFunction(value) || isPlainValue(value) {
+			continue
+		}
+		if ast.IsIdentifier(value) || ast.IsPropertyAccessExpression(value) {
+			symbol := e.checker.GetSymbolAtLocation(value)
+			if symbol != nil && symbol.Flags()&ast.SymbolFlagsAlias != 0 {
+				symbol = e.checker.SkipAlias(symbol)
+			}
+			if symbol != nil && (e.lookupFunction(symbol) != nil || e.isExternalSymbol(symbol)) {
+				continue
+			}
+		}
+		valueType := e.checker.GetTypeAtLocation(value)
+		if valueType == nil || len(e.checker.GetSignaturesOfType(e.checker.GetNonNullableType(valueType), checker.SignatureKindCall)) == 0 {
+			continue
+		}
+		e.recordUnresolvedCall(source, e.nodeLocation(file, value))
+	}
+}
+
+// isPlainValue reports a literal, which is never a function.
+func isPlainValue(node *ast.Node) bool {
+	return isLiteralValue(node) || ast.IsObjectLiteralExpression(node) || ast.IsArrayLiteralExpression(node)
+}
+
+// isLiteralValue reports a literal that runs no code.
+func isLiteralValue(node *ast.Node) bool {
+	switch node.Kind {
+	case ast.KindTrueKeyword, ast.KindFalseKeyword, ast.KindNullKeyword:
+		return true
+	}
+	return ast.IsLiteralExpression(node)
+}
+
+// createsFunctionValue reports a collected function that its definition
+// passes on as a value: an arrow function or function expression in an
+// argument, an array or a return, and a method or function in an object
+// literal. A function that is stored in a variable, a class property or a
+// default export is a value only where its name is used, and matchFnRef
+// records those uses.
+func createsFunctionValue(node *ast.Node) bool {
+	parent := node.Parent
+	if parent == nil {
+		return false
+	}
+	switch {
+	case ast.IsMethodDeclaration(node), ast.IsGetAccessorDeclaration(node), ast.IsSetAccessorDeclaration(node):
+		return ast.IsObjectLiteralExpression(parent)
+	case ast.IsFunctionExpressionOrArrowFunction(node):
+		return !ast.IsVariableDeclaration(parent) && !ast.IsPropertyDeclaration(parent) && !ast.IsExportAssignment(parent)
+	}
+	return false
+}
+
+// recordFnRef records a reference from source to a collected function.
+func (e *extractor) recordFnRef(source callSource, target *Function, location SourceLocation) {
+	baseKey := fmt.Sprintf("%s::refs::%s", source.key, target.SemanticKey)
+	semanticKey := withOrdinal(baseKey, nextOrdinal(e.refCount, baseKey))
+	e.refs = append(e.refs, FnRef{
+		EntityID:        "fn_ref:" + semanticKey,
+		SemanticKey:     semanticKey,
+		FromSemanticKey: source.key,
+		FromModule:      source.module,
+		FromPath:        source.path,
+		ToSemanticKey:   target.SemanticKey,
+		ToPath:          target.FilePath,
+		Range:           location,
+	})
+}
+
+// recordUnresolvedCall records a call whose target is not known: a call
+// through a callback, a function-typed value or an any-typed value.
+func (e *extractor) recordUnresolvedCall(source callSource, location SourceLocation) {
+	baseKey := source.key + "::calls_unresolved"
+	semanticKey := withOrdinal(baseKey, nextOrdinal(e.unresolvedCount, baseKey))
+	e.unresolved = append(e.unresolved, CallUnresolved{
+		EntityID:        "call_unresolved:" + semanticKey,
+		SemanticKey:     semanticKey,
+		FromSemanticKey: source.key,
+		FromModule:      source.module,
+		FromPath:        source.path,
+		Range:           location,
+	})
+}
+
+// calleeSymbol returns the symbol of the value that a call calls: the
+// symbol of an identifier or a property access, after alias resolution, or
+// the base class of a super() call. It returns nil for other callees, for
+// example an element access or the result of another call.
+func (e *extractor) calleeSymbol(node *ast.Node) *ast.Symbol {
+	callee := ast.SkipParentheses(calleeOf(node))
+	var symbol *ast.Symbol
+	switch {
+	case callee.Kind == ast.KindSuperKeyword:
+		if t := e.checker.GetTypeAtLocation(callee); t != nil {
+			symbol = t.Symbol()
+		}
+	case ast.IsIdentifier(callee), ast.IsPropertyAccessExpression(callee):
+		symbol = e.checker.GetSymbolAtLocation(callee)
+	}
+	if symbol != nil && symbol.Flags()&ast.SymbolFlagsAlias != 0 {
+		symbol = e.checker.SkipAlias(symbol)
+	}
+	return symbol
+}
+
+// isValueSignature reports a signature that a type declares for a function
+// value: a function type, a constructor type, or a call or construct
+// signature of an interface or type literal. A call with such a signature
+// calls a value of that type, and the type does not tell which function.
+func isValueSignature(declaration *ast.Node) bool {
+	switch declaration.Kind {
+	case ast.KindFunctionType, ast.KindConstructorType, ast.KindCallSignature, ast.KindConstructSignature:
+		return true
+	}
+	return false
+}
+
+// isExternalDeclaration reports a declaration outside the workspace source
+// files: in the default library, in a package or in a declaration file.
+func (e *extractor) isExternalDeclaration(declaration *ast.Node) bool {
+	file := ast.GetSourceFileOfNode(declaration)
+	if file == nil {
+		return false
+	}
+	fileName := normalizeSlash(file.FileName().AsString())
+	return file.IsDeclarationFile || !isWithinRoot(e.workspaceRoot, fileName) || strings.Contains(fileName, "/node_modules/")
+}
+
+// isExternalSymbol reports a symbol whose declarations are all external.
+func (e *extractor) isExternalSymbol(symbol *ast.Symbol) bool {
+	declarations := symbol.Declarations()
+	if len(declarations) == 0 {
+		return false
+	}
+	for _, declaration := range declarations {
+		if !e.isExternalDeclaration(declaration) {
+			return false
+		}
+	}
+	return true
+}
+
+// constructedWorkspaceClass returns the class declaration for a new
+// expression or super() call of a workspace class that has no constructor
+// of its own. The checker resolves such a call to the constructor of a
+// base class, or to no declaration when no class in the chain has one.
+func (e *extractor) constructedWorkspaceClass(node *ast.Node) *ast.Node {
+	if !ast.IsNewExpression(node) && ast.SkipParentheses(calleeOf(node)).Kind != ast.KindSuperKeyword {
+		return nil
+	}
+	symbol := e.calleeSymbol(node)
+	if symbol == nil || symbol.Flags()&ast.SymbolFlagsClass == 0 {
+		return nil
+	}
+	var class *ast.Node
+	for _, declaration := range symbol.Declarations() {
+		if ast.GetSourceFileOfNode(declaration) == nil || e.isExternalDeclaration(declaration) {
+			return nil
+		}
+		if ast.IsClassLike(declaration) {
+			class = declaration
+		}
+	}
+	if class == nil || ast.GetFirstConstructorWithBody(class) != nil {
+		return nil
+	}
+	return class
+}
+
+// externalBaseClass returns the first class outside the workspace in the
+// base class chain of a workspace class, or nil.
+func (e *extractor) externalBaseClass(class *ast.Node) *ast.Symbol {
+	for range 32 {
+		heritage := ast.GetClassExtendsHeritageElement(class)
+		if heritage == nil {
+			return nil
+		}
+		symbol := e.checker.GetSymbolAtLocation(heritage.Expression())
+		if symbol != nil && symbol.Flags()&ast.SymbolFlagsAlias != 0 {
+			symbol = e.checker.SkipAlias(symbol)
+		}
+		if symbol == nil {
+			return nil
+		}
+		if e.isExternalSymbol(symbol) {
+			return symbol
+		}
+		class = nil
+		for _, declaration := range symbol.Declarations() {
+			if ast.IsClassLike(declaration) {
+				class = declaration
+			}
+		}
+		if class == nil {
+			return nil
+		}
+	}
+	return nil
+}
+
+// hasInstanceInitializer reports a class with an instance property whose
+// initializer can run code. The initializer runs on construction, but a
+// class without a constructor has no function to attribute it to, so the
+// construction is a call that lintai cannot follow. A function or a literal
+// initializer runs no code.
+func hasInstanceInitializer(class *ast.Node) bool {
+	for _, member := range class.Members() {
+		if !ast.IsPropertyDeclaration(member) || ast.IsStatic(member) || member.Initializer() == nil {
+			continue
+		}
+		value := ast.SkipOuterExpressions(member.Initializer(), ast.OEKAll)
+		if ast.IsFunctionExpressionOrArrowFunction(value) || isLiteralValue(value) {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// matchFnRef records a reference to a collected function as a value: an
+// identifier or a property name that resolves to the function, outside the
+// callee of a call or new expression, a declaration name, an import or
+// export, an assignment target and a type position.
+func (e *extractor) matchFnRef(node *ast.Node, currentFunction *functionState) {
+	parent := node.Parent
+	if parent == nil {
+		return
+	}
+	var symbol *ast.Symbol
+	reference := node
+	switch {
+	case ast.IsShorthandPropertyAssignment(parent) && parent.Name() == node:
+		symbol = e.checker.GetShorthandAssignmentValueSymbol(parent)
+	case ast.IsPropertyAccessExpression(parent) && parent.Name() == node:
+		reference = parent
+		symbol = e.checker.GetSymbolAtLocation(node)
+	case ast.IsJsxTagName(node):
+		symbol = e.checker.GetSymbolAtLocation(node)
+	default:
+		if !ast.IsExpressionNode(node) || ast.IsDeclarationName(node) {
+			return
+		}
+		symbol = e.checker.GetSymbolAtLocation(node)
+	}
+	if symbol == nil || ast.IsPartOfTypeQuery(node) || ast.IsPartOfTypeNode(node) || isCallee(reference) || ast.IsAssignmentTarget(reference) {
+		return
+	}
+	for ancestor := parent; ancestor != nil; ancestor = ancestor.Parent {
+		switch ancestor.Kind {
+		case ast.KindImportDeclaration, ast.KindExportDeclaration, ast.KindImportEqualsDeclaration, ast.KindExportAssignment:
+			return
+		}
+		if ast.IsStatement(ancestor) || ast.IsFunctionLike(ancestor) {
+			break
+		}
+	}
+	target := e.lookupFunction(symbol)
+	if target == nil {
+		return
+	}
+	e.recordFnRef(e.callSourceFor(node, currentFunction), target, e.nodeLocation(e.ambientFile.file, node))
+}
+
+// isCallee reports the callee of a call or new expression, through
+// parentheses.
+func isCallee(node *ast.Node) bool {
+	for node.Parent != nil && node.Parent.Kind == ast.KindParenthesizedExpression {
+		node = node.Parent
+	}
+	parent := node.Parent
+	return parent != nil && (ast.IsCallExpression(parent) || ast.IsNewExpression(parent) || ast.IsTaggedTemplateExpression(parent)) && calleeOf(parent) == node
+}
+
+// calleeOf returns the callee of a call, new or tagged template expression.
+func calleeOf(node *ast.Node) *ast.Node {
+	if ast.IsTaggedTemplateExpression(node) {
+		return node.AsTaggedTemplateExpression().Tag
+	}
+	return node.Expression()
+}
+
 func calleeNameNode(node *ast.Node) *ast.Node {
-	callee := ast.SkipParentheses(node.Expression())
+	callee := ast.SkipParentheses(calleeOf(node))
 	if ast.IsPropertyAccessExpression(callee) {
 		return callee.Name().AsNode()
 	}
@@ -1094,7 +1530,7 @@ func (e *extractor) resolveCallTarget(node *ast.Node) (*Function, *ast.Node) {
 			}
 		}
 	}
-	expression := ast.SkipParentheses(node.Expression())
+	expression := ast.SkipParentheses(calleeOf(node))
 	if expression != nil && (ast.IsIdentifier(expression) || ast.IsPropertyAccessExpression(expression)) {
 		if target := e.lookupFunction(e.checker.GetSymbolAtLocation(expression)); target != nil {
 			return target, nil
@@ -1104,8 +1540,12 @@ func (e *extractor) resolveCallTarget(node *ast.Node) (*Function, *ast.Node) {
 }
 
 // recordPendingDtsCall records a call to a declaration in a workspace dist/
-// .d.ts file. resolveDtsCalls later links it to the matching source function.
-func (e *extractor) recordPendingDtsCall(source callSource, decl *ast.Node, location SourceLocation) bool {
+// .d.ts file. resolveDtsCalls later links it to the matching source
+// function, or records external when there is none.
+func (e *extractor) recordPendingDtsCall(source callSource, decl *ast.Node, location SourceLocation, external ExternalCall) bool {
+	if decl == nil {
+		return false
+	}
 	sf := ast.GetSourceFileOfNode(decl)
 	if sf == nil {
 		return false
@@ -1133,29 +1573,30 @@ func (e *extractor) recordPendingDtsCall(source callSource, decl *ast.Node, loca
 		FromName:        source.name,
 		FromPath:        source.path,
 		Range:           location,
+		Fallback:        external,
 	})
 	return true
 }
 
-// recordExternalCall records a call whose declaration is in the default
-// library, in a package, or in a declaration file. Calls to declarations in
-// workspace source files, such as interface members, are not external.
-func (e *extractor) recordExternalCall(source callSource, call *ast.Node, decl *ast.Node, location SourceLocation) {
+// externalCallFor returns the external call for a call of callee, a symbol
+// that is declared in the default library, in a package or in a declaration
+// file. decl is the declaration of the resolved signature, or else of the
+// callee.
+func (e *extractor) externalCallFor(source callSource, callee *ast.Symbol, decl *ast.Node, location SourceLocation) (ExternalCall, bool) {
+	if decl == nil {
+		decl = callee.Declarations()[0]
+	}
 	moduleName := e.externalModuleName(decl)
 	name := qualifiedSymbolName(decl.Symbol())
-	if name == "" {
-		callee := e.checker.GetSymbolAtLocation(ast.SkipParentheses(call.Expression()))
-		if callee != nil && callee.Flags()&ast.SymbolFlagsAlias != 0 {
-			callee = e.checker.SkipAlias(callee)
-		}
+	if name == "" && callee != nil {
 		name = qualifiedSymbolName(callee)
 	}
 	if moduleName == "" || name == "" {
-		return
+		return ExternalCall{}, false
 	}
 	baseKey := fmt.Sprintf("%s::external::%s::%s", source.key, moduleName, name)
 	semanticKey := withOrdinal(baseKey, nextOrdinal(e.externalCount, baseKey))
-	e.externalCalls = append(e.externalCalls, ExternalCall{
+	return ExternalCall{
 		EntityID:        "external_call:" + semanticKey,
 		SemanticKey:     semanticKey,
 		FromSemanticKey: source.key,
@@ -1164,7 +1605,7 @@ func (e *extractor) recordExternalCall(source callSource, call *ast.Node, decl *
 		Module:          moduleName,
 		Name:            name,
 		Range:           location,
-	})
+	}, true
 }
 
 // externalModuleName names the module that declares an external

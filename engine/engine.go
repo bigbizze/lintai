@@ -34,12 +34,24 @@ type Options struct {
 	RuleSeverity map[string]diagnostics.Severity
 	FactLimit    int
 	Explain      bool
+	// RulesLock is the path of a rules lock file. When it is set, a rule
+	// whose bundle inputs differ from the lock, a rule that is not in the
+	// lock and a locked rule that no longer exists are rule errors with
+	// phase integrity, and setup() does not run for them. require() in
+	// setup() is then limited to Node built-ins other than module and vm.
+	RulesLock string
+	// SetupSandbox selects whether setup() runs under the Node permission
+	// model. The default is auto.
+	SetupSandbox bundle.SetupSandbox
 }
 
 type Result struct {
 	Diagnostics     []diagnostics.Diagnostic
 	SnapshotVersion string
 	RulesLoaded     int
+	// Warnings are messages for the user that are not diagnostics, for
+	// example that setup() ran without a sandbox.
+	Warnings []string
 }
 
 type Engine struct {
@@ -59,6 +71,18 @@ func (e *Engine) Run(ctx context.Context, options Options) ([]diagnostics.Diagno
 }
 
 func (e *Engine) Analyze(ctx context.Context, options Options) (Result, error) {
+	sandbox, sandboxWarning, err := bundle.ResolveSetupSandbox(options.SetupSandbox)
+	if err != nil {
+		return Result{}, err
+	}
+	var lock *RulesLock
+	if options.RulesLock != "" {
+		loaded, err := ReadRulesLock(ResolveRulesLockPath(options.WorkspaceRoot, options.RulesLock))
+		if err != nil {
+			return Result{}, err
+		}
+		lock = &loaded
+	}
 	snapshot, err := e.backend.BuildSnapshot(ctx, options.RepoRoot, options.WorkspaceRoot, backend.SnapshotOptions{Excludes: options.Excludes, Files: options.Files})
 	if err != nil {
 		return Result{}, err
@@ -84,6 +108,9 @@ func (e *Engine) Analyze(ctx context.Context, options Options) (Result, error) {
 		SnapshotVersion: snapshot.Version,
 		RulesLoaded:     len(rulePaths),
 	}
+	if sandboxWarning != "" {
+		result.Warnings = append(result.Warnings, sandboxWarning)
+	}
 	if len(rulePaths) == 0 {
 		return result, nil
 	}
@@ -94,12 +121,9 @@ func (e *Engine) Analyze(ctx context.Context, options Options) (Result, error) {
 	}
 	defer os.RemoveAll(bundleDir)
 
-	assetRoot := options.AssetRoot
-	if assetRoot == "" {
-		assetRoot = options.RepoRoot
-	}
+	assetRoot := assetRootOf(options)
 
-	artifactsByRule, buildFailures, err := bundle.BuildAll(ctx, assetRoot, options.RepoRoot, bundleDir, rulePaths)
+	artifactsByRule, buildFailures, err := bundle.BuildAll(ctx, assetRoot, options.RepoRoot, options.WorkspaceRoot, bundleDir, rulePaths)
 	if err != nil {
 		for _, rulePath := range rulePaths {
 			if _, failed := buildFailures[rulePath]; failed {
@@ -119,7 +143,20 @@ func (e *Engine) Analyze(ctx context.Context, options Options) (Result, error) {
 		allDiagnostics = append(allDiagnostics, errorDiagnostic(filepath.Base(rulePath), "bundle", 0, snapshot.Version, e.backend.ID(), itemErr.Error()))
 	}
 
-	preparedByRule, prepareFailures, err := bundle.PrepareAll(ctx, assetRoot, options.RepoRoot, options.WorkspaceRoot, artifactsByRule, options.Env)
+	integrityFailures := 0
+	if lock != nil {
+		failures := checkRulesLock(*lock, options.WorkspaceRoot, rulePaths, artifactsByRule)
+		integrityFailures = len(failures)
+		for rulePath, failure := range failures {
+			delete(artifactsByRule, rulePath)
+			allDiagnostics = append(allDiagnostics, errorDiagnostic(failure.key, "integrity", 0, snapshot.Version, e.backend.ID(), failure.message))
+		}
+	}
+
+	preparedByRule, prepareFailures, err := bundle.PrepareAll(ctx, assetRoot, options.RepoRoot, options.WorkspaceRoot, artifactsByRule, options.Env, bundle.PrepareOptions{
+		Sandbox:         sandbox,
+		RestrictRequire: lock != nil,
+	})
 	if err != nil {
 		for rulePath, prepareErr := range prepareFailures {
 			allDiagnostics = append(allDiagnostics, errorDiagnostic(ruleIDForPrepareFailure(rulePath, prepareErr), "setup", prepareErr.RuleVersion, snapshot.Version, e.backend.ID(), prepareErr.Message))
@@ -228,7 +265,7 @@ func (e *Engine) Analyze(ctx context.Context, options Options) (Result, error) {
 		}
 		allDiagnostics = append(allDiagnostics, provisional...)
 	}
-	if len(buildFailures) == 0 {
+	if len(buildFailures) == 0 && integrityFailures == 0 {
 		allDiagnostics = append(allDiagnostics, unknownSeverityRules(options, knownRules, snapshot.Version, e.backend.ID())...)
 	}
 	sortDiagnostics(allDiagnostics)
