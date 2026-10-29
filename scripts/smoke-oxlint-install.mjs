@@ -27,7 +27,9 @@ assert.ok(!existsSync(path.join(repoDir, "node_modules", "eslint")), "expected n
 const cli = spawnSync("pnpm", ["exec", "oxlint", "--format", "json", "src/"], { cwd: repoDir, encoding: "utf8" });
 assert.notEqual(cli.status, 0, `expected oxlint to fail on the planted violation\n${cli.stdout}\n${cli.stderr}`);
 const cliDiagnostics = JSON.parse(cli.stdout).diagnostics;
-const planted = cliDiagnostics.find((diagnostic) => diagnostic.code === "lintai(architecture)");
+const planted = cliDiagnostics.find(
+	(diagnostic) => diagnostic.code === "lintai(architecture)" && diagnostic.message.includes("[arch.no-async/violation]"),
+);
 assert.ok(planted, `expected a lintai/architecture diagnostic\n${cli.stdout}`);
 assert.match(planted.message, /\[arch\.no-async\/violation\] example in src\/example\.ts must not be async/);
 assert.equal(planted.filename, "src/example.ts");
