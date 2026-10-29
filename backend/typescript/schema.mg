@@ -256,6 +256,15 @@ Decl module_parse_error(Err, File, Message)
     arg(Message, "Text of the first syntax error.")
   ].
 
+Decl config_adjusted(Config, Option, Action)
+  descr [
+    extensional(),
+    doc("lintai changed a compiler option that TypeScript 7 rejects before loading this tsconfig. The analysis uses the adjusted configuration, which can differ from the project's own build."),
+    arg(Config, "Workspace-relative path of the original tsconfig."),
+    arg(Option, "Compiler option name."),
+    arg(Action, "/removed, /rewritten or /replaced.")
+  ].
+
 Decl site_in_fn(Site, Fn)
   descr [
     extensional(),

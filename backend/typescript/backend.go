@@ -4,8 +4,12 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
+	"fmt"
+	"io"
+	"os"
 	"slices"
 	"sort"
+	"strings"
 
 	"github.com/bigbizze/lintai/backend"
 	"github.com/bigbizze/lintai/diagnostics"
@@ -61,6 +65,8 @@ func (b *Backend) buildAnalysisSnapshot(ctx context.Context, repoRoot, workspace
 		return nil, err
 	}
 	files := moduleFiles(workspaceRoot, walked, extracted.Modules)
+	adjustments := convertAdjustments(workspaceRoot, extracted.ConfigAdjustments)
+	reportAdjustments(os.Stderr, adjustments)
 
 	modules := convertModules(extracted.Modules)
 	functions := convertFunctions(extracted.Functions)
@@ -93,6 +99,7 @@ func (b *Backend) buildAnalysisSnapshot(ctx context.Context, repoRoot, workspace
 		GlobalRefs:     convertGlobalRefs(extracted.GlobalRefs),
 		Directives:     convertDirectives(extracted.Directives),
 		ParseErrors:    convertParseErrors(extracted.ParseErrors),
+		Adjustments:    adjustments,
 	}, nil
 }
 
@@ -243,6 +250,34 @@ func convertParseErrors(items []lintaiapi.ParseError) []analysis.ParseError {
 		})
 	}
 	return result
+}
+
+func convertAdjustments(workspaceRoot string, items []lintaiapi.ConfigAdjustment) []analysis.ConfigAdjustment {
+	result := make([]analysis.ConfigAdjustment, 0, len(items))
+	for _, item := range items {
+		result = append(result, analysis.ConfigAdjustment{
+			Config: workspace.RelativePath(workspaceRoot, item.Config),
+			Option: item.Option,
+			Action: item.Action,
+		})
+	}
+	return result
+}
+
+// reportAdjustments prints one line per adjusted tsconfig, for example
+// "lintai: adjusted tsconfig.json for TypeScript 7 (baseUrl rewritten,
+// target removed)". The adjustments are sorted by config.
+func reportAdjustments(out io.Writer, adjustments []analysis.ConfigAdjustment) {
+	for start := 0; start < len(adjustments); {
+		end := start
+		changes := make([]string, 0)
+		for end < len(adjustments) && adjustments[end].Config == adjustments[start].Config {
+			changes = append(changes, adjustments[end].Option+" "+adjustments[end].Action)
+			end++
+		}
+		fmt.Fprintf(out, "lintai: adjusted %s for TypeScript 7 (%s)\n", adjustments[start].Config, strings.Join(changes, ", "))
+		start = end
+	}
 }
 
 func convertTypeRefs(items []lintaiapi.TypeRef) []analysis.TypeRef {

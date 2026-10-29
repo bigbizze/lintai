@@ -3,10 +3,12 @@ package lintaiapi
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/bigbizze/lintai/internal/tsgo/internal/ast"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/bundled"
@@ -185,6 +187,9 @@ type Snapshot struct {
 	// ConfigFiles are the absolute paths of the tsconfig files that the
 	// snapshot read, including extended and referenced configs.
 	ConfigFiles []string
+	// ConfigAdjustments are the compiler options that lintai changed because
+	// TypeScript 7 rejects them, sorted by config path and option.
+	ConfigAdjustments []ConfigAdjustment
 }
 
 type configGroup struct {
@@ -248,7 +253,18 @@ type callSource struct {
 	module bool
 }
 
+// extractTiming records where extraction spends its time. BuildSnapshot
+// prints it to stderr when LINTAI_EXTRACT_TIMING=1.
+type extractTiming struct {
+	programs int
+	config   time.Duration
+	program  time.Duration
+	walk     time.Duration
+}
+
 func BuildSnapshot(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, error) {
+	started := time.Now()
+	timing := &extractTiming{}
 	workspaceRoot, err := normalizeAbsPath(req.WorkspaceRoot)
 	if err != nil {
 		return nil, err
@@ -269,14 +285,16 @@ func BuildSnapshot(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, er
 		nil,
 	)
 	configs := newConfigCache(host)
+	configStarted := time.Now()
 	groups, err := discoverConfigGroups(workspaceRoot, files, configs)
 	if err != nil {
 		return nil, err
 	}
+	timing.config = time.Since(configStarted)
 	merged := &Snapshot{}
 	missing := make(map[string]struct{})
 	for _, group := range groups {
-		partial, groupMissing, err := buildSnapshotForGroup(ctx, host, workspaceRoot, files, group, req.AmbientMatchers)
+		partial, groupMissing, err := buildSnapshotForGroup(ctx, host, workspaceRoot, files, group, req.AmbientMatchers, timing)
 		if err != nil {
 			return nil, err
 		}
@@ -294,7 +312,7 @@ func BuildSnapshot(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, er
 			fallbackFiles = append(fallbackFiles, file)
 		}
 		slices.Sort(fallbackFiles)
-		partial, _, err := buildSnapshotForGroup(ctx, host, workspaceRoot, files, configGroup{PrimaryFiles: fallbackFiles}, req.AmbientMatchers)
+		partial, _, err := buildSnapshotForGroup(ctx, host, workspaceRoot, files, configGroup{PrimaryFiles: fallbackFiles}, req.AmbientMatchers, timing)
 		if err != nil {
 			return nil, err
 		}
@@ -305,7 +323,12 @@ func BuildSnapshot(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, er
 		keepModuleFiles(merged)
 	}
 	merged.ConfigFiles = configs.files()
+	merged.ConfigAdjustments = configs.adjustments()
 	sortSnapshot(merged)
+	if os.Getenv("LINTAI_EXTRACT_TIMING") == "1" {
+		fmt.Fprintf(os.Stderr, "lintai: extract files=%d programs=%d config_ms=%d program_ms=%d walk_ms=%d total_ms=%d\n",
+			len(files), timing.programs, timing.config.Milliseconds(), timing.program.Milliseconds(), timing.walk.Milliseconds(), time.Since(started).Milliseconds())
+	}
 	return merged, nil
 }
 
@@ -366,7 +389,9 @@ func resolveDtsCalls(snap *Snapshot) {
 	snap.PendingDtsCalls = nil
 }
 
-func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, workspaceRoot string, requestedFiles []string, group configGroup, ambientMatchers []AmbientMatcher) (*Snapshot, []string, error) {
+func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, workspaceRoot string, requestedFiles []string, group configGroup, ambientMatchers []AmbientMatcher, timing *extractTiming) (*Snapshot, []string, error) {
+	programStarted := time.Now()
+	timing.programs++
 	config := group.Config
 	if config == nil {
 		synthetic, err := syntheticConfig(host, workspaceRoot, group.PrimaryFiles)
@@ -392,6 +417,9 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 	program.BindSourceFiles()
 	typeChecker, done := program.GetTypeChecker(ctx)
 	defer done()
+	timing.program += time.Since(programStarted)
+	walkStarted := time.Now()
+	defer func() { timing.walk += time.Since(walkStarted) }()
 
 	ex := &extractor{
 		workspaceRoot:  workspaceRoot,
@@ -487,9 +515,14 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 // parsedConfig is a parsed tsconfig file, the set of its root files and the
 // paths of its project references that exist.
 type parsedConfig struct {
-	command    *tsoptions.ParsedCommandLine
-	rootFiles  map[string]struct{}
-	references []string
+	// original is the tsconfig as the project wrote it. command is the
+	// command line to build the program with: the original, or an adjusted
+	// copy when TypeScript 7 rejects options of the original.
+	original    *tsoptions.ParsedCommandLine
+	command     *tsoptions.ParsedCommandLine
+	adjustments []ConfigAdjustment
+	rootFiles   map[string]struct{}
+	references  []string
 }
 
 type configCache struct {
@@ -529,7 +562,12 @@ func (c *configCache) load(configPath string) (*parsedConfig, error) {
 			references = append(references, referencePath)
 		}
 	}
-	parsed := &parsedConfig{command: command, rootFiles: rootFiles, references: references}
+	adjusted, adjustments, err := adjustForTypeScript7(c.host, configPath, command)
+	if err != nil {
+		c.errors[configPath] = err
+		return nil, err
+	}
+	parsed := &parsedConfig{original: command, command: adjusted, adjustments: adjustments, rootFiles: rootFiles, references: references}
 	c.configs[configPath] = parsed
 	return parsed, nil
 }
@@ -540,13 +578,24 @@ func (c *configCache) files() []string {
 	result := make([]string, 0, len(c.configs))
 	for configPath, parsed := range c.configs {
 		result = append(result, configPath)
-		for _, extended := range parsed.command.ExtendedSourceFiles() {
+		for _, extended := range parsed.original.ExtendedSourceFiles() {
 			result = append(result, normalizeSlash(extended.AsString()))
 		}
 		result = append(result, parsed.references...)
 	}
 	slices.Sort(result)
 	return slices.Compact(result)
+}
+
+// adjustments returns the option changes of every loaded config, sorted by
+// config path.
+func (c *configCache) adjustments() []ConfigAdjustment {
+	paths := slices.Sorted(maps.Keys(c.configs))
+	var result []ConfigAdjustment
+	for _, configPath := range paths {
+		result = append(result, c.configs[configPath].adjustments...)
+	}
+	return result
 }
 
 // owningConfig returns the config that lists file as a root file: the
