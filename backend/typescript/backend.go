@@ -12,8 +12,8 @@ import (
 	"github.com/bigbizze/lintai/facts"
 	"github.com/bigbizze/lintai/internal/ambient"
 	"github.com/bigbizze/lintai/internal/analysis"
+	"github.com/bigbizze/lintai/internal/tsgo/lintaiapi"
 	"github.com/bigbizze/lintai/internal/workspace"
-	"github.com/microsoft/TypeScript/tsc/lintaiapi"
 )
 
 type Backend struct{}
