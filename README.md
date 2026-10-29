@@ -162,9 +162,9 @@ The full reference lives in [docs/api.md](docs/api.md). Highlights:
 - rule builder:
   - `rule(id).version(n).setup(fn).facts(fn).program(p).report(...preds).expectNonEmpty(...preds).message(fn)`
 - `dl` tagged template: interpolates strings, numbers, `dl.name("x")` (the name constant `/x`) and other `dl` fragments, with correct escaping
-- base relations: `module`, `fn`, `fn_*`, `import_edge`, `import_*`, `call_edge`, `external_call`, `type_ref`, `type_ref_target`, `meta_access`, `ambient_source`, `ambient_use`, `ambient_key`, `ambient_dynamic`, `ambient_write`, `module_directive`, `module_parse_error`, `site_in_fn`, `location`
+- base relations: `module`, `fn`, `fn_*`, `import_edge`, `import_*`, `call_edge`, `external_call`, `type_ref`, `type_ref_target`, `meta_access`, `ambient_source`, `ambient_use`, `ambient_key`, `ambient_dynamic`, `ambient_write`, `global_ref`, `module_directive`, `module_parse_error`, `site_in_fn`, `location`
 - prelude: `glob`, `import_runtime`, `module_imports`, `imports_reach`, `calls_reach`, `fn_uses_ambient`, `fn_reaches_ambient`, `module_uses_ambient`, `module_reaches_ambient`
-- ambient sources: `clock` (`Date.now`, `new Date()`, `performance.now`), `env` (`process.env`), `random` (`Math.random`, `crypto.randomUUID` and other `crypto` random functions), `network` (`fetch`), `timer` (`setTimeout`, `setInterval`, `setImmediate`) and `process` (`process.cwd`, `process.argv`)
+- ambient sources: `clock` (`Date.now`, `new Date()`, `performance.now`), `env` (`process.env`), `random` (`Math.random`, `crypto.randomUUID` and other `crypto` random functions), `crypto` (`crypto.subtle`), `network` (`fetch`), `timer` (`setTimeout`, `setInterval`, `setImmediate`, `queueMicrotask`) and `process` (`process.cwd`, `process.argv`)
 - CLI: `lintai schema`, `lintai facts`, `--explain`, `--fact-limit`
 - optional `config` export:
   - `export const config = z.object({...})`
@@ -173,7 +173,7 @@ Important caveats:
 
 - the first argument of a reported predicate is its anchor; it must be an entity id with a `location` fact
 - a rule cannot redefine base or prelude predicates
-- `glob` needs both arguments bound by earlier premises and cannot be negated directly
+- `glob` and `!glob` need both arguments bound by earlier premises
 - `--explain` works only with `--json`
 
 The Go engine, backend contract, generic fact model, diagnostics, runtime,

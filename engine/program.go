@@ -25,6 +25,11 @@ const DefaultFactLimit = 5_000_000
 
 var globSym = ast.PredicateSym{Symbol: "glob", Arity: 2}
 
+// notGlobSym is the internal predicate that a negated glob premise becomes.
+// Mangle cannot negate an external predicate, so !glob(P, X) is evaluated as
+// a positive premise that holds when P does not match X.
+var notGlobSym = ast.PredicateSym{Symbol: "lintai:not_glob", Arity: 2}
+
 type phaseError struct {
 	phase string
 	err   error
@@ -52,7 +57,7 @@ type evalOptions struct {
 }
 
 func evaluateProgram(base factstore.ReadOnlyFactStore, prelude parse.SourceUnit, schemaDecls map[ast.PredicateSym]ast.Decl, output runtime.ProgramOutput, report, expectNonEmpty []string, options evalOptions) ([]violation, *phaseError) {
-	unit, err := parse.Unit(strings.NewReader(output.Text))
+	unit, err := parse.Unit(strings.NewReader(splitConstantTerminators(output.Text)))
 	if err != nil {
 		return nil, failPhase("program_parse", "%v", err)
 	}
@@ -66,6 +71,7 @@ func evaluateProgram(base factstore.ReadOnlyFactStore, prelude parse.SourceUnit,
 	if perr := checkGlobUses(unit); perr != nil {
 		return nil, perr
 	}
+	rewriteNegatedGlobs(&unit)
 	if perr := checkNegatedWildcards(unit); perr != nil {
 		return nil, perr
 	}
@@ -170,6 +176,9 @@ func runEvaluation(info *mangleanalysis.ProgramInfo, strata []mangleanalysis.Nod
 	if decl := info.Decls[globSym]; decl != nil && decl.IsExternal() {
 		externalPredicates[globSym] = globPredicate{}
 	}
+	if decl := info.Decls[notGlobSym]; decl != nil && decl.IsExternal() {
+		externalPredicates[notGlobSym] = globPredicate{negated: true}
+	}
 	_, err = mangleengine.EvalStratifiedProgramWithStats(info, strata, predToStratum, store,
 		mangleengine.WithDeterministicOrder(),
 		mangleengine.WithCreatedFactLimit(factLimit),
@@ -178,7 +187,9 @@ func runEvaluation(info *mangleanalysis.ProgramInfo, strata []mangleanalysis.Nod
 	return err
 }
 
-type globPredicate struct{}
+type globPredicate struct {
+	negated bool
+}
 
 func (globPredicate) ShouldPushdown() bool {
 	return false
@@ -188,9 +199,12 @@ func (globPredicate) ShouldQuery([]ast.Constant, []ast.BaseTerm, []ast.Term) boo
 	return true
 }
 
-func (globPredicate) ExecuteQuery(inputs []ast.Constant, _ []ast.BaseTerm, _ []ast.Term, cb func([]ast.BaseTerm)) error {
+func (g globPredicate) ExecuteQuery(inputs []ast.Constant, _ []ast.BaseTerm, _ []ast.Term, cb func([]ast.BaseTerm)) error {
 	path, err := inputs[0].StringValue()
 	if err != nil {
+		if g.negated {
+			cb(nil)
+		}
 		return nil
 	}
 	pattern, err := inputs[1].StringValue()
@@ -201,10 +215,99 @@ func (globPredicate) ExecuteQuery(inputs []ast.Constant, _ []ast.BaseTerm, _ []a
 	if err != nil {
 		return fmt.Errorf("glob pattern %q: %w", pattern, err)
 	}
-	if matched {
+	if matched != g.negated {
 		cb(nil)
 	}
 	return nil
+}
+
+// splitConstantTerminators puts a space between a name constant and the
+// clause-ending dot, so that Layer != /composition. parses. The Mangle lexer
+// allows "." inside a name constant, so it reads "/composition." as one
+// constant. A dot is split off only when whitespace, a comment or the end of
+// the text follows it. Strings and comments are not changed. When a space or
+// a tab follows, the dot and that character change places, so the columns of
+// later tokens do not change.
+func splitConstantTerminators(text string) string {
+	var out strings.Builder
+	out.Grow(len(text) + 8)
+	isConstantChar := func(c byte) bool {
+		return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.IndexByte(".-_~%/", c) >= 0
+	}
+	for i := 0; i < len(text); {
+		c := text[i]
+		switch {
+		case c == '#':
+			end := strings.IndexByte(text[i:], '\n')
+			if end < 0 {
+				end = len(text) - i
+			}
+			out.WriteString(text[i : i+end])
+			i += end
+		case c == '"' || c == '\'' || c == '`':
+			j := i + 1
+			for j < len(text) && text[j] != c {
+				if text[j] == '\\' {
+					j++
+				}
+				j++
+			}
+			j = min(j+1, len(text))
+			out.WriteString(text[i:j])
+			i = j
+		case c == '/':
+			j := i + 1
+			for j < len(text) && isConstantChar(text[j]) {
+				j++
+			}
+			token := text[i:j]
+			switch {
+			case len(token) <= 2 || token[len(token)-1] != '.':
+				out.WriteString(token)
+			case j < len(text) && (text[j] == ' ' || text[j] == '\t'):
+				out.WriteString(token[:len(token)-1])
+				out.WriteByte(text[j])
+				out.WriteByte('.')
+				j++
+			case j == len(text) || strings.IndexByte("\r\n\f#", text[j]) >= 0:
+				out.WriteString(token[:len(token)-1])
+				out.WriteString(" .")
+			default:
+				out.WriteString(token)
+			}
+			i = j
+		default:
+			out.WriteByte(c)
+			i++
+		}
+	}
+	return out.String()
+}
+
+const notGlobDecl = `Decl lintai:not_glob(Path, Pattern) descr [external(), mode('+', '+')].`
+
+// rewriteNegatedGlobs replaces each !glob(P, X) premise with the internal
+// positive premise lintai:not_glob(P, X), and declares that predicate when
+// the program uses it.
+func rewriteNegatedGlobs(unit *parse.SourceUnit) {
+	rewritten := false
+	for ci := range unit.Clauses {
+		premises := unit.Clauses[ci].Premises
+		for pi, premise := range premises {
+			if negated, ok := premise.(ast.NegAtom); ok && negated.Atom.Predicate == globSym {
+				premises[pi] = ast.Atom{Predicate: notGlobSym, Args: negated.Atom.Args}
+				rewritten = true
+			}
+		}
+	}
+	if !rewritten {
+		return
+	}
+	decls, err := parse.Unit(strings.NewReader(notGlobDecl))
+	if err != nil {
+		panic(err)
+	}
+	unit.Decls = append(unit.Decls, decls.Decls...)
 }
 
 // preludeFor keeps the prelude declarations and only the prelude clauses that
@@ -289,25 +392,33 @@ func checkReservedPredicates(unit, prelude parse.SourceUnit, schemaDecls map[ast
 	return nil
 }
 
-// checkGlobUses rejects glob premises that mangle-go cannot evaluate: a
-// negated glob, or a glob whose arguments are not bound by an earlier premise.
+// checkGlobUses rejects glob premises that mangle-go cannot evaluate: a glob
+// or a negated glob whose arguments are not bound by an earlier premise.
 func checkGlobUses(unit parse.SourceUnit) *phaseError {
 	for _, clause := range unit.Clauses {
 		bound := make(map[ast.Variable]struct{})
+		checkBound := func(args []ast.BaseTerm) *phaseError {
+			for _, arg := range args {
+				if variable, ok := arg.(ast.Variable); ok {
+					if _, isBound := bound[variable]; !isBound {
+						return failPhase("program_analysis", "glob argument %v must be bound by an earlier premise in %v", variable, clause)
+					}
+				}
+			}
+			return nil
+		}
 		for _, premise := range clause.Premises {
 			switch typed := premise.(type) {
 			case ast.NegAtom:
 				if typed.Atom.Predicate == globSym {
-					return failPhase("program_analysis", "glob cannot be negated in %v; define a helper predicate that uses glob and negate the helper", clause)
+					if perr := checkBound(typed.Atom.Args); perr != nil {
+						return perr
+					}
 				}
 			case ast.Atom:
 				if typed.Predicate == globSym {
-					for _, arg := range typed.Args {
-						if variable, ok := arg.(ast.Variable); ok {
-							if _, isBound := bound[variable]; !isBound {
-								return failPhase("program_analysis", "glob argument %v must be bound by an earlier premise in %v", variable, clause)
-							}
-						}
+					if perr := checkBound(typed.Args); perr != nil {
+						return perr
 					}
 					continue
 				}
@@ -523,8 +634,14 @@ func explain(info *mangleanalysis.ProgramInfo, store factstore.ReadOnlyFactStore
 }
 
 func renderProof(node *provenance.ProofNode, lines *[]string) {
-	text := node.Fact.String()
-	if node.Kind == provenance.KindAbsence {
+	fact := node.Fact
+	negated := node.Kind == provenance.KindAbsence
+	if fact.Predicate == notGlobSym {
+		fact = ast.Atom{Predicate: globSym, Args: fact.Args}
+		negated = true
+	}
+	text := fact.String()
+	if negated {
 		text = "!" + text
 	}
 	*lines = append(*lines, text)

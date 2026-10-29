@@ -73,7 +73,7 @@ module that imports `backend/typescript` must include the same compiler fork
 replacement used here:
 
 ```go
-replace github.com/microsoft/TypeScript/tsc => github.com/bigbizze/typescript-go v0.0.0-20261028214434-1b2c2fa7c3bb
+replace github.com/microsoft/TypeScript/tsc => github.com/bigbizze/typescript-go v0.0.0-20261029015929-a83c484892b1
 ```
 
 The separate module in `testdata/consumer-module` demonstrates this

@@ -5,7 +5,7 @@ Decl glob(Path, Pattern)
   descr [
     external(),
     mode('+', '+'),
-    doc("Path matches the doublestar pattern Pattern. Both arguments must be bound before glob is evaluated. glob cannot be negated: put it in a helper predicate and negate the helper."),
+    doc("Path matches the doublestar pattern Pattern. Both arguments must be bound by earlier premises. !glob(Path, Pattern) holds when Path does not match."),
     arg(Path, "Workspace-relative path."),
     arg(Pattern, "Doublestar pattern, for example \"src/core/**\".")
   ].
@@ -19,10 +19,11 @@ import_has_symbols(Imp) :- import_symbol(Imp, _, _).
 
 Decl import_runtime(Imp)
   descr [
-    doc("The import loads its target at runtime: it is not type-only, and it is a side-effect import or has at least one value binding."),
+    doc("The import loads its target at runtime: it is not type-only, and it is a side-effect import, has at least one value binding, or is kept by verbatimModuleSyntax (import_retained)."),
     arg(Imp, "Import entity id.")
   ].
 import_runtime(Imp) :- import_edge(Imp, _, _, _), !import_type_only(Imp), !import_has_symbols(Imp).
+import_runtime(Imp) :- import_retained(Imp).
 import_runtime(Imp) :- import_symbol(Imp, Name, _), !import_type_only(Imp), !import_symbol_type_only(Imp, Name).
 
 Decl module_imports(From, To)

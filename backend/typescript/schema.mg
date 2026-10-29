@@ -120,6 +120,13 @@ Decl import_type_only(Imp)
     arg(Imp, "Import entity id.")
   ].
 
+Decl import_retained(Imp)
+  descr [
+    extensional(),
+    doc("An import declaration whose bindings are all type-only, as in import { type X } from \"m\", when verbatimModuleSyntax is on. tsc emits it as import {} from \"m\", so the target loads at runtime."),
+    arg(Imp, "Import entity id.")
+  ].
+
 Decl import_symbol(Imp, Name, Kind)
   descr [
     extensional(),
@@ -222,6 +229,15 @@ Decl ambient_write(Site)
     arg(Site, "Site entity id.")
   ].
 
+Decl global_ref(Site, Name, File)
+  descr [
+    extensional(),
+    doc("A reference to a global value: an identifier that resolves to the global binding with its name, from the default library, an @types package or a declaration file, or a member of globalThis, window, self or global with that name. A local binding with the same name is not a global reference. Type positions are not references."),
+    arg(Site, "Site entity id."),
+    arg(Name, "Global name, for example \"crypto\" or \"process\"."),
+    arg(File, "Path of the file that contains the reference.")
+  ].
+
 Decl module_directive(Dir, File, Text)
   descr [
     extensional(),
@@ -243,7 +259,7 @@ Decl module_parse_error(Err, File, Message)
 Decl site_in_fn(Site, Fn)
   descr [
     extensional(),
-    doc("The innermost collected function that contains a call, external-call, ambient-use or meta-access site. Sites at module scope have no row."),
+    doc("The innermost collected function that contains a call, external-call, ambient-use, global-ref or meta-access site. Sites at module scope have no row."),
     arg(Site, "Site entity id."),
     arg(Fn, "Function entity id.")
   ].

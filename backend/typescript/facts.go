@@ -70,6 +70,9 @@ func factsFromAnalysis(snapshot *analysis.Snapshot) ([]facts.Fact, error) {
 		if edge.IsTypeOnly {
 			b.add("import_type_only", id)
 		}
+		if edge.Retained {
+			b.add("import_retained", id)
+		}
 		for _, symbol := range edge.ImportedSymbols {
 			kind, err := name(symbol.Kind)
 			if err != nil {
@@ -160,6 +163,14 @@ func factsFromAnalysis(snapshot *analysis.Snapshot) ([]facts.Fact, error) {
 			b.add("site_in_fn", id, str(use.FunctionSemanticKey))
 		}
 		b.location(use.SemanticKey, use.Range)
+	}
+	for _, ref := range snapshot.GlobalRefs {
+		id := str(ref.SemanticKey)
+		b.add("global_ref", id, str(ref.Name), str(ref.FilePath))
+		if ref.FunctionSemanticKey != "" {
+			b.add("site_in_fn", id, str(ref.FunctionSemanticKey))
+		}
+		b.location(ref.SemanticKey, ref.Range)
 	}
 	return b.items, nil
 }

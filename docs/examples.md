@@ -205,7 +205,7 @@ export default rule("arch.server-only")
 Caveats:
 
 - every variable in a negated atom must be bound by an earlier positive atom, and `_` is not allowed in a negated atom. Put the pattern with `_` in a helper predicate (`imports_marker`) and negate the helper.
-- `glob` cannot be negated. To express "not in a directory", define a helper predicate that uses `glob` and negate the helper.
+- to express "not in a directory", use `!glob(File, "src/dir/**")`. Both arguments must be bound by earlier premises.
 - `.expectNonEmpty("server_module")` produces a `premise` error if the glob matches no module, so the rule cannot pass because of a wrong path
 
 ## 6. Config and setup

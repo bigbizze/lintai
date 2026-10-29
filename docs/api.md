@@ -121,6 +121,7 @@ Conventions:
 | `import_unresolved(Imp)` | The import resolves to no file and no declared module: a typo in a path or alias, or a package that is not installed. |
 | `import_package(Imp, Pkg)` | The package name, for example `"next"` for `"next/server"`. |
 | `import_type_only(Imp)` | The reference loads only types: `import type`, `export type ... from` or `typeof import()`. |
+| `import_retained(Imp)` | An import declaration whose bindings are all `type` bindings (`import { type X } from "m"`), when `verbatimModuleSyntax` is on. tsc emits it as `import {} from "m"`, so `m` loads at runtime. Without the option, tsc removes the import and the fact is absent. |
 | `import_symbol(Imp, Name, Kind)` | `Kind` is `/default`, `/namespace` or `/named`. A side-effect import, `export *`, `import()` and `require()` have no rows. |
 | `import_symbol_type_only(Imp, Name)` | `import { type X }`. |
 | `call_edge(Call, Caller, Callee)` | A call to a collected function. The callee is the declaration that the type checker resolves for the call. `Caller` is the module path for a call at module scope. A call through a function-typed value (a callback parameter, or a property of a record of functions) has no row. |
@@ -133,9 +134,10 @@ Conventions:
 | `ambient_key(Site, Key)` | The static key read or written at the site. |
 | `ambient_dynamic(Site)` | The key is not static, or the whole object escapes. |
 | `ambient_write(Site)` | The site assigns to or deletes the keyed member. |
+| `global_ref(Site, Name, File)` | A reference to a global value. The identifier resolves to the global binding with that name, from the default library, an `@types` package or a declaration file. `globalThis.X`, `window.X`, `self.X` and `global.X` are references to `X` too. A local binding with the same name is not a global reference, and type positions are not references. Use it to ban a global completely, for example `crypto` or `process`, including aliases such as `const c = crypto`. |
 | `module_directive(Dir, File, Text)` | A prologue directive, for example `"use client"`. |
 | `module_parse_error(Err, File, Message)` | The first syntax error of a file. The other facts of that file can be incomplete. |
-| `site_in_fn(Site, Fn)` | The innermost collected function that contains a call, external-call, ambient-use or meta-access site. A site inside an anonymous callback belongs to the nearest enclosing collected function. Module-scope sites have no row. |
+| `site_in_fn(Site, Fn)` | The innermost collected function that contains a call, external-call, ambient-use, global-ref or meta-access site. A site inside an anonymous callback belongs to the nearest enclosing collected function. Module-scope sites have no row. |
 | `location(Entity, File, StartLine, StartCol, EndLine, EndCol)` | The source range of every entity id. |
 
 Caveats:
@@ -151,9 +153,9 @@ The prelude is loaded before every rule program. A rule cannot redefine a prelud
 
 | Predicate | Meaning |
 |---|---|
-| `glob(Path, Pattern)` | `Path` matches the doublestar `Pattern`. |
+| `glob(Path, Pattern)` | `Path` matches the doublestar `Pattern`. `!glob(Path, Pattern)` holds when it does not match. |
 | `import_has_symbols(Imp)` | The import introduces at least one binding. |
-| `import_runtime(Imp)` | The import loads its target at runtime: it is not type-only, and it is a side-effect import or has a value binding. |
+| `import_runtime(Imp)` | The import loads its target at runtime: it is not type-only, and it is a side-effect import, has a value binding, or has `import_retained`. |
 | `module_imports(From, To)` | `From` has a runtime import of `To`. |
 | `imports_reach(From, To)` | Transitive closure of `module_imports`. |
 | `calls_reach(Caller, Callee)` | Transitive closure of `call_edge`. |
@@ -164,7 +166,8 @@ The prelude is loaded before every rule program. A rule cannot redefine a prelud
 
 Caveats:
 
-- `glob` is an external predicate. Both arguments must be bound by earlier premises in the same clause. It cannot be negated directly; define a helper predicate that uses `glob` and negate the helper.
+- `glob` is an external predicate. Both arguments of `glob` and `!glob` must be bound by earlier premises in the same clause.
+- a clause can end with a name constant, as in `L != /composition.` lintai separates the final `.` from the constant when whitespace, a comment or the end of the program follows it. A name constant cannot itself end with `.`.
 - Mangle requires every variable in a negated atom to be bound. `_` in a negated atom is an error with phase `program_analysis`. Move the negated pattern into a helper predicate without the unused argument, and negate the helper.
 - `calls_reach(Caller, Callee)` also has rows where `Caller` is a module path, from calls at module scope.
 - LintAI evaluates only the prelude clauses that a rule uses.
@@ -204,14 +207,15 @@ type Source struct {
 Matching rules:
 
 1. **Root.** An identifier named `Root` matches when its symbol is not declared in a non-declaration source file. Globals from `lib.*.d.ts` or `@types/*` match, and so do unresolved identifiers. A local binding with the same name (`const Date = ...`, a parameter named `process`) does not match. `globalThis.Root` and `window.Root` also match.
-2. **Module bindings.** An import binding that matches a `Modules` entry (`import process from "node:process"`, `import { env } from "node:process"`, `import * as p from "node:process"` then `p.env`) stands for `Root` followed by the entry's `Path`. The checker resolves uses of the binding.
-3. **Member path.** Each step is `.name`, `?.name` or `["name"]`. Parentheses and non-null assertions are transparent.
-4. **Form.** `reference` matches every occurrence of the full path. `call` and `construct` match only the callee or the `new` target, with `ArgCount` checked when set.
-5. **Key** (`member` only). `.K`, `?.K`, `["K"]` and `"K" in path` give key `K`. `[expr]` with a non-literal `expr` gives a dynamic site. A destructuring declaration or assignment gives one site per named property, and one more dynamic site for a rest element. Any other use of the object (argument, spread, assignment, return) gives one dynamic site.
-6. **Write.** When the keyed member is the target of an assignment, a compound assignment or `delete`, the site also has `ambient_write`.
-7. **One site per use.** When matchers overlap, only the matcher with the longest `Path` records a site. `process.env.FOO` is one `env` site.
-8. **Site identity.** The entity id is `<file>::ambient::<source>.<capability>::<key-or-*>`, with an ordinal suffix for repeats. The range covers the matched expression, including the key access.
-9. **Scope.** Every primary file is scanned, including module scope and class field initializers.
+2. **Aliases.** A member access, an element access with a string key, a destructured property or a destructuring-assignment property also matches when the type checker resolves it to the member at the end of `Path`. This finds `const p = process; p.env.X`, `const D = Date; D.now()`, `const { now } = Date`, `const { random } = Math`, `Date["now"]` and `const { randomUUID } = c` for `import * as c from "node:crypto"`. A local object with a member of the same name does not match. The alias itself (`const c = crypto`) is not an ambient use; `global_ref` records it. Names computed at runtime, for example `globalThis["pro" + "cess"]`, do not match.
+3. **Module bindings.** An import binding that matches a `Modules` entry (`import process from "node:process"`, `import { env } from "node:process"`, `import * as p from "node:process"` then `p.env`) stands for `Root` followed by the entry's `Path`. The checker resolves uses of the binding.
+4. **Member path.** Each step is `.name`, `?.name` or `["name"]`. Parentheses and non-null assertions are transparent.
+5. **Form.** `reference` matches every occurrence of the full path. `call` and `construct` match only the callee or the `new` target, with `ArgCount` checked when set.
+6. **Key** (`member` only). `.K`, `?.K`, `["K"]` and `"K" in path` give key `K`. `[expr]` with a non-literal `expr` gives a dynamic site. A destructuring declaration or assignment gives one site per named property, and one more dynamic site for a rest element. Any other use of the object (argument, spread, assignment, return) gives one dynamic site.
+7. **Write.** When the keyed member is the target of an assignment, a compound assignment or `delete`, the site also has `ambient_write`.
+8. **One site per use.** When matchers overlap, only the matcher with the longest `Path` records a site. `process.env.FOO` is one `env` site.
+9. **Site identity.** The entity id is `<file>::ambient::<source>.<capability>::<key-or-*>`, with an ordinal suffix for repeats. The range covers the matched expression, including the key access.
+10. **Scope.** Every primary file is scanned, including module scope and class field initializers.
 
 ### Built-in sources
 
@@ -243,6 +247,12 @@ Capability `read` covers reads and writes. `ambient_write` marks a write.
 | `uuid` | `crypto` | `["randomUUID"]` | reference | the same, for `randomUUID` |
 | `bytes` | `crypto` | `["getRandomValues"]`, `["randomBytes"]`, `["randomFillSync"]` | reference | the same, for each name |
 
+`crypto`:
+
+| Capability | Root | Path | Form | Modules |
+|---|---|---|---|---|
+| `subtle` | `crypto` | `["subtle"]` | reference | `node:crypto` and `crypto`: export `default` with path `[]`, export `subtle` with path `["subtle"]` |
+
 `network`:
 
 | Capability | Root | Path | Form | Modules |
@@ -254,6 +264,7 @@ Capability `read` covers reads and writes. `ambient_write` marks a write.
 | Capability | Root | Path | Form | Modules |
 |---|---|---|---|---|
 | `schedule` | `setTimeout`, `setInterval`, `setImmediate` | `[]` | reference | `node:timers` and `timers`: the export with the same name, path `[]` |
+| `schedule` | `queueMicrotask` | `[]` | reference | — |
 
 `process`:
 

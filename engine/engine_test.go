@@ -203,3 +203,52 @@ export default rule("t.round-trip").version(1)
 		t.Fatalf("expected the values to round-trip, got %+v", items)
 	}
 }
+
+// !glob(P, X) holds when P does not match X, a clause can end with a name
+// constant (Layer != /core.), and with verbatimModuleSyntax an
+// import { type X } is a runtime import. Before this, the first was an
+// error, the second did not parse, and the third was not a runtime import.
+func TestNegatedGlobAndTrailingNameConstant(t *testing.T) {
+	repoRoot, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceRoot := t.TempDir()
+	writeTestFile(t, workspaceRoot, "tsconfig.json", `{"compilerOptions": {"module": "preserve", "moduleResolution": "bundler", "verbatimModuleSyntax": true}}`)
+	writeTestFile(t, workspaceRoot, "src/core/a.ts", "export type A = number;\n")
+	writeTestFile(t, workspaceRoot, "src/ui/b.ts", "import { type A } from \"../core/a\";\nexport const b: A = 1;\n")
+	writeTestFile(t, workspaceRoot, "lintai-rules/runtime.ts", `import { dl, rule } from "@lintai/sdk";
+export default rule("t.runtime").version(1)
+	.program(dl`+"`"+`Decl r(Imp). r(Imp) :- import_edge(Imp, F, _, _), glob(F, "src/**"), import_runtime(Imp).`+"`"+`)
+	.report("r").message(() => "runtime");
+`)
+	writeTestFile(t, workspaceRoot, "lintai-rules/outside.ts", `import { dl, rule } from "@lintai/sdk";
+export default rule("t.outside").version(1)
+	.program(dl`+"`"+`Decl layer(F, L). layer(F, /ui) :- module(F), glob(F, "src/ui/**"). layer(F, /core) :- module(F), glob(F, "src/core/**").
+Decl v(F). v(F) :- module(F), !glob(F, "src/core/**"), layer(F, L), L != /core.
+# a comment with /core. in it
+Decl w(F). w(F) :- module(F), F = "src/a/b.c", layer(F, /ui.x).`+"`"+`)
+	.report("v").message(() => "outside");
+`)
+	items, err := New(typescript.New()).Run(context.Background(), Options{
+		RepoRoot:      repoRoot,
+		AssetRoot:     filepath.Join(repoRoot, "packages", "eslint-plugin"),
+		WorkspaceRoot: workspaceRoot,
+		RuleGlobs:     []string{"lintai-rules/**/*.ts"},
+		Env:           map[string]any{},
+		Severity:      diagnostics.SeverityError,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byRule := map[string][]string{}
+	for _, item := range items {
+		byRule[item.RuleID] = append(byRule[item.RuleID], item.SourceLocation.File)
+	}
+	if got := byRule["t.outside"]; len(got) != 1 || got[0] != "src/ui/b.ts" {
+		t.Fatalf("expected one t.outside violation in src/ui/b.ts, got %+v", items)
+	}
+	if got := byRule["t.runtime"]; len(got) != 1 || got[0] != "src/ui/b.ts" {
+		t.Fatalf("expected the retained type import to be a runtime import, got %+v", items)
+	}
+}
