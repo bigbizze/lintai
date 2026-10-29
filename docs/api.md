@@ -341,11 +341,14 @@ lintai serve
 ```json
 {
 	"rules": [{ "id": "arch.no-service-imports", "path": "lintai-rules/no-service-imports.ts" }],
-	"errors": [{ "path": "lintai-rules/broken.ts", "message": "..." }]
+	"errors": [
+		{ "path": "lintai-rules/broken.ts", "message": "..." },
+		{ "path": "lintai-rules/dup-a.ts", "id": "arch.dup", "message": "rule id \"arch.dup\" is used by more than one rule file ..." }
+	]
 }
 ```
 
-`rules` is sorted by id, then by path. Paths are relative to the workspace root. A rule file that does not bundle or load, has an invalid id, or has the same id as another rule file is in `errors` and not in `rules`. These errors do not change the exit code: it is 0, so that a linter plugin can still create the other rules. Exit code 2 has its usual meaning, for example a glob that matches no file.
+`rules` is sorted by id, then by path. Paths are relative to the workspace root. A rule file that does not bundle or load, has an invalid id, or has the same id as another rule file is in `errors` and not in `rules`. An error has `id` when the id is valid and known, as for a duplicate id. These errors do not change the exit code: it is 0, so that a linter plugin can still create the other rules. Exit code 2 has its usual meaning, for example a glob that matches no file.
 
 Flags for analysis:
 
@@ -498,6 +501,8 @@ Linter rule caveats:
 - the rule list is fixed when the linter loads the plugin. After you add a rule file or change a rule id, restart the linter or the editor's language server. Until then, the violations of the new id appear under `lintai/analysis`, with a message that says to restart.
 - a lintai rule that is not in the linter config does not run, and neither linter has a wildcard such as `"lintai/*"`. Spread `configs.all` to enable every rule, then override single rules.
 - a misspelled rule name in the config, such as `"lintai/arch.no-servce-imports"`, fails the lint run, as for any unknown rule
+- a rule file that does not load has no linter rule, so a config that names its rule fails as an unknown rule. The plugin writes the load error to stderr when the linter loads it, and `lintai/analysis` reports it too. A duplicate id keeps its linter rule, so the config loads, and `lintai/analysis` reports the duplicate.
+- when `lintai rules` itself fails, for example because the binary is missing, the plugin has no lintai rules and writes the cause to stderr. The plugin does not keep this result, so a reload of the linter config tries again.
 - a rule set to `"off"` in the linter is still evaluated by lintai; only its output is dropped. To skip the evaluation, remove the rule file from the `rules` globs.
 - rule errors always appear under `lintai/analysis` at the level of `lintai/analysis`, whatever level the rule has, so a broken rule cannot pass as a warning or be hidden by `"off"`
 - `lintai rules` takes about 0.1 to 0.3 s for 1 to 20 rules. It runs once when the linter loads the plugin.

@@ -44,7 +44,9 @@ export type LintedFile = {
 
 export type LintaiRules = {
 	// rules are the lintai rules that get a linter rule lintai/<id>, sorted
-	// by id.
+	// by id. A rule whose id is known but that cannot run, for example
+	// because two rule files have its id, is in the list too, so a config
+	// that names it still loads. Its problem is reported by lintai/analysis.
 	rules: ReadonlyArray<{ id: string; path: string }>;
 	lintRule(id: string, file: LintedFile): void;
 	lintAnalysis(file: LintedFile): void;
@@ -64,29 +66,66 @@ export function createLintaiRules(
 	}
 	const resolved = resolveBridgeOptions(options, cwd, host);
 	const list = loadRuleIds(resolved);
-	const reserved = list.rules.filter((item) => reservedRuleNames.includes(item.id));
+	const known = new Map(list.rules.map((item) => [item.id, item]));
+	for (const item of list.errors) {
+		if (item.id && !known.has(item.id)) {
+			known.set(item.id, { id: item.id, path: item.path });
+		}
+	}
+	const rules = [...known.values()].sort((left, right) =>
+		left.id < right.id ? -1 : left.id > right.id ? 1 : 0,
+	);
+	const reserved = rules.filter((item) => reservedRuleNames.includes(item.id));
 	if (reserved.length > 0) {
 		throw new Error(
 			`lintai: ${reserved.map((item) => `rule ${item.path} has the id "${item.id}"`).join("; ")}. The lintai plugin uses the names ${reservedRuleNames.map((name) => `lintai/${name}`).join(", ")}, so rename the rule.`,
 		);
 	}
-	const ids = new Set(list.rules.map((item) => item.id));
+	const ids = new Set(known.keys());
 	const loadErrors = list.errors.map((item) =>
 		item.path
 			? `[lintai] rule file ${item.path} could not be loaded: ${item.message}`
 			: `[lintai] ${item.message}`,
 	);
+	// A config that names the rule of a file that did not load fails before
+	// lintai/analysis can run, so the cause also goes to stderr now.
+	for (const message of loadErrors) {
+		console.error(message);
+	}
 	let loadErrorsReported = false;
 
-	const diagnosticsFor = (file: LintedFile): Diagnostic[] | undefined => {
+	// The linter calls every lintai rule for a file in one synchronous pass,
+	// so the diagnostics of the file are read once per pass and the cache is
+	// cleared in the next microtask.
+	type PassEntry = { text: string; diagnostics: Diagnostic[] | undefined };
+	let passCache: Map<string, PassEntry> | undefined;
+	const readDiagnostics = (file: LintedFile): Diagnostic[] | undefined => {
 		if (resolved.mode === "serve" && hasUnsavedChanges(file.physicalFilename, file.text)) {
 			return undefined;
 		}
 		return getClient(resolved).getDiagnostics(workspacePath(resolved, file.physicalFilename));
 	};
+	const diagnosticsFor = (file: LintedFile): Diagnostic[] | undefined => {
+		if (!passCache) {
+			const cache = new Map<string, PassEntry>();
+			passCache = cache;
+			queueMicrotask(() => {
+				if (passCache === cache) {
+					passCache = undefined;
+				}
+			});
+		}
+		const cached = passCache.get(file.physicalFilename);
+		if (cached && cached.text === file.text) {
+			return cached.diagnostics;
+		}
+		const diagnostics = readDiagnostics(file);
+		passCache.set(file.physicalFilename, { text: file.text, diagnostics });
+		return diagnostics;
+	};
 
 	return {
-		rules: list.rules,
+		rules,
 		lintRule(id, file) {
 			const diagnostics = diagnosticsFor(file);
 			if (!diagnostics) {

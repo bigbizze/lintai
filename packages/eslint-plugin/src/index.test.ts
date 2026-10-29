@@ -64,6 +64,9 @@ function stubLintai(
 	ruleIDs: string[],
 	diagnostics: Diagnostic[],
 	extra: Partial<LintaiOptions> = {},
+	errors: Array<{ path: string; id?: string; message: string }> = [
+		{ path: "lintai-rules/broken.ts", message: "Unexpected end of file" },
+	],
 ): string[][] {
 	const runs: string[][] = [];
 	const resolved = resolveBridgeOptions(
@@ -78,7 +81,7 @@ function stubLintai(
 				return {
 					stdout: JSON.stringify({
 						rules: ruleIDs.map((id) => ({ id, path: `lintai-rules/${id}.ts` })),
-						errors: [{ path: "lintai-rules/broken.ts", message: "Unexpected end of file" }],
+						errors,
 					}),
 					stderr: "",
 					error: undefined,
@@ -242,6 +245,21 @@ test("a misspelled lintai rule name fails the lint run", () => {
 		() => lint({ "lintai/arch.hrad": "error" }),
 		/Could not find "arch.hrad" in plugin "lintai"/,
 	);
+});
+
+test("a rule that cannot run but has a known id keeps its linter rule, so a config that names it loads", () => {
+	const duplicate = 'rule id "arch.dup" is used by more than one rule file';
+	stubLintai(["arch.soft"], [], {}, [
+		{ path: "lintai-rules/dup-a.ts", id: "arch.dup", message: duplicate },
+		{ path: "lintai-rules/dup-b.ts", id: "arch.dup", message: duplicate },
+	]);
+	const messages = lint({ "lintai/analysis": "error", "lintai/arch.dup": "warn" }).filter((line) =>
+		line.startsWith("lintai/"),
+	);
+	assert.deepEqual(messages, [
+		`lintai/analysis 2 1 [lintai] rule file lintai-rules/dup-a.ts could not be loaded: ${duplicate}`,
+		`lintai/analysis 2 1 [lintai] rule file lintai-rules/dup-b.ts could not be loaded: ${duplicate}`,
+	]);
 });
 
 test("a rule id that the plugin uses for its own rules throws", () => {

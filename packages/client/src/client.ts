@@ -946,7 +946,7 @@ export function resetClientsForTest(): void {
 
 export type RuleIdList = {
 	rules: Array<{ id: string; path: string }>;
-	errors: Array<{ path: string; message: string }>;
+	errors: Array<{ path: string; id?: string; message: string }>;
 };
 
 const ruleIdCache = new Map<string, RuleIdList>();
@@ -956,7 +956,8 @@ const ruleIdCache = new Map<string, RuleIdList>();
 // rule for each id. The result is cached for each set of resolved options.
 // When lintai rules itself fails, for example because the binary is
 // missing or a glob matches nothing, the failure is one error with an empty
-// path and there are no rules.
+// path and there are no rules. That result is not cached, so the next load
+// of the linter config tries again.
 export function loadRuleIds(
 	options: ResolvedBridgeOptions,
 	dependencies: ClientDependencies = defaultDependencies,
@@ -983,7 +984,9 @@ export function loadRuleIds(
 		{ cwd: options.repoRoot, encoding: "utf8" },
 	);
 	const list = parseRuleIds(result);
-	ruleIdCache.set(key, list);
+	if (!list.errors.some((item) => item.path === "")) {
+		ruleIdCache.set(key, list);
+	}
 	return list;
 }
 
@@ -991,7 +994,10 @@ function parseRuleIds(result: ReturnType<SpawnSyncLike>): RuleIdList {
 	const fail = (message: string): RuleIdList => ({
 		rules: [],
 		errors: [
-			{ path: "", message: `lintai rules failed, so no lintai rules were created: ${message}` },
+			{
+				path: "",
+				message: `lintai rules failed, so no lintai rules were created. Fix the problem, then restart the linter or the editor's language server: ${message}`,
+			},
 		],
 	});
 	if (result.error) {

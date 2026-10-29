@@ -18,9 +18,11 @@ type ListedRule struct {
 }
 
 // RuleLoadError is a rule file that did not bundle or load, or that has an
-// id that another rule file has.
+// id that another rule file has. ID is set when the id of the rule is
+// known, so a linter plugin can still define a rule with that name.
 type RuleLoadError struct {
 	Path    string `json:"path"`
+	ID      string `json:"id,omitempty"`
 	Message string `json:"message"`
 }
 
@@ -94,7 +96,7 @@ func ListRules(ctx context.Context, options Options) (RuleList, error) {
 	for _, item := range found {
 		paths := pathsByID[item.ID]
 		if len(paths) > 1 {
-			list.Errors = append(list.Errors, RuleLoadError{Path: item.Path, Message: duplicateIDMessage(item.ID, paths)})
+			list.Errors = append(list.Errors, RuleLoadError{Path: item.Path, ID: item.ID, Message: duplicateIDMessage(item.ID, paths)})
 			continue
 		}
 		list.Rules = append(list.Rules, item)
@@ -135,10 +137,11 @@ type preparedRuleFailure struct {
 
 // invalidPreparedRules returns the prepared rules whose id does not match
 // runtime.RuleIDPattern (phase setup, as the other rule shape errors) and
-// the rules whose id another rule file has (phase config, one diagnostic
-// for each file). Linter rule levels select rules by id, so two rules with
-// one id cannot run.
-func invalidPreparedRules(workspaceRoot string, prepared map[string]bundle.PrepareResult) map[string]preparedRuleFailure {
+// the prepared rules whose id another rule file has (phase config). Linter
+// rule levels select rules by id, so two rules with one id cannot run. A
+// rule whose setup() failed still has its id, so it counts as a duplicate
+// too, as in lintai rules, which does not run setup().
+func invalidPreparedRules(workspaceRoot string, prepared map[string]bundle.PrepareResult, prepareFailures map[string]bundle.PrepareError) map[string]preparedRuleFailure {
 	failures := make(map[string]preparedRuleFailure)
 	pathsByID := make(map[string][]string)
 	for rulePath, item := range prepared {
@@ -147,6 +150,11 @@ func invalidPreparedRules(workspaceRoot string, prepared map[string]bundle.Prepa
 			continue
 		}
 		pathsByID[item.RuleID] = append(pathsByID[item.RuleID], rulePath)
+	}
+	for rulePath, item := range prepareFailures {
+		if item.RuleID != "" {
+			pathsByID[item.RuleID] = append(pathsByID[item.RuleID], rulePath)
+		}
 	}
 	for id, rulePaths := range pathsByID {
 		if len(rulePaths) < 2 {
@@ -158,7 +166,11 @@ func invalidPreparedRules(workspaceRoot string, prepared map[string]bundle.Prepa
 		}
 		message := duplicateIDMessage(id, keys)
 		for _, rulePath := range rulePaths {
-			failures[rulePath] = preparedRuleFailure{ruleID: id, phase: "config", ruleVersion: prepared[rulePath].RuleVersion, message: message}
+			item, ready := prepared[rulePath]
+			if !ready {
+				continue
+			}
+			failures[rulePath] = preparedRuleFailure{ruleID: id, phase: "config", ruleVersion: item.RuleVersion, message: message}
 		}
 	}
 	return failures

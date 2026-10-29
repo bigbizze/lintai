@@ -209,9 +209,13 @@ export default rule(` + strconvQuote(id) + `).version(1).program(dl` + "`Decl v(
 		"lintai-rules/nested/b.ts": ruleSource("arch/nested.b"),
 		"lintai-rules/dup-one.ts":  ruleSource("arch.dup"),
 		"lintai-rules/dup-two.ts":  ruleSource("arch.dup"),
-		"lintai-rules/bad-id.ts":   "export default { id: \"Arch.Bad\", versionValue: 1 };\n",
-		"lintai-rules/broken.ts":   "export default rule(\n",
-		"lintai-rules/helper.ts":   "export const shared = 1;\n",
+		"lintai-rules/dup-setup.ts": `import { dl, rule } from "@lintai/sdk";
+export default rule("arch.dup-setup").version(1).setup(() => { throw new Error("setup failed"); }).program(dl` + "`Decl v(F). v(F) :- module(F), glob(F, \"src/**\").`" + `).report("v").message(() => "x");
+`,
+		"lintai-rules/dup-setup-ok.ts": ruleSource("arch.dup-setup"),
+		"lintai-rules/bad-id.ts":       "export default { id: \"Arch.Bad\", versionValue: 1 };\n",
+		"lintai-rules/broken.ts":       "export default rule(\n",
+		"lintai-rules/helper.ts":       "export const shared = 1;\n",
 	}
 	for name, text := range files {
 		path := filepath.Join(workspace, filepath.FromSlash(name))
@@ -229,8 +233,8 @@ export default rule(` + strconvQuote(id) + `).version(1).program(dl` + "`Decl v(
 		t.Fatalf("exit code %d, want %d: %v", code, exitClean, err)
 	}
 	var list struct {
-		Rules  []struct{ ID, Path string }      `json:"rules"`
-		Errors []struct{ Path, Message string } `json:"errors"`
+		Rules  []struct{ ID, Path string }          `json:"rules"`
+		Errors []struct{ Path, ID, Message string } `json:"errors"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &list); err != nil {
 		t.Fatal(err)
@@ -247,19 +251,21 @@ export default rule(` + strconvQuote(id) + `).version(1).program(dl` + "`Decl v(
 	if !slices.Equal(gotRules, wantRules) {
 		t.Fatalf("rules:\ngot  %q\nwant %q", gotRules, wantRules)
 	}
-	wantErrors := []struct{ path, message string }{
-		{"lintai-rules/bad-id.ts", `rule id "Arch.Bad" is not valid`},
-		{"lintai-rules/broken.ts", "Unexpected end of file"},
-		{"lintai-rules/dup-one.ts", `rule id "arch.dup" is used by more than one rule file (lintai-rules/dup-one.ts, lintai-rules/dup-two.ts)`},
-		{"lintai-rules/dup-two.ts", `rule id "arch.dup" is used by more than one rule file`},
+	wantErrors := []struct{ path, id, message string }{
+		{"lintai-rules/bad-id.ts", "", `rule id "Arch.Bad" is not valid`},
+		{"lintai-rules/broken.ts", "", "Unexpected end of file"},
+		{"lintai-rules/dup-one.ts", "arch.dup", `rule id "arch.dup" is used by more than one rule file (lintai-rules/dup-one.ts, lintai-rules/dup-two.ts)`},
+		{"lintai-rules/dup-setup-ok.ts", "arch.dup-setup", `rule id "arch.dup-setup" is used by more than one rule file`},
+		{"lintai-rules/dup-setup.ts", "arch.dup-setup", `rule id "arch.dup-setup" is used by more than one rule file`},
+		{"lintai-rules/dup-two.ts", "arch.dup", `rule id "arch.dup" is used by more than one rule file`},
 	}
 	if len(list.Errors) != len(wantErrors) {
 		t.Fatalf("errors: got %+v", list.Errors)
 	}
 	for index, want := range wantErrors {
 		got := list.Errors[index]
-		if got.Path != want.path || !strings.Contains(got.Message, want.message) {
-			t.Errorf("error %d: got %+v, want path %s and a message with %q", index, got, want.path, want.message)
+		if got.Path != want.path || got.ID != want.id || !strings.Contains(got.Message, want.message) {
+			t.Errorf("error %d: got %+v, want path %s, id %q and a message with %q", index, got, want.path, want.id, want.message)
 		}
 	}
 
@@ -282,6 +288,8 @@ export default rule(` + strconvQuote(id) + `).version(1).program(dl` + "`Decl v(
 		"arch.alpha architecture_violation ",
 		"arch.dup rule_execution_error config",
 		"arch.dup rule_execution_error config",
+		"arch.dup-setup rule_execution_error config",
+		"arch.dup-setup rule_execution_error setup",
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("normal run:\ngot  %q\nwant %q", got, want)

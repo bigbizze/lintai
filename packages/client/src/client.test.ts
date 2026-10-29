@@ -664,7 +664,7 @@ test("hasUnsavedChanges compares the editor text with the saved file and ignores
 	}
 });
 
-test("loadRuleIds runs lintai rules once for each set of resolved options and keeps the load errors", () => {
+test("loadRuleIds runs lintai rules once for each set of resolved options, keeps the load errors and does not cache a failure", () => {
 	const calls: string[][] = [];
 	const deps = createTestDependencies({
 		spawnSync: (_command, args) => {
@@ -696,10 +696,16 @@ test("loadRuleIds runs lintai rules once for each set of resolved options and ke
 	loadRuleIds({ ...options, ruleGlobs: ["/workspace/other/*.ts"] }, deps);
 	assert.equal(calls.length, 2);
 
-	const failed = loadRuleIds(
-		{ ...options, binary: "/tmp/missing" },
-		createTestDependencies({ spawnSync: () => ({ stdout: "", stderr: "rule glob matched no files", error: undefined, status: 2 }) }),
-	);
+	let failures = 0;
+	const failing = createTestDependencies({
+		spawnSync: () => {
+			failures++;
+			return { stdout: "", stderr: "rule glob matched no files", error: undefined, status: 2 };
+		},
+	});
+	const failed = loadRuleIds({ ...options, binary: "/tmp/missing" }, failing);
 	assert.deepEqual(failed.rules, []);
 	assert.match(failed.errors[0]?.message ?? "", /lintai rules failed.*status 2: rule glob matched no files/);
+	loadRuleIds({ ...options, binary: "/tmp/missing" }, failing);
+	assert.equal(failures, 2);
 });
