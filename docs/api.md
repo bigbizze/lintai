@@ -135,7 +135,7 @@ Conventions:
 | `type_named(Type, Origin, Name)` | The type is a class, interface, enum or type alias, or an instantiation of one. `Origin` is `"lib"`, a package name (without `@types/`), a `declare module` name, or the workspace-relative path of the declaring file. It matches the `Module` of `external_call`. `Name` includes containing namespaces, for example `"Models.User"`. |
 | `type_arg(Type, Index, Arg)` | A type argument of a named type, or an element of a tuple. The `this` argument of class and interface references is not included. |
 | `type_member(Type, Member)` | A member of a union or intersection. Members are unordered. |
-| `type_literal(Type, Value)` | The value of a literal type: a string, a number, `/true` or `/false`, or the digits of a bigint as a string. |
+| `type_literal(Type, Value)` | The value of a literal type: a string, a number, `/true` or `/false`, or the digits of a bigint as a string. An integer is a number and any other value is a float, so `2` matches `2` but not `2.0`. |
 | `type_param_name(Type, Name)` | The name of a type parameter, for example `"T"`. |
 | `type_prop(Type, Name, PropType)` | A property of an anonymous object type. |
 | `type_prop_optional(Type, Name)` | The property is optional. |
@@ -172,11 +172,11 @@ A type is an entity. Its id is `"type:"` and a hash of the type's structure, so 
 - Classes, interfaces and enums are emitted by name and type arguments only. Their members are not expanded: a function that returns `Promise<User>` gives `Promise<User>`, `User`, and nothing inside `User`. Arrays are the lib interface `Array`.
 - Conditional, mapped, indexed access, `keyof` and template literal types are `/other`. They have no structure facts, only `type_display`. An alias of such a type still has its `type_named` and `type_arg` rows.
 - A function type with one call signature and no properties is `/function`, with `type_sig_param` and `type_sig_returns` rows. Other anonymous object types, including overloaded function types, are `/object` with `type_prop` rows only.
-- A type that refers to itself, such as `type Tree = { kids: Tree[] }`, refers to its own id. A type that makes a new type at each level of nesting stops at a depth of 16, where the type is `/other`.
+- A type that refers to itself, such as `type Tree = { kids: Tree[] }`, refers to its own id. A type whose structure is more than 16 levels deep, such as a type that makes a new type at each level of nesting, is `/other`. A named type keeps its `type_named` row.
 - TypeScript flattens a union that contains another union. `ActionResult<number> | null` is one union with the members of `ActionResult<number>` and `null`, and it has no row for `ActionResult`. A rule that must find the alias inside such a union cannot do so. Write the union as a named alias, or match the members.
 - A named type has one id for its declaration and type arguments. If two tsconfig files compile the same declaration with different compiler options, such as `strictNullChecks`, the structure of that id can differ by group. lintai keeps the rows of the first group.
 - The id of an `/other` type comes from its display text. Two different `/other` types with the same text have the same id.
-- `type_display` is the text that TypeScript 7 prints. It can differ from the text in an editor that runs TypeScript 5, and it can change when lintai updates its compiler. Do not match a rule against it. Use the structural relations, and use `type_display` in messages.
+- `type_display` is the text that TypeScript 7 prints. TypeScript stops the text at about 2000 characters and ends it with `...`. It can differ from the text in an editor that runs TypeScript 5, and it can change when lintai updates its compiler. Do not match a rule against it. Use the structural relations, and use `type_display` in messages.
 - Only a named type declared in a workspace source file has a `location` row, at its name. A rule that reports a type id as its anchor fails with a "no location fact" error for other types, so rules should report the function.
 
 ## Prelude and caveats

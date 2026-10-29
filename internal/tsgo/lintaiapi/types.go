@@ -46,8 +46,8 @@ const (
 	LiteralBoolean = "boolean"
 )
 
-// maxTypeKeyDepth is the depth of nested types that a canonical key
-// describes. A deeper position is written as trunc.
+// maxTypeKeyDepth is the height of the highest canonical key that has
+// structure facts. A higher type is /other.
 const maxTypeKeyDepth = 16
 
 // TypeLiteral is the value of a literal type. Text is the value of a string
@@ -94,6 +94,9 @@ type typeShape struct {
 	origin   string
 	name     string
 	nameDecl *ast.Node
+	// localPos is the position of a type declared in a function body. It
+	// is part of the key only.
+	localPos string
 	args     []*checker.Type
 	argMarks []string
 	members  []*checker.Type
@@ -133,7 +136,7 @@ func (e *extractor) emitFunctionType(root *checker.Type, enclosing *ast.Node) st
 		}
 		visited[t] = struct{}{}
 		id := e.typeID(t)
-		display := e.renderTypeText(t, enclosing)
+		display := e.typeDisplay(t, enclosing)
 		if existing := e.typeFacts[id]; existing != nil {
 			if display < existing.Display {
 				existing.Display = display
@@ -155,6 +158,23 @@ func (e *extractor) emitFunctionType(root *checker.Type, enclosing *ast.Node) st
 	return e.typeID(root)
 }
 
+// maxTypeDisplayLength is the approximate length at which the checker
+// stops printing the display text of a type. The text of a type that
+// nests the same subtype several times grows exponentially with depth.
+const maxTypeDisplayLength = 2000
+
+// typeDisplay returns the type_display text of a type. It is the
+// renderTypeText text, truncated with "..." by the checker when it is
+// longer than maxTypeDisplayLength.
+func (e *extractor) typeDisplay(t *checker.Type, enclosing *ast.Node) string {
+	return e.checker.TypeToStringEx(
+		t,
+		enclosing,
+		checker.TypeFormatFlagsUseAliasDefinedOutsideCurrentScope,
+		&checker.VerbosityContext{Level: -1, MaxTruncationLength: maxTypeDisplayLength},
+	)
+}
+
 func (s *typeShape) children() []*checker.Type {
 	result := make([]*checker.Type, 0, len(s.args)+len(s.members)+len(s.props)+len(s.sigParams)+1)
 	result = append(result, s.args...)
@@ -170,10 +190,10 @@ func (s *typeShape) children() []*checker.Type {
 }
 
 func (e *extractor) newTypeFact(t *checker.Type, id string, display string) *TypeFact {
-	if e.isTruncated(t) {
-		return &TypeFact{ID: id, Kind: TypeKindOther, Display: display}
-	}
 	shape := e.typeShapeOf(t)
+	if e.isTruncated(t) {
+		return &TypeFact{ID: id, Kind: TypeKindOther, Named: shape.named, Origin: shape.origin, Name: shape.name, Display: display}
+	}
 	fact := &TypeFact{
 		ID:        id,
 		Kind:      shape.kind,
@@ -233,25 +253,34 @@ func (e *extractor) typeID(t *checker.Type) string {
 	if id, ok := e.typeIDs[t]; ok {
 		return id
 	}
-	e.keyTruncated = false
-	key, _, _ := e.typeKey(t, nil)
-	if e.keyTruncated {
+	key, height, _ := e.typeKey(t, nil)
+	if height > maxTypeKeyDepth {
 		e.typeTruncated[t] = struct{}{}
 	}
-	sum := xxh3.HashString128(key).Bytes()
-	id := "type:" + hex.EncodeToString(sum[:])
+	id := "type:" + hashKey(key)
 	e.typeIDs[t] = id
 	return id
 }
 
-// isTruncated reports whether the canonical key of a type reaches
-// maxTypeKeyDepth. Such a type is /other and has no structure facts. This
-// bounds the facts of a type that makes a new type at each level, such as
-// type Deep<T> = { next: Deep<T[]> }.
+func hashKey(key string) string {
+	sum := xxh3.HashString128(key).Bytes()
+	return hex.EncodeToString(sum[:])
+}
+
+// isTruncated reports whether the canonical key of a type is more than
+// maxTypeKeyDepth levels high. Such a type is /other and has no structure
+// facts. This bounds the facts of a type that makes a new type at each
+// level, such as type Deep<T> = { next: Deep<T[]> }.
 func (e *extractor) isTruncated(t *checker.Type) bool {
 	e.typeID(t)
 	_, ok := e.typeTruncated[t]
 	return ok
+}
+
+// typeKeyAt is a type at a depth in the key of another type.
+type typeKeyAt struct {
+	t     *checker.Type
+	depth int
 }
 
 // cachedTypeKey is a canonical key that does not refer to the stack. height
@@ -261,15 +290,19 @@ type cachedTypeKey struct {
 	height int
 }
 
-// typeKey returns the canonical key of a type. stack holds the types whose
-// keys are being built. A type that is already on the stack is written as
-// ^n, where n is its distance from the top of the stack, and a position at
-// depth maxTypeKeyDepth is written as trunc. The key is a function of the
-// type and the stack only, so it does not depend on the order in which
+// typeKey returns the canonical key of a type. A key contains the hash of
+// the key of each child, not the child key itself, so a key has a bounded
+// length and each type is keyed once. stack holds the types whose keys are
+// being built. A type that is already on the stack is written as ^n, where
+// n is its distance from the top of the stack. A position deeper than
+// maxTypeKeyDepth is written as trunc. The key is a function of
+// the type and the stack only, so it does not depend on the order in which
 // types are keyed. The second result is the height of the key. The third
-// result is true when the key has no ^n and no trunc; such keys are cached.
+// result is true when the key has no ^n. Such a key depends only on the
+// type and its depth, and is cached for that depth.
 func (e *extractor) typeKey(t *checker.Type, stack []*checker.Type) (string, int, bool) {
-	if cached, ok := e.typeKeys[t]; ok && len(stack)+cached.height <= maxTypeKeyDepth {
+	at := typeKeyAt{t: t, depth: len(stack)}
+	if cached, ok := e.typeKeys[at]; ok {
 		return cached.key, cached.height, true
 	}
 	for index := len(stack) - 1; index >= 0; index-- {
@@ -277,9 +310,10 @@ func (e *extractor) typeKey(t *checker.Type, stack []*checker.Type) (string, int
 			return "^" + strconv.Itoa(len(stack)-index), 0, false
 		}
 	}
-	if len(stack) >= maxTypeKeyDepth {
-		e.keyTruncated = true
-		return "trunc", 0, false
+	if len(stack) > maxTypeKeyDepth {
+		// The parent of this position is already too high for structure
+		// facts, so the rest of the key does not change any fact.
+		return "trunc", 0, true
 	}
 	shape := e.typeShapeOf(t)
 	stack = append(stack, t)
@@ -289,7 +323,10 @@ func (e *extractor) typeKey(t *checker.Type, stack []*checker.Type) (string, int
 		text, itemHeight, itemFree := e.typeKey(item, stack)
 		free = free && itemFree
 		height = max(height, itemHeight+1)
-		return text
+		if strings.HasPrefix(text, "^") || strings.HasPrefix(text, "/") {
+			return text
+		}
+		return "#" + hashKey(text)
 	}
 	keys := func(types []*checker.Type) []string {
 		result := make([]string, len(types))
@@ -317,7 +354,7 @@ func (e *extractor) typeKey(t *checker.Type, stack []*checker.Type) (string, int
 	var result string
 	switch {
 	case shape.named:
-		result = "named(" + shape.origin + "," + shape.name + ")<" + strings.Join(keys(shape.args), ",") + ">"
+		result = "named(" + shape.origin + "," + shape.name + shape.localPos + ")<" + strings.Join(keys(shape.args), ",") + ">"
 	case shape.kind == TypeKindLiteral:
 		result = shape.litKey
 	case shape.kind == TypeKindTypeParam:
@@ -338,7 +375,7 @@ func (e *extractor) typeKey(t *checker.Type, stack []*checker.Type) (string, int
 	case shape.kind == TypeKindObject:
 		entries := make([]string, 0, len(shape.props))
 		for _, prop := range shape.props {
-			name := prop.name
+			name := jsonQuote(prop.name)
 			if prop.optional {
 				name += "?"
 			}
@@ -361,7 +398,7 @@ func (e *extractor) typeKey(t *checker.Type, stack []*checker.Type) (string, int
 		result = "/" + shape.kind
 	}
 	if free {
-		e.typeKeys[t] = cachedTypeKey{key: result, height: height}
+		e.typeKeys[at] = cachedTypeKey{key: result, height: height}
 	}
 	return result, height, free
 }
@@ -469,7 +506,10 @@ func (e *extractor) structureShape(shape *typeShape, t *checker.Type) {
 		shape.members = t.Types()
 	case flags&checker.TypeFlagsObject != 0 && checker.IsTupleType(t):
 		shape.kind = TypeKindTuple
-		if shape.named {
+		// A generic tuple alias keeps its type arguments in args, as
+		// other named types do. A tuple alias without type parameters
+		// gets its elements.
+		if shape.named && len(shape.args) > 0 {
 			return
 		}
 		elementFlags := t.TargetTupleType().ElementFlags()
@@ -649,6 +689,12 @@ func (e *extractor) nameShape(shape *typeShape, symbol *ast.Symbol) bool {
 		return false
 	}
 	decl := symbol.Declarations()[0]
+	if parent := decl.Parent; parent != nil && !ast.IsSourceFile(parent) && parent.Kind != ast.KindModuleBlock {
+		// A type declared in a function body is not unique by name in its
+		// file. Its position keeps it apart from other local types with
+		// the same name.
+		shape.localPos = "@" + strconv.Itoa(decl.Pos())
+	}
 	shape.named = true
 	shape.name = name
 	shape.nameDecl = decl

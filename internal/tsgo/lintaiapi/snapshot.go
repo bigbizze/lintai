@@ -282,10 +282,9 @@ type extractor struct {
 	globalSyms      map[string]*ast.Symbol
 	typeFacts       map[string]*TypeFact
 	typeIDs         map[*checker.Type]string
-	typeKeys        map[*checker.Type]cachedTypeKey
+	typeKeys        map[typeKeyAt]cachedTypeKey
 	typeShapes      map[*checker.Type]*typeShape
 	typeTruncated   map[*checker.Type]struct{}
-	keyTruncated    bool
 	timing          *extractTiming
 }
 
@@ -504,7 +503,7 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 		ambient:         newAmbientIndex(ambientMatchers),
 		typeFacts:       make(map[string]*TypeFact),
 		typeIDs:         make(map[*checker.Type]string),
-		typeKeys:        make(map[*checker.Type]cachedTypeKey),
+		typeKeys:        make(map[typeKeyAt]cachedTypeKey),
 		typeShapes:      make(map[*checker.Type]*typeShape),
 		typeTruncated:   make(map[*checker.Type]struct{}),
 		timing:          timing,

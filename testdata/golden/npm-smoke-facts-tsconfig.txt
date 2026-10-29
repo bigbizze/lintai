@@ -34,7 +34,7 @@ fn_kind("src/actions/save.ts::function::legacySave","function").
 fn_kind("src/actions/save.ts::function::save","function").
 fn_kind("src/example.ts::function::example","function").
 fn_returns("src/actions/save.ts::function::legacySave","type:8d8fb7d3f895831ab32bb1618e35036d").
-fn_returns("src/actions/save.ts::function::save","type:23b3a7eac54f70753b80998d5199b38b").
+fn_returns("src/actions/save.ts::function::save","type:7c01506573330e105646d5e115ceeff3").
 fn_returns("src/example.ts::function::example","type:8d8fb7d3f895831ab32bb1618e35036d").
 import_edge("lintai-rules/actions-return-action-result.ts::import::@lintai/sdk","lintai-rules/actions-return-action-result.ts","@lintai/sdk","@lintai/sdk").
 import_edge("lintai-rules/no-async.ts::import::@lintai/sdk","lintai-rules/no-async.ts","@lintai/sdk","@lintai/sdk").
@@ -85,38 +85,38 @@ module("lintai-rules/no-async.ts").
 module("src/actions/save.ts").
 module("src/core/result.ts").
 module("src/example.ts").
-type_arg("type:23b3a7eac54f70753b80998d5199b38b",0,"type:a15393c831bdf952e8e0075259c48b24").
+type_arg("type:7c01506573330e105646d5e115ceeff3",0,"type:a15393c831bdf952e8e0075259c48b24").
 type_arg("type:8d8fb7d3f895831ab32bb1618e35036d",0,"type:1fe05b06f5bf66e5895ee783cd676780").
 type_arg("type:a15393c831bdf952e8e0075259c48b24",0,"type:1fe05b06f5bf66e5895ee783cd676780").
-type_display("type:0a3f99c38561f05a617e1c6547e1b19e","{ ok: true; value: number; }").
 type_display("type:1fe05b06f5bf66e5895ee783cd676780","number").
-type_display("type:23b3a7eac54f70753b80998d5199b38b","Promise<ActionResult<number>>").
 type_display("type:486b8c94699987d63a689a5fe881f8c5","false").
-type_display("type:89dd2c7e974477703535c898fef7c2a9","{ ok: false; error: string; }").
+type_display("type:7c01506573330e105646d5e115ceeff3","Promise<ActionResult<number>>").
 type_display("type:8d8fb7d3f895831ab32bb1618e35036d","Promise<number>").
+type_display("type:9de7ef73732d810a562adf05c7edb5b7","{ ok: true; value: number; }").
 type_display("type:a15393c831bdf952e8e0075259c48b24","ActionResult<number>").
+type_display("type:a56e5c344cdcd9090ec1cfa1294af20a","{ ok: false; error: string; }").
 type_display("type:f2331b4aae7f44eefa2fe40c4a3cb92e","string").
 type_display("type:fde3ebb0d15e1959acf15a1c6579741e","true").
-type_kind("type:0a3f99c38561f05a617e1c6547e1b19e",/object).
 type_kind("type:1fe05b06f5bf66e5895ee783cd676780",/number).
-type_kind("type:23b3a7eac54f70753b80998d5199b38b",/object).
 type_kind("type:486b8c94699987d63a689a5fe881f8c5",/literal).
-type_kind("type:89dd2c7e974477703535c898fef7c2a9",/object).
+type_kind("type:7c01506573330e105646d5e115ceeff3",/object).
 type_kind("type:8d8fb7d3f895831ab32bb1618e35036d",/object).
+type_kind("type:9de7ef73732d810a562adf05c7edb5b7",/object).
 type_kind("type:a15393c831bdf952e8e0075259c48b24",/union).
+type_kind("type:a56e5c344cdcd9090ec1cfa1294af20a",/object).
 type_kind("type:f2331b4aae7f44eefa2fe40c4a3cb92e",/string).
 type_kind("type:fde3ebb0d15e1959acf15a1c6579741e",/literal).
 type_literal("type:486b8c94699987d63a689a5fe881f8c5",/false).
 type_literal("type:fde3ebb0d15e1959acf15a1c6579741e",/true).
-type_member("type:a15393c831bdf952e8e0075259c48b24","type:0a3f99c38561f05a617e1c6547e1b19e").
-type_member("type:a15393c831bdf952e8e0075259c48b24","type:89dd2c7e974477703535c898fef7c2a9").
-type_named("type:23b3a7eac54f70753b80998d5199b38b","lib","Promise").
+type_member("type:a15393c831bdf952e8e0075259c48b24","type:9de7ef73732d810a562adf05c7edb5b7").
+type_member("type:a15393c831bdf952e8e0075259c48b24","type:a56e5c344cdcd9090ec1cfa1294af20a").
+type_named("type:7c01506573330e105646d5e115ceeff3","lib","Promise").
 type_named("type:8d8fb7d3f895831ab32bb1618e35036d","lib","Promise").
 type_named("type:a15393c831bdf952e8e0075259c48b24","src/core/result.ts","ActionResult").
-type_prop("type:0a3f99c38561f05a617e1c6547e1b19e","ok","type:fde3ebb0d15e1959acf15a1c6579741e").
-type_prop("type:0a3f99c38561f05a617e1c6547e1b19e","value","type:1fe05b06f5bf66e5895ee783cd676780").
-type_prop("type:89dd2c7e974477703535c898fef7c2a9","error","type:f2331b4aae7f44eefa2fe40c4a3cb92e").
-type_prop("type:89dd2c7e974477703535c898fef7c2a9","ok","type:486b8c94699987d63a689a5fe881f8c5").
+type_prop("type:9de7ef73732d810a562adf05c7edb5b7","ok","type:fde3ebb0d15e1959acf15a1c6579741e").
+type_prop("type:9de7ef73732d810a562adf05c7edb5b7","value","type:1fe05b06f5bf66e5895ee783cd676780").
+type_prop("type:a56e5c344cdcd9090ec1cfa1294af20a","error","type:f2331b4aae7f44eefa2fe40c4a3cb92e").
+type_prop("type:a56e5c344cdcd9090ec1cfa1294af20a","ok","type:486b8c94699987d63a689a5fe881f8c5").
 type_ref("src/actions/save.ts::type_ref::ActionResult","src/actions/save.ts","ActionResult").
 type_ref("src/actions/save.ts::type_ref::Promise","src/actions/save.ts","Promise").
 type_ref("src/actions/save.ts::type_ref::Promise#2","src/actions/save.ts","Promise").

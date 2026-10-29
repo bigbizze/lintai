@@ -69,13 +69,13 @@ func TestTypeFacts(t *testing.T) {
 		"src/core/result.ts":  "export type ActionResult<T> = { ok: true; value: T } | { ok: false; error: string };\n",
 		"src/legacy/types.ts": "export type ActionResult<T> = { done: T };\n",
 		"src/box.ts":          "export class Box<T> { constructor(public value: T) {} }\nexport enum Color { Red, Green }\n",
-		"src/tree.ts":         "export type Tree = { kids: Tree[] };\nexport type Deep<T> = { next(): Deep<{ v: T }> };\n",
+		"src/tree.ts":         "export type Tree = { kids: Tree[] };\nexport type Deep<T> = { next(): Deep<{ v: T }> };\nexport type Wide<T> = { next(): Wide<{ a: T; b: T; c: T }> };\nexport type Pair = [string, number];\n",
 		"src/cond.ts":         "export type Unwrap<T> = T extends Promise<infer U> ? U : T;\n",
 		"src/ab.ts":           "export type A = { a: number };\nexport type B = { b: string };\n",
 		"src/actions.ts": `import type { ActionResult } from "./core/result";
 import type { ActionResult as LegacyResult } from "./legacy/types";
 import { Box, Color } from "./box";
-import type { Tree, Deep } from "./tree";
+import type { Tree, Deep, Wide, Pair } from "./tree";
 import type { Unwrap } from "./cond";
 import type { A, B } from "./ab";
 export async function save(): Promise<ActionResult<number>> { return { ok: true, value: 1 }; }
@@ -96,6 +96,11 @@ export const second = <T>(x: T): T => x;
 export function half(x: 0.5 | 2): void {}
 export function tree(x: Tree): void {}
 export function deep(x: Deep<string>): void {}
+export function wide(x: Wide<string>): void {}
+export function pair(x: Pair): void {}
+export function quoted(x: { "a?": string }, y: { a?: string }): void {}
+export function localA() { type R = { a: number }; return null as unknown as R; }
+export function localB() { type R = { b: string }; return null as unknown as R; }
 export function unwrap<T>(x: Unwrap<T>): T extends string ? 1 : 2 { return 1 as never; }
 `,
 	})
@@ -223,6 +228,35 @@ export function unwrap<T>(x: Unwrap<T>): T extends string ? 1 : 2 { return 1 as 
 	}
 	if deep := x.param("deep", 0); deep.Name != "Deep" || deep.Kind != TypeKindObject {
 		t.Fatalf("Deep<string> %+v", deep)
+	}
+
+	// A type that uses its argument several times at each level has a
+	// display text and a key that grow exponentially with depth. Before the
+	// limits, this one type took seconds and megabytes of text.
+	if wide := x.param("wide", 0); wide.Name != "Wide" || len(wide.Display) > 4*maxTypeDisplayLength {
+		t.Fatalf("Wide<string> %s %d", wide.Name, len(wide.Display))
+	}
+	for _, item := range snap.Types {
+		if len(item.Display) > 4*maxTypeDisplayLength {
+			t.Fatalf("display text of %d bytes", len(item.Display))
+		}
+	}
+
+	// A tuple alias without type parameters has its elements.
+	if pair := x.param("pair", 0); pair.Kind != TypeKindTuple || pair.Name != "Pair" || len(pair.Args) != 2 {
+		t.Fatalf("Pair %+v", pair)
+	}
+
+	// A quoted property name that looks like an optional name is a
+	// different type.
+	if x.fn("quoted").ParameterTypes[0] == x.fn("quoted").ParameterTypes[1] {
+		t.Fatalf(`{ "a?": string } and { a?: string } are one entity`)
+	}
+
+	// Two local types with the same name in one file are two entities.
+	localA, localB := x.returns("localA"), x.returns("localB")
+	if localA.Name != "R" || localB.Name != "R" || localA.ID == localB.ID {
+		t.Fatalf("local types %+v %+v", localA, localB)
 	}
 
 	// 12. A conditional type is /other with display text and no structure
