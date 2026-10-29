@@ -85,6 +85,24 @@ func (l *stringList) Set(value string) error {
 	return nil
 }
 
+// parseRuleSeverity parses --severity values of the form rule-id=level.
+func parseRuleSeverity(values []string) (map[string]diagnostics.Severity, error) {
+	result := make(map[string]diagnostics.Severity, len(values))
+	for _, value := range values {
+		ruleID, level, ok := strings.Cut(value, "=")
+		ruleID = strings.TrimSpace(ruleID)
+		if !ok || ruleID == "" {
+			return nil, fmt.Errorf("invalid --severity value %q: use <rule-id>=error|warning|off", value)
+		}
+		severity, err := diagnostics.ParseSeverity(strings.TrimSpace(level))
+		if err != nil {
+			return nil, fmt.Errorf("invalid --severity value %q: %w", value, err)
+		}
+		result[ruleID] = severity
+	}
+	return result, nil
+}
+
 func runFacts(ctx context.Context, args []string, stdout io.Writer) error {
 	flags := flag.NewFlagSet("lintai facts", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
@@ -140,7 +158,13 @@ func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 	var excludes stringList
 	flags.Var(&excludes, "exclude", "glob of workspace files to leave out of the snapshot (repeatable)")
 	files := flags.String("files", string(backend.FileScopeTsconfig), "files in the snapshot: tsconfig (files that tsc compiles) or walk (every walked file)")
+	var severities stringList
+	flags.Var(&severities, "severity", "rule severity as <rule-id>=error|warning|off (repeatable; default: error)")
 	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	ruleSeverity, err := parseRuleSeverity(severities)
+	if err != nil {
 		return err
 	}
 	if *explain && !*jsonOutput {
@@ -181,6 +205,7 @@ func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 		Files:         scope,
 		Env:           env,
 		Severity:      diagnostics.SeverityError,
+		RuleSeverity:  ruleSeverity,
 		FactLimit:     *factLimit,
 		Explain:       *explain,
 	})
@@ -199,14 +224,15 @@ func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 			if item.SourceLocation != nil {
 				location = fmt.Sprintf("%s:%d:%d: ", item.SourceLocation.File, item.SourceLocation.StartLine, item.SourceLocation.StartColumn)
 			}
-			fmt.Fprintf(stdout, "%s[%s/%s] %s\n", location, item.RuleID, item.AssertionID, item.Message)
+			fmt.Fprintf(stdout, "%s%s [%s/%s] %s\n", location, item.Severity, item.RuleID, item.AssertionID, item.Message)
 		}
 	}
 	return diagnosticsOutcome(result.Diagnostics)
 }
 
 // diagnosticsOutcome returns a rule error when a rule could not run, and a
-// violation error when a rule reported an error-severity violation.
+// violation error when a rule reported an error-severity violation. Warnings
+// do not change the exit code.
 func diagnosticsOutcome(items []diagnostics.Diagnostic) error {
 	ruleErrors, violations := 0, 0
 	for _, item := range items {

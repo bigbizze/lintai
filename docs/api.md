@@ -301,6 +301,7 @@ Flags for analysis:
 - `--json`
 - `--explain`: with `--json`, attach `explanation` to each violation
 - `--fact-limit`: the maximum number of facts that one rule may derive (default 5,000,000)
+- `--severity <rule-id>=<level>`: the severity of the violations of one rule. `<level>` is `error` (the default for every rule), `warning` or `off`. Repeat the flag for more rules. See "Rule severity".
 
 Example:
 
@@ -335,14 +336,22 @@ Then `--files` selects the walked files that become modules:
 
 A `tsconfig.json` that includes generated files, for example `.next/types/**/*.ts`, does not add them: a module must also be a walked file. Use `--exclude` to remove more files.
 
+Rule severity:
+
+- every rule has severity `error` unless `--severity` (or the `severity` option of the ESLint plugin) names it
+- `warning`: the violations of the rule have `"severity": "warning"`. Warnings do not change the exit code.
+- `off`: lintai does not evaluate the rule and reports nothing for it, also when its `setup` or program fails. A rule file that fails to bundle, or whose `setup` fails before it gives its id, still gives a `rule_execution_error`, because lintai does not know its id yet.
+- a `rule_execution_error` always has severity `error`, also for a rule with severity `warning`, so a broken rule cannot pass without notice
+- a `--severity` rule id that no loaded rule has is a `rule_execution_error` with phase `config`, so a typo does not leave a rule at `error`
+
 Exit codes:
 
 | Code | Meaning |
 |---|---|
 | 0 | No error diagnostics. |
 | 1 | At least one rule reported an error-severity violation, and every rule ran. |
-| 2 | Usage or configuration error: a bad flag, a bad root, a rule glob that matches no file, an invalid exclude glob. No rules ran. |
-| 3 | At least one rule could not run (`rule_execution_error`). Violations from the other rules are still in the output. |
+| 2 | Usage or configuration error: a bad flag, a bad `--severity` value, a bad root, a rule glob that matches no file, an invalid exclude glob. No rules ran. |
+| 3 | At least one rule could not run, or `--severity` names an unknown rule (`rule_execution_error`). Violations from the other rules are still in the output. |
 
 CLI caveats:
 
@@ -360,7 +369,8 @@ pnpm add -D @lintai/eslint-plugin eslint
 
 Rule names exported by the plugin:
 
-- `@lintai/architecture`
+- `@lintai/architecture`: lintai diagnostics with severity `error`, rule errors, and problems with the analysis
+- `@lintai/architecture-warnings`: lintai diagnostics with severity `warning`
 - `@lintai/no-ambient-in-pure-phase`: forbids ambient APIs in callbacks passed to `.program(`, `.facts(` and `.message(`
 - `@lintai/no-top-level-node-imports`
 - `@lintai/require-rule-shape`: requires `.version(`, `.program(`, `.report(` and `.message(`, and rejects `.assert(`
@@ -370,6 +380,11 @@ Example config:
 ```js
 import lintai from "@lintai/eslint-plugin";
 
+const bridge = {
+	rules: ["lintai-rules/**/*.ts"],
+	severity: { "arch.legacy-imports": "warning" },
+};
+
 export default [
 	{
 		files: ["src/**/*.ts", "src/**/*.tsx", "lintai-rules/**/*.ts"],
@@ -377,12 +392,8 @@ export default [
 			"@lintai": lintai,
 		},
 		rules: {
-			"@lintai/architecture": [
-				"error",
-				{
-					rules: ["lintai-rules/**/*.ts"],
-				},
-			],
+			"@lintai/architecture": ["error", bridge],
+			"@lintai/architecture-warnings": ["warn", bridge],
 			"@lintai/no-ambient-in-pure-phase": "error",
 			"@lintai/no-top-level-node-imports": "error",
 			"@lintai/require-rule-shape": "error",
@@ -404,10 +415,14 @@ type BridgeOptions = {
 	files?: "tsconfig" | "walk";
 	env?: Record<string, unknown>;
 	factLimit?: number;
+	severity?: Record<string, "error" | "warning" | "off">;
 };
 ```
 
 Plugin caveats:
+
+- ESLint gives one level to all reports of one rule, so lintai warnings come from a second rule, `@lintai/architecture-warnings`. Give both rules the same options object. Then they share one lintai process, and each diagnostic appears once. If you omit `@lintai/architecture-warnings`, warning diagnostics are not shown.
+- `severity` is the same as the CLI `--severity` flag
 
 - `serve` is the default in editor-like long-lived processes
 - `oneshot` is the default under plain ESLint CLI detection
@@ -466,7 +481,7 @@ Fields:
 - `source_location`
 - `entity_identity`: the anchor
 - `provenance`
-- `phase`: for execution errors, one of `bundle`, `setup`, `program`, `program_parse`, `program_analysis`, `evaluation`, `premise`, `report`, `message`
+- `phase`: for execution errors, one of `config`, `bundle`, `setup`, `program`, `program_parse`, `program_analysis`, `evaluation`, `premise`, `report`, `message`
 - `explanation`: with `--explain`, the proof of the violation as ground atoms in depth-first order; `!atom` marks a negated premise that holds because the atom is absent
 
 Diagnostic caveat:

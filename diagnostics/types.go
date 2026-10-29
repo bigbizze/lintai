@@ -1,5 +1,7 @@
 package diagnostics
 
+import "fmt"
+
 type Kind string
 
 const (
@@ -12,7 +14,19 @@ type Severity string
 const (
 	SeverityError   Severity = "error"
 	SeverityWarning Severity = "warning"
+	// SeverityOff is a configuration value only. A rule with severity off
+	// is not evaluated, so no diagnostic has this severity.
+	SeverityOff Severity = "off"
 )
+
+// ParseSeverity parses a configured rule severity: error, warning or off.
+func ParseSeverity(value string) (Severity, error) {
+	switch severity := Severity(value); severity {
+	case SeverityError, SeverityWarning, SeverityOff:
+		return severity, nil
+	}
+	return "", fmt.Errorf("invalid severity %q: use error, warning or off", value)
+}
 
 type SourceLocation struct {
 	File        string `json:"file"`

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -250,5 +251,63 @@ Decl w(F). w(F) :- module(F), F = "src/a/b.c", layer(F, /ui.x).`+"`"+`)
 	}
 	if got := byRule["t.runtime"]; len(got) != 1 || got[0] != "src/ui/b.ts" {
 		t.Fatalf("expected the retained type import to be a runtime import, got %+v", items)
+	}
+}
+
+// A rule with severity off is not evaluated, so it reports nothing even when
+// its program fails. A warning rule's violations are warnings, but its
+// execution errors are errors.
+func TestRuleSeverity(t *testing.T) {
+	repoRoot, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceRoot := t.TempDir()
+	writeTestFile(t, workspaceRoot, "src/a.ts", "export async function a() {\n\treturn 1;\n}\n")
+	writeTestFile(t, workspaceRoot, "lintai-rules/rules.ts", `import { dl, rule } from "@lintai/sdk";
+export const soft = rule("t.soft").version(1)
+	.program(dl`+"`"+`Decl v(Fn). v(Fn) :- fn_async(Fn).`+"`"+`)
+	.report("v").message(() => "soft");
+`)
+	writeTestFile(t, workspaceRoot, "lintai-rules/broken-off.ts", `import { dl, rule } from "@lintai/sdk";
+export default rule("t.broken-off").version(1)
+	.program(dl`+"`"+`Decl v(F). v(F) :- module(F)`+"`"+`)
+	.report("v").message(() => "x");
+`)
+	writeTestFile(t, workspaceRoot, "lintai-rules/broken-warning.ts", `import { dl, rule } from "@lintai/sdk";
+export default rule("t.broken-warning").version(1)
+	.program(dl`+"`"+`Decl v(F). v(F) :- module(F)`+"`"+`)
+	.report("v").message(() => "x");
+`)
+	writeTestFile(t, workspaceRoot, "lintai-rules/soft.ts", `export { soft as default } from "./rules";
+`)
+	items, err := New(typescript.New()).Run(context.Background(), Options{
+		RepoRoot:      repoRoot,
+		AssetRoot:     filepath.Join(repoRoot, "packages", "eslint-plugin"),
+		WorkspaceRoot: workspaceRoot,
+		RuleGlobs:     []string{"lintai-rules/broken-*.ts", "lintai-rules/soft.ts"},
+		Env:           map[string]any{},
+		RuleSeverity: map[string]diagnostics.Severity{
+			"t.soft":           diagnostics.SeverityWarning,
+			"t.broken-off":     diagnostics.SeverityOff,
+			"t.broken-warning": diagnostics.SeverityWarning,
+			"t.missing":        diagnostics.SeverityOff,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, 0, len(items))
+	for _, item := range items {
+		got = append(got, item.RuleID+" "+string(item.DiagnosticKind)+" "+string(item.Severity)+" "+item.Phase)
+	}
+	sort.Strings(got)
+	want := []string{
+		"t.broken-warning rule_execution_error error program_parse",
+		"t.missing rule_execution_error error config",
+		"t.soft architecture_violation warning ",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("got\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }

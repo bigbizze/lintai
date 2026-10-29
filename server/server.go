@@ -50,6 +50,8 @@ type InitializeParams struct {
 	Files         string         `json:"files,omitempty"`
 	Env           map[string]any `json:"env"`
 	FactLimit     int            `json:"factLimit,omitempty"`
+	// Severity maps a rule id to "error", "warning" or "off".
+	Severity map[string]string `json:"severity,omitempty"`
 }
 
 type FileDiagnosticsParams struct {
@@ -162,6 +164,14 @@ func (s *Server) handleInitialize(ctx context.Context, rawParams json.RawMessage
 	if err != nil {
 		return AnalysisResult{}, err
 	}
+	ruleSeverity := make(map[string]diagnostics.Severity, len(params.Severity))
+	for ruleID, level := range params.Severity {
+		severity, err := diagnostics.ParseSeverity(level)
+		if err != nil {
+			return AnalysisResult{}, fmt.Errorf("severity of rule %q: %w", ruleID, err)
+		}
+		ruleSeverity[ruleID] = severity
+	}
 	options := engine.Options{
 		RepoRoot:      params.RepoRoot,
 		AssetRoot:     params.AssetRoot,
@@ -171,6 +181,7 @@ func (s *Server) handleInitialize(ctx context.Context, rawParams json.RawMessage
 		Files:         scope,
 		Env:           params.Env,
 		Severity:      diagnostics.SeverityError,
+		RuleSeverity:  ruleSeverity,
 		FactLimit:     params.FactLimit,
 	}
 	s.mu.Lock()

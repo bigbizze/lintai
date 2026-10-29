@@ -31,7 +31,10 @@ export type BridgeOptions = {
 	files?: "tsconfig" | "walk";
 	env?: Record<string, unknown>;
 	factLimit?: number;
+	severity?: Record<string, RuleSeverity>;
 };
+
+export type RuleSeverity = "error" | "warning" | "off";
 
 type ResolvedBridgeOptions = {
 	mode: "serve" | "oneshot";
@@ -44,6 +47,7 @@ type ResolvedBridgeOptions = {
 	files: "tsconfig" | "walk";
 	env: Record<string, unknown>;
 	factLimit?: number;
+	severity: Record<string, RuleSeverity>;
 };
 
 type InitializeResult = {
@@ -377,6 +381,7 @@ export class LintAIClient {
 				excludes: this.options.excludes,
 				files: this.options.files,
 				env: this.options.env,
+				severity: this.options.severity,
 				...(this.options.factLimit === undefined ? {} : { factLimit: this.options.factLimit }),
 			});
 			this.attachStdoutListener();
@@ -418,6 +423,7 @@ export class LintAIClient {
 				"--env-json",
 				JSON.stringify(this.options.env),
 				...(this.options.factLimit === undefined ? [] : ["--fact-limit", String(this.options.factLimit)]),
+				...Object.entries(this.options.severity).flatMap(([ruleID, level]) => ["--severity", `${ruleID}=${level}`]),
 			],
 			{
 				cwd: this.options.repoRoot,
@@ -746,6 +752,7 @@ export function resolveBridgeOptions(options: BridgeOptions, cwd: string): Resol
 		excludes: options.exclude ?? [],
 		files: options.files ?? "tsconfig",
 		env: options.env ?? {},
+		severity: options.severity ?? {},
 		...(options.factLimit === undefined ? {} : { factLimit: options.factLimit }),
 	};
 }

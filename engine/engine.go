@@ -25,9 +25,15 @@ type Options struct {
 	Excludes      []string
 	Files         backend.FileScope
 	Env           map[string]any
-	Severity      diagnostics.Severity
-	FactLimit     int
-	Explain       bool
+	// Severity is the severity of a violation of a rule that RuleSeverity
+	// does not name. The default is error.
+	Severity diagnostics.Severity
+	// RuleSeverity maps a rule id to error, warning or off. A rule with off
+	// is not evaluated. An id that matches no rule is a rule error with
+	// phase config, so a typo does not go unnoticed.
+	RuleSeverity map[string]diagnostics.Severity
+	FactLimit    int
+	Explain      bool
 }
 
 type Result struct {
@@ -99,10 +105,10 @@ func (e *Engine) Analyze(ctx context.Context, options Options) (Result, error) {
 			if _, failed := buildFailures[rulePath]; failed {
 				continue
 			}
-			allDiagnostics = append(allDiagnostics, errorDiagnostic(filepath.Base(rulePath), "bundle", 0, snapshot.Version, e.backend.ID(), err.Error(), options.Severity))
+			allDiagnostics = append(allDiagnostics, errorDiagnostic(filepath.Base(rulePath), "bundle", 0, snapshot.Version, e.backend.ID(), err.Error()))
 		}
 		for rulePath, itemErr := range buildFailures {
-			allDiagnostics = append(allDiagnostics, errorDiagnostic(filepath.Base(rulePath), "bundle", 0, snapshot.Version, e.backend.ID(), itemErr.Error(), options.Severity))
+			allDiagnostics = append(allDiagnostics, errorDiagnostic(filepath.Base(rulePath), "bundle", 0, snapshot.Version, e.backend.ID(), itemErr.Error()))
 		}
 		sortDiagnostics(allDiagnostics)
 		result.Diagnostics = allDiagnostics
@@ -110,19 +116,19 @@ func (e *Engine) Analyze(ctx context.Context, options Options) (Result, error) {
 	}
 
 	for rulePath, itemErr := range buildFailures {
-		allDiagnostics = append(allDiagnostics, errorDiagnostic(filepath.Base(rulePath), "bundle", 0, snapshot.Version, e.backend.ID(), itemErr.Error(), options.Severity))
+		allDiagnostics = append(allDiagnostics, errorDiagnostic(filepath.Base(rulePath), "bundle", 0, snapshot.Version, e.backend.ID(), itemErr.Error()))
 	}
 
 	preparedByRule, prepareFailures, err := bundle.PrepareAll(ctx, assetRoot, options.RepoRoot, options.WorkspaceRoot, artifactsByRule, options.Env)
 	if err != nil {
 		for rulePath, prepareErr := range prepareFailures {
-			allDiagnostics = append(allDiagnostics, errorDiagnostic(ruleIDForPrepareFailure(rulePath, prepareErr), "setup", prepareErr.RuleVersion, snapshot.Version, e.backend.ID(), prepareErr.Message, options.Severity))
+			allDiagnostics = append(allDiagnostics, errorDiagnostic(ruleIDForPrepareFailure(rulePath, prepareErr), "setup", prepareErr.RuleVersion, snapshot.Version, e.backend.ID(), prepareErr.Message))
 		}
 		for rulePath := range artifactsByRule {
 			if _, failed := prepareFailures[rulePath]; failed {
 				continue
 			}
-			allDiagnostics = append(allDiagnostics, errorDiagnostic(filepath.Base(rulePath), "setup", 0, snapshot.Version, e.backend.ID(), err.Error(), options.Severity))
+			allDiagnostics = append(allDiagnostics, errorDiagnostic(filepath.Base(rulePath), "setup", 0, snapshot.Version, e.backend.ID(), err.Error()))
 		}
 		sortDiagnostics(allDiagnostics)
 		result.Diagnostics = allDiagnostics
@@ -130,9 +136,16 @@ func (e *Engine) Analyze(ctx context.Context, options Options) (Result, error) {
 	}
 
 	for rulePath, prepareErr := range prepareFailures {
-		allDiagnostics = append(allDiagnostics, errorDiagnostic(ruleIDForPrepareFailure(rulePath, prepareErr), "setup", prepareErr.RuleVersion, snapshot.Version, e.backend.ID(), prepareErr.Message, options.Severity))
+		if severityOf(options, prepareErr.RuleID) == diagnostics.SeverityOff {
+			continue
+		}
+		allDiagnostics = append(allDiagnostics, errorDiagnostic(ruleIDForPrepareFailure(rulePath, prepareErr), "setup", prepareErr.RuleVersion, snapshot.Version, e.backend.ID(), prepareErr.Message))
 	}
 	result.RulesLoaded = len(preparedByRule) + len(prepareFailures)
+	knownRules := make(map[string]struct{}, len(preparedByRule)+len(prepareFailures))
+	for _, prepareErr := range prepareFailures {
+		knownRules[prepareErr.RuleID] = struct{}{}
+	}
 
 	for _, rulePath := range rulePaths {
 		artifacts, built := artifactsByRule[rulePath]
@@ -143,8 +156,12 @@ func (e *Engine) Analyze(ctx context.Context, options Options) (Result, error) {
 		if !ready {
 			continue
 		}
+		knownRules[prepared.RuleID] = struct{}{}
+		if severityOf(options, prepared.RuleID) == diagnostics.SeverityOff {
+			continue
+		}
 		fail := func(ruleID, phase string, ruleVersion int, message string) {
-			allDiagnostics = append(allDiagnostics, errorDiagnostic(ruleID, phase, ruleVersion, snapshot.Version, e.backend.ID(), message, options.Severity))
+			allDiagnostics = append(allDiagnostics, errorDiagnostic(ruleID, phase, ruleVersion, snapshot.Version, e.backend.ID(), message))
 		}
 		if _, err := canonical.Marshal(prepared.Setup); err != nil {
 			fail(prepared.RuleID, "setup", prepared.RuleVersion, err.Error())
@@ -162,6 +179,11 @@ func (e *Engine) Analyze(ctx context.Context, options Options) (Result, error) {
 		}
 		ruleID := loadedRule.RuleID()
 		ruleVersion := loadedRule.RuleVersion()
+		knownRules[ruleID] = struct{}{}
+		severity := severityOf(options, ruleID)
+		if severity == diagnostics.SeverityOff {
+			continue
+		}
 		output, err := loadedRule.Program(prepared.Env, prepared.Setup)
 		if err != nil {
 			fail(ruleID, "program", ruleVersion, err.Error())
@@ -189,7 +211,7 @@ func (e *Engine) Analyze(ctx context.Context, options Options) (Result, error) {
 				RuleID:         ruleID,
 				AssertionID:    item.predicate,
 				DiagnosticKind: diagnostics.KindArchitectureViolation,
-				Severity:       options.Severity,
+				Severity:       severity,
 				Message:        message,
 				SourceLocation: &location,
 				EntityIdentity: &diagnostics.EntityIdentity{SemanticKey: item.anchor},
@@ -206,9 +228,41 @@ func (e *Engine) Analyze(ctx context.Context, options Options) (Result, error) {
 		}
 		allDiagnostics = append(allDiagnostics, provisional...)
 	}
+	if len(buildFailures) == 0 {
+		allDiagnostics = append(allDiagnostics, unknownSeverityRules(options, knownRules, snapshot.Version, e.backend.ID())...)
+	}
 	sortDiagnostics(allDiagnostics)
 	result.Diagnostics = allDiagnostics
 	return result, nil
+}
+
+// severityOf returns the configured severity of a rule: its RuleSeverity
+// entry, else Options.Severity, else error.
+func severityOf(options Options, ruleID string) diagnostics.Severity {
+	if severity, ok := options.RuleSeverity[ruleID]; ok {
+		return severity
+	}
+	if options.Severity != "" {
+		return options.Severity
+	}
+	return diagnostics.SeverityError
+}
+
+// unknownSeverityRules reports each RuleSeverity id that names no loaded
+// rule, so that a misspelled id does not leave a rule at its default.
+func unknownSeverityRules(options Options, known map[string]struct{}, snapshotVersion, backendID string) []diagnostics.Diagnostic {
+	ids := make([]string, 0)
+	for id := range options.RuleSeverity {
+		if _, ok := known[id]; !ok {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	result := make([]diagnostics.Diagnostic, 0, len(ids))
+	for _, id := range ids {
+		result = append(result, errorDiagnostic(id, "config", 0, snapshotVersion, backendID, fmt.Sprintf("severity is configured for rule %q, but no loaded rule has this id", id)))
+	}
+	return result
 }
 
 func sortDiagnostics(allDiagnostics []diagnostics.Diagnostic) {
@@ -263,12 +317,15 @@ func ruleIDForPrepareFailure(rulePath string, prepareErr bundle.PrepareError) st
 	return filepath.Base(rulePath)
 }
 
-func errorDiagnostic(ruleID, phase string, ruleVersion int, snapshotVersion, backendID, message string, severity diagnostics.Severity) diagnostics.Diagnostic {
+// errorDiagnostic reports a rule that could not run. Its severity is always
+// error, whatever the configured severity of the rule, so a broken rule
+// cannot pass silently.
+func errorDiagnostic(ruleID, phase string, ruleVersion int, snapshotVersion, backendID, message string) diagnostics.Diagnostic {
 	return diagnostics.Diagnostic{
 		RuleID:         ruleID,
 		AssertionID:    "default",
 		DiagnosticKind: diagnostics.KindRuleExecutionError,
-		Severity:       severity,
+		Severity:       diagnostics.SeverityError,
 		Message:        message,
 		Phase:          phase,
 		Provenance: diagnostics.Provenance{

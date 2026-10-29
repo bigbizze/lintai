@@ -391,3 +391,4 @@ Caveats:
 - include `lintai-rules/**/*.ts` if you want ESLint to lint the rule files themselves
 - the architecture rule reports diagnostics on target source files, not on the rule file that produced them
 - `factLimit` is optional. The default is 5,000,000 derived facts for each rule.
+- to make one rule a warning, add `severity: { "arch.rule-id": "warning" }` to the options, and add `"@lintai/architecture-warnings": ["warn", options]` with the same options object. `"off"` turns the rule off.

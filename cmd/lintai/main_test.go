@@ -103,6 +103,10 @@ func TestExitCodes(t *testing.T) {
 	}{
 		{"violations", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--rules", rule("layers.ts")}, exitViolations},
 		{"clean", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--rules", rule("layers.ts"), "--exclude", "src/pure/**"}, exitClean},
+		{"warnings do not fail", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--rules", rule("layers.ts"), "--severity", "arch.layers=warning"}, exitClean},
+		{"rule off", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--rules", rule("layers.ts"), "--severity", "arch.layers=off"}, exitClean},
+		{"severity for unknown rule", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--rules", rule("layers.ts"), "--severity", "arch.layer=off"}, exitRuleError},
+		{"bad severity", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--rules", rule("layers.ts"), "--severity", "arch.layers=info"}, exitUsage},
 		{"unknown flag", []string{"--no-such-flag"}, exitUsage},
 		{"bad file scope", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--rules", rule("layers.ts"), "--files", "all"}, exitUsage},
 		{"glob matches nothing", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--rules", "missing/*.ts"}, exitUsage},
