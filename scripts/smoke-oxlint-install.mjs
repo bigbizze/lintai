@@ -27,12 +27,21 @@ assert.ok(!existsSync(path.join(repoDir, "node_modules", "eslint")), "expected n
 const cli = spawnSync("pnpm", ["exec", "oxlint", "--format", "json", "src/"], { cwd: repoDir, encoding: "utf8" });
 assert.notEqual(cli.status, 0, `expected oxlint to fail on the planted violation\n${cli.stdout}\n${cli.stderr}`);
 const cliDiagnostics = JSON.parse(cli.stdout).diagnostics;
-const planted = cliDiagnostics.find((diagnostic) => diagnostic.code === "lintai(architecture)");
+const planted = cliDiagnostics.find(
+	(diagnostic) => diagnostic.code === "lintai(architecture)" && diagnostic.message.includes("[arch.no-async/violation]"),
+);
 assert.ok(planted, `expected a lintai/architecture diagnostic\n${cli.stdout}`);
 assert.match(planted.message, /\[arch\.no-async\/violation\] example in src\/example\.ts must not be async/);
 assert.equal(planted.filename, "src/example.ts");
 // lintai reports line 1, column 23 (1-based); oxlint prints the same values.
 assert.deepEqual([planted.labels[0].span.line, planted.labels[0].span.column], [1, 23]);
+// The structural type rule reports the action that does not return
+// Promise<ActionResult<T>> and accepts the one that does.
+const typeRule = cliDiagnostics.filter((diagnostic) => diagnostic.message.includes("[arch.actions-return-action-result/violation]"));
+assert.equal(typeRule.length, 1, `expected one type rule diagnostic\n${cli.stdout}`);
+assert.match(typeRule[0].message, /legacySave must return Promise<ActionResult<T>>, but returns Promise<number>/);
+assert.equal(typeRule[0].filename, "src/actions/save.ts");
+assert.deepEqual([typeRule[0].labels[0].span.line, typeRule[0].labels[0].span.column], [7, 23]);
 
 // Authoring rules run on the rule files.
 const authoring = spawnSync("pnpm", ["exec", "oxlint", "--format", "json", "lintai-rules/"], {
@@ -66,6 +75,17 @@ try {
 	const located = opened.find((diagnostic) => diagnostic.message.includes("[arch.no-async/violation]"));
 	// The language server uses 0-based lines and characters.
 	assert.deepEqual(located.range.start, { line: 0, character: 22 });
+
+	const actionPath = path.join(repoDir, "src", "actions", "save.ts");
+	const actionURI = pathToFileURL(actionPath).href;
+	server.notify("textDocument/didOpen", {
+		textDocument: { uri: actionURI, languageId: "typescript", version: 1, text: await fs.readFile(actionPath, "utf8") },
+	});
+	const action = await server.diagnostics(actionURI);
+	assert.ok(
+		action.some((diagnostic) => diagnostic.message.includes("[arch.actions-return-action-result/violation] legacySave")),
+		`expected the type rule diagnostic after didOpen\n${JSON.stringify(action)}`,
+	);
 
 	const fixedText = exampleText.replace("export async function", "export function");
 	await fs.writeFile(examplePath, fixedText);

@@ -10,21 +10,21 @@ type Module struct {
 }
 
 type Function struct {
-	EntityID           string
-	SemanticKey        string
-	Name               string
-	Kind               string
-	FilePath           string
-	ContainerName      string
-	ContainsAwait      bool
-	IsExported         bool
-	IsAsync            bool
-	ParameterCount     int
-	ReturnTypeText     string
-	ParameterTypeTexts []string
-	Range              diagnostics.SourceLocation
-	BodyStart          int
-	BodyEnd            int
+	EntityID       string
+	SemanticKey    string
+	Name           string
+	Kind           string
+	FilePath       string
+	ContainerName  string
+	ContainsAwait  bool
+	IsExported     bool
+	IsAsync        bool
+	ParameterCount int
+	ReturnType     string
+	ParameterTypes []string
+	Range          diagnostics.SourceLocation
+	BodyStart      int
+	BodyEnd        int
 }
 
 type ImportedSymbol struct {
@@ -195,7 +195,43 @@ type Snapshot struct {
 	GlobalRefs      []GlobalRef
 	Directives      []ModuleDirective
 	ParseErrors     []ParseError
+	Types           []TypeFact
 	Adjustments     []ConfigAdjustment
+}
+
+// TypeLiteral is the value of a literal type. Kind is string, number,
+// bigint or boolean. Text is the value of a string literal and the decimal
+// digits of a bigint literal.
+type TypeLiteral struct {
+	Kind   string
+	Text   string
+	Number float64
+	Bool   bool
+}
+
+type TypeProp struct {
+	Name     string
+	Type     string
+	Optional bool
+}
+
+// TypeFact is a type entity. The fields that refer to other types hold
+// their type entity IDs.
+type TypeFact struct {
+	ID         string
+	Kind       string
+	Named      bool
+	Origin     string
+	Name       string
+	Args       []string
+	Members    []string
+	Literal    *TypeLiteral
+	ParamName  string
+	Props      []TypeProp
+	SigParams  []string
+	SigReturns string
+	Display    string
+	Location   *diagnostics.SourceLocation
 }
 
 type AmbientSource struct {

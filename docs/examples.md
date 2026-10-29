@@ -513,3 +513,87 @@ Caveats:
 
 - `fn_calls_package` uses the package name from `external_call`, so a call through a re-export from another package has the name of the package that declares the function
 - the table is data that you maintain. A package that is not in the table is not reported.
+
+## 14. Return type of a server action
+
+Every exported async function in `src/actions` must return `Promise<ActionResult<T>>`, where `ActionResult` is the type declared in `src/core/result.ts`. The rule matches the type by its declaration, not by its text:
+
+```ts
+// lintai-rules/actions-return-action-result.ts
+import { dl, rule } from "@lintai/sdk";
+
+export default rule("arch.actions-return-action-result")
+	.version(1)
+	.program(dl`
+		Decl violation(Fn, Name, Returned).
+		returns_action_result(Fn) :-
+			fn_returns_awaited(Fn, R),
+			type_named(R, "src/core/result.ts", "ActionResult").
+		violation(Fn, Name, Returned) :-
+			fn(Fn, File, Name), fn_exported(Fn), glob(File, "src/actions/**"),
+			fn_async(Fn), !returns_action_result(Fn),
+			fn_returns(Fn, T), type_display(T, Returned).
+	`)
+	.report("violation")
+	.message((row) => `${row.Name} must return Promise<ActionResult<T>>, but returns ${row.Returned}`);
+```
+
+Planted violation:
+
+```ts
+// src/actions/save.ts
+import type { ActionResult } from "../legacy/types";
+export async function save(): Promise<ActionResult<number>> {
+	return { done: 1 };
+}
+```
+
+The rule reports `save`. Its return type is written `Promise<ActionResult<number>>`, but `ActionResult` is declared in `src/legacy/types.ts`, so `type_named` has a different `Origin`. `fn_returns_awaited` removes one level of `Promise` from the return type. If TypeScript infers the return type, the rule accepts the function only when the returned value already has the type `ActionResult`. An inferred object literal type, such as `Promise<{ ok: boolean; value: number }>`, has no `ActionResult` name, so the rule reports it.
+
+Caveats:
+
+- `type_display` is used only in the message. The text is what TypeScript 7 prints and can differ from an editor that runs TypeScript 5.
+- the rule reports the function. A type has a `location` row only when it is a named type declared in the workspace.
+
+## 15. Domain signatures do not mention infrastructure types
+
+No exported function under `src/domain` has a parameter or return type that contains a named type declared under `src/infra`. `type_contains` finds the type at any depth, for example `Promise<Db[]>` or `{ db: Db }`:
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+export default rule("arch.domain-signatures-no-infra")
+	.version(1)
+	.program(dl`
+		signature_type(Fn, T) :- fn_param(Fn, _, T).
+		signature_type(Fn, T) :- fn_returns(Fn, T).
+
+		mentions(Fn, T) :- signature_type(Fn, T).
+		mentions(Fn, Inner) :- signature_type(Fn, T), type_contains(T, Inner).
+
+		Decl violation(Fn, Name, Origin, TypeName).
+		violation(Fn, Name, Origin, TypeName) :-
+			fn(Fn, File, Name), fn_exported(Fn), glob(File, "src/domain/**"),
+			mentions(Fn, T), type_named(T, Origin, TypeName), glob(Origin, "src/infra/**").
+	`)
+	.report("violation")
+	.message((row) => `${row.Name} exposes ${row.TypeName} from ${row.Origin}`);
+```
+
+Planted violation:
+
+```ts
+// src/domain/user.ts
+import type { Db } from "../infra/db";
+export function loadUser(input: { db: Db; id: string }): Promise<string> {
+	return Promise.resolve(input.id);
+}
+```
+
+The rule reports `loadUser` with `Db` from `src/infra/db.ts`.
+
+Caveats:
+
+- `type_contains` does not look into index signatures or call signatures, so `{ [k: string]: Db }` is not reported.
+- `type_contains` does not look inside classes, interfaces or enums. If `User` is an interface with a property of type `Db`, a function that returns `User` is not reported. Add a rule for the declaration of `User`, or use `type_ref` and `type_ref_target` on the file that declares it.
+- an `Origin` is a workspace-relative path only for types declared in workspace source files. A type from a package has the package name, so `glob(Origin, "src/infra/**")` does not match it.

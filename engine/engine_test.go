@@ -311,3 +311,94 @@ export default rule("t.broken-warning").version(1)
 		t.Fatalf("got\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 }
+
+// Rules check types through structural facts. The example rule from
+// docs/examples.md reports an exported async action that does not return
+// Promise<ActionResult<T>>, and type_contains finds a named type nested in
+// a signature.
+func TestStructuralTypeRules(t *testing.T) {
+	repoRoot, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceRoot := t.TempDir()
+	writeTestFile(t, workspaceRoot, "tsconfig.json", `{"compilerOptions": {"strict": true, "module": "preserve", "moduleResolution": "bundler"}}`)
+	writeTestFile(t, workspaceRoot, "src/core/result.ts", "export type ActionResult<T> = { ok: true; value: T } | { ok: false; error: string };\n")
+	writeTestFile(t, workspaceRoot, "src/legacy/types.ts", "export type ActionResult<T> = { done: T };\n")
+	writeTestFile(t, workspaceRoot, "src/infra/db.ts", "export class Db { query(): number { return 1; } }\n")
+	writeTestFile(t, workspaceRoot, "src/actions/save.ts", `import type { ActionResult } from "../core/result";
+import type { ActionResult as Legacy } from "../legacy/types";
+export async function save(): Promise<ActionResult<number>> { return { ok: true, value: 1 }; }
+export async function legacy(): Promise<Legacy<number>> { return { done: 1 }; }
+`)
+	writeTestFile(t, workspaceRoot, "src/domain/user.ts", `import type { Db } from "../infra/db";
+export function load(input: { db: Db[] }): number { return input.db.length; }
+export function sync(): number { return 1; }
+export const plain = (): number => 1;
+`)
+	writeTestFile(t, workspaceRoot, "lintai-rules/actions.ts", `import { dl, rule } from "@lintai/sdk";
+export default rule("arch.actions-return-action-result").version(1)
+	.program(dl`+"`"+`
+		Decl violation(Fn, Name, Returned).
+		returns_action_result(Fn) :-
+			fn_returns_awaited(Fn, R),
+			type_named(R, "src/core/result.ts", "ActionResult").
+		violation(Fn, Name, Returned) :-
+			fn(Fn, File, Name), fn_exported(Fn), glob(File, "src/actions/**"),
+			fn_async(Fn), !returns_action_result(Fn),
+			fn_returns(Fn, T), type_display(T, Returned).
+	`+"`"+`)
+	.report("violation")
+	.message((row) => `+"`${row.Name} returns ${row.Returned}`"+`);
+`)
+	writeTestFile(t, workspaceRoot, "lintai-rules/domain.ts", `import { dl, rule } from "@lintai/sdk";
+export default rule("arch.domain-signatures").version(1)
+	.program(dl`+"`"+`
+		Decl violation(Fn, Name).
+		signature_type(Fn, T) :- fn_param(Fn, _, T).
+		signature_type(Fn, T) :- fn_returns(Fn, T).
+		mentions_infra(Fn) :- signature_type(Fn, T), type_named(T, Origin, _), glob(Origin, "src/infra/**").
+		mentions_infra(Fn) :- signature_type(Fn, T), type_contains(T, Inner), type_named(Inner, Origin, _), glob(Origin, "src/infra/**").
+		violation(Fn, Name) :- fn(Fn, File, Name), fn_exported(Fn), glob(File, "src/domain/**"), mentions_infra(Fn).
+	`+"`"+`)
+	.report("violation")
+	.message((row) => row.Name);
+`)
+	writeTestFile(t, workspaceRoot, "lintai-rules/awaited.ts", `import { dl, rule } from "@lintai/sdk";
+export default rule("t.awaited").version(1)
+	.program(dl`+"`"+`
+		Decl v(Fn, Name, Text).
+		v(Fn, Name, Text) :- fn(Fn, _, Name), fn_returns_awaited(Fn, T), type_display(T, Text).
+	`+"`"+`)
+	.report("v")
+	.message((row) => `+"`${row.Name}:${row.Text}`"+`);
+`)
+	items, err := New(typescript.New()).Run(context.Background(), Options{
+		RepoRoot:      repoRoot,
+		AssetRoot:     filepath.Join(repoRoot, "packages", "client"),
+		WorkspaceRoot: workspaceRoot,
+		RuleGlobs:     []string{"lintai-rules/**/*.ts"},
+		Env:           map[string]any{},
+		Severity:      diagnostics.SeverityError,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byRule := map[string][]string{}
+	for _, item := range items {
+		byRule[item.RuleID] = append(byRule[item.RuleID], item.Message)
+	}
+	for _, messages := range byRule {
+		sort.Strings(messages)
+	}
+	if got := byRule["arch.actions-return-action-result"]; len(got) != 1 || got[0] != "legacy returns Promise<Legacy<number>>" {
+		t.Fatalf("actions rule: %+v", items)
+	}
+	if got := byRule["arch.domain-signatures"]; len(got) != 1 || got[0] != "load" {
+		t.Fatalf("domain rule: %+v", items)
+	}
+	want := []string{"Db.query:number", "legacy:Legacy<number>", "load:number", "plain:number", "save:ActionResult<number>", "sync:number"}
+	if got := byRule["t.awaited"]; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("fn_returns_awaited: got %v, want %v", got, want)
+	}
+}

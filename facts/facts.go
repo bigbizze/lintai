@@ -4,6 +4,7 @@ package facts
 
 import (
 	"fmt"
+	"math"
 	"slices"
 	"sort"
 	"strings"
@@ -22,6 +23,7 @@ const (
 	StringKind ValueKind = iota + 1
 	NumberKind
 	NameKind
+	FloatKind
 )
 
 // Value is one typed Mangle constant. Name values are closed vocabulary
@@ -30,10 +32,14 @@ type Value struct {
 	Kind   ValueKind
 	String string
 	Number int64
+	Float  float64
 }
 
 func String(value string) Value { return Value{Kind: StringKind, String: value} }
 func Number(value int64) Value  { return Value{Kind: NumberKind, Number: value} }
+
+// Float creates a float64 constant. Use Number for integers.
+func Float(value float64) Value { return Value{Kind: FloatKind, Float: value} }
 
 // Name creates a Mangle name constant. Its value is written without the
 // leading slash, for example Name("clock") represents /clock.
@@ -198,6 +204,11 @@ func (value Value) constant() (ast.Constant, error) {
 		return ast.Number(value.Number), nil
 	case NameKind:
 		return ast.Name("/" + value.String)
+	case FloatKind:
+		if math.IsNaN(value.Float) || math.IsInf(value.Float, 0) {
+			return ast.Constant{}, fmt.Errorf("invalid float %v", value.Float)
+		}
+		return ast.Float64(value.Float), nil
 	default:
 		return ast.Constant{}, fmt.Errorf("unsupported fact value kind %d", value.Kind)
 	}

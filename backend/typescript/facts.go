@@ -3,6 +3,7 @@ package typescript
 import (
 	_ "embed"
 	"fmt"
+	"math"
 
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/facts"
@@ -44,10 +45,14 @@ func factsFromAnalysis(snapshot *analysis.Snapshot) ([]facts.Fact, error) {
 		if fn.ContainsAwait {
 			b.add("fn_awaits", id)
 		}
-		for index, typeText := range fn.ParameterTypeTexts {
-			b.add("fn_param", id, facts.Number(int64(index)), str(typeText))
+		for index, typeID := range fn.ParameterTypes {
+			if typeID != "" {
+				b.add("fn_param", id, facts.Number(int64(index)), str(typeID))
+			}
 		}
-		b.add("fn_returns", id, str(fn.ReturnTypeText))
+		if fn.ReturnType != "" {
+			b.add("fn_returns", id, str(fn.ReturnType))
+		}
 		b.location(fn.SemanticKey, fn.Range)
 	}
 	for _, edge := range snapshot.ImportEdges {
@@ -144,6 +149,11 @@ func factsFromAnalysis(snapshot *analysis.Snapshot) ([]facts.Fact, error) {
 		}
 		b.location(ref.SemanticKey, ref.Range)
 	}
+	for _, item := range snapshot.Types {
+		if err := b.typeFacts(item); err != nil {
+			return nil, err
+		}
+	}
 	bodies := functionBodiesByFile(snapshot.Functions)
 	for _, access := range snapshot.Accesses {
 		id := str(access.SemanticKey)
@@ -200,6 +210,71 @@ func factsFromAnalysis(snapshot *analysis.Snapshot) ([]facts.Fact, error) {
 		b.location(ref.SemanticKey, ref.Range)
 	}
 	return b.items, nil
+}
+
+func (b *builder) typeFacts(item analysis.TypeFact) error {
+	id := str(item.ID)
+	kind, err := name(item.Kind)
+	if err != nil {
+		return err
+	}
+	b.add("type_kind", id, kind)
+	if item.Named {
+		b.add("type_named", id, str(item.Origin), str(item.Name))
+	}
+	for index, arg := range item.Args {
+		b.add("type_arg", id, facts.Number(int64(index)), str(arg))
+	}
+	for _, member := range item.Members {
+		b.add("type_member", id, str(member))
+	}
+	if item.Literal != nil {
+		value, err := literalValue(*item.Literal)
+		if err != nil {
+			return err
+		}
+		b.add("type_literal", id, value)
+	}
+	if item.Kind == "type_param" {
+		b.add("type_param_name", id, str(item.ParamName))
+	}
+	for _, prop := range item.Props {
+		b.add("type_prop", id, str(prop.Name), str(prop.Type))
+		if prop.Optional {
+			b.add("type_prop_optional", id, str(prop.Name))
+		}
+	}
+	if item.Kind == "function" {
+		for index, param := range item.SigParams {
+			b.add("type_sig_param", id, facts.Number(int64(index)), str(param))
+		}
+		b.add("type_sig_returns", id, str(item.SigReturns))
+	}
+	b.add("type_display", id, str(item.Display))
+	if item.Location != nil {
+		b.location(item.ID, *item.Location)
+	}
+	return nil
+}
+
+// literalValue returns the type_literal value of a literal type: a string,
+// a number, /true or /false, or the digits of a bigint as a string.
+func literalValue(literal analysis.TypeLiteral) (facts.Value, error) {
+	switch literal.Kind {
+	case "string", "bigint":
+		return str(literal.Text), nil
+	case "boolean":
+		if literal.Bool {
+			return facts.Name("true"), nil
+		}
+		return facts.Name("false"), nil
+	case "number":
+		if literal.Number == math.Trunc(literal.Number) && math.Abs(literal.Number) <= 1<<53 {
+			return facts.Number(int64(literal.Number)), nil
+		}
+		return facts.Float(literal.Number), nil
+	}
+	return facts.Value{}, fmt.Errorf("unknown literal kind %q", literal.Kind)
 }
 
 type builder struct {

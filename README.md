@@ -9,7 +9,7 @@ LintAI lets you write rules like "components must not import domain code", "pure
 LintAI is a whole-workspace architecture engine:
 
 - it builds a semantic snapshot of your TypeScript workspace in Go
-- it converts the snapshot into base relations (facts) such as `fn`, `import_edge`, `call_edge` and `ambient_use`
+- it converts the snapshot into base relations (facts) such as `fn`, `import_edge`, `call_edge`, `ambient_use` and `type_named`
 - each rule is a Datalog program, in the [Mangle](https://codeberg.org/TauCeti/mangle-go) dialect, that derives violation rows from those facts
 - it reports file-scoped diagnostics that can be consumed by the CLI, ESLint or oxlint
 
@@ -35,7 +35,7 @@ LintAI fills that gap with Datalog over repository-level semantic facts. Recursi
 Current caveats:
 
 - it does not replace tests, the type checker, or runtime validation
-- type metadata is text-oriented, for example `fn_returns(Fn, TypeText)`
+- types are structural facts keyed by where each named type is declared: `fn_returns(Fn, Type)` gives a type entity, and `type_named`, `type_arg`, `type_member` and the other `type_*` relations describe it. Members of classes and interfaces are not expanded, and conditional, mapped and indexed access types are `/other` with display text only
 - calls to functions outside the workspace are in `external_call`, but lintai does not analyze code inside `node_modules`
 - lintai is a deterministic gate against cooperative but careless authors, not a security boundary against an adversary with write access to the repository and its CI. See [docs/trust.md](docs/trust.md).
 
@@ -184,8 +184,8 @@ The full reference lives in [docs/api.md](docs/api.md). Highlights:
 - rule builder:
   - `rule(id).version(n).setup(fn).facts(fn).program(p).report(...preds).expectNonEmpty(...preds).message(fn)`
 - `dl` tagged template: interpolates strings, numbers, `dl.name("x")` (the name constant `/x`) and other `dl` fragments, with correct escaping
-- base relations: `module`, `fn`, `fn_*`, `import_edge`, `import_*`, `import_opaque`, `call_edge`, `call_unresolved`, `fn_ref`, `external_call`, `type_ref`, `type_ref_target`, `meta_access`, `ambient_source`, `ambient_use`, `ambient_key`, `ambient_dynamic`, `ambient_write`, `global_ref`, `module_directive`, `module_parse_error`, `site_in_fn`, `location`
-- prelude: `glob`, `import_runtime`, `module_imports`, `imports_reach`, `calls_reach`, `fn_uses_ambient`, `fn_reaches_ambient`, `module_uses_ambient`, `module_reaches_ambient`, `fn_calls_package`, `module_calls_package`
+- base relations: `module`, `fn`, `fn_*`, `import_edge`, `import_*`, `import_opaque`, `call_edge`, `call_unresolved`, `fn_ref`, `external_call`, `type_ref`, `type_ref_target`, `type_kind`, `type_named`, `type_arg`, `type_member`, `type_literal`, `type_param_name`, `type_prop`, `type_prop_optional`, `type_sig_param`, `type_sig_returns`, `type_display`, `meta_access`, `ambient_source`, `ambient_use`, `ambient_key`, `ambient_dynamic`, `ambient_write`, `global_ref`, `module_directive`, `module_parse_error`, `site_in_fn`, `location`
+- prelude: `glob`, `import_runtime`, `module_imports`, `imports_reach`, `calls_reach`, `fn_uses_ambient`, `fn_reaches_ambient`, `module_uses_ambient`, `module_reaches_ambient`, `fn_calls_package`, `module_calls_package`, `type_child`, `type_contains`, `type_is_promise`, `fn_returns_awaited`
 - strict mode: `calls_or_refs_reach`, `fn_reaches_ambient_strict`, `fn_has_unresolved_call`, `module_has_unresolved_call` and `fn_reaches_unresolved` also follow function values and report calls that lintai cannot resolve
 - ambient sources: `clock` (`Date.now`, `new Date()`, `performance.now`), `env` (`process.env`), `random` (`Math.random`, `crypto.randomUUID` and other `crypto` random functions), `crypto` (`crypto.subtle`), `network` (`fetch`), `timer` (`setTimeout`, `setInterval`, `setImmediate`, `queueMicrotask`) and `process` (`process.cwd`, `process.argv`)
 - CLI: `lintai schema`, `lintai facts`, `lintai lock`, `--explain`, `--fact-limit`, `--severity <rule-id>=error|warning|off`, `--rules-lock`, `--setup-sandbox auto|on|off`
@@ -195,6 +195,8 @@ The full reference lives in [docs/api.md](docs/api.md). Highlights:
 Important caveats:
 
 - the first argument of a reported predicate is its anchor; it must be an entity id with a `location` fact
+- `type_display` is the text that TypeScript 7 prints; use it in messages, and match types with `type_named` and the other structural relations
+- TypeScript flattens nested unions, so `ActionResult<number> | null` has the members of `ActionResult<number>` and no `type_named` row for `ActionResult`
 - a rule cannot redefine base or prelude predicates
 - `glob` and `!glob` need both arguments bound by earlier premises
 - `--explain` works only with `--json`
@@ -222,6 +224,7 @@ More examples live in [docs/examples.md](docs/examples.md). They cover:
 - ESLint integration
 - strict purity rules that also follow function values and report unresolved calls
 - a package capability table
+- type rules: a server action must return `Promise<ActionResult<T>>`, and domain signatures must not contain infrastructure types
 
 Important caveat:
 
