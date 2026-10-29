@@ -103,7 +103,7 @@ pnpm exec lintai \
   --rules 'lintai-rules/**/*.ts'
 ```
 
-With npm, use `npx lintai` in place of `pnpm exec lintai`.
+With npm, use `npm exec -- lintai` in place of `pnpm exec lintai`.
 
 The CLI exits with 0 when there are no violations, 1 when a rule found violations, 2 for a usage or configuration error, and 3 when a rule could not run. The snapshot contains only the files that `tsc` compiles with their `tsconfig.json`; use `--files walk` to include every source file. To leave more files out, add `--exclude 'src/generated/**'` (repeatable). `node_modules`, `dist` and dot-directories such as `.next` are always skipped.
 

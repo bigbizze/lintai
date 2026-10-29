@@ -11,12 +11,12 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/bigbizze/lintai/internal/backend"
-	"github.com/bigbizze/lintai/internal/backend/typescript"
-	"github.com/bigbizze/lintai/internal/diagnostics"
-	"github.com/bigbizze/lintai/internal/engine"
-	"github.com/bigbizze/lintai/internal/facts"
-	"github.com/bigbizze/lintai/internal/server"
+	"github.com/bigbizze/lintai/backend"
+	"github.com/bigbizze/lintai/backend/typescript"
+	"github.com/bigbizze/lintai/diagnostics"
+	"github.com/bigbizze/lintai/engine"
+	"github.com/bigbizze/lintai/facts"
+	"github.com/bigbizze/lintai/server"
 )
 
 // Exit codes. CI can tell "the rules found violations" apart from "lintai
@@ -64,7 +64,8 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 		case "serve":
 			return runServe(ctx)
 		case "schema":
-			_, err := fmt.Fprintf(stdout, "%s\n%s", facts.Schema, facts.Prelude)
+			schema := typescript.Schema()
+			_, err := fmt.Fprintf(stdout, "%s\n%s", schema.Declarations, schema.Prelude)
 			return err
 		case "facts":
 			return runFacts(ctx, args[1:], stdout)
@@ -109,11 +110,7 @@ func runFacts(ctx context.Context, args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	store, err := facts.FromSnapshot(snapshot)
-	if err != nil {
-		return err
-	}
-	text, err := facts.Format(store, relations)
+	text, err := facts.Format(snapshot, relations)
 	if err != nil {
 		return err
 	}

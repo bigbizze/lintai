@@ -8,17 +8,17 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bigbizze/lintai/internal/backend"
+	"github.com/bigbizze/lintai/backend"
 )
 
 func TestBuildSnapshotExposesStableFunctionKeysAndCalls(t *testing.T) {
-	repoRoot, err := filepath.Abs("../../..")
+	repoRoot, err := filepath.Abs("../..")
 	if err != nil {
 		t.Fatal(err)
 	}
 	workspaceRoot := filepath.Join(repoRoot, "testdata/fixtures/workspace")
 
-	snapshot, err := New().BuildSnapshot(context.Background(), repoRoot, workspaceRoot, backend.SnapshotOptions{})
+	snapshot, err := New().buildAnalysisSnapshot(context.Background(), repoRoot, workspaceRoot, backend.SnapshotOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,16 +104,16 @@ func TestBuildSnapshotExposesExpandedMetadataAndCapabilities(t *testing.T) {
   "include": ["src/**/*.ts"]
 }
 `)
-	writeWorkspaceFile(t, root, "src/data/db.ts", `export default async function db(query: string): Promise<number> {
-	return query.length;
+	writeWorkspaceFile(t, root, "src/data/db.ts", `export default async function db(input: string): Promise<number> {
+	return input.length;
 }
 
 export type DbConfig = {
-	dsn: string;
+	endpoint: string;
 };
 
 export function helper(config: DbConfig): number {
-	return config.dsn.length;
+	return config.endpoint.length;
 }
 `)
 	writeWorkspaceFile(t, root, "src/service/repository.ts", `import db, { helper as runHelper, type DbConfig } from "../data/db";
@@ -123,8 +123,8 @@ type LocalConfig = DbConfig;
 
 export class Repository {
 	async save(config: DbConfig): Promise<number> {
-		await db("select 1");
-		return runHelper(config) + (await dbModule.default(config.dsn));
+		await db("sample input");
+		return runHelper(config) + (await dbModule.default(config.endpoint));
 	}
 }
 
@@ -133,7 +133,7 @@ export function mirror(config: LocalConfig): DbConfig {
 }
 `)
 
-	snapshot, err := New().BuildSnapshot(context.Background(), root, root, backend.SnapshotOptions{})
+	snapshot, err := New().buildAnalysisSnapshot(context.Background(), root, root, backend.SnapshotOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -230,7 +230,7 @@ func TestBuildSnapshotExposesImportMetaAccessesAndIgnoresStrings(t *testing.T) {
 }
 `)
 
-	snapshot, err := New().BuildSnapshot(context.Background(), root, root, backend.SnapshotOptions{})
+	snapshot, err := New().buildAnalysisSnapshot(context.Background(), root, root, backend.SnapshotOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +280,7 @@ export function a() {
 }
 `)
 
-	snapshot, err := New().BuildSnapshot(context.Background(), root, root, backend.SnapshotOptions{})
+	snapshot, err := New().buildAnalysisSnapshot(context.Background(), root, root, backend.SnapshotOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

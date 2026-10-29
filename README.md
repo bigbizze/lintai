@@ -176,6 +176,11 @@ Important caveats:
 - `glob` needs both arguments bound by earlier premises and cannot be negated directly
 - `--explain` works only with `--json`
 
+The Go engine, backend contract, generic fact model, diagnostics, runtime,
+bundling helpers, and JSON-RPC server are also public packages. See
+[docs/go-api.md](docs/go-api.md) for backend composition and package entry
+points.
+
 ## Examples and caveats
 
 More examples live in [docs/examples.md](docs/examples.md). They cover:
@@ -193,7 +198,8 @@ Important caveat:
 ## Repository layout and caveats
 
 - `cmd/lintai/` — Go CLI entry point
-- `internal/` — engine, runtime, backend, server, and diagnostics internals
+- `engine/`, `backend/`, `facts/`, `diagnostics/`, `runtime/`, `bundle/`, `server/`, `jsonrpc/` — public Go API
+- `internal/` — private compiler, workspace, ambient-source, and canonicalization support
 - `packages/sdk/` — `@lintai/sdk`
 - `packages/eslint-plugin/` — `@lintai/eslint-plugin`
 - `packages/authoring-rules/` — authoring lint rules re-exported by the ESLint plugin

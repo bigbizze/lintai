@@ -33,6 +33,10 @@ jobs:
       - name: Go tests
         run: go test ./...
 
+      - name: Go consumer module smoke
+        working-directory: testdata/consumer-module
+        run: go run -mod=readonly .
+
       - name: Build host npm binary
         run: pnpm build:npm-binary:host
 

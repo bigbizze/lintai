@@ -1,6 +1,6 @@
 package analysis
 
-import "github.com/bigbizze/lintai/internal/diagnostics"
+import "github.com/bigbizze/lintai/diagnostics"
 
 type Module struct {
 	EntityID    string
