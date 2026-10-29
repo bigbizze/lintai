@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import path from "node:path";
 
 import {
@@ -175,6 +176,16 @@ export function createLintaiRules(
 	};
 }
 
+// workspacePath returns the path of a linted file relative to the workspace
+// root. process.cwd() is a real path, but a language server can give the
+// file under a symbolic link (on macOS, the temp directory /var is a link to
+// /private/var). If the file is not under the root, compare real paths.
 function workspacePath(options: ResolvedBridgeOptions, physicalFilename: string): string {
-	return path.relative(options.workspaceRoot, physicalFilename).replace(/\\/g, "/");
+	let relative = path.relative(options.workspaceRoot, physicalFilename);
+	if (relative.startsWith("..") || path.isAbsolute(relative)) {
+		try {
+			relative = path.relative(realpathSync(options.workspaceRoot), realpathSync(physicalFilename));
+		} catch {}
+	}
+	return relative.replace(/\\/g, "/");
 }
