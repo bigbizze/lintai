@@ -202,7 +202,7 @@ What the facts show:
 | origin kind | the id, `type_origin_kind` |
 | type alias name and arguments | the id, `type_named`, `type_arg`, when the checker keeps the alias |
 
-Not shown: members of classes, interfaces and enums; call, construct and index signatures of an `/object` (marked `/signatures`); type parameter constraints (marked `/constraint`) and defaults; the structure of `/other` types (marked `/unsupported`); parameter names.
+Not shown: members of classes, interfaces and enums (not marked); call, construct and index signatures of an `/object` (marked `/signatures`); type parameter constraints (marked `/constraint`) and defaults; the structure of `/other` types (marked `/unsupported`); parameter names.
 
 Removed by the checker before lintai sees the type, so no rule can see them: an alias of a primitive or of another named type (`type UserId = string` is `/string`, `type Handle = Db` is `Db`), a union inside a union (the members are flattened), and `undefined` in optional properties, elements and parameters.
 
@@ -231,7 +231,7 @@ The prelude is loaded before every rule program. A rule cannot redefine a prelud
 | `module_calls_package(File, Pkg)` | `File` directly calls into the package `Pkg`, at any scope. |
 | `type_child(Type, Child)` | `Child` appears directly in `Type`: a type argument, tuple element, union or intersection member, property type, signature parameter or signature return. |
 | `type_contains(Type, Inner)` | Transitive closure of `type_child`. It does not look inside classes, interfaces or enums, whose members are not emitted, into the call, construct or index signatures of an `/object`, into type parameter constraints, or into `/other`, truncated and conflicting types. Use `type_reaches_incomplete` to fail closed. |
-| `type_reaches_incomplete(Type)` | `Type`, or a type that it contains, has a `type_incomplete` row. A rule that must see every type in a signature reports such a type. |
+| `type_reaches_incomplete(Type)` | `Type`, or a type that it contains, has a `type_incomplete` row. A rule that must see every type in a signature reports such a type. Classes, interfaces and enums have no `type_incomplete` row for their members, so a type inside a member is not found. |
 | `type_is_promise(Type)` | `Type` is the lib `Promise` (`type_origin_kind` `/lib`), with any type argument. A `Promise` declared in a `declare module "lib"` block is not. |
 | `fn_returns_awaited(Fn, Type)` | The return type of `Fn` with exactly one level of the lib `Promise` removed: the type argument of a returned `Promise`, otherwise the return type itself. This is not TypeScript's `Awaited`: it does not unwrap `PromiseLike`, a `Promise` inside a `Promise`, or a union that contains a `Promise`, so `Promise<A> \| undefined` is returned unchanged. |
 

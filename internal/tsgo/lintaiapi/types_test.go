@@ -381,10 +381,35 @@ func TestTypeFactsRecursiveKeysDoNotDependOnFileNames(t *testing.T) {
 		}
 		return ids
 	}
+	buildGroups := func(entryGroup, ringGroup string, depth int) []string {
+		entry := "import { a0 } from \"../shared/r\";\nexport function entry() { return " + strings.Repeat("{ n: ", depth) + "a0" + strings.Repeat(" }", depth) + "; }\n"
+		files := map[string]string{
+			"shared/r.ts":                 ring.String(),
+			entryGroup + "/tsconfig.json": `{"compilerOptions": {"strict": true}, "include": ["**/*.ts", "../shared/**/*.ts"]}`,
+			entryGroup + "/entry.ts":      entry,
+			ringGroup + "/tsconfig.json":  `{"compilerOptions": {"strict": true}, "include": ["**/*.ts", "../shared/**/*.ts"]}`,
+			ringGroup + "/use.ts":         "import { a0 } from \"../shared/r\";\nexport function use() { return a0; }\n",
+			"tsconfig.json":               `{"files": [], "references": [{"path": "./` + entryGroup + `"}, {"path": "./` + ringGroup + `"}]}`,
+		}
+		root := t.TempDir()
+		snap, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{WorkspaceRoot: root, Files: writeWorkspace(t, root, files)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		x := newTypeIndex(t, snap)
+		ids := make([]string, 0, 6)
+		for index := range 6 {
+			ids = append(ids, x.fn(fmt.Sprintf("a%d", index)).ReturnType)
+		}
+		return ids
+	}
 	for depth := 5; depth <= 12; depth++ {
 		before, after := build("a.ts", depth), build("z.ts", depth)
 		if !slices.Equal(before, after) {
 			t.Fatalf("depth %d: the ring IDs depend on the entry file name:\n%v\n%v", depth, before, after)
+		}
+		if groupsBefore, groupsAfter := buildGroups("a", "m", depth), buildGroups("z", "m", depth); !slices.Equal(groupsBefore, groupsAfter) || !slices.Equal(groupsBefore, before) {
+			t.Fatalf("depth %d: the ring IDs depend on the config group order:\n%v\n%v\n%v", depth, groupsBefore, groupsAfter, before)
 		}
 	}
 }

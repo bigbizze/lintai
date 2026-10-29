@@ -92,7 +92,7 @@ Canonical key, defined recursively. `K(x)` is the key of `x`. Every key that is 
 | Keyword kinds | the kind, for example `/string` |
 | `/literal` | `["lit", kind, value]`, where kind is `s`, `n`, `big` or `b` and value is the string, the number, the digits or `true`/`false` |
 | Named (cases 4, 9) | `["named", origin kind, origin, name, local position, [K(arg 0), K(arg 1), ...]]` |
-| `/type_param` | `["tparam", origin kind, origin, position, name]`. The position is the position of the type parameter's own declaration in its file, not the name of the declaration that declares it: the generic methods of two object literals, or of a class and a merged namespace, have the same qualified name. The origin of a type parameter is never mapped from `dist/` to `src/`, because the position is a position in the declaration file. A `this` type is `["this", origin kind, origin, position of the class or interface]`. |
+| `/type_param` | `["tparam", origin kind, origin, position, name]`. The position is the position of the type parameter's own declaration in its file, not the name of the declaration that declares it: the generic methods of two object literals, or of a class and a merged namespace, have the same qualified name. The origin of a type parameter is never mapped from `dist/` to `src/`, because the position is a position in the declaration file. A `this` type has the name `"this"` and the position of the class or interface that declares it. |
 | `/union`, `/intersection` | `["union", [member keys sorted]]` or `["inter", [...]]` |
 | `/tuple` | `["tuple", readonly, [[mark, K(element)], ...]]`, where readonly is `"readonly"` or `""` and mark is `"?"` for an optional element, `"..."` for a rest element or `""` |
 | `/function` | `["fn", [[mark, K(param)], ...], K(return)]` with the same marks |
@@ -135,7 +135,7 @@ A named type whose origin is a workspace source path gets a `location` row at it
 | `/constraint` | a type parameter with a constraint, which is not emitted |
 | `/conflict` | config groups give different structure for the id (4.8) |
 
-Members of classes, interfaces and enums are out of scope (section 10) and are not marked: a rule cannot inspect them, with or without the marker.
+Members of classes, interfaces and enums are out of scope (section 10) and are not marked: a rule cannot inspect them, with or without the marker. So `type_reaches_incomplete` does not fail closed on a class or interface whose members contain a type. Marking every class and interface would mark every `Promise` and `Array`.
 
 ### 4.8 Config groups
 

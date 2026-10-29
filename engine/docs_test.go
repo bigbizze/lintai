@@ -11,6 +11,8 @@ import (
 var (
 	dlBlock      = regexp.MustCompile("(?s)\\.program\\((?:\\([^)]*\\)\\s*=>\\s*)?dl`(.*?)`")
 	quoted       = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
+	comment      = regexp.MustCompile(`(?m)#.*$`)
+	interpolated = regexp.MustCompile(`\$\{[^}]*\}`)
 	clauseEnd    = regexp.MustCompile(`\.(?:\s|$)`)
 	relationName = regexp.MustCompile(`^(?:Decl\s+)?([a-z_][A-Za-z0-9_]*)\s*\(`)
 	docSources   = []string{
@@ -37,10 +39,15 @@ func TestDocumentedProgramsDeclareTheirRelations(t *testing.T) {
 		for _, block := range dlBlock.FindAllStringSubmatch(string(data), -1) {
 			declared := map[string]bool{}
 			var heads []string
-			for _, clause := range clauseEnd.Split(quoted.ReplaceAllString(block[1], `""`), -1) {
+			text := interpolated.ReplaceAllString(comment.ReplaceAllString(quoted.ReplaceAllString(block[1], `""`), ""), "x")
+			for _, clause := range clauseEnd.Split(text, -1) {
 				clause = strings.TrimSpace(clause)
+				if clause == "" {
+					continue
+				}
 				match := relationName.FindStringSubmatch(clause)
 				if match == nil {
+					t.Errorf("%s: cannot read the clause %q", path, clause)
 					continue
 				}
 				if strings.HasPrefix(clause, "Decl") {

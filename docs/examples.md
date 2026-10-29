@@ -598,7 +598,7 @@ export function loadUser(input: { db: Db; id: string }): Promise<string> {
 
 The rule reports `loadUser` with `Db` from `src/infra/db.ts`.
 
-`type_contains` does not look into every part of a type. The strict variant also reports a signature that contains a type whose facts are incomplete, so a type that the rule cannot inspect fails the rule:
+`type_contains` does not look into every part of a type. The strict variant also reports a signature that contains a type whose facts are incomplete (`type_incomplete`), so most types that the rule cannot inspect fail the rule. The members of classes, interfaces and enums are the exception: they are not emitted and not marked, so neither rule reports `Db` inside an interface:
 
 ```ts
 import { dl, rule } from "@lintai/sdk";

@@ -241,6 +241,7 @@ func (e *extractor) newTypeFact(t *checker.Type, id string, display string) *Typ
 	if shape.named {
 		fact.OriginKind = shape.originKind
 	}
+	fact.Location = e.typeLocation(t)
 	if e.isTruncated(t) {
 		fact.Kind = TypeKindOther
 		fact.Incomplete = []string{IncompleteTruncated}
@@ -270,7 +271,6 @@ func (e *extractor) newTypeFact(t *checker.Type, id string, display string) *Typ
 		fact.SigMarks = factMarks(shape.sigMarks)
 		fact.SigReturns = e.typeID(shape.sigReturn)
 	}
-	fact.Location = e.typeLocation(t)
 	return fact
 }
 
@@ -304,7 +304,7 @@ func hasKey[K comparable, V any](m map[K]V, key K) bool {
 // path to the same type can supply it.
 func (e *extractor) typeLocation(t *checker.Type) *SourceLocation {
 	shape := e.typeShapeOf(t)
-	if !shape.named || shape.nameDecl == nil || e.isTruncated(t) {
+	if !shape.named || shape.nameDecl == nil {
 		return nil
 	}
 	file := ast.GetSourceFileOfNode(shape.nameDecl)
@@ -428,7 +428,11 @@ func (e *extractor) typeKey(t *checker.Type, stack []*checker.Type) typeKeyResul
 	marked := func(types []*checker.Type, marks []string) string {
 		parts := keys(types)
 		for index := range parts {
-			parts[index] = jsonList(jsonQuote(marks[index]), parts[index])
+			mark := ""
+			if index < len(marks) {
+				mark = marks[index]
+			}
+			parts[index] = jsonList(jsonQuote(mark), parts[index])
 		}
 		return jsonList(parts...)
 	}

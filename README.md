@@ -35,7 +35,7 @@ LintAI fills that gap with Datalog over repository-level semantic facts. Recursi
 Current caveats:
 
 - it does not replace tests, the type checker, or runtime validation
-- types are structural facts keyed by where each named type is declared: `fn_returns(Fn, Type)` gives a type entity, and `type_named`, `type_arg`, `type_member` and the other `type_*` relations describe it. Members of classes and interfaces are not expanded, and conditional, mapped and indexed access types are `/other` with display text only. `type_contains` does not look into these types, into type parameter constraints or into the signatures of object types; a rule that must see every type in a signature uses `type_reaches_incomplete` to fail closed
+- types are structural facts keyed by where each named type is declared: `fn_returns(Fn, Type)` gives a type entity, and `type_named`, `type_arg`, `type_member` and the other `type_*` relations describe it. Members of classes and interfaces are not expanded, and conditional, mapped and indexed access types are `/other` with display text only. `type_contains` does not look into these types, into type parameter constraints or into the signatures of object types; a rule that must see every type in a signature uses `type_reaches_incomplete` to fail closed. Class and interface members are not marked, so neither predicate sees a type inside them
 - calls to functions outside the workspace are in `external_call`, but lintai does not analyze code inside `node_modules`
 - lintai is a deterministic gate against cooperative but careless authors, not a security boundary against an adversary with write access to the repository and its CI. See [docs/trust.md](docs/trust.md).
 
@@ -216,7 +216,7 @@ Important caveats:
 - the first argument of a reported predicate is its anchor; it must be an entity id with a `location` fact
 - `type_display` is the text that TypeScript 7 prints; use it in messages, and match types with `type_named` and the other structural relations
 - TypeScript flattens nested unions, so `ActionResult<number> | null` has the members of `ActionResult<number>` and no `type_named` row for `ActionResult`
-- `type_contains` does not find every type in a signature; `type_incomplete` marks the types whose facts leave out structure, and `type_reaches_incomplete` finds them
+- `type_contains` does not find every type in a signature; `type_incomplete` marks the types whose facts leave out structure, and `type_reaches_incomplete` finds them. Classes, interfaces and enums are not marked, although their members are not emitted
 - `type_is_promise` and `fn_returns_awaited` match only the lib `Promise`, and remove exactly one level of it
 - a rule cannot redefine base or prelude predicates
 - `glob` and `!glob` need both arguments bound by earlier premises
