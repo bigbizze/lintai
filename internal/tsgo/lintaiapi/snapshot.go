@@ -61,21 +61,23 @@ type Module struct {
 }
 
 type Function struct {
-	EntityID           string
-	SemanticKey        string
-	Name               string
-	Kind               string
-	FilePath           string
-	ContainerName      string
-	ContainsAwait      bool
-	IsExported         bool
-	IsAsync            bool
-	ParameterCount     int
-	ReturnTypeText     string
-	ParameterTypeTexts []string
-	Range              SourceLocation
-	BodyStart          int
-	BodyEnd            int
+	EntityID       string
+	SemanticKey    string
+	Name           string
+	Kind           string
+	FilePath       string
+	ContainerName  string
+	ContainsAwait  bool
+	IsExported     bool
+	IsAsync        bool
+	ParameterCount int
+	// ReturnType and ParameterTypes are type entity IDs. Snapshot.Types
+	// holds the facts of each type.
+	ReturnType     string
+	ParameterTypes []string
+	Range          SourceLocation
+	BodyStart      int
+	BodyEnd        int
 }
 
 type ImportedSymbol struct {
@@ -224,6 +226,9 @@ type Snapshot struct {
 	Directives      []ModuleDirective
 	ParseErrors     []ParseError
 	PendingDtsCalls []PendingDtsCall
+	// Types are the type entities that function parameter and return types
+	// refer to, sorted by ID.
+	Types []TypeFact
 	// ConfigFiles are the absolute paths of the tsconfig files that the
 	// snapshot read, including extended and referenced configs.
 	ConfigFiles []string
@@ -275,6 +280,13 @@ type extractor struct {
 	ambientMembers  map[*ast.Symbol][]*AmbientMatcher
 	ambientDone     map[*ast.Node]struct{}
 	globalSyms      map[string]*ast.Symbol
+	typeFacts       map[string]*TypeFact
+	typeIDs         map[*checker.Type]string
+	typeKeys        map[*checker.Type]cachedTypeKey
+	typeShapes      map[*checker.Type]*typeShape
+	typeTruncated   map[*checker.Type]struct{}
+	keyTruncated    bool
+	timing          *extractTiming
 }
 
 type functionMeta struct {
@@ -305,6 +317,8 @@ type extractTiming struct {
 	config   time.Duration
 	program  time.Duration
 	walk     time.Duration
+	// types is the part of walk that builds type facts.
+	types time.Duration
 }
 
 func BuildSnapshot(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, error) {
@@ -366,13 +380,14 @@ func BuildSnapshot(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, er
 	resolveDtsCalls(merged)
 	if req.TsconfigFiles {
 		keepModuleFiles(merged)
+		keepReachableTypes(merged)
 	}
 	merged.ConfigFiles = configs.files()
 	merged.ConfigAdjustments = configs.adjustments()
 	sortSnapshot(merged)
 	if os.Getenv("LINTAI_EXTRACT_TIMING") == "1" {
-		fmt.Fprintf(os.Stderr, "lintai: extract files=%d programs=%d config_ms=%d program_ms=%d walk_ms=%d total_ms=%d\n",
-			len(files), timing.programs, timing.config.Milliseconds(), timing.program.Milliseconds(), timing.walk.Milliseconds(), time.Since(started).Milliseconds())
+		fmt.Fprintf(os.Stderr, "lintai: extract files=%d programs=%d config_ms=%d program_ms=%d walk_ms=%d types_ms=%d type_entities=%d total_ms=%d\n",
+			len(files), timing.programs, timing.config.Milliseconds(), timing.program.Milliseconds(), timing.walk.Milliseconds(), timing.types.Milliseconds(), len(merged.Types), time.Since(started).Milliseconds())
 	}
 	return merged, nil
 }
@@ -487,6 +502,12 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 		ambientDone:     make(map[*ast.Node]struct{}),
 		globalSyms:      make(map[string]*ast.Symbol),
 		ambient:         newAmbientIndex(ambientMatchers),
+		typeFacts:       make(map[string]*TypeFact),
+		typeIDs:         make(map[*checker.Type]string),
+		typeKeys:        make(map[*checker.Type]cachedTypeKey),
+		typeShapes:      make(map[*checker.Type]*typeShape),
+		typeTruncated:   make(map[*checker.Type]struct{}),
+		timing:          timing,
 	}
 	for _, file := range requestedFiles {
 		ex.requestedFiles[file] = struct{}{}
@@ -554,6 +575,7 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 		Directives:      directives,
 		ParseErrors:     parseErrors,
 		PendingDtsCalls: ex.pendingDtsCalls,
+		Types:           ex.sortedTypeFacts(),
 	}
 	sortSnapshot(partial)
 	return partial, missingPrimary, nil
@@ -815,6 +837,7 @@ func mergeSnapshot(into *Snapshot, partial *Snapshot) {
 	into.Directives = mergeByEntityID(into.Directives, partial.Directives, func(item ModuleDirective) string { return item.EntityID })
 	into.ParseErrors = mergeByEntityID(into.ParseErrors, partial.ParseErrors, func(item ParseError) string { return item.EntityID })
 	into.PendingDtsCalls = append(into.PendingDtsCalls, partial.PendingDtsCalls...)
+	into.Types = mergeTypes(into.Types, partial.Types)
 }
 
 func sortSnapshot(snapshot *Snapshot) {
@@ -831,6 +854,7 @@ func sortSnapshot(snapshot *Snapshot) {
 	slices.SortFunc(snapshot.GlobalRefs, func(a, b GlobalRef) int { return strings.Compare(a.SemanticKey, b.SemanticKey) })
 	slices.SortFunc(snapshot.Directives, func(a, b ModuleDirective) int { return strings.Compare(a.SemanticKey, b.SemanticKey) })
 	slices.SortFunc(snapshot.ParseErrors, func(a, b ParseError) int { return strings.Compare(a.SemanticKey, b.SemanticKey) })
+	slices.SortFunc(snapshot.Types, func(a, b TypeFact) int { return strings.Compare(a.ID, b.ID) })
 }
 
 func mergeByEntityID[T any](existing []T, incoming []T, entityID func(T) string) []T {
@@ -956,24 +980,25 @@ func (e *extractor) collectFunction(node *ast.Node) *Function {
 	}
 
 	nameRange := e.nodeLocation(file, meta.nameNode)
+	returnType, parameterTypes := e.functionTypes(node)
 	baseKey := fmt.Sprintf("%s::%s::%s", nameRange.File, meta.kind, displayName)
 	semanticKey := withOrdinal(baseKey, nextOrdinal(e.functionCount, baseKey))
 	record := Function{
-		EntityID:           "function:" + semanticKey,
-		SemanticKey:        semanticKey,
-		Name:               displayName,
-		Kind:               meta.kind,
-		FilePath:           nameRange.File,
-		ContainerName:      containerName,
-		ContainsAwait:      containsAwait(node),
-		IsExported:         meta.exported || e.isExportedFunction(node, meta),
-		IsAsync:            ast.HasSyntacticModifier(node, ast.ModifierFlagsAsync),
-		ParameterCount:     len(node.Parameters()),
-		ReturnTypeText:     e.functionReturnTypeText(node),
-		ParameterTypeTexts: e.functionParameterTypeTexts(node),
-		Range:              nameRange,
-		BodyStart:          node.Body().Pos(),
-		BodyEnd:            node.Body().End(),
+		EntityID:       "function:" + semanticKey,
+		SemanticKey:    semanticKey,
+		Name:           displayName,
+		Kind:           meta.kind,
+		FilePath:       nameRange.File,
+		ContainerName:  containerName,
+		ContainsAwait:  containsAwait(node),
+		IsExported:     meta.exported || e.isExportedFunction(node, meta),
+		IsAsync:        ast.HasSyntacticModifier(node, ast.ModifierFlagsAsync),
+		ParameterCount: len(node.Parameters()),
+		ReturnType:     returnType,
+		ParameterTypes: parameterTypes,
+		Range:          nameRange,
+		BodyStart:      node.Body().Pos(),
+		BodyEnd:        node.Body().End(),
 	}
 	e.functions = append(e.functions, record)
 	stored := &e.functions[len(e.functions)-1]
@@ -1823,25 +1848,25 @@ func (e *extractor) isExportedSymbol(symbol *ast.Symbol) bool {
 	return exportSymbol != nil && exportSymbol != symbol
 }
 
-func (e *extractor) functionReturnTypeText(node *ast.Node) string {
-	signature := e.checker.GetSignatureFromDeclaration(node)
-	if signature == nil {
-		return ""
+// functionTypes records the type facts of the return type and the
+// parameter types of a function and returns their type IDs.
+func (e *extractor) functionTypes(node *ast.Node) (string, []string) {
+	started := time.Now()
+	defer func() { e.timing.types += time.Since(started) }()
+	returnType := ""
+	if signature := e.checker.GetSignatureFromDeclaration(node); signature != nil {
+		returnType = e.emitFunctionType(e.checker.GetReturnTypeOfSignature(signature), node)
 	}
-	return e.renderTypeText(e.checker.GetReturnTypeOfSignature(signature), node)
-}
-
-func (e *extractor) functionParameterTypeTexts(node *ast.Node) []string {
 	parameters := node.Parameters()
-	texts := make([]string, 0, len(parameters))
+	parameterTypes := make([]string, 0, len(parameters))
 	for _, parameter := range parameters {
 		if parameter == nil {
-			texts = append(texts, "")
+			parameterTypes = append(parameterTypes, "")
 			continue
 		}
-		texts = append(texts, e.renderTypeText(e.checker.GetTypeAtLocation(parameter.AsNode()), parameter.AsNode()))
+		parameterTypes = append(parameterTypes, e.emitFunctionType(e.checker.GetTypeAtLocation(parameter.AsNode()), parameter.AsNode()))
 	}
-	return texts
+	return returnType, parameterTypes
 }
 
 func (e *extractor) renderTypeText(t *checker.Type, enclosing *ast.Node) string {

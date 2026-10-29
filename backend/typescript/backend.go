@@ -110,6 +110,7 @@ func (b *Backend) buildAnalysisSnapshot(ctx context.Context, repoRoot, workspace
 		GlobalRefs:      convertGlobalRefs(extracted.GlobalRefs),
 		Directives:      convertDirectives(extracted.Directives),
 		ParseErrors:     convertParseErrors(extracted.ParseErrors),
+		Types:           convertTypes(extracted.Types),
 		Adjustments:     adjustments,
 	}, nil
 }
@@ -146,21 +147,21 @@ func convertFunctions(items []lintaiapi.Function) []analysis.Function {
 	result := make([]analysis.Function, 0, len(items))
 	for _, item := range items {
 		result = append(result, analysis.Function{
-			EntityID:           item.EntityID,
-			SemanticKey:        item.SemanticKey,
-			Name:               item.Name,
-			Kind:               item.Kind,
-			FilePath:           item.FilePath,
-			ContainerName:      item.ContainerName,
-			ContainsAwait:      item.ContainsAwait,
-			IsExported:         item.IsExported,
-			IsAsync:            item.IsAsync,
-			ParameterCount:     item.ParameterCount,
-			ReturnTypeText:     item.ReturnTypeText,
-			ParameterTypeTexts: append([]string(nil), item.ParameterTypeTexts...),
-			Range:              convertLocation(item.Range),
-			BodyStart:          item.BodyStart,
-			BodyEnd:            item.BodyEnd,
+			EntityID:       item.EntityID,
+			SemanticKey:    item.SemanticKey,
+			Name:           item.Name,
+			Kind:           item.Kind,
+			FilePath:       item.FilePath,
+			ContainerName:  item.ContainerName,
+			ContainsAwait:  item.ContainsAwait,
+			IsExported:     item.IsExported,
+			IsAsync:        item.IsAsync,
+			ParameterCount: item.ParameterCount,
+			ReturnType:     item.ReturnType,
+			ParameterTypes: append([]string(nil), item.ParameterTypes...),
+			Range:          convertLocation(item.Range),
+			BodyStart:      item.BodyStart,
+			BodyEnd:        item.BodyEnd,
 		})
 	}
 	return result
@@ -362,6 +363,37 @@ func convertTypeRefs(items []lintaiapi.TypeRef) []analysis.TypeRef {
 			TargetPath:  item.TargetPath,
 			Range:       convertLocation(item.Range),
 		})
+	}
+	return result
+}
+
+func convertTypes(items []lintaiapi.TypeFact) []analysis.TypeFact {
+	result := make([]analysis.TypeFact, 0, len(items))
+	for _, item := range items {
+		converted := analysis.TypeFact{
+			ID:         item.ID,
+			Kind:       item.Kind,
+			Named:      item.Named,
+			Origin:     item.Origin,
+			Name:       item.Name,
+			Args:       item.Args,
+			Members:    item.Members,
+			ParamName:  item.ParamName,
+			SigParams:  item.SigParams,
+			SigReturns: item.SigReturns,
+			Display:    item.Display,
+		}
+		if item.Literal != nil {
+			converted.Literal = &analysis.TypeLiteral{Kind: item.Literal.Kind, Text: item.Literal.Text, Number: item.Literal.Number, Bool: item.Literal.Bool}
+		}
+		for _, prop := range item.Props {
+			converted.Props = append(converted.Props, analysis.TypeProp{Name: prop.Name, Type: prop.Type, Optional: prop.Optional})
+		}
+		if item.Location != nil {
+			location := convertLocation(*item.Location)
+			converted.Location = &location
+		}
+		result = append(result, converted)
 	}
 	return result
 }

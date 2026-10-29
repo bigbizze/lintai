@@ -113,8 +113,8 @@ Conventions:
 | `fn_kind(Fn, Kind)` | `"function"`, `"function_expression"`, `"arrow_function"`, `"method"`, `"constructor"`, `"get_accessor"` or `"set_accessor"`. |
 | `fn_container(Fn, Container)` | The container name, when it is not empty. |
 | `fn_exported(Fn)`, `fn_async(Fn)`, `fn_awaits(Fn)` | Exported, has the `async` modifier, contains `await`. |
-| `fn_param(Fn, Index, TypeText)` | One row per parameter. `Index` starts at 0. |
-| `fn_returns(Fn, TypeText)` | Return type text. |
+| `fn_param(Fn, Index, Type)` | One row per parameter. `Index` starts at 0. `Type` is a type entity id. |
+| `fn_returns(Fn, Type)` | The return type, as a type entity id. |
 | `import_edge(Imp, From, To, Specifier)` | One row per module reference with a string specifier: `import`, `export ... from`, `import()`, `require()`, `import x = require()` and `typeof import()`. `To` is the workspace-relative path when `import_internal` is set, otherwise the specifier. |
 | `import_form(Imp, Form)` | `/static`, `/reexport`, `/dynamic`, `/require`, `/import_equals` or `/import_type`. Every import has one row. |
 | `import_internal(Imp)` | The import resolves to a workspace file that is not in `node_modules`. |
@@ -131,6 +131,17 @@ Conventions:
 | `fn_ref(Ref, From, To)` | A reference to a collected function as a value, outside the callee of a call: an argument, a stored value, a return value or a property value. An inline arrow function, function expression or object literal method that is passed as a value is a reference from the function that contains it, so `[1].map(() => Date.now())` connects the caller to the arrow function. `From` is the containing function, or the module path at module scope. Import and export specifiers are not references. |
 | `type_ref(Ref, File, Name)` | A type reference. |
 | `type_ref_target(Ref, TargetFile)` | The declaring file, when it is inside the workspace. |
+| `type_kind(Type, Kind)` | The structure of a type. Every type entity has one row. `Kind` is `/any`, `/unknown`, `/never`, `/void`, `/undefined`, `/null`, `/string`, `/number`, `/bigint`, `/boolean`, `/symbol`, `/object_keyword`, `/literal`, `/type_param`, `/union`, `/intersection`, `/tuple`, `/function`, `/object` or `/other`. |
+| `type_named(Type, Origin, Name)` | The type is a class, interface, enum or type alias, or an instantiation of one. `Origin` is `"lib"`, a package name (without `@types/`), a `declare module` name, or the workspace-relative path of the declaring file. It matches the `Module` of `external_call`. `Name` includes containing namespaces, for example `"Models.User"`. |
+| `type_arg(Type, Index, Arg)` | A type argument of a named type, or an element of a tuple. The `this` argument of class and interface references is not included. |
+| `type_member(Type, Member)` | A member of a union or intersection. Members are unordered. |
+| `type_literal(Type, Value)` | The value of a literal type: a string, a number, `/true` or `/false`, or the digits of a bigint as a string. |
+| `type_param_name(Type, Name)` | The name of a type parameter, for example `"T"`. |
+| `type_prop(Type, Name, PropType)` | A property of an anonymous object type. |
+| `type_prop_optional(Type, Name)` | The property is optional. |
+| `type_sig_param(Type, Index, ParamType)` | A parameter of a `/function` type. |
+| `type_sig_returns(Type, ReturnType)` | The return type of a `/function` type. |
+| `type_display(Type, Text)` | The type as the TypeScript 7 checker prints it. Use it in messages only. |
 | `meta_access(Acc, File, AccessPath)` | An `import.meta.*` access. |
 | `ambient_source(Source, Capability)` | One row per capability of each ambient source. |
 | `ambient_use(Site, Source, Capability, File)` | One row per ambient use site. |
@@ -150,6 +161,20 @@ Caveats:
 - an unresolved import is not internal, so `To` is the specifier. Check `import_unresolved` when a rule depends on `import_internal`.
 - `export default function () {}` and `export default () => ...` are functions named `default`.
 - a call inside an anonymous function at module scope, for example `app.get("/", () => load())` or a class `static` block, has the module path as `Caller`, even when the function runs later.
+
+### Types
+
+A type is an entity. Its id is `"type:"` and a hash of the type's structure, so the same type has the same id in every file, every tsconfig and every run. `fn_param` and `fn_returns` give the type ids of a function's parameters and return type. The `type_*` relations describe those types and every type that they contain.
+
+- `type_kind` says what a type is. A named type also has a `type_named` row, and its kind describes what the name refers to. `ActionResult<number>`, where `ActionResult<T>` is an alias of a union, has kind `/union`, a `type_named` row for `ActionResult`, one `type_arg` row and one `type_member` row for each member of the union.
+- A named type is identified by its declaration, not by its text. Two types called `ActionResult` in different files are different entities, with different `Origin` values. `ActionResult<number>` and `ActionResult<string>` are different entities too.
+- Union members and object properties are sorted before the id is computed, so `A | B` and `B | A` are the same entity.
+- Classes, interfaces and enums are emitted by name and type arguments only. Their members are not expanded: a function that returns `Promise<User>` gives `Promise<User>`, `User`, and nothing inside `User`. Arrays are the lib interface `Array`.
+- Conditional, mapped, indexed access, `keyof` and template literal types are `/other`. They have no structure facts, only `type_display`. An alias of such a type still has its `type_named` and `type_arg` rows.
+- A function type with one call signature and no properties is `/function`, with `type_sig_param` and `type_sig_returns` rows. Other anonymous object types, including overloaded function types, are `/object` with `type_prop` rows only.
+- A type that refers to itself, such as `type Tree = { kids: Tree[] }`, refers to its own id. A type that makes a new type at each level of nesting stops at a depth of 16, where the type is `/other`.
+- `type_display` is the text that TypeScript 7 prints. It can differ from the text in an editor that runs TypeScript 5, and it can change when lintai updates its compiler. Do not match a rule against it. Use the structural relations, and use `type_display` in messages.
+- Only a named type declared in a workspace source file has a `location` row, at its name. A rule that reports a type id as its anchor fails with a "no location fact" error for other types, so rules should report the function.
 
 ## Prelude and caveats
 
@@ -174,6 +199,10 @@ The prelude is loaded before every rule program. A rule cannot redefine a prelud
 | `fn_reaches_ambient_strict(Fn, Source)` | Like `fn_reaches_ambient`, but over `calls_or_refs_reach`. |
 | `fn_calls_package(Fn, Pkg)` | `Fn` directly calls into the package `Pkg` (`external_call` with a module that is not `"lib"`). |
 | `module_calls_package(File, Pkg)` | `File` directly calls into the package `Pkg`, at any scope. |
+| `type_child(Type, Child)` | `Child` appears directly in `Type`: a type argument, tuple element, union or intersection member, property type, signature parameter or signature return. |
+| `type_contains(Type, Inner)` | Transitive closure of `type_child`. It does not look inside classes, interfaces or enums, whose members are not emitted. |
+| `type_is_promise(Type)` | `Type` is the lib `Promise`, with any type argument. |
+| `fn_returns_awaited(Fn, Type)` | The return type of `Fn` with one level of `Promise` removed: the type argument of a returned `Promise`, otherwise the return type itself. |
 
 Caveats:
 

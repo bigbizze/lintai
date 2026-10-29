@@ -200,11 +200,11 @@ export function mirror(config: LocalConfig): DbConfig {
 	if dbFunction.ParameterCount != 1 {
 		t.Fatalf("expected db parameter count 1, got %+v", dbFunction)
 	}
-	if dbFunction.ReturnTypeText != "Promise<number>" {
-		t.Fatalf("expected db return type Promise<number>, got %+v", dbFunction)
+	if display := typeDisplay(snapshot, dbFunction.ReturnType); display != "Promise<number>" {
+		t.Fatalf("expected db return type Promise<number>, got %q", display)
 	}
-	if len(dbFunction.ParameterTypeTexts) != 1 || dbFunction.ParameterTypeTexts[0] != "string" {
-		t.Fatalf("unexpected db parameter types %+v", dbFunction.ParameterTypeTexts)
+	if len(dbFunction.ParameterTypes) != 1 || typeDisplay(snapshot, dbFunction.ParameterTypes[0]) != "string" {
+		t.Fatalf("unexpected db parameter types %+v", dbFunction.ParameterTypes)
 	}
 
 	var mixedImport *ImportEdge
@@ -447,4 +447,13 @@ func typeRefKeys(snapshot *Snapshot) []string {
 	}
 	slices.Sort(keys)
 	return keys
+}
+
+func typeDisplay(snapshot *Snapshot, id string) string {
+	for _, item := range snapshot.Types {
+		if item.ID == id {
+			return item.Display
+		}
+	}
+	return ""
 }

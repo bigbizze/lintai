@@ -228,11 +228,15 @@ export function mirror(config: LocalConfig): DbConfig {
 		if fn.ParameterCount != 1 {
 			t.Fatalf("expected db parameter count 1, got %+v", fn)
 		}
-		if fn.ReturnTypeText != "Promise<number>" {
-			t.Fatalf("expected db return type Promise<number>, got %+v", fn)
+		displays := make(map[string]string, len(snapshot.Types))
+		for _, item := range snapshot.Types {
+			displays[item.ID] = item.Display
 		}
-		if len(fn.ParameterTypeTexts) != 1 || fn.ParameterTypeTexts[0] != "string" {
-			t.Fatalf("expected db parameter types [string], got %+v", fn.ParameterTypeTexts)
+		if displays[fn.ReturnType] != "Promise<number>" {
+			t.Fatalf("expected db return type Promise<number>, got %q", displays[fn.ReturnType])
+		}
+		if len(fn.ParameterTypes) != 1 || displays[fn.ParameterTypes[0]] != "string" {
+			t.Fatalf("expected db parameter types [string], got %+v", fn.ParameterTypes)
 		}
 	}
 	if !dbFnFound {

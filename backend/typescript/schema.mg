@@ -56,21 +56,21 @@ Decl fn_awaits(Fn)
     arg(Fn, "Function entity id.")
   ].
 
-Decl fn_param(Fn, Index, TypeText)
+Decl fn_param(Fn, Index, Type)
   descr [
     extensional(),
     doc("One row per function parameter."),
     arg(Fn, "Function entity id."),
     arg(Index, "Parameter position, starting at 0."),
-    arg(TypeText, "Parameter type as text.")
+    arg(Type, "Type entity id of the parameter.")
   ].
 
-Decl fn_returns(Fn, TypeText)
+Decl fn_returns(Fn, Type)
   descr [
     extensional(),
     doc("The return type of a function."),
     arg(Fn, "Function entity id."),
-    arg(TypeText, "Return type as text.")
+    arg(Type, "Type entity id of the return type.")
   ].
 
 Decl import_edge(Imp, From, To, Specifier)
@@ -203,6 +203,98 @@ Decl type_ref_target(Ref, TargetFile)
     doc("The file that declares the referenced type. Only present when that file is inside the workspace."),
     arg(Ref, "Type reference entity id."),
     arg(TargetFile, "Path of the declaring file.")
+  ].
+
+Decl type_kind(Type, Kind)
+  descr [
+    extensional(),
+    doc("The structure of a type. Every type entity has one row. A named type also has a type_named row; the kind describes what the name refers to."),
+    arg(Type, "Type entity id."),
+    arg(Kind, "/any, /unknown, /never, /void, /undefined, /null, /string, /number, /bigint, /boolean, /symbol, /object_keyword, /literal, /type_param, /union, /intersection, /tuple, /function, /object or /other.")
+  ].
+
+Decl type_named(Type, Origin, Name)
+  descr [
+    extensional(),
+    doc("The type is a class, interface, enum or type alias, or an instantiation of one. Two types with the same Origin and Name and different type arguments are different entities."),
+    arg(Type, "Type entity id."),
+    arg(Origin, "\"lib\" for the default library, the package name for a package (the @types/ prefix is removed), the module name of a declare module block, or the workspace-relative path of the declaring file. Matches the Module argument of external_call."),
+    arg(Name, "Name with its containing namespaces, for example \"Promise\" or \"Models.User\".")
+  ].
+
+Decl type_arg(Type, Index, Arg)
+  descr [
+    extensional(),
+    doc("A type argument of a named type, or an element of a tuple. The this-type argument that the checker adds to class and interface references is not included."),
+    arg(Type, "Type entity id."),
+    arg(Index, "Position, starting at 0."),
+    arg(Arg, "Type entity id of the argument.")
+  ].
+
+Decl type_member(Type, Member)
+  descr [
+    extensional(),
+    doc("A member of a union or intersection. Members are unordered."),
+    arg(Type, "Type entity id of the union or intersection."),
+    arg(Member, "Type entity id of the member.")
+  ].
+
+Decl type_literal(Type, Value)
+  descr [
+    extensional(),
+    doc("The value of a literal type."),
+    arg(Type, "Type entity id."),
+    arg(Value, "A string for a string literal, a number for a number literal, /true or /false for a boolean literal, and the decimal digits as a string for a bigint literal.")
+  ].
+
+Decl type_param_name(Type, Name)
+  descr [
+    extensional(),
+    doc("The name of a type parameter."),
+    arg(Type, "Type entity id."),
+    arg(Name, "Type parameter name, for example \"T\".")
+  ].
+
+Decl type_prop(Type, Name, PropType)
+  descr [
+    extensional(),
+    doc("A property of an anonymous object type. Properties of classes and interfaces are not emitted."),
+    arg(Type, "Type entity id."),
+    arg(Name, "Property name."),
+    arg(PropType, "Type entity id of the property.")
+  ].
+
+Decl type_prop_optional(Type, Name)
+  descr [
+    extensional(),
+    doc("The property is optional."),
+    arg(Type, "Type entity id."),
+    arg(Name, "Property name.")
+  ].
+
+Decl type_sig_param(Type, Index, ParamType)
+  descr [
+    extensional(),
+    doc("A parameter of a /function type."),
+    arg(Type, "Type entity id."),
+    arg(Index, "Parameter position, starting at 0."),
+    arg(ParamType, "Type entity id of the parameter.")
+  ].
+
+Decl type_sig_returns(Type, ReturnType)
+  descr [
+    extensional(),
+    doc("The return type of a /function type."),
+    arg(Type, "Type entity id."),
+    arg(ReturnType, "Type entity id of the return type.")
+  ].
+
+Decl type_display(Type, Text)
+  descr [
+    extensional(),
+    doc("The type as the TypeScript 7 checker prints it. For messages and debugging. Do not match rules against it; use the structural relations."),
+    arg(Type, "Type entity id."),
+    arg(Text, "Type text.")
   ].
 
 Decl meta_access(Acc, File, AccessPath)

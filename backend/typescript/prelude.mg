@@ -143,3 +143,40 @@ Decl module_calls_package(File, Pkg)
     arg(Pkg, "Package name from external_call.")
   ].
 module_calls_package(File, Pkg) :- external_call(Site, _, Pkg, _), Pkg != "lib", location(Site, File, _, _, _, _).
+
+Decl type_child(Type, Child)
+  descr [
+    doc("Child appears directly in Type: a type argument, tuple element, union or intersection member, property type, signature parameter or signature return."),
+    arg(Type, "Type entity id."),
+    arg(Child, "Type entity id.")
+  ].
+type_child(T, C) :- type_arg(T, _, C).
+type_child(T, C) :- type_member(T, C).
+type_child(T, C) :- type_prop(T, _, C).
+type_child(T, C) :- type_sig_param(T, _, C).
+type_child(T, C) :- type_sig_returns(T, C).
+
+Decl type_contains(Type, Inner)
+  descr [
+    doc("Transitive closure of type_child. Does not look inside classes, interfaces or enums, whose members are not emitted."),
+    arg(Type, "Type entity id."),
+    arg(Inner, "Type entity id reached through one or more type_child steps.")
+  ].
+type_contains(T, C) :- type_child(T, C).
+type_contains(T, D) :- type_child(T, C), type_contains(C, D).
+
+Decl type_is_promise(Type)
+  descr [
+    doc("Type is the default library's Promise, with any type argument."),
+    arg(Type, "Type entity id.")
+  ].
+type_is_promise(T) :- type_named(T, "lib", "Promise").
+
+Decl fn_returns_awaited(Fn, Type)
+  descr [
+    doc("The return type of Fn with one level of Promise removed: the type argument of a returned Promise, otherwise the return type itself."),
+    arg(Fn, "Function entity id."),
+    arg(Type, "Type entity id.")
+  ].
+fn_returns_awaited(Fn, T) :- fn_returns(Fn, P), type_is_promise(P), type_arg(P, 0, T).
+fn_returns_awaited(Fn, T) :- fn_returns(Fn, T), !type_is_promise(T).
