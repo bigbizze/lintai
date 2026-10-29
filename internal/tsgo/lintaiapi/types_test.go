@@ -3,6 +3,7 @@ package lintaiapi
 import (
 	"context"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -90,6 +91,9 @@ export function options(x: { name: string; size?: number }): void {}
 export function letter(x: "a" | "b"): void {}
 export function color(x: Color): void {}
 export function identity<T>(x: T): T { return x; }
+export const first = <T>(x: T): T => x;
+export const second = <T>(x: T): T => x;
+export function half(x: 0.5 | 2): void {}
 export function tree(x: Tree): void {}
 export function deep(x: Deep<string>): void {}
 export function unwrap<T>(x: Unwrap<T>): T extends string ? 1 : 2 { return 1 as never; }
@@ -188,6 +192,21 @@ export function unwrap<T>(x: Unwrap<T>): T extends string ? 1 : 2 { return 1 as 
 		t.Fatalf("type parameter %+v", param)
 	}
 
+	// Anonymous generic functions do not share type parameter entities.
+	if x.fn("first").ParameterTypes[0] == x.fn("second").ParameterTypes[0] {
+		t.Fatalf("the T of two arrow functions is one entity: %+v", x.param("first", 0))
+	}
+
+	// A number literal can be a float.
+	numbers := make([]float64, 0, 2)
+	for _, member := range x.param("half", 0).Members {
+		numbers = append(numbers, x.get(member).Literal.Number)
+	}
+	slices.Sort(numbers)
+	if !slices.Equal(numbers, []float64{0.5, 2}) {
+		t.Fatalf("0.5 | 2 %v", numbers)
+	}
+
 	// 11. A recursive alias gives a finite fact set.
 	tree := x.param("tree", 0)
 	if tree.Name != "Tree" || tree.Kind != TypeKindObject || len(tree.Props) != 1 {
@@ -272,9 +291,7 @@ func TestTypeFactsAcrossConfigGroupsAndFileOrder(t *testing.T) {
 	if !strings.HasPrefix(filepath.ToSlash(x.get(load.ParameterTypes[0]).Origin), "shared/") {
 		t.Fatalf("origin %q", x.get(load.ParameterTypes[0]).Origin)
 	}
-	if !slices.EqualFunc(first.Types, second.Types, func(a, b TypeFact) bool {
-		return a.ID == b.ID && a.Display == b.Display && a.Kind == b.Kind
-	}) {
+	if !reflect.DeepEqual(first.Types, second.Types) {
 		t.Fatalf("file order changed the type facts:\n%+v\n%+v", first.Types, second.Types)
 	}
 }

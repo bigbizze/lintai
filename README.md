@@ -196,6 +196,7 @@ Important caveats:
 
 - the first argument of a reported predicate is its anchor; it must be an entity id with a `location` fact
 - `type_display` is the text that TypeScript 7 prints; use it in messages, and match types with `type_named` and the other structural relations
+- TypeScript flattens nested unions, so `ActionResult<number> | null` has the members of `ActionResult<number>` and no `type_named` row for `ActionResult`
 - a rule cannot redefine base or prelude predicates
 - `glob` and `!glob` need both arguments bound by earlier premises
 - `--explain` works only with `--json`

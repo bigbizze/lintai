@@ -138,6 +138,9 @@ func (e *extractor) emitFunctionType(root *checker.Type, enclosing *ast.Node) st
 			if display < existing.Display {
 				existing.Display = display
 			}
+			if existing.Location == nil {
+				existing.Location = e.typeLocation(t)
+			}
 		} else {
 			e.typeFacts[id] = e.newTypeFact(t, id, display)
 		}
@@ -198,18 +201,30 @@ func (e *extractor) newTypeFact(t *checker.Type, id string, display string) *Typ
 		}
 		fact.SigReturns = e.typeID(shape.sigReturn)
 	}
-	if shape.named && shape.nameDecl != nil {
-		file := ast.GetSourceFileOfNode(shape.nameDecl)
-		if file != nil && !file.IsDeclarationFile && isWithinRoot(e.workspaceRoot, file.FileName().AsString()) && e.relativePath(file.FileName().AsString()) == shape.origin {
-			nameNode := ast.GetNameOfDeclaration(shape.nameDecl)
-			if nameNode == nil {
-				nameNode = shape.nameDecl
-			}
-			location := e.nodeLocation(file, nameNode)
-			fact.Location = &location
-		}
-	}
+	fact.Location = e.typeLocation(t)
 	return fact
+}
+
+// typeLocation returns the location of the declaration name of a named
+// type that is declared in a workspace source file. A type that is reached
+// through a dist/ declaration file has the origin of its source file but
+// no declaration in it, so it has no location from that path; another
+// path to the same type can supply it.
+func (e *extractor) typeLocation(t *checker.Type) *SourceLocation {
+	shape := e.typeShapeOf(t)
+	if !shape.named || shape.nameDecl == nil || e.isTruncated(t) {
+		return nil
+	}
+	file := ast.GetSourceFileOfNode(shape.nameDecl)
+	if file == nil || file.IsDeclarationFile || !isWithinRoot(e.workspaceRoot, file.FileName().AsString()) || e.relativePath(file.FileName().AsString()) != shape.origin {
+		return nil
+	}
+	nameNode := ast.GetNameOfDeclaration(shape.nameDecl)
+	if nameNode == nil {
+		nameNode = shape.nameDecl
+	}
+	location := e.nodeLocation(file, nameNode)
+	return &location
 }
 
 // typeID returns "type:" and the hex xxh3-128 hash of the canonical key of
@@ -523,6 +538,12 @@ func (e *extractor) typeParamShape(shape *typeShape, t *checker.Type) {
 	if parent := declarations[0].Parent; parent != nil {
 		shape.paramOwner = qualifiedSymbolName(parent.Symbol())
 	}
+	if shape.paramOwner == "" {
+		// An anonymous declaration, such as a generic arrow function, has
+		// no name. Its position keeps its type parameters apart from those
+		// of other anonymous declarations in the file.
+		shape.paramOwner = "@" + strconv.Itoa(declarations[0].Pos())
+	}
 }
 
 func (e *extractor) anonymousObjectShape(shape *typeShape, t *checker.Type) {
@@ -718,8 +739,8 @@ func (f *TypeFact) children() []string {
 }
 
 // mergeTypes merges the type facts of a config group into a snapshot. The
-// same ID describes the same type; only the display text can differ, and
-// the smallest text is kept.
+// same ID describes the same type. The smallest display text is kept, and
+// a location from any group is kept.
 func mergeTypes(existing []TypeFact, incoming []TypeFact) []TypeFact {
 	index := make(map[string]int, len(existing))
 	for i, item := range existing {
@@ -729,6 +750,9 @@ func mergeTypes(existing []TypeFact, incoming []TypeFact) []TypeFact {
 		if i, ok := index[item.ID]; ok {
 			if item.Display < existing[i].Display {
 				existing[i].Display = item.Display
+			}
+			if existing[i].Location == nil {
+				existing[i].Location = item.Location
 			}
 			continue
 		}

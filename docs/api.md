@@ -173,6 +173,9 @@ A type is an entity. Its id is `"type:"` and a hash of the type's structure, so 
 - Conditional, mapped, indexed access, `keyof` and template literal types are `/other`. They have no structure facts, only `type_display`. An alias of such a type still has its `type_named` and `type_arg` rows.
 - A function type with one call signature and no properties is `/function`, with `type_sig_param` and `type_sig_returns` rows. Other anonymous object types, including overloaded function types, are `/object` with `type_prop` rows only.
 - A type that refers to itself, such as `type Tree = { kids: Tree[] }`, refers to its own id. A type that makes a new type at each level of nesting stops at a depth of 16, where the type is `/other`.
+- TypeScript flattens a union that contains another union. `ActionResult<number> | null` is one union with the members of `ActionResult<number>` and `null`, and it has no row for `ActionResult`. A rule that must find the alias inside such a union cannot do so. Write the union as a named alias, or match the members.
+- A named type has one id for its declaration and type arguments. If two tsconfig files compile the same declaration with different compiler options, such as `strictNullChecks`, the structure of that id can differ by group. lintai keeps the rows of the first group.
+- The id of an `/other` type comes from its display text. Two different `/other` types with the same text have the same id.
 - `type_display` is the text that TypeScript 7 prints. It can differ from the text in an editor that runs TypeScript 5, and it can change when lintai updates its compiler. Do not match a rule against it. Use the structural relations, and use `type_display` in messages.
 - Only a named type declared in a workspace source file has a `location` row, at its name. A rule that reports a type id as its anchor fails with a "no location fact" error for other types, so rules should report the function.
 
