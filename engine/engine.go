@@ -2,16 +2,12 @@ package engine
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 
-	"codeberg.org/TauCeti/mangle-go/factstore"
 	"github.com/bigbizze/lintai/backend"
 	"github.com/bigbizze/lintai/bundle"
 	"github.com/bigbizze/lintai/diagnostics"
@@ -42,10 +38,6 @@ type Result struct {
 
 type Engine struct {
 	backend backend.Backend
-
-	mu            sync.Mutex
-	cachedVersion string
-	cachedStore   factstore.ReadOnlyFactStore
 }
 
 func New(selectedBackend backend.Backend) *Engine {
@@ -72,7 +64,7 @@ func (e *Engine) Analyze(ctx context.Context, options Options) (Result, error) {
 	if err != nil {
 		return Result{}, fmt.Errorf("backend %q schema: %w", e.backend.ID(), err)
 	}
-	base, err := e.baseFacts(snapshot)
+	base, err := facts.Store(snapshot.Facts)
 	if err != nil {
 		return Result{}, fmt.Errorf("backend %q facts: %w", e.backend.ID(), err)
 	}
@@ -217,34 +209,6 @@ func (e *Engine) Analyze(ctx context.Context, options Options) (Result, error) {
 	sortDiagnostics(allDiagnostics)
 	result.Diagnostics = allDiagnostics
 	return result, nil
-}
-
-// baseFacts returns the base fact store for a snapshot. The store is cached
-// by snapshot version and rebuilt when the snapshot changes.
-func (e *Engine) baseFacts(snapshot facts.Snapshot) (factstore.ReadOnlyFactStore, error) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	version := cacheVersion(snapshot)
-	if e.cachedStore != nil && e.cachedVersion == version {
-		return e.cachedStore, nil
-	}
-	store, err := facts.Store(snapshot.Facts)
-	if err != nil {
-		return nil, err
-	}
-	e.cachedVersion = version
-	e.cachedStore = store
-	return store, nil
-}
-
-func cacheVersion(snapshot facts.Snapshot) string {
-	hash := sha256.New()
-	hash.Write([]byte(snapshot.Version))
-	hash.Write([]byte{0})
-	hash.Write([]byte(snapshot.Schema.Declarations))
-	hash.Write([]byte{0})
-	hash.Write([]byte(snapshot.Schema.Prelude))
-	return hex.EncodeToString(hash.Sum(nil))
 }
 
 func sortDiagnostics(allDiagnostics []diagnostics.Diagnostic) {

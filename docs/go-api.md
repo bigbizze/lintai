@@ -38,13 +38,14 @@ Decl location(Entity, File, StartLine, StartColumn, EndLine, EndColumn)
 	}, nil
 }
 
-
 func Analyze(ctx context.Context, repoRoot, assetRoot, workspaceRoot string) error {
 	runner := engine.New(CatalogBackend{})
 	_, err := runner.Analyze(ctx, engine.Options{
-	RepoRoot: repoRoot, AssetRoot: assetRoot, WorkspaceRoot: workspaceRoot,
-	RuleGlobs: []string{"lintai-rules/**/*.ts"},
-})
+		RepoRoot:      repoRoot,
+		AssetRoot:     assetRoot,
+		WorkspaceRoot: workspaceRoot,
+		RuleGlobs:     []string{"lintai-rules/**/*.ts"},
+	})
 	return err
 }
 ```
@@ -55,6 +56,10 @@ prelude, snapshot version, and fact arities before evaluating rules.
 Every backend schema must declare `location(Entity, File, StartLine,
 StartColumn, EndLine, EndColumn)`; report anchors use its string entity id to
 create the diagnostic source location.
+
+`Version` identifies the snapshot in diagnostic provenance and in the server's
+analysis result. The engine does not cache facts between runs: it builds the
+fact store from `Facts` on every `Analyze` call.
 
 The TypeScript implementation is available at `backend/typescript`. It keeps
 the TypeScript compiler extraction and conversion from its compiler model to
