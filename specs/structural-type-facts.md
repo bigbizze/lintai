@@ -2,6 +2,8 @@
 
 You are working in a clone of `bigbizze/lintai`. This document is the full specification for release 0.6.0. It assumes 0.5.0 has landed (the oxlint plugin and `@lintai/client`). Bump every package to 0.6.0. Before writing code, copy this document into the repository as `specs/structural-type-facts.md`.
 
+Corrections after 0.6.0 (unreleased): key framing, incompleteness, recursion order, config group conflicts, represented distinctions, the limits of `type_contains` and the declarations of the example rules. These sections replace the 0.6.0 text: 4.2 to 4.4 and 4.7 to 4.9, the new relations in section 5, section 7, the examples in section 8 and the tests in section 9.
+
 ## 1. Problem
 
 `fn_param(Fn, Index, TypeText)` and `fn_returns(Fn, TypeText)` carry the output of `TypeToString`. A rule that checks a type has to match that string, for example `fn_returns(Fn, "Promise<ActionResult<T>>")`. This fails in ways a rule author cannot see:
@@ -48,14 +50,14 @@ Classify in this order. The first matching case wins.
 2. `Flags()` has `Boolean`: kind `/boolean`. The checker represents `boolean` as the union `true | false`, so test this before the union case.
 3. Literal flags (`StringLiteral`, `NumberLiteral`, `BigIntLiteral`, `BooleanLiteral`) without `EnumLiteral`: kind `/literal`, with a `type_literal` row.
 4. `Alias()` is not nil: the type is named by its alias. Name and origin come from the alias symbol, type arguments from `Alias().TypeArguments()`. The kind is whatever cases 5 to 11 give for the underlying type, and the structure facts of that case are emitted too. So `ActionResult<number>` is kind `/union` with `type_named` of `ActionResult`, one `type_arg` and its `type_member` rows.
-5. `Flags()` has `TypeParameter`: kind `/type_param`, with a `type_param_name` row.
+5. `Flags()` has `TypeParameter`: kind `/type_param`, with a `type_param_name` row. A type parameter that has a constraint also has `type_incomplete(Type, /constraint)`, because the constraint is not emitted.
 6. `Flags()` has `Union`: kind `/union`, with a `type_member` row per member. A union with `EnumLiteral` and an enum symbol is case 9.
 7. `Flags()` has `Intersection`: kind `/intersection`, with `type_member` rows.
-8. `IsTupleType()` or a reference whose target is a tuple: kind `/tuple`, with `type_arg` rows for the elements in order.
+8. `IsTupleType()` or a reference whose target is a tuple: kind `/tuple`, with `type_arg` rows for the elements in order, `type_arg_optional` and `type_arg_rest` rows for optional and rest elements, and `type_readonly` for a `readonly` tuple.
 9. A class, interface or enum (by the symbol's flags, or `ObjectFlagsClassOrInterface` on the type or its `Target()`): kind `/object`, named by the symbol, with type arguments from `GetTypeArguments`. For class and interface references the checker appends a `this` type argument; emit only as many arguments as the target declares type parameters. Arrays fall here as the `lib` interface `Array`.
-10. An anonymous object type with exactly one call signature, no construct signatures and no properties: kind `/function`, with `type_sig_param` and `type_sig_returns` rows.
-11. Any other anonymous object type (object literal types, callable objects, overloaded function types): kind `/object`, with `type_prop` and `type_prop_optional` rows. No signature rows.
-12. Everything else (conditional, mapped, indexed access, `keyof`, template literal, string mapping, substitution): kind `/other`. No structure facts. `type_display` is the only way to inspect it.
+10. An anonymous object type with exactly one call signature, no construct signatures, no index signatures and no properties: kind `/function`, with `type_sig_param` and `type_sig_returns` rows, and `type_sig_param_optional` and `type_sig_param_rest` rows for optional and rest parameters.
+11. Any other anonymous object type (object literal types, callable objects, overloaded function types): kind `/object`, with `type_prop`, `type_prop_optional` and `type_prop_readonly` rows. No signature rows. If the type has a call, construct or index signature, it also has `type_incomplete(Type, /signatures)`.
+12. Everything else (conditional, mapped, indexed access, `keyof`, template literal, string mapping, substitution, `unique symbol`): kind `/other`, with `type_incomplete(Type, /unsupported)`. No structure facts. `type_display` is the only way to inspect it. An alias of such a type keeps its `type_named` and `type_arg` rows and is incomplete too.
 
 ### 4.3 Origin and name
 
@@ -65,31 +67,53 @@ For a named type (cases 4 and 9), take the declaration of the alias or type symb
 - If the origin is a workspace path under `/dist/` ending in `.d.ts` and `mapDtsToSource` gives a path that is a module in the snapshot, use the mapped path. This matches what `resolveDtsCalls` does for calls, so a type from `packages/core/dist/result.d.ts` and the same type from `packages/core/src/result.ts` get the same id.
 - Otherwise the origin is the workspace-relative path of the declaring source file.
 
+The origin text alone is ambiguous: `declare module "lib" { interface Promise<T> {} }` has the origin `"lib"`, and `declare module "src/core/result.ts" { ... }` has the origin of a workspace file. So each origin also has a kind, emitted as `type_origin_kind(Type, Kind)` and included in the key:
+
+| Kind | Origin |
+| --- | --- |
+| `/lib` | a default library file |
+| `/package` | a file under `node_modules` |
+| `/ambient_module` | a `declare module "name"` block |
+| `/declaration_file` | a declaration file that is not mapped to a source file |
+| `/source_file` | a workspace source file, or a `dist/` declaration file mapped to its source file |
+
+`type_is_promise` requires `/lib`, so a `Promise` declared in `declare module "lib"` is not the lib `Promise`.
+
 The name is `qualifiedSymbolName(symbol)`, for example `ActionResult`, `Promise` or `Models.User`.
 
 ### 4.4 Ids
 
 The id is `"type:"` followed by the hex xxh3-128 (already a dependency) of a canonical key. Do not use `Type.Id()`: it depends on checking order, and each config group has its own checker, so the same type has different `Type` objects across groups.
 
-Canonical key, defined recursively. `K(x)` is the key of `x`.
+Canonical key, defined recursively. `K(x)` is the key of `x`. Every key that is not a keyword kind is a JSON array: each field is a JSON string or a JSON array, so no name, origin, property name or literal can contain a delimiter that makes two different keys equal before hashing.
 
 | Case | Key |
 | --- | --- |
 | Keyword kinds | the kind, for example `/string` |
-| `/literal` | `lit:s:` + JSON-quoted string, `lit:n:` + number, `lit:big:` + digits, `lit:b:true` or `lit:b:false` |
-| Named (cases 4, 9) | `named(` origin `,` name `)<` K(arg 0) `,` K(arg 1) ... `>` |
-| `/type_param` | `tparam(` origin `,` qualified name of the declaring symbol `,` name `)` |
-| `/union`, `/intersection` | `union{` or `inter{`, the member keys sorted and joined with `,`, then `}` |
-| `/tuple` | `tuple[` element keys in order, with `?` after optional elements and `...` before rest elements `]` |
-| `/function` | `fn(` param keys in order, with `?` after optional and `...` before rest `)=>` K(return) |
-| Anonymous `/object` | `obj{` sorted entries `name:` K(type) with `?` after optional names, then each call signature in declaration order as `call(...)=>...`, then each construct signature as `new(...)=>...` `}` |
-| `/other` | `other(` + `TypeToStringEx` with a nil enclosing node and `NoTruncation` `)` |
+| `/literal` | `["lit", kind, value]`, where kind is `s`, `n`, `big` or `b` and value is the string, the number, the digits or `true`/`false` |
+| Named (cases 4, 9) | `["named", origin kind, origin, name, local position, [K(arg 0), K(arg 1), ...]]` |
+| `/type_param` | `["tparam", origin kind, origin, position, name]`. The position is the position of the type parameter's own declaration in its file, not the name of the declaration that declares it: the generic methods of two object literals, or of a class and a merged namespace, have the same qualified name. The origin of a type parameter is never mapped from `dist/` to `src/`, because the position is a position in the declaration file. A `this` type is `["this", origin kind, origin, position of the class or interface]`. |
+| `/union`, `/intersection` | `["union", [member keys sorted]]` or `["inter", [...]]` |
+| `/tuple` | `["tuple", readonly, [[mark, K(element)], ...]]`, where readonly is `"readonly"` or `""` and mark is `"?"` for an optional element, `"..."` for a rest element or `""` |
+| `/function` | `["fn", [[mark, K(param)], ...], K(return)]` with the same marks |
+| Anonymous `/object` | `["obj", [[name, flags, K(type)], ...], [call signatures], [construct signatures], [[K(key), K(value), readonly], ...]]`. Properties are sorted by name. flags is `"?"` for optional, `"r"` for readonly, `"?r"` for both, or `""`. Signatures are in declaration order, each as `[[[mark, K(param)], ...], K(return)]`. |
+| `/other` | `["other", text, origin kind, origin, position]`, where text is `TypeToStringEx` with a nil enclosing node and `NoTruncation`, and the last three fields are the declaration of `Type.Symbol()` when it has one, for example the variable of a `unique symbol`, or `""` |
 
 Sorting union members and object properties makes `A | B` and `B | A` the same id, and makes the id independent of declaration order.
 
-In a key, a child key that is not a keyword kind or `^n` is written as `#` and the hex xxh3-128 of the child key. This keeps every key short, so a type that uses the same subtype in several places does not get a key that grows exponentially with depth. Object property names are JSON-quoted. The cycle check is done before the key cache is read, so a key does not depend on the order in which types are keyed. A named type that is declared in a function body has `@` and the position of its declaration after its name in the key, so two local types with the same name in one file are different entities. `type_display` is truncated by the checker at about 2000 characters.
+In a key, a child key that is not a keyword kind or `^n` is written as `#` and the hex xxh3-128 of the child key. This keeps every key short, so a type that uses the same subtype in several places does not get a key that grows exponentially with depth. A named type that is declared in a function body has the position of its declaration in the key, so two local types with the same name in one file are different entities. `type_display` is truncated by the checker at about 2000 characters.
 
-Cycles: keep a stack of types being keyed. When a type already on the stack recurs, emit `^n`, where `n` is the distance to it on the stack. Beyond a depth of 16, emit `trunc` and give that position kind `/other`. Named types stop most recursion on their own, because a named type's key uses its name and arguments, not its structure.
+Cycles: keep a stack of types being keyed. When a type already on the stack recurs, emit `^n`, where `n` is the distance to it on the stack. A position deeper than 16 is written as `trunc`. A type whose key is more than 16 levels high is truncated: it has kind `/other`, `type_incomplete(Type, /truncated)` and no structure facts, and a named truncated type keeps its `type_named` row. Named types stop most recursion on their own, because a named type's key uses its name and arguments, not its structure.
+
+A key is a function of the type and the stack only, so it does not depend on the order in which types, files or config groups are keyed:
+
+- The cycle check is done before the key cache is read.
+- A key without `^n` and without `trunc` is cached by type and depth. If a type in such a key were on the stack, the walk would reach the type itself and the key would have `^n`.
+- A key without `^n` that has `trunc` depends on where the walk stopped. A type on the current stack that the walk visited would give `^n` instead of `trunc`. So the cache keeps the set of types that the walk visited, and the cached key is used only if no type on the current stack is in that set.
+
+### Safe identity
+
+Two different types can still have one id: two `/other` types with the same text and no declaration, or two truncated types whose first 16 levels agree. Such an id is always incomplete, and every fact that is emitted for it (kind, `type_named`, `type_display`, `type_incomplete`) is true of each type that has the id. A rule that needs structure that is not emitted must use `type_incomplete` or `type_reaches_incomplete` (section 7) and fail closed. No id that has structure facts is shared by two types with different structure in one config group.
 
 ### 4.5 Display text
 
@@ -98,6 +122,42 @@ Cycles: keep a stack of types being keyed. When a type already on the stack recu
 ### 4.6 Locations
 
 A named type whose origin is a workspace source path gets a `location` row at its declaration name. Other types have no location, so a rule that reports a type id as its anchor fails with the existing "no location fact" error unless the type is declared in the workspace. Document that rules should anchor on the function.
+
+### 4.7 Incompleteness
+
+`type_incomplete(Type, Reason)` marks a type whose emitted facts leave out structure that a rule can depend on:
+
+| Reason | Type |
+| --- | --- |
+| `/truncated` | the key is more than 16 levels high (4.4) |
+| `/unsupported` | kind `/other` (case 12), or a type parameter that has no declaration |
+| `/signatures` | an anonymous `/object` with a call, construct or index signature, whose signatures have no rows |
+| `/constraint` | a type parameter with a constraint, which is not emitted |
+| `/conflict` | config groups give different structure for the id (4.8) |
+
+Members of classes, interfaces and enums are out of scope (section 10) and are not marked: a rule cannot inspect them, with or without the marker.
+
+### 4.8 Config groups
+
+Each config group has its own checker, so a type is keyed once per group. Merge two facts with the same id only if they agree on every structure field: kind, name, origin, origin kind, arguments and their marks, members, literal, type parameter name, properties and their flags, signature, readonly and incompleteness. The same declaration can have different structure under different compiler options, for example `{ a: string | undefined }` under `strict: false` and `strict: true`. If the facts differ, the merged fact keeps only the fields that the key fixes (`type_named`, `type_origin_kind` and, for a named type, `type_arg`), takes kind `/other` if the kinds differ, drops the other structure rows and gets `type_incomplete(Type, /conflict)`. The result does not depend on the order or the names of the groups. The same check applies when two checker types in one group give one id.
+
+A function that is compiled in two groups has one entity, and its `fn_param` and `fn_returns` come from the first group. This is not changed here.
+
+### 4.9 Represented and erased distinctions
+
+| Distinction | Represented by |
+| --- | --- |
+| optional property | key, `type_prop_optional` |
+| readonly property | key, `type_prop_readonly` |
+| optional or rest tuple element | key, `type_arg_optional`, `type_arg_rest` |
+| readonly tuple | key, `type_readonly`. A readonly array is the lib interface `ReadonlyArray`. |
+| optional or rest signature parameter | key, `type_sig_param_optional`, `type_sig_param_rest` |
+| origin kind | key, `type_origin_kind` |
+| type alias name and arguments | key, `type_named`, `type_arg`, when the checker keeps the alias |
+
+Not represented: members of classes, interfaces and enums; call, construct and index signatures of an `/object` (in the key, marked `/signatures`); type parameter constraints (marked `/constraint`) and defaults; the structure of `/other` types (marked `/unsupported`); parameter names.
+
+Erased by the checker, so lintai cannot report them: an alias of a primitive or of another named type (`type UserId = string` is `/string`, `type Handle = Db` is `Db`), a union nested in a union (the members are flattened), and `undefined` in optional properties, elements and parameters (removed before the type is keyed).
 
 ## 5. New base relations
 
@@ -197,6 +257,73 @@ Decl type_display(Type, Text)
   ].
 ```
 
+Added after 0.6.0:
+
+```
+Decl type_origin_kind(Type, Kind)
+  descr [
+    extensional(),
+    doc("The kind of the origin of a named type. The Origin of type_named alone is ambiguous: a declare module block can have the name \"lib\" or the path of a workspace file."),
+    arg(Type, "Type entity id."),
+    arg(Kind, "/lib, /package, /ambient_module, /declaration_file or /source_file.")
+  ].
+
+Decl type_arg_optional(Type, Index)
+  descr [
+    extensional(),
+    doc("The tuple element is optional."),
+    arg(Type, "Type entity id of the tuple."),
+    arg(Index, "Element position, starting at 0.")
+  ].
+
+Decl type_arg_rest(Type, Index)
+  descr [
+    extensional(),
+    doc("The tuple element is a rest element."),
+    arg(Type, "Type entity id of the tuple."),
+    arg(Index, "Element position, starting at 0.")
+  ].
+
+Decl type_readonly(Type)
+  descr [
+    extensional(),
+    doc("The tuple is readonly."),
+    arg(Type, "Type entity id of the tuple.")
+  ].
+
+Decl type_prop_readonly(Type, Name)
+  descr [
+    extensional(),
+    doc("The property is readonly."),
+    arg(Type, "Type entity id."),
+    arg(Name, "Property name.")
+  ].
+
+Decl type_sig_param_optional(Type, Index)
+  descr [
+    extensional(),
+    doc("The parameter of a /function type is optional."),
+    arg(Type, "Type entity id."),
+    arg(Index, "Parameter position, starting at 0.")
+  ].
+
+Decl type_sig_param_rest(Type, Index)
+  descr [
+    extensional(),
+    doc("The parameter of a /function type is a rest parameter."),
+    arg(Type, "Type entity id."),
+    arg(Index, "Parameter position, starting at 0.")
+  ].
+
+Decl type_incomplete(Type, Reason)
+  descr [
+    extensional(),
+    doc("The facts of the type leave out structure that a rule can depend on. A rule that must see every type inside a signature fails closed on such a type."),
+    arg(Type, "Type entity id."),
+    arg(Reason, "/truncated, /unsupported, /signatures, /constraint or /conflict.")
+  ].
+```
+
 ## 6. Changed relations
 
 ```
@@ -218,7 +345,7 @@ Decl fn_returns(Fn, Type)
   ].
 ```
 
-In `lintaiapi.Function` and `analysis` replace `ReturnTypeText` and `ParameterTypeTexts` with type ids, and add a `Types` slice to the snapshot that carries each type's kind, name, origin, arguments, members, literal, properties, signature and display text. `mergeSnapshot` merges types by id, keeping the smallest display text (4.5). `sortSnapshot` sorts types by id.
+In `lintaiapi.Function` and `analysis` replace `ReturnTypeText` and `ParameterTypeTexts` with type ids, and add a `Types` slice to the snapshot that carries each type's kind, name, origin, arguments, members, literal, properties, signature and display text. `mergeSnapshot` merges types by id, keeping the smallest display text (4.5) and marking a conflict when the structure differs (4.8). `sortSnapshot` sorts types by id.
 
 ## 7. Prelude additions
 
@@ -237,23 +364,31 @@ type_child(T, C) :- type_sig_returns(T, C).
 
 Decl type_contains(Type, Inner)
   descr [
-    doc("Transitive closure of type_child. Does not look inside classes, interfaces or enums, whose members are not emitted."),
+    doc("Transitive closure of type_child. It does not look inside classes, interfaces or enums, into the call, construct or index signatures of an /object, into type parameter constraints, or into /other and truncated types. Use type_reaches_incomplete to fail closed."),
     arg(Type, "Type entity id."),
     arg(Inner, "Type entity id reached through one or more type_child steps.")
   ].
 type_contains(T, C) :- type_child(T, C).
 type_contains(T, D) :- type_child(T, C), type_contains(C, D).
 
-Decl type_is_promise(Type)
+Decl type_reaches_incomplete(Type)
   descr [
-    doc("Type is the default library's Promise, with any type argument."),
+    doc("Type, or a type that it contains, has a type_incomplete row."),
     arg(Type, "Type entity id.")
   ].
-type_is_promise(T) :- type_named(T, "lib", "Promise").
+type_reaches_incomplete(T) :- type_incomplete(T, _).
+type_reaches_incomplete(T) :- type_contains(T, I), type_incomplete(I, _).
+
+Decl type_is_promise(Type)
+  descr [
+    doc("Type is the default library's Promise, with any type argument. A Promise declared in a declare module \"lib\" block is not."),
+    arg(Type, "Type entity id.")
+  ].
+type_is_promise(T) :- type_named(T, "lib", "Promise"), type_origin_kind(T, /lib).
 
 Decl fn_returns_awaited(Fn, Type)
   descr [
-    doc("The return type of Fn with one level of Promise removed: the type argument of a returned Promise, otherwise the return type itself."),
+    doc("The return type of Fn with exactly one level of the lib Promise removed: the type argument of a returned Promise, otherwise the return type itself. This is not TypeScript's Awaited: it does not unwrap PromiseLike or other thenables, a Promise inside a Promise, or a union that contains a Promise, so Promise<A> | undefined is returned unchanged."),
     arg(Fn, "Function entity id."),
     arg(Type, "Type entity id.")
   ].
@@ -273,7 +408,7 @@ import { dl, rule } from "@lintai/sdk";
 export default rule("arch.actions-return-action-result")
 	.version(1)
 	.program(dl`
-		Decl violation(Fn, Name, Returned).
+		Decl returns_action_result(Fn).
 		returns_action_result(Fn) :-
 			fn_returns_awaited(Fn, R),
 			type_named(R, "src/core/result.ts", "ActionResult").
@@ -286,8 +421,8 @@ export default rule("arch.actions-return-action-result")
 	.message((row) => `${row.Name} must return Promise<ActionResult<T>>, but returns ${row.Returned}`);
 ```
 
-  and one that uses `type_contains` for a layering rule: no exported function under `src/domain/**` has a parameter or return type that contains a named type whose origin matches `src/infra/**`.
-- README: replace the caveat "type metadata is text-oriented, for example `fn_returns(Fn, TypeText)`" with one that says types are structural facts keyed by declaration, that class and interface members are not expanded, and that conditional, mapped and indexed access types are `/other` with display text only. Add the new relations to the base relation list in "API and caveats".
+  and one that uses `type_contains` for a layering rule: no exported function under `src/domain/**` has a parameter or return type that contains a named type whose origin matches `src/infra/**`. Every relation that a rule program defines has a `Decl`. The layering rule also shows a strict variant that reports a signature that `type_reaches_incomplete`, because `type_contains` does not see into `/other`, truncated or conflicting types, signatures of `/object` types or type parameter constraints.
+- README: replace the caveat "type metadata is text-oriented, for example `fn_returns(Fn, TypeText)`" with one that says types are structural facts keyed by declaration, that class and interface members are not expanded, and that conditional, mapped and indexed access types are `/other` with display text only. Do not say that `type_contains` finds every type in a signature: state its limits and point to `type_reaches_incomplete`. Add the new relations to the base relation list in "API and caveats".
 
 ## 9. Tests
 
@@ -308,6 +443,14 @@ Add `TestTypeFacts` in `internal/tsgo/lintaiapi/facts_test.go`, in the style of 
 13. A type declared in `packages/core/src/result.ts` and imported once through the source and once through `packages/core/dist/result.d.ts` gives one id with origin `packages/core/src/result.ts`.
 14. Two config groups that both reference the same workspace type give one id, and the snapshot has one set of facts for it.
 15. Reordering files in `Files` does not change any type id or display text.
+
+Counterexamples added after 0.6.0. Each fails on 0.6.0:
+
+16. A `Promise` and an `ActionResult` declared in `declare module "lib"` and `declare module "src/core/result.ts"` blocks have different ids from the real ones, and only the lib `Promise` is `type_is_promise`. The `T` of the generic methods of two object literals in one file are two ids. A readonly tuple and a mutable tuple are two ids.
+17. Two 18-level nested object types that differ only at the leaf, two `unique symbol` types from two files and a generic indexed access type are incomplete, and the `unique symbol` types have different ids.
+18. A ring of mutually recursive function types, reached once from a deeper entry function, has the same ids when the entry file sorts before or after the ring file, and when the entry is in a config group that sorts before or after another group that also compiles the ring. Files and groups are sorted by path, so reversing `Files` does not test order: the test renames the file or the group.
+19. One declaration compiled by two groups with different `strict` options has `/conflict` and no property rows, and the facts do not depend on which group sorts first.
+20. Every relation that a rule program in `docs/examples.md`, this spec and the smoke rules defines has a `Decl`.
 
 Add prelude tests for `type_contains` and both clauses of `fn_returns_awaited`. Add an engine test that runs the section 8 example rule against a fixture with one passing and one failing action. Regenerate `testdata/golden/` and review the diff by hand: every `fn_param` and `fn_returns` row changes, and the new type rows should read sensibly.
 
