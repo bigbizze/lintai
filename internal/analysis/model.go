@@ -84,6 +84,36 @@ type ModuleDirective struct {
 	Range       diagnostics.SourceLocation
 }
 
+// CallUnresolved is a call whose target the checker does not resolve.
+type CallUnresolved struct {
+	EntityID        string
+	SemanticKey     string
+	FromSemanticKey string
+	FromModule      bool
+	FromPath        string
+	Range           diagnostics.SourceLocation
+}
+
+// ImportOpaque is an import() or require() with a computed specifier.
+type ImportOpaque struct {
+	EntityID    string
+	SemanticKey string
+	FromPath    string
+	Range       diagnostics.SourceLocation
+}
+
+// FnRef is a reference to a collected function as a value.
+type FnRef struct {
+	EntityID        string
+	SemanticKey     string
+	FromSemanticKey string
+	FromModule      bool
+	FromPath        string
+	ToSemanticKey   string
+	ToPath          string
+	Range           diagnostics.SourceLocation
+}
+
 // ConfigAdjustment is a compiler option that the backend changed before it
 // loaded a tsconfig, because its compiler rejects the option.
 type ConfigAdjustment struct {
@@ -147,22 +177,25 @@ type GlobalRef struct {
 }
 
 type Snapshot struct {
-	Version        string
-	BackendID      string
-	WorkspaceRoot  string
-	Modules        []Module
-	Functions      []Function
-	ImportEdges    []ImportEdge
-	CallEdges      []CallEdge
-	ExternalCalls  []ExternalCall
-	TypeRefs       []TypeRef
-	Accesses       []Access
-	AmbientSources []AmbientSource
-	AmbientUses    []AmbientUse
-	GlobalRefs     []GlobalRef
-	Directives     []ModuleDirective
-	ParseErrors    []ParseError
-	Adjustments    []ConfigAdjustment
+	Version         string
+	BackendID       string
+	WorkspaceRoot   string
+	Modules         []Module
+	Functions       []Function
+	ImportEdges     []ImportEdge
+	CallEdges       []CallEdge
+	ExternalCalls   []ExternalCall
+	CallsUnresolved []CallUnresolved
+	ImportsOpaque   []ImportOpaque
+	FnRefs          []FnRef
+	TypeRefs        []TypeRef
+	Accesses        []Access
+	AmbientSources  []AmbientSource
+	AmbientUses     []AmbientUse
+	GlobalRefs      []GlobalRef
+	Directives      []ModuleDirective
+	ParseErrors     []ParseError
+	Adjustments     []ConfigAdjustment
 }
 
 type AmbientSource struct {

@@ -56,11 +56,15 @@ func TestFixtureRulesReportPlantedViolations(t *testing.T) {
 		"arch.layers violation src/pure/helper.ts:1",
 		"arch.pure-no-service-imports violation src/pure/helper.ts:1",
 		"arch.pure-no-effects violation src/pure/helper.ts:3",
+		"arch.pure-no-effects-strict leaves_analysis src/pure/launder.ts:1",
 		"arch.pure-no-effects violation src/pure/math.ts:3",
 		"arch.ambient clock_in_pure src/pure/time.ts:1",
+		"arch.pure-no-effects-strict reaches_effect src/pure/time.ts:1",
+		"arch.pure-no-effects-strict leaves_analysis src/pure/wired.ts:3",
 		"arch.server-only missing_marker src/server/config.ts:1",
 		"arch.ambient env_outside_config src/server/handler.ts:5",
 		"arch.ambient env_dynamic src/server/handler.ts:5",
+		"arch.server-wires-services wires src/server/wire-clock.ts:1",
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("planted violations differ:\ngot:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))

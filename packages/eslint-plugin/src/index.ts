@@ -38,6 +38,8 @@ const bridgeSchema: Rule.RuleMetaData["schema"] = [
 				type: "object",
 				additionalProperties: { enum: ["error", "warning", "off"] },
 			},
+			rulesLock: { type: "string" },
+			setupSandbox: { enum: ["auto", "on", "off"] },
 		},
 		additionalProperties: false,
 	},

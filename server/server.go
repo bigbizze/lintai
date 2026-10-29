@@ -11,6 +11,7 @@ import (
 	"sync"
 
 	"github.com/bigbizze/lintai/backend"
+	"github.com/bigbizze/lintai/bundle"
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/engine"
 	"github.com/bigbizze/lintai/jsonrpc"
@@ -39,6 +40,9 @@ type Server struct {
 	rulesLoaded       int
 	initialized       bool
 	analysisValid     bool
+	// Log receives each analysis warning once. Nil discards them.
+	Log    io.Writer
+	warned map[string]struct{}
 }
 
 type InitializeParams struct {
@@ -52,6 +56,10 @@ type InitializeParams struct {
 	FactLimit     int            `json:"factLimit,omitempty"`
 	// Severity maps a rule id to "error", "warning" or "off".
 	Severity map[string]string `json:"severity,omitempty"`
+	// RulesLock is the path of a rules lock file to enforce.
+	RulesLock string `json:"rulesLock,omitempty"`
+	// SetupSandbox is "auto", "on" or "off". The default is auto.
+	SetupSandbox string `json:"setupSandbox,omitempty"`
 }
 
 type FileDiagnosticsParams struct {
@@ -172,6 +180,10 @@ func (s *Server) handleInitialize(ctx context.Context, rawParams json.RawMessage
 		}
 		ruleSeverity[ruleID] = severity
 	}
+	sandbox, err := bundle.ParseSetupSandbox(params.SetupSandbox)
+	if err != nil {
+		return AnalysisResult{}, err
+	}
 	options := engine.Options{
 		RepoRoot:      params.RepoRoot,
 		AssetRoot:     params.AssetRoot,
@@ -183,6 +195,8 @@ func (s *Server) handleInitialize(ctx context.Context, rawParams json.RawMessage
 		Severity:      diagnostics.SeverityError,
 		RuleSeverity:  ruleSeverity,
 		FactLimit:     params.FactLimit,
+		RulesLock:     params.RulesLock,
+		SetupSandbox:  sandbox,
 	}
 	s.mu.Lock()
 	s.options = options
@@ -258,6 +272,16 @@ func (s *Server) applyAnalysis(options engine.Options, result engine.Result) {
 	}
 
 	s.mu.Lock()
+	for _, warning := range result.Warnings {
+		if _, seen := s.warned[warning]; seen || s.Log == nil {
+			continue
+		}
+		if s.warned == nil {
+			s.warned = make(map[string]struct{})
+		}
+		s.warned[warning] = struct{}{}
+		fmt.Fprintln(s.Log, warning)
+	}
 	s.options = options
 	s.diagnostics = append([]diagnostics.Diagnostic(nil), result.Diagnostics...)
 	s.diagnosticsByFile = byFile

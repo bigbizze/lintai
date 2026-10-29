@@ -84,7 +84,7 @@ Current caveats:
 
 For each rule:
 
-1. `setup()` runs in Node.
+1. `setup()` runs in Node, under the setup sandbox when it is active (see [trust.md](trust.md)). Errors use phase `setup`. When a rules lock is given, each rule is checked against it before its `setup()` runs. A mismatch uses phase `integrity`, and the rule does not run.
 2. `facts()` and `program()` run in Goja. Errors use phase `program`.
 3. Go parses the prelude and the program. Parse errors use phase `program_parse`.
 4. Go analyzes and stratifies the program, with the base relations and the `facts()` relations as extensional predicates. Errors use phase `program_analysis`. This includes: a redefined base or prelude predicate, a `.report()` or `.expectNonEmpty()` name that does not exist, a reported predicate without `Decl`, a `facts()` relation without an `extensional()` declaration, a wrong tuple arity, and unsafe negation.
@@ -124,8 +124,11 @@ Conventions:
 | `import_retained(Imp)` | An import declaration whose bindings are all `type` bindings (`import { type X } from "m"`), when `verbatimModuleSyntax` is on. tsc emits it as `import {} from "m"`, so `m` loads at runtime. Without the option, tsc removes the import and the fact is absent. |
 | `import_symbol(Imp, Name, Kind)` | `Kind` is `/default`, `/namespace` or `/named`. A side-effect import, `export *`, `import()` and `require()` have no rows. |
 | `import_symbol_type_only(Imp, Name)` | `import { type X }`. |
-| `call_edge(Call, Caller, Callee)` | A call to a collected function. The callee is the declaration that the type checker resolves for the call. `Caller` is the module path for a call at module scope. A call through a function-typed value (a callback parameter, or a property of a record of functions) has no row. |
+| `call_edge(Call, Caller, Callee)` | A call to a collected function. The callee is the declaration that the type checker resolves for the call. `Caller` is the module path for a call at module scope. A call through a function-typed value (a callback parameter, or a property of a record of functions) has no row; it is a `call_unresolved` row. |
 | `external_call(Call, Caller, Module, Name)` | A call to a declaration outside the workspace sources. `Module` is `"lib"`, a package name, a `declare module` name or a `.d.ts` path. `Name` is the qualified name, for example `"JSON.parse"` or `"Set.add"`. |
+| `call_unresolved(Site, Caller)` | A call or `new` expression whose target the checker does not resolve to a collected workspace function or an external declaration: a callback, a function-typed value, an element-access callee such as `table["k"]()`, an optional call through such a value, or an `any`-typed callee. Every call site has exactly one of `call_edge`, `external_call` and `call_unresolved`. `new` of a workspace class without a constructor runs no function and has no row. |
+| `import_opaque(Site, From)` | An `import()` or `require()` whose specifier is not a string literal, for example `import(name)` or ``import(`./${name}`)``. It has no `import_edge` row. A template literal without substitutions is a string literal and gives a normal `import_edge`. |
+| `fn_ref(Ref, From, To)` | A reference to a collected function as a value, outside the callee of a call: an argument, a stored value, a return value or a property value. `From` is the containing function, or the module path at module scope. Import and export specifiers are not references. |
 | `type_ref(Ref, File, Name)` | A type reference. |
 | `type_ref_target(Ref, TargetFile)` | The declaring file, when it is inside the workspace. |
 | `meta_access(Acc, File, AccessPath)` | An `import.meta.*` access. |
@@ -138,12 +141,12 @@ Conventions:
 | `module_directive(Dir, File, Text)` | A prologue directive, for example `"use client"`. |
 | `module_parse_error(Err, File, Message)` | The first syntax error of a file. The other facts of that file can be incomplete. |
 | `config_adjusted(Config, Option, Action)` | lintai changed a compiler option that TypeScript 7 rejects before it loaded the tsconfig `Config`. `Action` is `/removed`, `/rewritten` (`baseUrl` and `paths` become absolute `paths`) or `/replaced` (a removed `moduleResolution` becomes the TypeScript 7 default). The analysis uses the adjusted configuration, which can differ from the project's own build. |
-| `site_in_fn(Site, Fn)` | The innermost collected function that contains a call, external-call, ambient-use, global-ref or meta-access site. A site inside an anonymous callback belongs to the nearest enclosing collected function. Module-scope sites have no row. |
+| `site_in_fn(Site, Fn)` | The innermost collected function that contains a call, external-call, unresolved-call, function-reference, ambient-use, global-ref or meta-access site. A site inside an anonymous callback belongs to the nearest enclosing collected function. Module-scope sites have no row. |
 | `location(Entity, File, StartLine, StartCol, EndLine, EndCol)` | The source range of every entity id. |
 
 Caveats:
 
-- `call_edge` follows only calls that the type checker resolves to one declaration. Dependency injection through records of functions or callback parameters hides the call, so `calls_reach` does not see it.
+- `call_edge` follows only calls that the type checker resolves to one declaration. Dependency injection through records of functions or callback parameters hides the call, so `calls_reach` does not see it. These calls are `call_unresolved` rows, and the function that is passed in is a `fn_ref` row where it is passed. A strict rule uses `calls_or_refs_reach` and `fn_reaches_unresolved` to fail closed. See example 12 in [examples.md](examples.md).
 - an unresolved import is not internal, so `To` is the specifier. Check `import_unresolved` when a rule depends on `import_internal`.
 - `export default function () {}` and `export default () => ...` are functions named `default`.
 - a call inside an anonymous function at module scope, for example `app.get("/", () => load())` or a class `static` block, has the module path as `Caller`, even when the function runs later.
@@ -164,6 +167,13 @@ The prelude is loaded before every rule program. A rule cannot redefine a prelud
 | `fn_reaches_ambient(Fn, Source)` | `Fn` uses `Source` directly or through a call chain. |
 | `module_uses_ambient(File, Source)` | `File` contains a use of `Source` at any scope. |
 | `module_reaches_ambient(File, Source)` | `File` uses `Source` directly or through runtime imports. |
+| `calls_or_refs_reach(From, To)` | Transitive closure over `call_edge` and `fn_ref` together. A function that refers to another function as a value is treated as if it called it. This is more than the code can reach, never less, for the calls that lintai sees. |
+| `fn_has_unresolved_call(Fn)` | `Fn` directly contains a `call_unresolved` site. |
+| `module_has_unresolved_call(File)` | `File` contains a `call_unresolved` site at any scope. |
+| `fn_reaches_unresolved(Fn)` | `Fn` contains an unresolved call, directly or through `calls_or_refs_reach`. A strict rule treats this as leaving the analyzed code. |
+| `fn_reaches_ambient_strict(Fn, Source)` | Like `fn_reaches_ambient`, but over `calls_or_refs_reach`. |
+| `fn_calls_package(Fn, Pkg)` | `Fn` directly calls into the package `Pkg` (`external_call` with a module that is not `"lib"`). |
+| `module_calls_package(File, Pkg)` | `File` directly calls into the package `Pkg`, at any scope. |
 
 Caveats:
 
@@ -287,6 +297,7 @@ Caveats:
 lintai [flags]
 lintai schema
 lintai facts --workspace-root <dir> [--exclude <glob>]... [--files tsconfig|walk] [--relation <name>]...
+lintai lock [--workspace-root <dir>] [--rules <globs>] [--lock-file <path>]
 lintai serve
 ```
 
@@ -303,6 +314,8 @@ Flags for analysis:
 - `--explain`: with `--json`, attach `explanation` to each violation
 - `--fact-limit`: the maximum number of facts that one rule may derive (default 5,000,000)
 - `--severity <rule-id>=<level>`: the severity of the violations of one rule. `<level>` is `error` (the default for every rule), `warning` or `off`. Repeat the flag for more rules. See "Rule severity".
+- `--rules-lock <path>`: a rules lock file, relative to the workspace root, that `lintai lock` wrote. See "Rules lock".
+- `--setup-sandbox auto|on|off`: run `setup()` under the Node permission model. See "Setup sandbox".
 
 Example:
 
@@ -337,6 +350,37 @@ Then `--files` selects the walked files that become modules:
 
 A `tsconfig.json` that includes generated files, for example `.next/types/**/*.ts`, does not add them: a module must also be a walked file. Use `--exclude` to remove more files.
 
+Rules lock:
+
+`lintai lock` bundles the rules and writes `lintai-rules.lock.json` at the workspace root (`--lock-file` changes the path). It takes the same `--workspace-root`, `--rules`, `--repo-root` and `--asset-root` flags as a run, and prints one line per rule. Exit code 0 means the lock was written. Exit code 2 means a rule did not bundle.
+
+```json
+{
+  "version": 1,
+  "rules": {
+    "lintai-rules/no-service-imports.ts": { "hash": "sha256:..." }
+  }
+}
+```
+
+The hash of a rule covers every source file that the bundler read for it: the rule file, the files it imports, and the package files it imports. Package files are recorded from the package directory inside `node_modules`, so the hash does not depend on the machine. The bundler output is not hashed.
+
+With `--rules-lock`, lintai checks each rule against the lock after bundling and before `setup()`. These are `rule_execution_error` diagnostics with phase `integrity`, and exit code 3:
+
+- the hash of a rule differs from the lock
+- a rule is not in the lock
+- a rule in the lock no longer exists
+
+A rule with an integrity error does not run. With `--rules-lock`, `require()` in `setup()` loads only Node built-ins, and `import()` in `setup()` fails, so all workspace code that a rule uses is in the bundle and in the hash. See [trust.md](trust.md).
+
+Setup sandbox:
+
+- `auto` (default): on Node 22.13 or later (or 23.5 or later), `setup()` runs under the Node permission model. On an older Node it runs as before, and lintai prints one warning on stderr.
+- `on`: the same, but an older Node is a usage error (exit code 2).
+- `off`: `setup()` runs with full Node capabilities.
+
+In the sandbox, `setup()` can read files in the workspace. It cannot write files, start child processes or start workers. `require()` loads only Node built-ins. A denied operation is a `rule_execution_error` with phase `setup` that names the permission or the specifier. On Node 22.13 to 24 the permission model does not restrict the network. On Node 25 and later the network is denied. See [trust.md](trust.md).
+
 Rule severity:
 
 - every rule has severity `error` unless `--severity` (or the `severity` option of the ESLint plugin) names it
@@ -352,7 +396,7 @@ Exit codes:
 | 0 | No error diagnostics. |
 | 1 | At least one rule reported an error-severity violation, and every rule ran. |
 | 2 | Usage or configuration error: a bad flag, a bad `--severity` value, a bad root, a rule glob that matches no file, an invalid exclude glob. No rules ran. |
-| 3 | At least one rule could not run, or `--severity` names an unknown rule (`rule_execution_error`). Violations from the other rules are still in the output. |
+| 3 | At least one rule could not run, a rule does not match the rules lock, or `--severity` names an unknown rule (`rule_execution_error`). Violations from the other rules are still in the output. |
 
 CLI caveats:
 
@@ -417,6 +461,8 @@ type BridgeOptions = {
 	env?: Record<string, unknown>;
 	factLimit?: number;
 	severity?: Record<string, "error" | "warning" | "off">;
+	rulesLock?: string;
+	setupSandbox?: "auto" | "on" | "off";
 };
 ```
 
@@ -424,6 +470,8 @@ Plugin caveats:
 
 - ESLint gives one level to all reports of one rule, so lintai warnings come from a second rule, `@lintai/architecture-warnings`. Give both rules the same options object. Then they share one lintai process, and each diagnostic appears once. If you omit `@lintai/architecture-warnings`, warning diagnostics are not shown.
 - `severity` is the same as the CLI `--severity` flag
+- `rulesLock` is the same as the CLI `--rules-lock` flag. A relative path is resolved from the workspace root
+- `setupSandbox` is the same as the CLI `--setup-sandbox` flag
 
 - `serve` is the default in editor-like long-lived processes
 - `oneshot` is the default under plain ESLint CLI detection

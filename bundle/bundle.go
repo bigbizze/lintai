@@ -15,6 +15,20 @@ import (
 type Artifacts struct {
 	PureBundlePath    string `json:"pureBundlePath"`
 	PrepareBundlePath string `json:"prepareBundlePath"`
+	// Hash is the rules-lock hash of the rule: "sha256:" and the hash of the
+	// sorted list of Inputs.
+	Hash string `json:"hash"`
+	// Inputs are the source files that the bundler read for the rule, with
+	// the sha256 of each file.
+	Inputs []Input `json:"inputs"`
+}
+
+// Input is a source file of a rule bundle. Path is workspace-relative, or
+// starts with node_modules/ for a file in a package, or with asset: for a
+// file of the lintai packages outside the workspace.
+type Input struct {
+	Path   string `json:"path"`
+	SHA256 string `json:"sha256"`
 }
 
 type PrepareResult struct {
@@ -31,16 +45,19 @@ type PrepareError struct {
 }
 
 type buildRequest struct {
-	RepoRoot string `json:"repoRoot"`
-	RulePath string `json:"rulePath"`
-	OutDir   string `json:"outDir"`
+	RepoRoot      string `json:"repoRoot"`
+	WorkspaceRoot string `json:"workspaceRoot"`
+	RulePath      string `json:"rulePath"`
+	OutDir        string `json:"outDir"`
 }
 
 type buildResponse struct {
-	RulePath          string `json:"rulePath"`
-	PrepareBundlePath string `json:"prepareBundlePath,omitempty"`
-	PureBundlePath    string `json:"pureBundlePath,omitempty"`
-	Error             string `json:"error,omitempty"`
+	RulePath          string  `json:"rulePath"`
+	PrepareBundlePath string  `json:"prepareBundlePath,omitempty"`
+	PureBundlePath    string  `json:"pureBundlePath,omitempty"`
+	Hash              string  `json:"hash,omitempty"`
+	Inputs            []Input `json:"inputs,omitempty"`
+	Error             string  `json:"error,omitempty"`
 }
 
 type prepareRequest struct {
@@ -48,6 +65,9 @@ type prepareRequest struct {
 	WorkspaceRoot string `json:"workspaceRoot"`
 	BundlePath    string `json:"bundlePath"`
 	Env           any    `json:"env"`
+	// RestrictRequire limits require() in the prepare bundle to Node
+	// built-ins and makes dynamic import() fail.
+	RestrictRequire bool `json:"restrictRequire"`
 }
 
 type prepareResponse struct {
@@ -60,9 +80,10 @@ type prepareResponse struct {
 	Skipped     bool   `json:"skipped,omitempty"`
 }
 
-// BuildAll writes the bundles of each rule to its own subdirectory of outDir.
-// The caller owns outDir and removes it when the bundles are no longer needed.
-func BuildAll(ctx context.Context, assetRoot, repoRoot, outDir string, rulePaths []string) (map[string]Artifacts, map[string]error, error) {
+// BuildAll writes the bundles of each rule to its own subdirectory of outDir,
+// and returns the rules-lock hash of each rule. The caller owns outDir and
+// removes it when the bundles are no longer needed.
+func BuildAll(ctx context.Context, assetRoot, repoRoot, workspaceRoot, outDir string, rulePaths []string) (map[string]Artifacts, map[string]error, error) {
 	if len(rulePaths) == 0 {
 		return map[string]Artifacts{}, map[string]error{}, nil
 	}
@@ -75,9 +96,10 @@ func BuildAll(ctx context.Context, assetRoot, repoRoot, outDir string, rulePaths
 		}
 		requested[rulePath] = struct{}{}
 		requests = append(requests, buildRequest{
-			RepoRoot: repoRoot,
-			RulePath: rulePath,
-			OutDir:   filepath.Join(outDir, strconv.Itoa(index)),
+			RepoRoot:      repoRoot,
+			WorkspaceRoot: workspaceRoot,
+			RulePath:      rulePath,
+			OutDir:        filepath.Join(outDir, strconv.Itoa(index)),
 		})
 	}
 	itemErrors := make(map[string]error)
@@ -120,6 +142,8 @@ func BuildAll(ctx context.Context, assetRoot, repoRoot, outDir string, rulePaths
 		results[row.RulePath] = Artifacts{
 			PureBundlePath:    row.PureBundlePath,
 			PrepareBundlePath: row.PrepareBundlePath,
+			Hash:              row.Hash,
+			Inputs:            row.Inputs,
 		}
 	}
 
@@ -131,10 +155,21 @@ func BuildAll(ctx context.Context, assetRoot, repoRoot, outDir string, rulePaths
 	return results, itemErrors, nil
 }
 
+// PrepareOptions control the process that runs setup().
+type PrepareOptions struct {
+	// Sandbox runs the process under the Node permission model: it can read
+	// only the workspace, the bundles and the asset root, and it cannot
+	// write files or start child processes or workers.
+	Sandbox bool
+	// RestrictRequire limits require() in setup() to Node built-ins and
+	// makes dynamic import() fail. It is always on when Sandbox is on.
+	RestrictRequire bool
+}
+
 // PrepareAll runs setup() for each rule. A file under the rule globs that has
 // no default export is a helper module, not a rule: it is in neither result
 // map.
-func PrepareAll(ctx context.Context, assetRoot, repoRoot, workspaceRoot string, artifacts map[string]Artifacts, rawEnv any) (map[string]PrepareResult, map[string]PrepareError, error) {
+func PrepareAll(ctx context.Context, assetRoot, repoRoot, workspaceRoot string, artifacts map[string]Artifacts, rawEnv any, options PrepareOptions) (map[string]PrepareResult, map[string]PrepareError, error) {
 	if len(artifacts) == 0 {
 		return map[string]PrepareResult{}, map[string]PrepareError{}, nil
 	}
@@ -153,10 +188,11 @@ func PrepareAll(ctx context.Context, assetRoot, repoRoot, workspaceRoot string, 
 		}
 		requested[rulePath] = struct{}{}
 		requests = append(requests, prepareRequest{
-			RulePath:      rulePath,
-			WorkspaceRoot: workspaceRoot,
-			BundlePath:    item.PrepareBundlePath,
-			Env:           rawEnv,
+			RulePath:        rulePath,
+			WorkspaceRoot:   workspaceRoot,
+			BundlePath:      item.PrepareBundlePath,
+			Env:             rawEnv,
+			RestrictRequire: options.Sandbox || options.RestrictRequire,
 		})
 	}
 
@@ -168,12 +204,18 @@ func PrepareAll(ctx context.Context, assetRoot, repoRoot, workspaceRoot string, 
 	if err != nil {
 		return nil, nil, err
 	}
-	command := exec.CommandContext(ctx, "node", scriptPath)
+	args := []string{scriptPath}
+	if options.Sandbox {
+		args = sandboxArgs(scriptPath, assetRoot, workspaceRoot, artifacts)
+	}
+	command := exec.CommandContext(ctx, "node", args...)
 	command.Dir = assetRoot
 	command.Stdin = bytes.NewReader(payload)
-	output, err := command.CombinedOutput()
+	var stderr bytes.Buffer
+	command.Stderr = &stderr
+	output, err := command.Output()
 	if err != nil {
-		return nil, nil, fmt.Errorf("prepare failed: %w\n%s", err, output)
+		return nil, nil, fmt.Errorf("prepare failed: %w\n%s%s", err, output, stderr.Bytes())
 	}
 
 	var rows []prepareResponse

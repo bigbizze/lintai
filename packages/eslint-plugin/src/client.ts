@@ -32,7 +32,11 @@ export type BridgeOptions = {
 	env?: Record<string, unknown>;
 	factLimit?: number;
 	severity?: Record<string, RuleSeverity>;
+	rulesLock?: string;
+	setupSandbox?: SetupSandbox;
 };
+
+export type SetupSandbox = "auto" | "on" | "off";
 
 export type RuleSeverity = "error" | "warning" | "off";
 
@@ -48,6 +52,8 @@ type ResolvedBridgeOptions = {
 	env: Record<string, unknown>;
 	factLimit?: number;
 	severity: Record<string, RuleSeverity>;
+	rulesLock?: string;
+	setupSandbox?: SetupSandbox;
 };
 
 type InitializeResult = {
@@ -386,6 +392,8 @@ export class LintAIClient {
 				env: this.options.env,
 				severity: this.options.severity,
 				...(this.options.factLimit === undefined ? {} : { factLimit: this.options.factLimit }),
+				...(this.options.rulesLock === undefined ? {} : { rulesLock: this.options.rulesLock }),
+				...(this.options.setupSandbox === undefined ? {} : { setupSandbox: this.options.setupSandbox }),
 			});
 			this.attachStdoutListener();
 			this.setDiagnostics(resultValue.diagnostics);
@@ -427,6 +435,8 @@ export class LintAIClient {
 				JSON.stringify(this.options.env),
 				...(this.options.factLimit === undefined ? [] : ["--fact-limit", String(this.options.factLimit)]),
 				...Object.entries(this.options.severity).flatMap(([ruleID, level]) => ["--severity", `${ruleID}=${level}`]),
+				...(this.options.rulesLock === undefined ? [] : ["--rules-lock", this.options.rulesLock]),
+				...(this.options.setupSandbox === undefined ? [] : ["--setup-sandbox", this.options.setupSandbox]),
 			],
 			{
 				cwd: this.options.repoRoot,
@@ -757,6 +767,8 @@ export function resolveBridgeOptions(options: BridgeOptions, cwd: string): Resol
 		env: options.env ?? {},
 		severity: options.severity ?? {},
 		...(options.factLimit === undefined ? {} : { factLimit: options.factLimit }),
+		...(options.rulesLock === undefined ? {} : { rulesLock: path.resolve(workspaceRoot, options.rulesLock) }),
+		...(options.setupSandbox === undefined ? {} : { setupSandbox: options.setupSandbox }),
 	};
 }
 

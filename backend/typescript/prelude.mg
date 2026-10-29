@@ -85,3 +85,61 @@ Decl module_reaches_ambient(File, Source)
   ].
 module_reaches_ambient(File, Source) :- module_uses_ambient(File, Source).
 module_reaches_ambient(File, Source) :- imports_reach(File, Mid), module_uses_ambient(Mid, Source).
+
+Decl calls_or_refs_reach(From, To)
+  descr [
+    doc("Transitive closure over call_edge and fn_ref together: a conservative over-approximation of workspace-internal reachability."),
+    arg(From, "Function entity id, or module path for module-scope sites."),
+    arg(To, "Function entity id reached through calls or function-value references.")
+  ].
+calls_or_refs_reach(A, B) :- call_edge(_, A, B).
+calls_or_refs_reach(A, B) :- fn_ref(_, A, B).
+calls_or_refs_reach(A, C) :- call_edge(_, A, B), calls_or_refs_reach(B, C).
+calls_or_refs_reach(A, C) :- fn_ref(_, A, B), calls_or_refs_reach(B, C).
+
+Decl fn_has_unresolved_call(Fn)
+  descr [
+    doc("Fn directly contains a call the checker could not resolve."),
+    arg(Fn, "Function entity id.")
+  ].
+fn_has_unresolved_call(Fn) :- call_unresolved(Site, _), site_in_fn(Site, Fn).
+
+Decl module_has_unresolved_call(File)
+  descr [
+    doc("File contains an unresolved call at any scope."),
+    arg(File, "Path of the file.")
+  ].
+module_has_unresolved_call(File) :- call_unresolved(Site, _), location(Site, File, _, _, _, _).
+
+Decl fn_reaches_unresolved(Fn)
+  descr [
+    doc("Fn contains an unresolved call, directly or through calls_or_refs_reach. A strict rule treats this as leaving the analyzed code."),
+    arg(Fn, "Function entity id.")
+  ].
+fn_reaches_unresolved(Fn) :- fn_has_unresolved_call(Fn).
+fn_reaches_unresolved(Fn) :- calls_or_refs_reach(Fn, Callee), fn_has_unresolved_call(Callee).
+
+Decl fn_reaches_ambient_strict(Fn, Source)
+  descr [
+    doc("Like fn_reaches_ambient, but over calls_or_refs_reach."),
+    arg(Fn, "Function entity id."),
+    arg(Source, "Source name constant.")
+  ].
+fn_reaches_ambient_strict(Fn, Source) :- fn_uses_ambient(Fn, Source).
+fn_reaches_ambient_strict(Fn, Source) :- calls_or_refs_reach(Fn, Callee), fn_uses_ambient(Callee, Source).
+
+Decl fn_calls_package(Fn, Pkg)
+  descr [
+    doc("Fn directly calls into a package. lib calls are excluded."),
+    arg(Fn, "Function entity id."),
+    arg(Pkg, "Package name from external_call.")
+  ].
+fn_calls_package(Fn, Pkg) :- external_call(Site, _, Pkg, _), site_in_fn(Site, Fn), Pkg != "lib".
+
+Decl module_calls_package(File, Pkg)
+  descr [
+    doc("File directly calls into a package, at any scope."),
+    arg(File, "Path of the file."),
+    arg(Pkg, "Package name from external_call.")
+  ].
+module_calls_package(File, Pkg) :- external_call(Site, _, Pkg, _), Pkg != "lib", location(Site, File, _, _, _, _).

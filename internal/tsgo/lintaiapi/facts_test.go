@@ -176,11 +176,115 @@ export default () => add(4);
 	wantExternal := []string{
 		"src/a.ts::arrow_function::text lib String",
 		"src/a.ts::function::add lib DateConstructor.now",
+		"src/a.ts::function::collect lib Set",
 		"src/a.ts::function::collect lib Set.add",
 		"src/a.ts::function::parse lib JSON.parse",
 	}
 	if !slices.Equal(external, wantExternal) {
 		t.Fatalf("external calls differ:\ngot:\n%s\nwant:\n%s", strings.Join(external, "\n"), strings.Join(wantExternal, "\n"))
+	}
+
+	unresolved := make([]string, 0)
+	for _, call := range snapshot.CallsUnresolved {
+		unresolved = append(unresolved, call.FromSemanticKey)
+	}
+	if want := []string{"src/a.ts::function::show"}; !slices.Equal(unresolved, want) {
+		t.Fatalf("unresolved calls differ:\ngot  %q\nwant %q", unresolved, want)
+	}
+}
+
+// Every call site has exactly one of call_edge, external_call and
+// call_unresolved, so a strict rule can fail closed on calls that the
+// checker does not resolve. A function used as a value is a fn_ref, and an
+// import() or require() with a computed specifier is an import_opaque.
+func TestStrictReachabilityFacts(t *testing.T) {
+	snapshot := buildTestSnapshot(t, map[string]string{
+		"node_modules/pkg/package.json": `{ "name": "pkg", "version": "1.0.0", "types": "index.d.ts" }`,
+		"node_modules/pkg/index.d.ts":   "export declare function run(): void;\nexport declare const handlers: { go(): void };\n",
+		"src/effect.ts":                 "export function effect(): number { return Date.now(); }\n",
+		"src/a.ts": `import { effect } from "./effect";
+import { run, handlers } from "pkg";
+type Deps = { load(): number };
+export function inject(deps: Deps, cb: () => number, table: Record<string, () => void>, loose: any): number {
+  const f = deps.load;
+  f();
+  table["k"]();
+  cb?.();
+  loose();
+  run();
+  handlers.go();
+  return deps.load();
+}
+export function wire(): number {
+  return inject({ load: effect }, effect, {}, null);
+}
+export const registry = [effect];
+export async function load(name: string) {
+  await import(name);
+  await import(` + "`./${name}`" + `);
+  await import(` + "`./effect`" + `);
+  return require("./" + name);
+}
+class Plain {}
+export const plain = new Plain();
+`,
+	})
+	callers := func(items []CallUnresolved) []string {
+		result := make([]string, 0, len(items))
+		for _, item := range items {
+			result = append(result, fmt.Sprintf("%s:%d", item.FromSemanticKey, item.Range.StartLine))
+		}
+		return result
+	}
+	if got, want := callers(snapshot.CallsUnresolved), []string{
+		"src/a.ts::function::inject:6",
+		"src/a.ts::function::inject:7",
+		"src/a.ts::function::inject:8",
+		"src/a.ts::function::inject:9",
+		"src/a.ts::function::inject:12",
+	}; !slices.Equal(got, want) {
+		t.Fatalf("unresolved calls differ:\ngot  %q\nwant %q", got, want)
+	}
+
+	external := make([]string, 0)
+	for _, call := range snapshot.ExternalCalls {
+		if call.FromPath == "src/a.ts" {
+			external = append(external, call.Module+" "+call.Name)
+		}
+	}
+	slices.Sort(external)
+	if want := []string{"pkg go", "pkg run"}; !slices.Equal(external, want) {
+		t.Fatalf("external calls differ:\ngot  %q\nwant %q", external, want)
+	}
+
+	refs := make([]string, 0)
+	for _, ref := range snapshot.FnRefs {
+		refs = append(refs, fmt.Sprintf("%s:%d", ref.SemanticKey, ref.Range.StartLine))
+	}
+	slices.Sort(refs)
+	if want := []string{
+		"src/a.ts::function::wire::refs::src/effect.ts::function::effect#2:15",
+		"src/a.ts::function::wire::refs::src/effect.ts::function::effect:15",
+		"src/a.ts::refs::src/effect.ts::function::effect:17",
+	}; !slices.Equal(refs, want) {
+		t.Fatalf("function references differ:\ngot  %q\nwant %q", refs, want)
+	}
+
+	opaque := make([]string, 0)
+	for _, item := range snapshot.ImportsOpaque {
+		opaque = append(opaque, fmt.Sprintf("%s:%d", item.FromPath, item.Range.StartLine))
+	}
+	if want := []string{"src/a.ts:19", "src/a.ts:20", "src/a.ts:22"}; !slices.Equal(opaque, want) {
+		t.Fatalf("opaque imports differ:\ngot  %q\nwant %q", opaque, want)
+	}
+	dynamic := 0
+	for _, edge := range snapshot.ImportEdges {
+		if edge.Form == ImportFormDynamic {
+			dynamic++
+		}
+	}
+	if dynamic != 1 {
+		t.Fatalf("want one dynamic import edge for the template literal without substitutions, got %d", dynamic)
 	}
 }
 

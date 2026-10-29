@@ -101,6 +101,26 @@ func factsFromAnalysis(snapshot *analysis.Snapshot) ([]facts.Fact, error) {
 		}
 		b.location(call.SemanticKey, call.Range)
 	}
+	for _, call := range snapshot.CallsUnresolved {
+		id := str(call.SemanticKey)
+		b.add("call_unresolved", id, str(call.FromSemanticKey))
+		if !call.FromModule {
+			b.add("site_in_fn", id, str(call.FromSemanticKey))
+		}
+		b.location(call.SemanticKey, call.Range)
+	}
+	for _, item := range snapshot.ImportsOpaque {
+		b.add("import_opaque", str(item.SemanticKey), str(item.FromPath))
+		b.location(item.SemanticKey, item.Range)
+	}
+	for _, ref := range snapshot.FnRefs {
+		id := str(ref.SemanticKey)
+		b.add("fn_ref", id, str(ref.FromSemanticKey), str(ref.ToSemanticKey))
+		if !ref.FromModule {
+			b.add("site_in_fn", id, str(ref.FromSemanticKey))
+		}
+		b.location(ref.SemanticKey, ref.Range)
+	}
 	for _, directive := range snapshot.Directives {
 		b.add("module_directive", str(directive.SemanticKey), str(directive.FilePath), str(directive.Text))
 		b.location(directive.SemanticKey, directive.Range)

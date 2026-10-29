@@ -13,6 +13,7 @@ import (
 
 	"github.com/bigbizze/lintai/backend"
 	"github.com/bigbizze/lintai/backend/typescript"
+	"github.com/bigbizze/lintai/bundle"
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/engine"
 	"github.com/bigbizze/lintai/facts"
@@ -69,6 +70,8 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 			return err
 		case "facts":
 			return runFacts(ctx, args[1:], stdout)
+		case "lock":
+			return runLock(ctx, args[1:], stdout)
 		}
 	}
 	return runOnce(ctx, args, stdout)
@@ -140,7 +143,9 @@ func runFacts(ctx context.Context, args []string, stdout io.Writer) error {
 
 func runServe(ctx context.Context) error {
 	runner := engine.New(newBackend())
-	return server.New(runner).Serve(ctx, os.Stdin, os.Stdout)
+	instance := server.New(runner)
+	instance.Log = os.Stderr
+	return instance.Serve(ctx, os.Stdin, os.Stdout)
 }
 
 func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
@@ -160,10 +165,16 @@ func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 	files := flags.String("files", string(backend.FileScopeTsconfig), "files in the snapshot: tsconfig (files that tsc compiles) or walk (every walked file)")
 	var severities stringList
 	flags.Var(&severities, "severity", "rule severity as <rule-id>=error|warning|off (repeatable; default: error)")
+	rulesLock := flags.String("rules-lock", "", "rules lock file to enforce (see lintai lock); a changed, new or removed rule is a rule error with phase integrity")
+	setupSandbox := flags.String("setup-sandbox", string(bundle.SetupSandboxAuto), "run setup() under the Node permission model: auto, on or off")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	ruleSeverity, err := parseRuleSeverity(severities)
+	if err != nil {
+		return err
+	}
+	sandbox, err := bundle.ParseSetupSandbox(*setupSandbox)
 	if err != nil {
 		return err
 	}
@@ -208,9 +219,14 @@ func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 		RuleSeverity:  ruleSeverity,
 		FactLimit:     *factLimit,
 		Explain:       *explain,
+		RulesLock:     *rulesLock,
+		SetupSandbox:  sandbox,
 	})
 	if err != nil {
 		return err
+	}
+	for _, warning := range result.Warnings {
+		fmt.Fprintln(os.Stderr, warning)
 	}
 	if *jsonOutput {
 		encoder := json.NewEncoder(stdout)
@@ -280,6 +296,49 @@ func hasHelperScripts(root string) bool {
 		}
 	}
 	return true
+}
+
+// runLock bundles the rules and writes the rules lock.
+func runLock(ctx context.Context, args []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("lintai lock", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	workspaceRoot := flags.String("workspace-root", ".", "workspace root that contains the rules")
+	repoRoot := flags.String("repo-root", ".", "repository root containing scripts and packages")
+	assetRoot := flags.String("asset-root", "", "asset root containing lintai helper scripts")
+	rules := flags.String("rules", "lintai-rules/**/*.ts", "comma-separated list of rule globs, relative to --workspace-root")
+	lockFile := flags.String("lock-file", engine.DefaultRulesLockFile, "rules lock file to write, relative to --workspace-root")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	absoluteWorkspace, err := filepath.Abs(*workspaceRoot)
+	if err != nil {
+		return err
+	}
+	absoluteRepo, err := filepath.Abs(*repoRoot)
+	if err != nil {
+		return err
+	}
+	absoluteAssetRoot, err := resolveAssetRoot(*assetRoot, absoluteRepo)
+	if err != nil {
+		return err
+	}
+	lock, locked, err := engine.BuildRulesLock(ctx, engine.Options{
+		RepoRoot:      absoluteRepo,
+		AssetRoot:     absoluteAssetRoot,
+		WorkspaceRoot: absoluteWorkspace,
+		RuleGlobs:     strings.Split(*rules, ","),
+	})
+	if err != nil {
+		return err
+	}
+	path := engine.ResolveRulesLockPath(absoluteWorkspace, *lockFile)
+	if err := engine.WriteRulesLock(path, lock); err != nil {
+		return err
+	}
+	for _, item := range locked {
+		fmt.Fprintf(stdout, "%s %s\n", item.Hash, item.Path)
+	}
+	return nil
 }
 
 // newBackend returns the TypeScript backend that reports adjusted tsconfigs
