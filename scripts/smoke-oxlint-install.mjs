@@ -84,7 +84,12 @@ try {
 }
 
 function startLanguageServer(cwd) {
-	const child = spawn("pnpm", ["exec", "oxlint", "--lsp"], { cwd, stdio: ["pipe", "pipe", "inherit"] });
+	// Start oxlint directly, not through pnpm exec, so that close() stops the
+	// language server. lintai serve exits when its stdin closes.
+	const child = spawn(path.join(cwd, "node_modules", ".bin", "oxlint"), ["--lsp"], {
+		cwd,
+		stdio: ["pipe", "pipe", "inherit"],
+	});
 	let buffer = Buffer.alloc(0);
 	let nextID = 1;
 	const waiters = [];

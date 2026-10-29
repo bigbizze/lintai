@@ -123,6 +123,7 @@ type ClientDependencies = {
 const clientCache = new Map<string, LintAIClient>();
 const initializeTimeoutMs = 60_000;
 const refreshIdleMs = 750;
+const modifiedTimeMarginMs = 2_000;
 const syncSleep = new Int32Array(new SharedArrayBuffer(4));
 
 const defaultDependencies: ClientDependencies = {
@@ -307,13 +308,13 @@ export class LintAIClient {
 		const startedAt = this.dependencies.now();
 		this.refreshInFlight = this.sendRequest<InitializeResult>("reanalyze", {})
 			.then((result) => {
-				if (targetEpoch !== this.analysisEpoch || this.state !== "ready") {
+				if (this.isOutdated(targetEpoch, startedAt)) {
 					return;
 				}
 				this.setDiagnostics(result.diagnostics, startedAt);
 			})
 			.catch((error) => {
-				if (targetEpoch !== this.analysisEpoch || this.state !== "ready") {
+				if (this.isOutdated(targetEpoch, startedAt)) {
 					return;
 				}
 				this.setReanalyzeFailure(asError(error), startedAt);
@@ -607,15 +608,23 @@ export class LintAIClient {
 		}
 	}
 
+	// isOutdated reports whether a background refresh result must be dropped:
+	// the rule files changed, or a newer analysis (for a saved file) finished
+	// while the refresh ran.
+	private isOutdated(targetEpoch: number, startedAt: number): boolean {
+		return targetEpoch !== this.analysisEpoch || this.state !== "ready" || startedAt < this.diagnosticsAnalyzedAt;
+	}
+
 	// savedSinceAnalysis returns the modification time of the file when the
 	// file was saved after the analysis that produced the current diagnostics
 	// started. A linter lints a file again when it is saved, so that lint must
 	// not get the diagnostics of the old file. Each saved version causes one
 	// analysis at most, so a modification time in the future cannot cause an
-	// analysis on every lint.
+	// analysis on every lint. Some file systems store modification times in
+	// whole seconds, so a save shortly before the analysis started also counts.
 	private savedSinceAnalysis(file: string): number | undefined {
 		const modifiedAt = this.dependencies.modifiedAt(path.join(this.options.workspaceRoot, file));
-		if (modifiedAt === undefined || modifiedAt < this.diagnosticsAnalyzedAt) {
+		if (modifiedAt === undefined || modifiedAt < this.diagnosticsAnalyzedAt - modifiedTimeMarginMs) {
 			return undefined;
 		}
 		return this.savedVersionsAnalyzed.get(file) === modifiedAt ? undefined : modifiedAt;

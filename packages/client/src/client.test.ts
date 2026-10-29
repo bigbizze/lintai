@@ -258,7 +258,7 @@ test("idle gap triggers background reanalyze and swaps cached diagnostics", asyn
 test("a file saved after the analysis started is linted with a new analysis, once per saved version", () => {
 	const child = createTestProcess();
 	let now = 0;
-	let modifiedAt = -10;
+	let modifiedAt = -10_000;
 	const requests: string[] = [];
 	child.stdin.on("data", (chunk: Buffer) => {
 		const method = /"method":"([^"]+)"/.exec(chunk.toString("utf8"))?.[1];
@@ -289,14 +289,15 @@ test("a file saved after the analysis started is linted with a new analysis, onc
 		}),
 	);
 
+	now = 10_000;
 	assert.equal(client.getDiagnostics("src/example.ts")[0]?.rule_id, "arch.old");
-	now = 100;
-	modifiedAt = 50;
+	now = 20_000;
+	modifiedAt = 15_000;
 	assert.deepEqual(client.getDiagnostics("src/example.ts"), []);
 	assert.deepEqual(requests, ["initialize", "reanalyze"]);
 
 	modifiedAt = 1_000_000;
-	now = 200;
+	now = 20_100;
 	responses.push(
 		createFramedResponse({
 			jsonrpc: "2.0",
@@ -305,9 +306,68 @@ test("a file saved after the analysis started is linted with a new analysis, onc
 		}),
 	);
 	client.getDiagnostics("src/example.ts");
-	now = 300;
+	now = 20_200;
 	client.getDiagnostics("src/example.ts");
 	assert.deepEqual(requests, ["initialize", "reanalyze", "reanalyze"]);
+	client.dispose();
+});
+
+test("a background refresh that started before a save-triggered analysis does not replace its result", async () => {
+	const child = createTestProcess();
+	let now = 0;
+	let modifiedAt = -10_000;
+	const responses = [
+		createInitializeResult("arch.old"),
+		createFramedResponse({
+			jsonrpc: "2.0",
+			id: 3,
+			result: { rulesLoaded: 1, diagnosticCount: 0, snapshotVersion: "snap-saved", diagnostics: [] },
+		}),
+	];
+	const client = new LintAIClient(
+		resolveBridgeOptions(
+			{ mode: "serve", binary: "/tmp/lintai", repoRoot: "/repo", workspaceRoot: "/workspace" },
+			"/repo",
+			editorHost,
+		),
+		createTestDependencies({
+			spawnServe: () => child,
+			readServeSync: () => responses.shift() ?? Buffer.alloc(0),
+			modifiedAt: () => modifiedAt,
+			now: () => now,
+			log: () => undefined,
+		}),
+	);
+
+	now = 10_000;
+	client.getDiagnostics("src/example.ts");
+	now = 11_000;
+	client.getDiagnostics("src/example.ts");
+	now = 12_000;
+	modifiedAt = 11_500;
+	assert.deepEqual(client.getDiagnostics("src/example.ts"), []);
+
+	child.stdout.write(
+		createFramedResponse({
+			jsonrpc: "2.0",
+			id: 2,
+			result: {
+				rulesLoaded: 1,
+				diagnosticCount: 1,
+				snapshotVersion: "snap-background",
+				diagnostics: [
+					{
+						rule_id: "arch.old",
+						assertion_id: "default",
+						message: "old",
+						source_location: { file: "src/example.ts", startLine: 1, startColumn: 1, endLine: 1, endColumn: 2 },
+					},
+				],
+			},
+		}),
+	);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.deepEqual(client.getDiagnostics("src/example.ts"), []);
 	client.dispose();
 });
 
