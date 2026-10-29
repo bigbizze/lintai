@@ -534,6 +534,7 @@ Plugin caveats:
 - line and column values are the same as under ESLint. A lintai diagnostic at line 3, column 5 is shown by the oxlint CLI at line 3, column 5
 - the plugin reports only. It gives no fixes and no suggestions
 - oxlint 1.90.0 runs JS plugins on one thread of one Node.js process, in the CLI and in the language server, so one lintai analysis serves all files
+- on Linux, the plugin starts a small Node.js process (the spawner) when oxlint loads it, and starts lintai through that process. After it loads JS plugins, oxlint 1.90.0 reserves 6 GiB of address space for each lint thread. Then Node cannot start a child process from the oxlint process when the system does not allow that much memory to be committed, and the start fails with `ENOMEM` (see [oxc#20331](https://github.com/oxc-project/oxc/issues/20331)). This occurs, for example, with 4 threads on a machine with 16 GiB of RAM and 4 GiB of swap, such as a GitHub Actions `ubuntu-latest` runner
 
 ## Diagnostic shape and caveats
 

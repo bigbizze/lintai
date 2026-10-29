@@ -211,14 +211,14 @@ Measured on Linux x86_64 (16 cores) on the fixture workspace (`testdata/fixtures
 
 | Command | Node 24.22 | Node 22.23 |
 |---|---|---|
-| `lintai` CLI alone | 305 ms | 316 ms |
-| `eslint src`, no rules | 322 ms | 350 ms |
-| `eslint src` with `@lintai/architecture` | 644 ms | 690 ms |
-| `oxlint src`, no JS plugin | 41 ms | 47 ms |
-| `oxlint src` with `@lintai/oxlint-plugin` loaded, one authoring rule | 144 ms | 149 ms |
-| `oxlint src` with `lintai/architecture` | 465 ms | 490 ms |
+| `lintai` CLI alone | 312 ms | 312 ms |
+| `eslint src`, no rules | 322 ms | 343 ms |
+| `eslint src` with `@lintai/architecture` | 644 ms | 685 ms |
+| `oxlint src`, no JS plugin | 43 ms | 43 ms |
+| `oxlint src` with `@lintai/oxlint-plugin` loaded, one authoring rule | 149 ms | 158 ms |
+| `oxlint src` with `lintai/architecture` | 491 ms | 511 ms |
 
-The lintai analysis (about 310 ms) is the same under both linters. The rest is the host linter: about 330 ms for ESLint, and about 150 ms for oxlint, most of which is the start of its JS plugin runtime.
+The lintai analysis (about 310 ms) is the same under both linters. The rest is the host linter: about 330 ms for ESLint, and about 180 ms for oxlint. Most of the oxlint part is the start of its JS plugin runtime and, on Linux, of the spawner process (see the oxlint plugin caveats in [api.md](api.md#oxlint-plugin-reference-and-caveats)).
 
 The oxlint rule uses `create(context)`, not `createOnce`. `create()` costs about 28 µs per file (it resolves the options and gets the cached client), which is less than 0.1% of the run on this workspace. `createOnce` would save this cost but would make the oxlint rule different in structure from the ESLint rule.
 

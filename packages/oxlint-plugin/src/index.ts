@@ -6,6 +6,7 @@ import {
 	getClient,
 	hasUnsavedChanges,
 	resolveBridgeOptions,
+	startSpawner,
 	toReports,
 	unsavedChangesMessage,
 	type BridgeOptions,
@@ -53,6 +54,12 @@ export function oxlintHostDefaults(argv: string[] = process.argv): HostDefaults 
 	const server = isOxlintLanguageServer(argv);
 	return { defaultMode: server ? "serve" : "oneshot", reportProblemsOnce: !server };
 }
+
+// On Linux, oxlint reserves a large amount of address space after it loads
+// the plugins, and then the oxlint process cannot start lintai. The spawner
+// process starts now, before that, and starts lintai later. See spawner.ts
+// in @lintai/client.
+startSpawner();
 
 const programLocation = { start: { line: 1, column: 0 }, end: { line: 1, column: 0 } };
 

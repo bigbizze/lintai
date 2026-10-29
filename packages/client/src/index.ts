@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 
 import type { Diagnostic } from "./client.js";
+export { startSpawner } from "./spawner.js";
 
 export {
 	LintAIClient,

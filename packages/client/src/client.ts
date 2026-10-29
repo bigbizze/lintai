@@ -5,6 +5,8 @@ import path from "node:path";
 import chokidar from "chokidar";
 import { fileURLToPath } from "node:url";
 
+import { activeSpawner, type SpawnedProcess } from "./spawner.js";
+
 export type Diagnostic = {
 	rule_id: string;
 	assertion_id: string;
@@ -128,6 +130,10 @@ const syncSleep = new Int32Array(new SharedArrayBuffer(4));
 
 const defaultDependencies: ClientDependencies = {
 	spawnServe(binary, args, cwd) {
+		const spawner = activeSpawner();
+		if (spawner) {
+			return spawner.spawn(binary, args, cwd) as unknown as ClientProcess;
+		}
 		const child = spawn(binary, args, {
 			cwd,
 			stdio: ["pipe", "pipe", "inherit"],
@@ -137,6 +143,10 @@ const defaultDependencies: ClientDependencies = {
 		return child as unknown as ClientProcess;
 	},
 	spawnSync(command, args, options) {
+		const spawner = activeSpawner();
+		if (spawner) {
+			return spawner.spawnSync(command, args, options.cwd);
+		}
 		return spawnSync(command, args, options);
 	},
 	watchPath(target, onChange) {
@@ -158,6 +168,10 @@ const defaultDependencies: ClientDependencies = {
 		};
 	},
 	readServeSync(child, timeoutMs) {
+		const spawner = activeSpawner();
+		if (spawner) {
+			return spawner.readSync(child as unknown as SpawnedProcess, timeoutMs);
+		}
 		const fd = getReadableFD(child.stdout);
 		if (fd == null) {
 			throw new Error("lintai serve stdout fd is unavailable for synchronous initialization");
