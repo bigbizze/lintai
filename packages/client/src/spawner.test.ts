@@ -21,6 +21,13 @@ test("the spawner runs a process to completion and relays a long-running process
 	const exited = new Promise<number | null>((resolve) => child.on("exit", (code) => resolve(code)));
 	child.stdin.write(Buffer.from("second"));
 	child.stdin.end();
-	assert.equal(await exited, 0);
+	// The spawner does not keep the event loop alive, because the host linter
+	// does that. This timer does it for the test.
+	const keepAlive = setInterval(() => undefined, 1_000);
+	try {
+		assert.equal(await exited, 0);
+	} finally {
+		clearInterval(keepAlive);
+	}
 	assert.deepEqual(received, ["second"]);
 });
