@@ -235,7 +235,7 @@ Reinstall `@lintai/cli` on a supported platform and architecture. The launcher r
 
 ### `could not find lintai asset root`
 
-The asset root is the directory that contains `scripts/bundle-rule.mjs` and `scripts/prepare-rule.mjs`. lintai looks for `node_modules/@lintai/client`, then `packages/client`, then the repository root. Pass `--asset-root` explicitly if you are running the Go binary directly outside the npm package layout.
+The asset root is the directory that contains `scripts/bundle-rule.mjs` and `scripts/prepare-rule.mjs`. lintai looks for `node_modules/@lintai/client`, then `node_modules/.pnpm/node_modules/@lintai/client` (pnpm), then `packages/client`, then the repository root. Pass `--asset-root` explicitly if you are running the Go binary directly outside the npm package layout.
 
 ### Rule bundles fail unexpectedly
 

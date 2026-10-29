@@ -13,8 +13,15 @@ test("the spawner runs a process to completion and relays a long-running process
 	// An echo process: it writes each stdin chunk back, and exits when stdin
 	// closes, as lintai serve does.
 	const child = spawner.spawn(process.execPath, ["-e", "process.stdin.pipe(process.stdout)"], process.cwd());
-	child.stdin.write(Buffer.from("first"));
-	assert.equal(spawner.readSync(child, 10_000).toString(), "first");
+	// A message larger than a pipe buffer must reach the spawner while the
+	// host blocks in readSync.
+	const large = Buffer.alloc(1024 * 1024, "x");
+	child.stdin.write(large);
+	const echoed: Buffer[] = [];
+	while (Buffer.concat(echoed).length < large.length) {
+		echoed.push(spawner.readSync(child, 10_000));
+	}
+	assert.ok(Buffer.concat(echoed).equals(large));
 
 	const received: string[] = [];
 	child.stdout.on("data", (chunk: Buffer) => received.push(chunk.toString()));

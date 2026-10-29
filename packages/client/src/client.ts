@@ -125,7 +125,6 @@ type ClientDependencies = {
 const clientCache = new Map<string, LintAIClient>();
 const initializeTimeoutMs = 60_000;
 const refreshIdleMs = 750;
-const modifiedTimeMarginMs = 2_000;
 const syncSleep = new Int32Array(new SharedArrayBuffer(4));
 
 const defaultDependencies: ClientDependencies = {
@@ -635,10 +634,15 @@ export class LintAIClient {
 	// not get the diagnostics of the old file. Each saved version causes one
 	// analysis at most, so a modification time in the future cannot cause an
 	// analysis on every lint. Some file systems store modification times in
-	// whole seconds, so a save shortly before the analysis started also counts.
+	// whole seconds, so for a whole-second time a save up to one second before
+	// the analysis started also counts.
 	private savedSinceAnalysis(file: string): number | undefined {
 		const modifiedAt = this.dependencies.modifiedAt(path.join(this.options.workspaceRoot, file));
-		if (modifiedAt === undefined || modifiedAt < this.diagnosticsAnalyzedAt - modifiedTimeMarginMs) {
+		if (modifiedAt === undefined) {
+			return undefined;
+		}
+		const margin = modifiedAt % 1_000 === 0 ? 1_000 : 0;
+		if (modifiedAt < this.diagnosticsAnalyzedAt - margin) {
 			return undefined;
 		}
 		return this.savedVersionsAnalyzed.get(file) === modifiedAt ? undefined : modifiedAt;

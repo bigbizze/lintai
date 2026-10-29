@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { readSync } from "node:fs";
+import { readSync, writeSync } from "node:fs";
 import path from "node:path";
 import { PassThrough, type Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
@@ -64,7 +64,7 @@ type Channel = {
 const syncSleep = new Int32Array(new SharedArrayBuffer(4));
 
 export class Spawner {
-	private readonly child: ChildProcess;
+	private readonly child: ChildProcess | undefined;
 	private readonly decoder = new FrameDecoder();
 	private readonly results = new Map<number, SpawnerMessage & { type: "result" }>();
 	private readonly channels = new Map<number, Channel>();
@@ -72,15 +72,29 @@ export class Spawner {
 	private nextID = 1;
 	private failure: Error | undefined;
 
+	get failed(): boolean {
+		return this.failure !== undefined;
+	}
+
 	constructor(script: string = path.join(path.dirname(fileURLToPath(import.meta.url)), "spawner-child.js")) {
-		this.child = spawn(process.execPath, [script], { stdio: ["pipe", "pipe", "inherit"] });
-		this.child.on("error", (error) => this.fail(error));
-		this.child.on("exit", () => this.fail(new Error("the lintai spawner process exited")));
-		this.child.stdin?.on("error", (error) => this.fail(error));
-		this.child.stdout?.on("data", (chunk: Buffer) => this.receive(chunk));
-		this.child.unref();
-		unrefStream(this.child.stdin);
-		unrefStream(this.child.stdout);
+		let child: ChildProcess;
+		try {
+			child = spawn(process.execPath, [script], { stdio: ["pipe", "pipe", "inherit"] });
+		} catch (error) {
+			this.child = undefined;
+			this.failure = new Error(
+				`could not start the lintai spawner process: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return;
+		}
+		this.child = child;
+		child.on("error", (error) => this.fail(error));
+		child.on("exit", () => this.fail(new Error("the lintai spawner process exited")));
+		child.stdin?.on("error", (error) => this.fail(error));
+		child.stdout?.on("data", (chunk: Buffer) => this.receive(chunk));
+		child.unref();
+		unrefStream(child.stdin);
+		unrefStream(child.stdout);
 	}
 
 	spawnSync(command: string, args: string[], cwd: string): RunResult {
@@ -180,21 +194,46 @@ export class Spawner {
 			}
 			this.readOnce(deadline);
 		}
-		return Buffer.concat(channel.pending.splice(0));
+		const output = Buffer.concat(channel.pending.splice(0));
+		if (channel.exit) {
+			this.scheduleFlush(channel);
+		}
+		return output;
 	}
 
+	// send writes the whole frame before it returns. The callers then block
+	// the event loop while they wait for the answer, so a write that the
+	// event loop would finish later could never complete.
 	private send(message: HostMessage): void {
 		if (this.failure) {
 			throw this.failure;
 		}
-		this.child.stdin?.write(encodeFrame(message));
+		const frame = encodeFrame(message);
+		const fd = (this.child?.stdin as unknown as { _handle?: { fd?: number } } | null)?._handle?.fd;
+		if (typeof fd !== "number") {
+			this.child?.stdin?.write(frame);
+			return;
+		}
+		let offset = 0;
+		while (offset < frame.length) {
+			try {
+				offset += writeSync(fd, frame, offset);
+			} catch (error) {
+				const code = (error as NodeJS.ErrnoException)?.code;
+				if (code !== "EAGAIN" && code !== "EWOULDBLOCK") {
+					this.fail(error instanceof Error ? error : new Error(String(error)));
+					throw this.failure;
+				}
+				Atomics.wait(syncSleep, 0, 0, 1);
+			}
+		}
 	}
 
 	private readOnce(deadline: number | undefined): void {
 		if (this.failure) {
 			throw this.failure;
 		}
-		const fd = (this.child.stdout as unknown as { _handle?: { fd?: number } })._handle?.fd;
+		const fd = (this.child?.stdout as unknown as { _handle?: { fd?: number } } | null)?._handle?.fd;
 		if (typeof fd !== "number") {
 			throw new Error("the lintai spawner stdout fd is unavailable");
 		}
@@ -290,20 +329,29 @@ function unrefStream(stream: unknown): void {
 
 let active: Spawner | undefined;
 
+let enabled = false;
+
 // startSpawner starts the spawner process on Linux, where fork() can fail in
 // a large host process. Call it when the host linter loads the plugin. Later
 // lintai processes of this process start through the spawner.
 export function startSpawner(): void {
-	if (active || process.platform !== "linux") {
+	if (process.platform !== "linux") {
 		return;
 	}
-	try {
-		active = new Spawner();
-	} catch {
-		active = undefined;
-	}
+	enabled = true;
+	activeSpawner();
 }
 
+// activeSpawner returns the spawner when startSpawner was called. When the
+// spawner process failed, it starts a new one. If that start fails too
+// (with ENOMEM after the host reserved its memory), the new spawner reports
+// the error to the client, which reports it as a workspace problem.
 export function activeSpawner(): Spawner | undefined {
+	if (!enabled) {
+		return undefined;
+	}
+	if (!active || active.failed) {
+		active = new Spawner();
+	}
 	return active;
 }

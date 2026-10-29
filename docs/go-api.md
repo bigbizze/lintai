@@ -59,7 +59,8 @@ create the diagnostic source location.
 
 `AssetRoot` is the directory that contains `scripts/bundle-rule.mjs` and
 `scripts/prepare-rule.mjs`, which bundle and run the rules in Node. In an npm
-install it is `node_modules/@lintai/client`; in this repository it is
+install it is `node_modules/@lintai/client` (with pnpm,
+`node_modules/.pnpm/node_modules/@lintai/client`); in this repository it is
 `packages/client`.
 
 `Version` identifies the snapshot in diagnostic provenance and in the server's

@@ -316,13 +316,35 @@ test("a background refresh that started before a save-triggered analysis does no
 	const child = createTestProcess();
 	let now = 0;
 	let modifiedAt = -10_000;
+	const requests: string[] = [];
+	child.stdin.on("data", (chunk: Buffer) => {
+		const method = /"method":"([^"]+)"/.exec(chunk.toString("utf8"))?.[1];
+		if (method) {
+			requests.push(method);
+		}
+	});
+	const staleDiagnostic = {
+		rule_id: "arch.old",
+		assertion_id: "default",
+		message: "old",
+		source_location: { file: "src/example.ts", startLine: 1, startColumn: 1, endLine: 1, endColumn: 2 },
+	};
+	// lintai serve answers in request order, so the synchronous read for the
+	// save-triggered request (id 3) also returns the background answer (id 2).
 	const responses = [
 		createInitializeResult("arch.old"),
-		createFramedResponse({
-			jsonrpc: "2.0",
-			id: 3,
-			result: { rulesLoaded: 1, diagnosticCount: 0, snapshotVersion: "snap-saved", diagnostics: [] },
-		}),
+		Buffer.concat([
+			createFramedResponse({
+				jsonrpc: "2.0",
+				id: 2,
+				result: { rulesLoaded: 1, diagnosticCount: 1, snapshotVersion: "snap-background", diagnostics: [staleDiagnostic] },
+			}),
+			createFramedResponse({
+				jsonrpc: "2.0",
+				id: 3,
+				result: { rulesLoaded: 1, diagnosticCount: 0, snapshotVersion: "snap-saved", diagnostics: [] },
+			}),
+		]),
 	];
 	const client = new LintAIClient(
 		resolveBridgeOptions(
@@ -346,28 +368,68 @@ test("a background refresh that started before a save-triggered analysis does no
 	now = 12_000;
 	modifiedAt = 11_500;
 	assert.deepEqual(client.getDiagnostics("src/example.ts"), []);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.deepEqual(client.getDiagnostics("src/example.ts"), []);
 
-	child.stdout.write(
+	now = 20_000;
+	client.getDiagnostics("src/example.ts");
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.deepEqual(requests, ["initialize", "reanalyze", "reanalyze", "reanalyze"]);
+	client.dispose();
+});
+
+test("a save of many files causes one analysis", () => {
+	const child = createTestProcess();
+	let now = 0;
+	const modified = new Map<string, number>();
+	const requests: string[] = [];
+	child.stdin.on("data", (chunk: Buffer) => {
+		const method = /"method":"([^"]+)"/.exec(chunk.toString("utf8"))?.[1];
+		if (method) {
+			requests.push(method);
+		}
+	});
+	const responses = [
+		createInitializeResult("arch.old"),
 		createFramedResponse({
 			jsonrpc: "2.0",
 			id: 2,
-			result: {
-				rulesLoaded: 1,
-				diagnosticCount: 1,
-				snapshotVersion: "snap-background",
-				diagnostics: [
-					{
-						rule_id: "arch.old",
-						assertion_id: "default",
-						message: "old",
-						source_location: { file: "src/example.ts", startLine: 1, startColumn: 1, endLine: 1, endColumn: 2 },
-					},
-				],
+			result: { rulesLoaded: 1, diagnosticCount: 0, snapshotVersion: "snap-2", diagnostics: [] },
+		}),
+	];
+	const client = new LintAIClient(
+		resolveBridgeOptions(
+			{ mode: "serve", binary: "/tmp/lintai", repoRoot: "/repo", workspaceRoot: "/workspace" },
+			"/repo",
+			editorHost,
+		),
+		createTestDependencies({
+			spawnServe: () => child,
+			readServeSync: () => {
+				const response = responses.shift();
+				if (!response) {
+					throw new Error(`unexpected request after ${requests.join(", ")}`);
+				}
+				return response;
 			},
+			modifiedAt: (file) => modified.get(file),
+			now: () => now,
+			log: () => undefined,
 		}),
 	);
-	await new Promise((resolve) => setImmediate(resolve));
-	assert.deepEqual(client.getDiagnostics("src/example.ts"), []);
+
+	now = 10_000;
+	client.getDiagnostics("src/a.ts");
+	for (const name of ["a", "b", "c"]) {
+		modified.set(`/workspace/src/${name}.ts`, 20_000.5);
+	}
+	now = 20_100;
+	client.getDiagnostics("src/a.ts");
+	now = 20_200;
+	client.getDiagnostics("src/b.ts");
+	now = 20_300;
+	client.getDiagnostics("src/c.ts");
+	assert.deepEqual(requests, ["initialize", "reanalyze"]);
 	client.dispose();
 });
 
