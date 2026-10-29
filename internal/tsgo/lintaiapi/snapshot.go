@@ -517,7 +517,8 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 type parsedConfig struct {
 	// original is the tsconfig as the project wrote it. command is the
 	// command line to build the program with: the original, or an adjusted
-	// copy when TypeScript 7 rejects options of the original.
+	// copy when TypeScript 7 rejects options of the original. command is nil
+	// until program is called for the config.
 	original    *tsoptions.ParsedCommandLine
 	command     *tsoptions.ParsedCommandLine
 	adjustments []ConfigAdjustment
@@ -562,14 +563,30 @@ func (c *configCache) load(configPath string) (*parsedConfig, error) {
 			references = append(references, referencePath)
 		}
 	}
-	adjusted, adjustments, err := adjustForTypeScript7(c.host, configPath, command)
-	if err != nil {
-		c.errors[configPath] = err
-		return nil, err
-	}
-	parsed := &parsedConfig{original: command, command: adjusted, adjustments: adjustments, rootFiles: rootFiles, references: references}
+	parsed := &parsedConfig{original: command, rootFiles: rootFiles, references: references}
 	c.configs[configPath] = parsed
 	return parsed, nil
+}
+
+// program returns the config that the program of a group uses: the loaded
+// config, adjusted when TypeScript 7 rejects some of its options. Only
+// program configs are adjusted, so a referenced config that cannot be
+// adjusted does not stop the groups of other configs.
+func (c *configCache) program(configPath string) (*tsoptions.ParsedCommandLine, error) {
+	parsed, err := c.load(configPath)
+	if err != nil {
+		return nil, err
+	}
+	if parsed.command != nil {
+		return parsed.command, nil
+	}
+	adjusted, adjustments, err := adjustForTypeScript7(c.host, configPath, parsed.original)
+	if err != nil {
+		return nil, err
+	}
+	parsed.command = adjusted
+	parsed.adjustments = adjustments
+	return adjusted, nil
 }
 
 // files returns the paths of every loaded config and of the configs that
@@ -697,7 +714,11 @@ func discoverConfigGroups(workspaceRoot string, files []string, configs *configC
 		slices.Sort(primaryFiles)
 		group := configGroup{ConfigPath: key, PrimaryFiles: primaryFiles}
 		if key != "" {
-			group.Config = configs.configs[key].command
+			command, err := configs.program(key)
+			if err != nil {
+				return nil, err
+			}
+			group.Config = command
 		}
 		groups = append(groups, group)
 	}

@@ -100,8 +100,17 @@ chmod 644 internal/tsgo/LICENSE.txt internal/tsgo/NOTICE.txt
 # 8. VERSION.
 core_version="$(sed -n 's/^var version = "\(.*\)"$/\1/p' "$tsc/internal/core/version.go")"
 npm_version=""
-if [ -n "$core_version" ] && command -v npm >/dev/null; then
-	if [ "$(npm view "typescript@$core_version" gitHead 2>/dev/null || true)" = "$commit" ]; then
+if [ -n "$core_version" ]; then
+	command -v npm >/dev/null || { echo "sync-tsgo: npm is required to look up typescript@$core_version" >&2; exit 1; }
+	npm_err="$work/npm-view.err"
+	npm_status=0
+	npm_head="$(npm view "typescript@$core_version" gitHead 2>"$npm_err")" || npm_status=$?
+	if [ "$npm_status" -ne 0 ] && ! grep -q E404 "$npm_err"; then
+		echo "sync-tsgo: npm view typescript@$core_version failed:" >&2
+		cat "$npm_err" >&2
+		exit 1
+	fi
+	if [ "$npm_head" = "$commit" ]; then
 		npm_version="$core_version"
 	fi
 fi

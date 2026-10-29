@@ -59,7 +59,7 @@ Current caveats:
   - rule-file edits invalidate the cache and force a fresh analysis on the next lint pass
 - lintai reads saved files, not unsaved editor text. A file with unsaved changes shows one message that asks you to save it.
 - the types that rules see are the view of lintai's own TypeScript 7 compiler. They can differ from the view of the TypeScript version that your repository builds with.
-- TypeScript 7 rejects some compiler options that TypeScript 5 projects still use, for example `baseUrl`, `moduleResolution: "node"` and `target: "es5"`. lintai analyzes such a `tsconfig.json` with those options changed: `baseUrl` becomes absolute `paths`, a removed `moduleResolution` becomes the TypeScript 7 default, and other removed options are dropped. lintai prints one line to stderr for each changed `tsconfig.json`, and each change is a `config_adjusted` fact.
+- TypeScript 7 rejects some compiler options that TypeScript 5 projects still use, for example `baseUrl`, `moduleResolution: "node"` and `target: "es5"`. lintai analyzes such a `tsconfig.json` with those options changed: `baseUrl` becomes absolute `paths`, a removed `moduleResolution` becomes the TypeScript 7 default, and other removed options are dropped. The CLI prints one line to stderr for each changed `tsconfig.json` (Go API users set `typescript.Backend.Log`), and each change is a `config_adjusted` fact.
 
 ## Install and caveats
 

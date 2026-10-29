@@ -6,10 +6,10 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"os"
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/bigbizze/lintai/backend"
 	"github.com/bigbizze/lintai/diagnostics"
@@ -20,7 +20,15 @@ import (
 	"github.com/bigbizze/lintai/internal/workspace"
 )
 
-type Backend struct{}
+// Backend extracts facts from TypeScript and JavaScript files.
+type Backend struct {
+	// Log receives one line for each tsconfig that lintai adjusted for
+	// TypeScript 7, once per config and adjustment set. Nil discards them.
+	Log io.Writer
+
+	reportedMu sync.Mutex
+	reported   map[string]string
+}
 
 var _ backend.Backend = (*Backend)(nil)
 
@@ -66,7 +74,7 @@ func (b *Backend) buildAnalysisSnapshot(ctx context.Context, repoRoot, workspace
 	}
 	files := moduleFiles(workspaceRoot, walked, extracted.Modules)
 	adjustments := convertAdjustments(workspaceRoot, extracted.ConfigAdjustments)
-	reportAdjustments(os.Stderr, adjustments)
+	b.reportAdjustments(adjustments)
 
 	modules := convertModules(extracted.Modules)
 	functions := convertFunctions(extracted.Functions)
@@ -264,10 +272,20 @@ func convertAdjustments(workspaceRoot string, items []lintaiapi.ConfigAdjustment
 	return result
 }
 
-// reportAdjustments prints one line per adjusted tsconfig, for example
-// "lintai: adjusted tsconfig.json for TypeScript 7 (baseUrl rewritten,
-// target removed)". The adjustments are sorted by config.
-func reportAdjustments(out io.Writer, adjustments []analysis.ConfigAdjustment) {
+// reportAdjustments writes one line per adjusted tsconfig to b.Log, for
+// example "lintai: adjusted tsconfig.json for TypeScript 7 (baseUrl
+// rewritten, target removed)". A line that b.Log already received for the
+// config is not written again, so lintai serve does not repeat it on every
+// refresh. The adjustments are sorted by config.
+func (b *Backend) reportAdjustments(adjustments []analysis.ConfigAdjustment) {
+	if b.Log == nil {
+		return
+	}
+	b.reportedMu.Lock()
+	defer b.reportedMu.Unlock()
+	if b.reported == nil {
+		b.reported = make(map[string]string)
+	}
 	for start := 0; start < len(adjustments); {
 		end := start
 		changes := make([]string, 0)
@@ -275,7 +293,12 @@ func reportAdjustments(out io.Writer, adjustments []analysis.ConfigAdjustment) {
 			changes = append(changes, adjustments[end].Option+" "+adjustments[end].Action)
 			end++
 		}
-		fmt.Fprintf(out, "lintai: adjusted %s for TypeScript 7 (%s)\n", adjustments[start].Config, strings.Join(changes, ", "))
+		config := adjustments[start].Config
+		line := fmt.Sprintf("lintai: adjusted %s for TypeScript 7 (%s)\n", config, strings.Join(changes, ", "))
+		if b.reported[config] != line {
+			b.reported[config] = line
+			_, _ = io.WriteString(b.Log, line)
+		}
 		start = end
 	}
 }
