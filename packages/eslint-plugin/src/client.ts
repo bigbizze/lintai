@@ -11,6 +11,7 @@ export type Diagnostic = {
 	diagnostic_kind?: string;
 	severity?: string;
 	message: string;
+	phase?: string;
 	source_location?: {
 		file: string;
 		startLine: number;
@@ -67,6 +68,11 @@ type JSONRPCResponse<T = unknown> = {
 		code: number;
 		message: string;
 	};
+};
+
+type IndexedDiagnostics = {
+	byFile: Map<string, Diagnostic[]>;
+	unlocated: Diagnostic[];
 };
 
 type ClientState = "idle" | "starting" | "ready" | "invalidated" | "fallback" | "disposed";
@@ -184,9 +190,14 @@ export class LintAIClient {
 	private pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
 	private stdoutBuffer = Buffer.alloc(0);
 	private diagnosticsByFile = new Map<string, Diagnostic[]>();
+	private unlocated: Diagnostic[] = [];
+	private serveFailure: string | undefined;
+	private analysisFailure: string | undefined;
+	private problemsReported = false;
+	private readonly reportProblemsOnce = isLikelyESLintCLIProcess();
 	private initialization: Promise<void> | undefined;
 	private refreshInFlight: Promise<void> | undefined;
-	private oneshotCache: Map<string, Diagnostic[]> | undefined;
+	private oneshotCache: IndexedDiagnostics | undefined;
 	private warned = new Set<string>();
 	private lastDiagnosticsRequestAt = -1;
 	private attachedStdoutListener = false;
@@ -222,6 +233,38 @@ export class LintAIClient {
 		return [];
 	}
 
+	// problems returns the workspace-wide problems that every file must show:
+	// a failed analysis, a serve process that fell back to oneshot mode, and
+	// rules that could not run. Without them a broken setup shows no
+	// diagnostics, which looks the same as a clean workspace.
+	//
+	// The ESLint CLI lints each file once, so in that process the problems are
+	// returned for the first file only, so that they are not repeated for every
+	// file. An editor lints files again, so it gets them on every call.
+	problems(): string[] {
+		if (this.reportProblemsOnce) {
+			if (this.problemsReported) {
+				return [];
+			}
+			this.problemsReported = true;
+		}
+		const items: string[] = [];
+		if (this.serveFailure) {
+			items.push(
+				`[lintai] lintai serve failed, so diagnostics come from one lintai run and do not update until ESLint restarts: ${this.serveFailure}`,
+			);
+		}
+		if (this.analysisFailure) {
+			items.push(`[lintai] lintai could not analyze the workspace: ${this.analysisFailure}`);
+		}
+		const unlocated = this.state === "fallback" ? (this.oneshotCache?.unlocated ?? []) : this.unlocated;
+		for (const diagnostic of unlocated) {
+			const phase = diagnostic.phase ? ` (phase ${diagnostic.phase})` : "";
+			items.push(`[lintai] rule ${diagnostic.rule_id} could not run${phase}: ${diagnostic.message}`);
+		}
+		return items;
+	}
+
 	refresh(): Promise<void> {
 		this.ensureStarted();
 		if (this.state !== "ready") {
@@ -239,9 +282,14 @@ export class LintAIClient {
 				this.setDiagnostics(result.diagnostics);
 			})
 			.catch((error) => {
-				if (this.state === "ready") {
-					this.warnOnce(`lintai serve reanalyze failed: ${asError(error).message}`);
+				if (targetEpoch !== this.analysisEpoch || this.state !== "ready") {
+					return;
 				}
+				const message = asError(error).message;
+				this.warnOnce(`lintai serve reanalyze failed: ${message}`);
+				this.diagnosticsByFile = new Map();
+				this.unlocated = [];
+				this.analysisFailure = message;
 			})
 			.finally(() => {
 				this.refreshInFlight = undefined;
@@ -347,10 +395,11 @@ export class LintAIClient {
 		if (!this.oneshotCache) {
 			this.oneshotCache = this.loadOneshotDiagnostics();
 		}
-		return this.oneshotCache.get(file) ?? [];
+		return this.oneshotCache.byFile.get(file) ?? [];
 	}
 
-	private loadOneshotDiagnostics(): Map<string, Diagnostic[]> {
+	private loadOneshotDiagnostics(): IndexedDiagnostics {
+		this.analysisFailure = undefined;
 		const result = this.dependencies.spawnSync(
 			this.options.binary,
 			[
@@ -375,20 +424,22 @@ export class LintAIClient {
 				encoding: "utf8",
 			},
 		);
+		const fail = (message: string): IndexedDiagnostics => {
+			this.warnOnce(`lintai oneshot run failed: ${message}`);
+			this.analysisFailure = message;
+			return { byFile: new Map(), unlocated: [] };
+		};
 		if (result.error) {
-			this.warnOnce(`lintai oneshot fallback failed: ${result.error.message}`);
-			return new Map();
+			return fail(result.error.message);
 		}
 		if (!result.stdout) {
-			this.warnOnce(`lintai oneshot fallback produced no output${result.stderr ? `: ${result.stderr}` : ""}`);
-			return new Map();
+			const stderr = result.stderr?.trim();
+			return fail(`lintai exited with status ${result.status ?? "null"} and no output${stderr ? `: ${stderr}` : ""}`);
 		}
 		try {
-			const diagnostics = JSON.parse(result.stdout) as Diagnostic[];
-			return indexDiagnostics(diagnostics);
+			return indexDiagnostics(JSON.parse(result.stdout) as Diagnostic[]);
 		} catch (error) {
-			this.warnOnce(`lintai oneshot fallback returned invalid JSON: ${asError(error).message}`);
-			return new Map();
+			return fail(`lintai returned invalid JSON: ${asError(error).message}`);
 		}
 	}
 
@@ -576,6 +627,9 @@ export class LintAIClient {
 			return;
 		}
 		this.warnOnce(`lintai serve unavailable, falling back to oneshot mode: ${error.message}`);
+		this.serveFailure = error.message;
+		this.diagnosticsByFile = new Map();
+		this.unlocated = [];
 
 		for (const pending of this.pending.values()) {
 			pending.reject(error);
@@ -593,7 +647,10 @@ export class LintAIClient {
 	}
 
 	private setDiagnostics(diagnostics: Diagnostic[]): void {
-		this.diagnosticsByFile = indexDiagnostics(diagnostics);
+		const indexed = indexDiagnostics(diagnostics);
+		this.diagnosticsByFile = indexed.byFile;
+		this.unlocated = indexed.unlocated;
+		this.analysisFailure = undefined;
 	}
 
 	private ensureRuleWatchers(): void {
@@ -642,6 +699,8 @@ export class LintAIClient {
 		this.analysisEpoch += 1;
 		this.pendingRuleInvalidation = false;
 		this.diagnosticsByFile = new Map();
+		this.unlocated = [];
+		this.analysisFailure = undefined;
 		this.oneshotCache = undefined;
 		this.refreshInFlight = undefined;
 		if (this.state === "idle") {
@@ -807,11 +866,15 @@ export function createFramedResponse(response: JSONRPCResponse): Buffer {
 	return Buffer.concat([Buffer.from(`Content-Length: ${payload.length}\r\n\r\n`, "utf8"), payload]);
 }
 
-function indexDiagnostics(diagnostics: Diagnostic[]): Map<string, Diagnostic[]> {
+function indexDiagnostics(diagnostics: Diagnostic[]): IndexedDiagnostics {
 	const byFile = new Map<string, Diagnostic[]>();
+	const unlocated: Diagnostic[] = [];
 	for (const diagnostic of diagnostics) {
 		const key = diagnostic.source_location?.file;
 		if (!key) {
+			if (diagnostic.diagnostic_kind === "rule_execution_error") {
+				unlocated.push(diagnostic);
+			}
 			continue;
 		}
 		const normalized = normalizeFile(key);
@@ -819,7 +882,7 @@ function indexDiagnostics(diagnostics: Diagnostic[]): Map<string, Diagnostic[]> 
 		items.push(diagnostic);
 		byFile.set(normalized, items);
 	}
-	return byFile;
+	return { byFile, unlocated };
 }
 
 function normalizeFile(file: string): string {

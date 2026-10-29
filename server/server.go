@@ -206,7 +206,7 @@ func (s *Server) handleFileDiagnostics(rawParams json.RawMessage) (FileDiagnosti
 		s.mu.RUnlock()
 		return FileDiagnosticsResult{}, fmt.Errorf("analysis results unavailable")
 	}
-	items := append([]diagnostics.Diagnostic(nil), s.diagnosticsByFile[key]...)
+	items := append([]diagnostics.Diagnostic{}, s.diagnosticsByFile[key]...)
 	s.mu.RUnlock()
 
 	return FileDiagnosticsResult{Diagnostics: items}, nil
@@ -268,11 +268,13 @@ func (s *Server) invalidateAnalysis() {
 }
 
 func analysisResult(result engine.Result) AnalysisResult {
+	items := make([]diagnostics.Diagnostic, len(result.Diagnostics))
+	copy(items, result.Diagnostics)
 	return AnalysisResult{
 		RulesLoaded:     result.RulesLoaded,
 		DiagnosticCount: len(result.Diagnostics),
 		SnapshotVersion: result.SnapshotVersion,
-		Diagnostics:     append([]diagnostics.Diagnostic(nil), result.Diagnostics...),
+		Diagnostics:     items,
 	}
 }
 
