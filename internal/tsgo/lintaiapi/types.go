@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"maps"
 	"math"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -39,6 +41,21 @@ const (
 	TypeKindOther         = "other"
 )
 
+// Reasons of type_incomplete.
+const (
+	IncompleteTruncated   = "truncated"
+	IncompleteUnsupported = "unsupported"
+	IncompleteSignatures  = "signatures"
+	IncompleteConstraint  = "constraint"
+	IncompleteConflict    = "conflict"
+)
+
+// Marks of a tuple element or a signature parameter.
+const (
+	MarkOptional = "optional"
+	MarkRest     = "rest"
+)
+
 const (
 	LiteralString  = "string"
 	LiteralNumber  = "number"
@@ -63,49 +80,59 @@ type TypeProp struct {
 	Name     string
 	Type     string
 	Optional bool
+	Readonly bool
 }
 
 // TypeFact is one type entity. Its ID is derived from the canonical key of
 // the type, so the same type has the same ID in every config group and in
 // every run. The fields that refer to other types hold their IDs.
 type TypeFact struct {
-	ID     string
-	Kind   string
-	Named  bool
-	Origin string
-	Name   string
+	ID         string
+	Kind       string
+	Named      bool
+	OriginKind string
+	Origin     string
+	Name       string
 	// Args are the type arguments of a named type or the elements of a
-	// tuple.
+	// tuple. ArgMarks, when not nil, has a mark for each tuple element:
+	// MarkOptional, MarkRest or "".
 	Args       []string
+	ArgMarks   []string
+	Readonly   bool
 	Members    []string
 	Literal    *TypeLiteral
 	ParamName  string
 	Props      []TypeProp
 	SigParams  []string
+	SigMarks   []string
 	SigReturns string
+	// Incomplete holds the sorted type_incomplete reasons.
+	Incomplete []string
 	Display    string
 	Location   *SourceLocation
 }
 
 // typeShape is the classification of one checker type.
 type typeShape struct {
-	kind     string
-	named    bool
-	origin   string
-	name     string
-	nameDecl *ast.Node
+	kind       string
+	named      bool
+	originKind string
+	origin     string
+	name       string
+	nameDecl   *ast.Node
 	// localPos is the position of a type declared in a function body. It
 	// is part of the key only.
 	localPos string
 	args     []*checker.Type
 	argMarks []string
+	readonly bool
 	members  []*checker.Type
 	literal  *TypeLiteral
 	litKey   string
-	// paramName and paramOwner are the name of a type parameter and the
-	// qualified name of the declaration that declares it.
+	// paramName is the name of a type parameter, and paramPos is the
+	// position of its declaration in the file of origin.
 	paramName  string
-	paramOwner string
+	paramPos   string
 	props      []shapeProp
 	sigParams  []*checker.Type
 	sigMarks   []string
@@ -113,13 +140,22 @@ type typeShape struct {
 	callSigs   []*checker.Signature
 	ctorSigs   []*checker.Signature
 	indexInfos []*checker.IndexInfo
-	otherText  string
+	// otherKey is the key of an /other type.
+	otherKey string
+	// otherParts are types inside an /other type, such as the object and
+	// index of an indexed access type. Their keys are part of the key of
+	// the /other type, so Db[K] from two files gets two IDs. They have no
+	// facts.
+	otherParts []*checker.Type
+	// incomplete holds the type_incomplete reasons of the shape.
+	incomplete []string
 }
 
 type shapeProp struct {
 	name     string
 	t        *checker.Type
 	optional bool
+	readonly bool
 }
 
 // emitFunctionType records the facts of a parameter or return type and of
@@ -137,15 +173,19 @@ func (e *extractor) emitFunctionType(root *checker.Type, enclosing *ast.Node) st
 		visited[t] = struct{}{}
 		id := e.typeID(t)
 		display := e.typeDisplay(t, enclosing)
-		if existing := e.typeFacts[id]; existing != nil {
+		existing := e.typeFacts[id]
+		switch {
+		case existing == nil:
+			e.typeFacts[id] = e.newTypeFact(t, id, display)
+			e.typeFactSeen[t] = struct{}{}
+		case !hasKey(e.typeFactSeen, t):
+			// Another checker type has this ID. Its facts must agree.
+			*existing = mergeTypeFact(*existing, *e.newTypeFact(t, id, display))
+			e.typeFactSeen[t] = struct{}{}
+		default:
 			if display < existing.Display {
 				existing.Display = display
 			}
-			if existing.Location == nil {
-				existing.Location = e.typeLocation(t)
-			}
-		} else {
-			e.typeFacts[id] = e.newTypeFact(t, id, display)
 		}
 		if e.isTruncated(t) {
 			return
@@ -191,38 +231,70 @@ func (s *typeShape) children() []*checker.Type {
 
 func (e *extractor) newTypeFact(t *checker.Type, id string, display string) *TypeFact {
 	shape := e.typeShapeOf(t)
-	if e.isTruncated(t) {
-		return &TypeFact{ID: id, Kind: TypeKindOther, Named: shape.named, Origin: shape.origin, Name: shape.name, Display: display}
-	}
 	fact := &TypeFact{
-		ID:        id,
-		Kind:      shape.kind,
-		Named:     shape.named,
-		Origin:    shape.origin,
-		Name:      shape.name,
-		Literal:   shape.literal,
-		ParamName: shape.paramName,
-		Display:   display,
+		ID:      id,
+		Named:   shape.named,
+		Origin:  shape.origin,
+		Name:    shape.name,
+		Display: display,
 	}
+	if shape.named {
+		fact.OriginKind = shape.originKind
+	}
+	fact.Location = e.typeLocation(t)
+	if e.isTruncated(t) {
+		fact.Kind = TypeKindOther
+		fact.Incomplete = []string{IncompleteTruncated}
+		return fact
+	}
+	fact.Kind = shape.kind
+	fact.Literal = shape.literal
+	fact.ParamName = shape.paramName
+	fact.Readonly = shape.readonly
+	fact.Incomplete = slices.Clone(shape.incomplete)
 	for _, arg := range shape.args {
 		fact.Args = append(fact.Args, e.typeID(arg))
 	}
+	fact.ArgMarks = factMarks(shape.argMarks)
 	for _, member := range shape.members {
 		fact.Members = append(fact.Members, e.typeID(member))
 	}
 	slices.Sort(fact.Members)
 	fact.Members = slices.Compact(fact.Members)
 	for _, prop := range shape.props {
-		fact.Props = append(fact.Props, TypeProp{Name: prop.name, Type: e.typeID(prop.t), Optional: prop.optional})
+		fact.Props = append(fact.Props, TypeProp{Name: prop.name, Type: e.typeID(prop.t), Optional: prop.optional, Readonly: prop.readonly})
 	}
 	if shape.kind == TypeKindFunction {
 		for _, param := range shape.sigParams {
 			fact.SigParams = append(fact.SigParams, e.typeID(param))
 		}
+		fact.SigMarks = factMarks(shape.sigMarks)
 		fact.SigReturns = e.typeID(shape.sigReturn)
 	}
-	fact.Location = e.typeLocation(t)
 	return fact
+}
+
+// factMarks converts the key marks of tuple elements or signature
+// parameters to TypeFact marks. It returns nil when no item is marked.
+func factMarks(marks []string) []string {
+	if !slices.ContainsFunc(marks, func(mark string) bool { return mark != "" }) {
+		return nil
+	}
+	result := make([]string, len(marks))
+	for index, mark := range marks {
+		switch mark {
+		case "?":
+			result[index] = MarkOptional
+		case "...":
+			result[index] = MarkRest
+		}
+	}
+	return result
+}
+
+func hasKey[K comparable, V any](m map[K]V, key K) bool {
+	_, ok := m[key]
+	return ok
 }
 
 // typeLocation returns the location of the declaration name of a named
@@ -232,7 +304,7 @@ func (e *extractor) newTypeFact(t *checker.Type, id string, display string) *Typ
 // path to the same type can supply it.
 func (e *extractor) typeLocation(t *checker.Type) *SourceLocation {
 	shape := e.typeShapeOf(t)
-	if !shape.named || shape.nameDecl == nil || e.isTruncated(t) {
+	if !shape.named || shape.nameDecl == nil {
 		return nil
 	}
 	file := ast.GetSourceFileOfNode(shape.nameDecl)
@@ -248,14 +320,18 @@ func (e *extractor) typeLocation(t *checker.Type) *SourceLocation {
 }
 
 // typeID returns "type:" and the hex xxh3-128 hash of the canonical key of
-// a type.
+// a type. The key of a truncated type also has its display text, so two
+// types that differ only below the depth limit get two IDs when their
+// display texts differ.
 func (e *extractor) typeID(t *checker.Type) string {
 	if id, ok := e.typeIDs[t]; ok {
 		return id
 	}
-	key, height, _ := e.typeKey(t, nil)
-	if height > maxTypeKeyDepth {
+	result := e.typeKey(t, nil)
+	key := result.key
+	if result.height > maxTypeKeyDepth {
 		e.typeTruncated[t] = struct{}{}
+		key = jsonList(jsonQuote("truncated"), jsonQuote(key), jsonQuote(e.typeDisplay(t, nil)))
 	}
 	id := "type:" + hashKey(key)
 	e.typeIDs[t] = id
@@ -283,50 +359,64 @@ type typeKeyAt struct {
 	depth int
 }
 
-// cachedTypeKey is a canonical key that does not refer to the stack. height
-// is the number of nested levels that the key describes.
-type cachedTypeKey struct {
+// typeKeyResult is a canonical key. height is the number of nested levels
+// that the key describes. free is true when the key has no ^n. reach is
+// nil when the key has no trunc, and otherwise holds the types that the
+// walk visited.
+type typeKeyResult struct {
 	key    string
 	height int
+	free   bool
+	reach  map[*checker.Type]struct{}
 }
 
-// typeKey returns the canonical key of a type. A key contains the hash of
-// the key of each child, not the child key itself, so a key has a bounded
-// length and each type is keyed once. stack holds the types whose keys are
-// being built. A type that is already on the stack is written as ^n, where
-// n is its distance from the top of the stack. A position deeper than
-// maxTypeKeyDepth is written as trunc. The key is a function of
-// the type and the stack only, so it does not depend on the order in which
-// types are keyed. The second result is the height of the key. The third
-// result is true when the key has no ^n. Such a key depends only on the
-// type and its depth, and is cached for that depth.
-func (e *extractor) typeKey(t *checker.Type, stack []*checker.Type) (string, int, bool) {
+// typeKey returns the canonical key of a type. Each node of a key is a JSON
+// array, so names, origins and property names cannot run into the
+// delimiters. A key contains the hash of the key of each child, not the
+// child key itself, so a key has a bounded length and each type is keyed
+// once. stack holds the types whose keys are being built. A type that is
+// already on the stack is written as ^n, where n is its distance from the
+// top of the stack. A position deeper than maxTypeKeyDepth is written as
+// trunc.
+//
+// The key is a function of the type and the stack only, so it does not
+// depend on the order in which types are keyed. A key without ^n is cached
+// for its depth. If the key has no trunc, no type that it describes can be
+// on the stack: the walk would reach the type itself and write ^n. A key
+// with trunc stopped where it did only because the types that it visited
+// were not on the stack, so it is reused only if none of them is.
+func (e *extractor) typeKey(t *checker.Type, stack []*checker.Type) typeKeyResult {
 	for index := len(stack) - 1; index >= 0; index-- {
 		if stack[index] == t {
-			return "^" + strconv.Itoa(len(stack)-index), 0, false
+			return typeKeyResult{key: "^" + strconv.Itoa(len(stack)-index)}
 		}
 	}
 	at := typeKeyAt{t: t, depth: len(stack)}
-	if cached, ok := e.typeKeys[at]; ok {
-		return cached.key, cached.height, true
+	if cached, ok := e.typeKeys[at]; ok && !slices.ContainsFunc(stack, func(item *checker.Type) bool { return hasKey(cached.reach, item) }) {
+		return cached
 	}
 	if len(stack) > maxTypeKeyDepth {
 		// The parent of this position is already too high for structure
 		// facts, so the rest of the key does not change any fact.
-		return "trunc", 0, true
+		return typeKeyResult{key: "trunc", free: true, reach: map[*checker.Type]struct{}{t: {}}}
 	}
 	shape := e.typeShapeOf(t)
 	stack = append(stack, t)
-	free := true
-	height := 1
+	result := typeKeyResult{free: true, height: 1}
 	key := func(item *checker.Type) string {
-		text, itemHeight, itemFree := e.typeKey(item, stack)
-		free = free && itemFree
-		height = max(height, itemHeight+1)
-		if strings.HasPrefix(text, "^") || strings.HasPrefix(text, "/") {
-			return text
+		child := e.typeKey(item, stack)
+		result.free = result.free && child.free
+		result.height = max(result.height, child.height+1)
+		if child.reach != nil {
+			if result.reach == nil {
+				result.reach = map[*checker.Type]struct{}{t: {}}
+			}
+			maps.Copy(result.reach, child.reach)
 		}
-		return "#" + hashKey(text)
+		if strings.HasPrefix(child.key, "^") || strings.HasPrefix(child.key, "/") {
+			return jsonQuote(child.key)
+		}
+		return jsonQuote("#" + hashKey(child.key))
 	}
 	keys := func(types []*checker.Type) []string {
 		result := make([]string, len(types))
@@ -337,70 +427,86 @@ func (e *extractor) typeKey(t *checker.Type, stack []*checker.Type) (string, int
 	}
 	marked := func(types []*checker.Type, marks []string) string {
 		parts := keys(types)
-		for index, mark := range marks {
-			switch mark {
-			case "?":
-				parts[index] += "?"
-			case "...":
-				parts[index] = "..." + parts[index]
+		for index := range parts {
+			mark := ""
+			if index < len(marks) {
+				mark = marks[index]
 			}
+			parts[index] = jsonList(jsonQuote(mark), parts[index])
 		}
-		return strings.Join(parts, ",")
+		return jsonList(parts...)
 	}
 	signature := func(sig *checker.Signature) string {
 		params, marks, ret := e.signatureParts(sig)
-		return "(" + marked(params, marks) + ")=>" + key(ret)
+		return jsonList(marked(params, marks), key(ret))
 	}
-	var result string
+	q := jsonQuote
 	switch {
 	case shape.named:
-		result = "named(" + shape.origin + "," + shape.name + shape.localPos + ")<" + strings.Join(keys(shape.args), ",") + ">"
+		result.key = jsonList(q("named"), q(shape.originKind), q(shape.origin), q(shape.name), q(shape.localPos), jsonList(keys(shape.args)...))
 	case shape.kind == TypeKindLiteral:
-		result = shape.litKey
+		result.key = shape.litKey
 	case shape.kind == TypeKindTypeParam:
-		result = "tparam(" + shape.origin + "," + shape.paramOwner + "," + shape.paramName + ")"
+		result.key = jsonList(q("tparam"), q(shape.originKind), q(shape.origin), q(shape.paramPos), q(shape.paramName))
 	case shape.kind == TypeKindUnion || shape.kind == TypeKindIntersection:
 		parts := keys(shape.members)
 		slices.Sort(parts)
 		parts = slices.Compact(parts)
-		prefix := "union{"
+		prefix := "union"
 		if shape.kind == TypeKindIntersection {
-			prefix = "inter{"
+			prefix = "inter"
 		}
-		result = prefix + strings.Join(parts, ",") + "}"
+		result.key = jsonList(q(prefix), jsonList(parts...))
 	case shape.kind == TypeKindTuple:
-		result = "tuple[" + marked(shape.args, shape.argMarks) + "]"
+		readonly := ""
+		if shape.readonly {
+			readonly = "readonly"
+		}
+		result.key = jsonList(q("tuple"), q(readonly), marked(shape.args, shape.argMarks))
 	case shape.kind == TypeKindFunction:
-		result = "fn(" + marked(shape.sigParams, shape.sigMarks) + ")=>" + key(shape.sigReturn)
+		result.key = jsonList(q("fn"), marked(shape.sigParams, shape.sigMarks), key(shape.sigReturn))
 	case shape.kind == TypeKindObject:
-		entries := make([]string, 0, len(shape.props))
+		props := make([]string, 0, len(shape.props))
 		for _, prop := range shape.props {
-			name := jsonQuote(prop.name)
+			flags := ""
 			if prop.optional {
-				name += "?"
+				flags += "?"
 			}
-			entries = append(entries, name+":"+key(prop.t))
+			if prop.readonly {
+				flags += "r"
+			}
+			props = append(props, jsonList(q(prop.name), q(flags), key(prop.t)))
 		}
-		slices.Sort(entries)
+		calls := make([]string, 0, len(shape.callSigs))
 		for _, sig := range shape.callSigs {
-			entries = append(entries, "call"+signature(sig))
+			calls = append(calls, signature(sig))
 		}
+		ctors := make([]string, 0, len(shape.ctorSigs))
 		for _, sig := range shape.ctorSigs {
-			entries = append(entries, "new"+signature(sig))
+			ctors = append(ctors, signature(sig))
 		}
+		indexes := make([]string, 0, len(shape.indexInfos))
 		for _, info := range shape.indexInfos {
-			entries = append(entries, "index("+key(info.KeyType())+")=>"+key(info.ValueType()))
+			readonly := ""
+			if info.IsReadonly() {
+				readonly = "readonly"
+			}
+			indexes = append(indexes, jsonList(key(info.KeyType()), key(info.ValueType()), q(readonly)))
 		}
-		result = "obj{" + strings.Join(entries, ",") + "}"
+		result.key = jsonList(q("obj"), jsonList(props...), jsonList(calls...), jsonList(ctors...), jsonList(indexes...))
 	case shape.kind == TypeKindOther:
-		result = "other(" + shape.otherText + ")"
+		result.key = jsonList(shape.otherKey, jsonList(keys(shape.otherParts)...))
 	default:
-		result = "/" + shape.kind
+		result.key = "/" + shape.kind
 	}
-	if free {
-		e.typeKeys[at] = cachedTypeKey{key: result, height: height}
+	if result.free {
+		e.typeKeys[at] = result
 	}
-	return result, height, free
+	return result
+}
+
+func jsonList(items ...string) string {
+	return "[" + strings.Join(items, ",") + "]"
 }
 
 func (e *extractor) typeShapeOf(t *checker.Type) *typeShape {
@@ -458,20 +564,24 @@ func (e *extractor) classifyType(t *checker.Type) *typeShape {
 func literalShape(t *checker.Type) *typeShape {
 	switch value := t.AsLiteralType().Value().(type) {
 	case string:
-		return &typeShape{kind: TypeKindLiteral, literal: &TypeLiteral{Kind: LiteralString, Text: value}, litKey: "lit:s:" + jsonQuote(value)}
+		return &typeShape{kind: TypeKindLiteral, literal: &TypeLiteral{Kind: LiteralString, Text: value}, litKey: literalKey("s", value)}
 	case jsnum.Number:
 		number := float64(value)
 		if math.IsNaN(number) || math.IsInf(number, 0) {
 			return nil
 		}
-		return &typeShape{kind: TypeKindLiteral, literal: &TypeLiteral{Kind: LiteralNumber, Number: number}, litKey: "lit:n:" + value.String()}
+		return &typeShape{kind: TypeKindLiteral, literal: &TypeLiteral{Kind: LiteralNumber, Number: number}, litKey: literalKey("n", value.String())}
 	case jsnum.PseudoBigInt:
 		digits := value.String()
-		return &typeShape{kind: TypeKindLiteral, literal: &TypeLiteral{Kind: LiteralBigInt, Text: digits}, litKey: "lit:big:" + digits}
+		return &typeShape{kind: TypeKindLiteral, literal: &TypeLiteral{Kind: LiteralBigInt, Text: digits}, litKey: literalKey("big", digits)}
 	case bool:
-		return &typeShape{kind: TypeKindLiteral, literal: &TypeLiteral{Kind: LiteralBoolean, Bool: value}, litKey: "lit:b:" + strconv.FormatBool(value)}
+		return &typeShape{kind: TypeKindLiteral, literal: &TypeLiteral{Kind: LiteralBoolean, Bool: value}, litKey: literalKey("b", strconv.FormatBool(value))}
 	}
 	return nil
+}
+
+func literalKey(kind string, value string) string {
+	return jsonList(jsonQuote("lit"), jsonQuote(kind), jsonQuote(value))
 }
 
 func jsonQuote(value string) string {
@@ -512,6 +622,7 @@ func (e *extractor) structureShape(shape *typeShape, t *checker.Type) {
 		if shape.named && len(shape.args) > 0 {
 			return
 		}
+		shape.readonly = t.TargetTupleType().IsReadonly()
 		elementFlags := t.TargetTupleType().ElementFlags()
 		elements := slices.Clone(e.checker.GetTypeArguments(t))
 		if len(elements) > len(elementFlags) {
@@ -556,33 +667,31 @@ func (e *extractor) structureShape(shape *typeShape, t *checker.Type) {
 	}
 }
 
+// typeParamShape keys a type parameter by the position of its declaration.
+// The name of the declaration that declares it is not unique: the generic
+// methods of two object literals in one file have the same name.
 func (e *extractor) typeParamShape(shape *typeShape, t *checker.Type) {
 	symbol := t.Symbol()
-	if symbol == nil {
-		return
+	var declarations []*ast.Node
+	if symbol != nil {
+		declarations = symbol.Declarations()
 	}
-	declarations := symbol.Declarations()
-	if t.AsTypeParameter().IsThisType() {
-		shape.paramName = "this"
-		shape.paramOwner = qualifiedSymbolName(symbol)
-		if len(declarations) > 0 {
-			shape.origin = e.typeOrigin(declarations[0])
+	if len(declarations) == 0 {
+		shape.incomplete = []string{IncompleteUnsupported}
+		if symbol != nil {
+			shape.paramName = symbol.Name()
 		}
 		return
 	}
-	shape.paramName = symbol.Name()
-	if len(declarations) == 0 {
+	shape.originKind, shape.origin = e.declarationOrigin(declarations[0], false)
+	shape.paramPos = strconv.Itoa(declarations[0].Pos())
+	if t.AsTypeParameter().IsThisType() {
+		shape.paramName = "this"
 		return
 	}
-	shape.origin = e.typeOrigin(declarations[0])
-	if parent := declarations[0].Parent; parent != nil {
-		shape.paramOwner = qualifiedSymbolName(parent.Symbol())
-	}
-	if shape.paramOwner == "" {
-		// An anonymous declaration, such as a generic arrow function, has
-		// no name. Its position keeps its type parameters apart from those
-		// of other anonymous declarations in the file.
-		shape.paramOwner = "@" + strconv.Itoa(declarations[0].Pos())
+	shape.paramName = symbol.Name()
+	if e.checker.GetConstraintOfTypeParameter(t) != nil {
+		shape.incomplete = []string{IncompleteConstraint}
 	}
 }
 
@@ -607,17 +716,48 @@ func (e *extractor) anonymousObjectShape(shape *typeShape, t *checker.Type) {
 		if optional {
 			propertyType = e.checker.RemoveMissingOrUndefinedType(propertyType)
 		}
-		shape.props = append(shape.props, shapeProp{name: name, t: propertyType, optional: optional})
+		shape.props = append(shape.props, shapeProp{name: name, t: propertyType, optional: optional, readonly: e.checker.IsReadonlySymbol(property)})
 	}
 	slices.SortFunc(shape.props, func(a, b shapeProp) int { return strings.Compare(a.name, b.name) })
 	shape.callSigs = calls
 	shape.ctorSigs = constructs
 	shape.indexInfos = indexInfos
+	if len(calls) > 0 || len(constructs) > 0 || len(indexInfos) > 0 {
+		shape.incomplete = append(shape.incomplete, IncompleteSignatures)
+	}
 }
 
+// setOther makes a shape /other. The key has the text of the type and the
+// declaration of its symbol, if it has one, so two unique symbol types
+// with one name in two files get two IDs. An alias of an /other type keeps
+// its name and arguments.
 func (e *extractor) setOther(shape *typeShape, t *checker.Type) {
 	shape.kind = TypeKindOther
-	shape.otherText = e.checker.TypeToStringEx(t, nil, checker.TypeFormatFlagsNoTruncation, nil)
+	shape.incomplete = []string{IncompleteUnsupported}
+	text := e.checker.TypeToStringEx(t, nil, checker.TypeFormatFlagsNoTruncation, nil)
+	originKind, origin, position := "", "", ""
+	if symbol := t.Symbol(); symbol != nil && len(symbol.Declarations()) > 0 {
+		decl := symbol.Declarations()[0]
+		originKind, origin = e.declarationOrigin(decl, false)
+		position = strconv.Itoa(decl.Pos())
+	}
+	shape.otherKey = jsonList(jsonQuote("other"), jsonQuote(text), jsonQuote(originKind), jsonQuote(origin), jsonQuote(position))
+	flags := t.Flags()
+	switch {
+	case flags&checker.TypeFlagsIndexedAccess != 0:
+		shape.otherParts = []*checker.Type{t.AsIndexedAccessType().ObjectType(), t.AsIndexedAccessType().IndexType()}
+	case flags&checker.TypeFlagsIndex != 0:
+		shape.otherParts = []*checker.Type{t.AsIndexType().Target()}
+	case flags&checker.TypeFlagsConditional != 0:
+		shape.otherParts = []*checker.Type{t.AsConditionalType().CheckType(), t.AsConditionalType().ExtendsType()}
+	case flags&checker.TypeFlagsTemplateLiteral != 0:
+		shape.otherParts = t.AsTemplateLiteralType().Types()
+	case flags&checker.TypeFlagsStringMapping != 0:
+		shape.otherParts = []*checker.Type{t.AsStringMappingType().Target()}
+	case flags&checker.TypeFlagsSubstitution != 0:
+		shape.otherParts = []*checker.Type{t.AsSubstitutionType().BaseType()}
+	}
+	shape.otherParts = slices.DeleteFunc(shape.otherParts, func(part *checker.Type) bool { return part == nil })
 }
 
 func (e *extractor) otherShape(t *checker.Type) *typeShape {
@@ -698,32 +838,34 @@ func (e *extractor) nameShape(shape *typeShape, symbol *ast.Symbol) bool {
 	shape.named = true
 	shape.name = name
 	shape.nameDecl = decl
-	shape.origin = e.typeOrigin(decl)
+	shape.originKind, shape.origin = e.declarationOrigin(decl, true)
 	return true
 }
 
-// typeOrigin returns the origin of a type declaration: the module name that
-// external_call uses, or the workspace-relative path of the declaring
-// source file. A declaration file under dist/ whose source file is a
-// workspace file has the origin of the source file, as resolveDtsCalls
-// does for calls.
-func (e *extractor) typeOrigin(decl *ast.Node) string {
-	if origin := e.externalModuleName(decl); origin != "" {
-		if strings.HasSuffix(origin, ".d.ts") {
+// declarationOrigin returns the origin kind and the origin of a type
+// declaration. The origin is the module name that external_call uses, or
+// the workspace-relative path of the declaring source file. A declaration
+// file under dist/ whose source file is a workspace file has the origin of
+// the source file, as resolveDtsCalls does for calls, when mapDist is
+// true. A type parameter is keyed by a position in its file, so its origin
+// is not mapped.
+func (e *extractor) declarationOrigin(decl *ast.Node, mapDist bool) (string, string) {
+	if kind, origin := e.externalModule(decl); origin != "" {
+		if mapDist && strings.HasSuffix(origin, ".d.ts") {
 			if mapped := mapDtsToSource(origin); mapped != "" {
 				absolute := normalizeSlash(filepath.Join(filepath.FromSlash(e.workspaceRoot), filepath.FromSlash(mapped)))
 				if _, ok := e.requestedFiles[absolute]; ok {
-					return mapped
+					return OriginKindSourceFile, mapped
 				}
 			}
 		}
-		return origin
+		return kind, origin
 	}
 	file := ast.GetSourceFileOfNode(decl)
 	if file == nil {
-		return ""
+		return "", ""
 	}
-	return e.relativePath(file.FileName().AsString())
+	return OriginKindSourceFile, e.relativePath(file.FileName().AsString())
 }
 
 // sortedTypeFacts returns the recorded type facts sorted by ID.
@@ -784,9 +926,8 @@ func (f *TypeFact) children() []string {
 	return result
 }
 
-// mergeTypes merges the type facts of a config group into a snapshot. The
-// same ID describes the same type. The smallest display text is kept, and
-// a location from any group is kept.
+// mergeTypes merges the type facts of a config group into a snapshot. Two
+// facts with one ID are merged with mergeTypeFact.
 func mergeTypes(existing []TypeFact, incoming []TypeFact) []TypeFact {
 	index := make(map[string]int, len(existing))
 	for i, item := range existing {
@@ -794,16 +935,67 @@ func mergeTypes(existing []TypeFact, incoming []TypeFact) []TypeFact {
 	}
 	for _, item := range incoming {
 		if i, ok := index[item.ID]; ok {
-			if item.Display < existing[i].Display {
-				existing[i].Display = item.Display
-			}
-			if existing[i].Location == nil {
-				existing[i].Location = item.Location
-			}
+			existing[i] = mergeTypeFact(existing[i], item)
 			continue
 		}
 		index[item.ID] = len(existing)
 		existing = append(existing, item)
 	}
 	return existing
+}
+
+// mergeTypeFact merges two facts with one ID: from two config groups, or
+// from two checker types in one group. The smallest display text and the
+// smallest location are kept. If the facts give different structure, for
+// example one declaration under strict and non-strict compiler options,
+// the result keeps only the fields that the key fixes (the name, the
+// origin and the arguments of a named type), drops the other structure
+// and is incomplete with IncompleteConflict. The result does not depend
+// on the order of the two facts.
+func mergeTypeFact(left TypeFact, right TypeFact) TypeFact {
+	display := min(left.Display, right.Display)
+	location := left.Location
+	if location == nil || (right.Location != nil && locationLess(*right.Location, *location)) {
+		location = right.Location
+	}
+	if !sameStructure(left, right) {
+		kind := left.Kind
+		if left.Kind != right.Kind {
+			kind = TypeKindOther
+		}
+		merged := TypeFact{
+			ID:         left.ID,
+			Kind:       kind,
+			Named:      left.Named,
+			OriginKind: left.OriginKind,
+			Origin:     left.Origin,
+			Name:       left.Name,
+			Incomplete: []string{IncompleteConflict},
+		}
+		if left.Named && slices.Equal(left.Args, right.Args) {
+			merged.Args = left.Args
+		}
+		left = merged
+	}
+	left.Display = display
+	left.Location = location
+	return left
+}
+
+// sameStructure reports whether two facts with one ID agree on every
+// field except the display text and the location.
+func sameStructure(left TypeFact, right TypeFact) bool {
+	left.Display, right.Display = "", ""
+	left.Location, right.Location = nil, nil
+	return reflect.DeepEqual(left, right)
+}
+
+func locationLess(left SourceLocation, right SourceLocation) bool {
+	if left.File != right.File {
+		return left.File < right.File
+	}
+	if left.StartLine != right.StartLine {
+		return left.StartLine < right.StartLine
+	}
+	return left.StartColumn < right.StartColumn
 }

@@ -529,6 +529,7 @@ export default rule("arch.actions-return-action-result")
 	.version(1)
 	.program(dl`
 		Decl violation(Fn, Name, Returned).
+		Decl returns_action_result(Fn).
 		returns_action_result(Fn) :-
 			fn_returns_awaited(Fn, R),
 			type_named(R, "src/core/result.ts", "ActionResult").
@@ -560,7 +561,7 @@ Caveats:
 
 ## 15. Domain signatures do not mention infrastructure types
 
-No exported function under `src/domain` has a parameter or return type that contains a named type declared under `src/infra`. `type_contains` finds the type at any depth, for example `Promise<Db[]>` or `{ db: Db }`:
+No exported function under `src/domain` has a parameter or return type that contains a named type declared under `src/infra`. `type_contains` follows type arguments, tuple elements, union and intersection members, the properties of anonymous object types and the parameters and return types of function types, for example `Promise<Db[]>` or `{ db: Db }`:
 
 ```ts
 import { dl, rule } from "@lintai/sdk";
@@ -568,9 +569,11 @@ import { dl, rule } from "@lintai/sdk";
 export default rule("arch.domain-signatures-no-infra")
 	.version(1)
 	.program(dl`
+		Decl signature_type(Fn, T).
 		signature_type(Fn, T) :- fn_param(Fn, _, T).
 		signature_type(Fn, T) :- fn_returns(Fn, T).
 
+		Decl mentions(Fn, T).
 		mentions(Fn, T) :- signature_type(Fn, T).
 		mentions(Fn, Inner) :- signature_type(Fn, T), type_contains(T, Inner).
 
@@ -595,8 +598,33 @@ export function loadUser(input: { db: Db; id: string }): Promise<string> {
 
 The rule reports `loadUser` with `Db` from `src/infra/db.ts`.
 
+`type_contains` does not look into every part of a type. The strict variant also reports a signature that contains a type whose facts are incomplete (`type_incomplete`), so most types that the rule cannot inspect fail the rule. The members of classes, interfaces and enums are the exception: they are not emitted and not marked, so neither rule reports `Db` inside an interface:
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+export default rule("arch.domain-signatures-strict")
+	.version(1)
+	.program(dl`
+		Decl signature_type(Fn, T).
+		signature_type(Fn, T) :- fn_param(Fn, _, T).
+		signature_type(Fn, T) :- fn_returns(Fn, T).
+
+		Decl violation(Fn, Name, Shown).
+		violation(Fn, Name, Shown) :-
+			fn(Fn, File, Name), fn_exported(Fn), glob(File, "src/domain/**"),
+			signature_type(Fn, T), type_reaches_incomplete(T), type_display(T, Shown).
+	`)
+	.report("violation")
+	.message((row) => `${row.Name} has a type that lintai cannot inspect: ${row.Shown}`);
+```
+
+For example, `export function pick<K extends keyof Db>(key: K): Db[K]` is reported: `K` has a constraint and `Db[K]` is an indexed access type, which is `/other`.
+
 Caveats:
 
-- `type_contains` does not look into index signatures or call signatures, so `{ [k: string]: Db }` is not reported.
+- `type_contains` does not look into the call, construct or index signatures of an anonymous object type, so `{ [k: string]: Db }` is not reported by the first rule. The type has `type_incomplete(T, /signatures)`, so the strict variant reports it.
+- `type_contains` does not look into type parameter constraints (`/constraint`), into conditional, mapped, indexed access and template literal types (`/other`, `/unsupported`), into types that are more than 16 levels deep (`/truncated`) or into types that two config groups compile with different structure (`/conflict`). Use `type_reaches_incomplete` to fail closed on these types.
 - `type_contains` does not look inside classes, interfaces or enums. If `User` is an interface with a property of type `Db`, a function that returns `User` is not reported. Add a rule for the declaration of `User`, or use `type_ref` and `type_ref_target` on the file that declares it.
+- the checker erases some types before lintai sees them. `type Handle = Db` is `Db`, and `type UserId = string` is `/string`.
 - an `Origin` is a workspace-relative path only for types declared in workspace source files. A type from a package has the package name, so `glob(Origin, "src/infra/**")` does not match it.

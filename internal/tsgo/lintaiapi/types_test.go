@@ -2,6 +2,7 @@ package lintaiapi
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -292,31 +293,28 @@ export function fromDist(x: Built): void {}
 
 // Each config group has its own checker, so the same type is a different
 // checker object in each group. Its ID, facts and display text must not
-// depend on the group or on file order.
-func TestTypeFactsAcrossConfigGroupsAndFileOrder(t *testing.T) {
-	files := map[string]string{
-		"shared/model.ts":     "export type Model = { id: string; tags: string[] };\n",
-		"app/tsconfig.json":   `{"compilerOptions": {"strict": true}, "include": ["**/*.ts", "../shared/**/*.ts"]}`,
-		"app/use.ts":          "import type { Model } from \"../shared/model\";\nexport function load(x: Model): Model | null { return x; }\n",
-		"admin/tsconfig.json": `{"compilerOptions": {"strict": true}, "include": ["**/*.ts", "../shared/**/*.ts"]}`,
-		"admin/use.ts":        "import type { Model } from \"../shared/model\";\nexport function save(x: Model | null): void {}\n",
-		"tsconfig.json":       `{"files": [], "references": [{"path": "./app"}, {"path": "./admin"}]}`,
-	}
-	root := t.TempDir()
-	paths := writeWorkspace(t, root, files)
-	build := func(order []string) *Snapshot {
-		snap, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{WorkspaceRoot: root, Files: order})
+// depend on the group. Files and groups are sorted by path, so the test
+// renames a group to change the order.
+func TestTypeFactsAcrossConfigGroups(t *testing.T) {
+	build := func(first, second string) *Snapshot {
+		files := map[string]string{
+			"shared/model.ts":         "export type Model = { id: string; tags: string[] };\n",
+			first + "/tsconfig.json":  `{"compilerOptions": {"strict": true}, "include": ["**/*.ts", "../shared/**/*.ts"]}`,
+			first + "/use.ts":         "import type { Model } from \"../shared/model\";\nexport function load(x: Model): Model | null { return x; }\n",
+			second + "/tsconfig.json": `{"compilerOptions": {"strict": true}, "include": ["**/*.ts", "../shared/**/*.ts"]}`,
+			second + "/use.ts":        "import type { Model } from \"../shared/model\";\nexport function save(x: Model | null): void {}\n",
+			"tsconfig.json":           `{"files": [], "references": [{"path": "./` + first + `"}, {"path": "./` + second + `"}]}`,
+		}
+		root := t.TempDir()
+		snap, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{WorkspaceRoot: root, Files: writeWorkspace(t, root, files)})
 		if err != nil {
 			t.Fatal(err)
 		}
 		return snap
 	}
-	first := build(paths)
-	reversed := slices.Clone(paths)
-	slices.Reverse(reversed)
-	second := build(reversed)
-
-	x := newTypeIndex(t, first)
+	before := build("app", "zadmin")
+	after := build("zapp", "admin")
+	x := newTypeIndex(t, before)
 	load := x.fn("load")
 	save := x.fn("save")
 	if x.get(load.ParameterTypes[0]).Name != "Model" || load.ReturnType != save.ParameterTypes[0] {
@@ -325,7 +323,224 @@ func TestTypeFactsAcrossConfigGroupsAndFileOrder(t *testing.T) {
 	if !strings.HasPrefix(filepath.ToSlash(x.get(load.ParameterTypes[0]).Origin), "shared/") {
 		t.Fatalf("origin %q", x.get(load.ParameterTypes[0]).Origin)
 	}
-	if !reflect.DeepEqual(first.Types, second.Types) {
-		t.Fatalf("file order changed the type facts:\n%+v\n%+v", first.Types, second.Types)
+	if !reflect.DeepEqual(before.Types, after.Types) {
+		t.Fatalf("the group order changed the type facts:\n%+v\n%+v", before.Types, after.Types)
+	}
+}
+
+// One declaration compiled under strict and non-strict options has
+// different structure in each group. 0.6.0 kept the structure of the group
+// that sorted first. The merged fact now has no structure, is marked as a
+// conflict, and does not depend on the group order.
+func TestTypeFactsConflictAcrossConfigGroups(t *testing.T) {
+	build := func(loose, strict string) *Snapshot {
+		files := map[string]string{
+			"shared/r.ts":             "export type R = { a: string | undefined };\n",
+			loose + "/tsconfig.json":  `{"compilerOptions": {"strict": false}, "include": ["**/*.ts", "../shared/**/*.ts"]}`,
+			loose + "/use.ts":         "import type { R } from \"../shared/r\";\nexport function fa(x: R): void {}\n",
+			strict + "/tsconfig.json": `{"compilerOptions": {"strict": true}, "include": ["**/*.ts", "../shared/**/*.ts"]}`,
+			strict + "/use.ts":        "import type { R } from \"../shared/r\";\nexport function fb(x: R): void {}\n",
+			"tsconfig.json":           `{"files": [], "references": [{"path": "./` + loose + `"}, {"path": "./` + strict + `"}]}`,
+		}
+		root := t.TempDir()
+		snap, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{WorkspaceRoot: root, Files: writeWorkspace(t, root, files)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return snap
+	}
+	looseFirst := build("a", "b")
+	strictFirst := build("c", "b")
+	x := newTypeIndex(t, looseFirst)
+	r := x.param("fa", 0)
+	if r.ID != x.fn("fb").ParameterTypes[0] || r.Name != "R" || len(r.Props) != 0 || !slices.Equal(r.Incomplete, []string{IncompleteConflict}) {
+		t.Fatalf("R %+v", r)
+	}
+	y := newTypeIndex(t, strictFirst)
+	if !reflect.DeepEqual(r, y.param("fa", 0)) {
+		t.Fatalf("the group order changed R:\n%+v\n%+v", r, y.param("fa", 0))
+	}
+}
+
+// A ring of function types that recurse through each other is keyed once
+// from inside the ring and once from a deeper entry function. In 0.6.0 a
+// key that a deep walk truncated was cached and reused for a shallower
+// walk, so the IDs of the ring depended on which file sorted first.
+func TestTypeFactsRecursiveKeysDoNotDependOnFileNames(t *testing.T) {
+	var ring strings.Builder
+	for index := range 6 {
+		fmt.Fprintf(&ring, "export function a%d() { return { n: a%d }; }\n", index, (index+1)%6)
+	}
+	build := func(entryFile string, depth int) []string {
+		entry := "import { a0 } from \"./r\";\nexport function entry() { return " + strings.Repeat("{ n: ", depth) + "a0" + strings.Repeat(" }", depth) + "; }\n"
+		snap := buildTestSnapshot(t, map[string]string{"src/r.ts": ring.String(), "src/" + entryFile: entry})
+		x := newTypeIndex(t, snap)
+		ids := make([]string, 0, 6)
+		for index := range 6 {
+			ids = append(ids, x.fn(fmt.Sprintf("a%d", index)).ReturnType)
+		}
+		return ids
+	}
+	buildGroups := func(entryGroup, ringGroup string, depth int) []string {
+		entry := "import { a0 } from \"../shared/r\";\nexport function entry() { return " + strings.Repeat("{ n: ", depth) + "a0" + strings.Repeat(" }", depth) + "; }\n"
+		files := map[string]string{
+			"shared/r.ts":                 ring.String(),
+			entryGroup + "/tsconfig.json": `{"compilerOptions": {"strict": true}, "include": ["**/*.ts", "../shared/**/*.ts"]}`,
+			entryGroup + "/entry.ts":      entry,
+			ringGroup + "/tsconfig.json":  `{"compilerOptions": {"strict": true}, "include": ["**/*.ts", "../shared/**/*.ts"]}`,
+			ringGroup + "/use.ts":         "import { a0 } from \"../shared/r\";\nexport function use() { return a0; }\n",
+			"tsconfig.json":               `{"files": [], "references": [{"path": "./` + entryGroup + `"}, {"path": "./` + ringGroup + `"}]}`,
+		}
+		root := t.TempDir()
+		snap, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{WorkspaceRoot: root, Files: writeWorkspace(t, root, files)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		x := newTypeIndex(t, snap)
+		ids := make([]string, 0, 6)
+		for index := range 6 {
+			ids = append(ids, x.fn(fmt.Sprintf("a%d", index)).ReturnType)
+		}
+		return ids
+	}
+	for depth := 5; depth <= 12; depth++ {
+		before, after := build("a.ts", depth), build("z.ts", depth)
+		if !slices.Equal(before, after) {
+			t.Fatalf("depth %d: the ring IDs depend on the entry file name:\n%v\n%v", depth, before, after)
+		}
+		if groupsBefore, groupsAfter := buildGroups("a", "m", depth), buildGroups("z", "m", depth); !slices.Equal(groupsBefore, groupsAfter) || !slices.Equal(groupsBefore, before) {
+			t.Fatalf("depth %d: the ring IDs depend on the config group order:\n%v\n%v\n%v", depth, groupsBefore, groupsAfter, before)
+		}
+	}
+}
+
+// Keys are JSON arrays with an origin kind. In 0.6.0 a declare module
+// "lib" block had the origin of the real lib, the T of the generic methods
+// of two object literals had one ID, and readonly was not in the key.
+func TestTypeKeyFraming(t *testing.T) {
+	snap := buildTestSnapshot(t, map[string]string{
+		"src/fake.d.ts":      "declare module \"lib\" { export interface Promise<T> { fake: T } }\ndeclare module \"src/core/result.ts\" { export type ActionResult<T> = { fake: T } }\n",
+		"src/core/result.ts": "export type ActionResult<T> = { ok: true; value: T };\n",
+		"src/use.ts": `import type { Promise as FakePromise } from "lib";
+import type { ActionResult as FakeResult } from "src/core/result.ts";
+import type { ActionResult } from "./core/result";
+export async function real(): Promise<number> { return 1; }
+export function fake(): FakePromise<number> { return null as never; }
+export function realResult(): ActionResult<number> { return null as never; }
+export function fakeResult(): FakeResult<number> { return null as never; }
+export const a = { m<T>(x: T): T { return x; } };
+export const b = { m<T>(x: T): T { return x; } };
+export function readonlyTuple(x: readonly [string, number]): void {}
+export function mutableTuple(x: [string, number]): void {}
+export function readonlyProp(x: { readonly a: string }): void {}
+export function mutableProp(x: { a: string }): void {}
+`,
+	})
+	x := newTypeIndex(t, snap)
+	real, fake := x.returns("real"), x.returns("fake")
+	if real.ID == fake.ID || real.OriginKind != OriginKindLib || fake.OriginKind != OriginKindAmbientModule {
+		t.Fatalf("lib Promise %+v and declare module Promise %+v", real, fake)
+	}
+	realResult, fakeResult := x.returns("realResult"), x.returns("fakeResult")
+	if realResult.ID == fakeResult.ID || realResult.OriginKind != OriginKindSourceFile || fakeResult.OriginKind != OriginKindAmbientModule {
+		t.Fatalf("workspace ActionResult %+v and declare module ActionResult %+v", realResult, fakeResult)
+	}
+	var methods []Function
+	for _, item := range snap.Functions {
+		if item.Name == "m" || strings.HasSuffix(item.Name, ".m") {
+			methods = append(methods, item)
+		}
+	}
+	if len(methods) != 2 || methods[0].ParameterTypes[0] == methods[1].ParameterTypes[0] {
+		t.Fatalf("the T of two object literal methods is one entity: %+v", methods)
+	}
+	readonlyTuple, mutableTuple := x.param("readonlyTuple", 0), x.param("mutableTuple", 0)
+	if readonlyTuple.ID == mutableTuple.ID || !readonlyTuple.Readonly || mutableTuple.Readonly {
+		t.Fatalf("readonly tuple %+v mutable tuple %+v", readonlyTuple, mutableTuple)
+	}
+	readonlyProp, mutableProp := x.param("readonlyProp", 0), x.param("mutableProp", 0)
+	if readonlyProp.ID == mutableProp.ID || !readonlyProp.Props[0].Readonly || mutableProp.Props[0].Readonly {
+		t.Fatalf("readonly property %+v mutable property %+v", readonlyProp, mutableProp)
+	}
+}
+
+// Types whose structure lintai does not emit are marked, and types that
+// 0.6.0 collapsed into one ID get their own IDs.
+func TestTypeFactsIncomplete(t *testing.T) {
+	nest := func(leaf string) string {
+		text := leaf
+		for range 18 {
+			text = "{ a: " + text + " }"
+		}
+		return text
+	}
+	snap := buildTestSnapshot(t, map[string]string{
+		"src/a.ts":         "export const tag: unique symbol = Symbol();\n",
+		"src/b.ts":         "export const tag: unique symbol = Symbol();\n",
+		"src/infra/db.ts":  "export type Db = { users: string; posts: number };\n",
+		"src/legacy/db.ts": "export type Db = { users: string; posts: number };\n",
+		"src/use.ts": `import { tag as tagA } from "./a";
+import { tag as tagB } from "./b";
+import type { Db } from "./infra/db";
+import type { Db as LegacyDb } from "./legacy/db";
+export function deepString(x: ` + nest("string") + `): void {}
+export function deepNumber(x: ` + nest("number") + `): void {}
+export function symbolA(x: typeof tagA): void {}
+export function symbolB(x: typeof tagB): void {}
+export function get<K extends keyof Db>(k: K): Db[K] { return null as never; }
+export function legacyGet<K extends keyof LegacyDb>(k: K): LegacyDb[K] { return null as never; }
+export function constrained<T extends Db>(x: T): void {}
+export function plain<T>(x: T): void {}
+export function indexed(x: { [key: string]: Db }): void {}
+`,
+	})
+	x := newTypeIndex(t, snap)
+	incomplete := func(item TypeFact, reason string) bool { return slices.Contains(item.Incomplete, reason) }
+
+	deepString, deepNumber := x.param("deepString", 0), x.param("deepNumber", 0)
+	if deepString.ID == deepNumber.ID || !incomplete(deepString, IncompleteTruncated) || !incomplete(deepNumber, IncompleteTruncated) {
+		t.Fatalf("truncated types %+v %+v", deepString, deepNumber)
+	}
+	symbolA, symbolB := x.param("symbolA", 0), x.param("symbolB", 0)
+	if symbolA.ID == symbolB.ID || !incomplete(symbolA, IncompleteUnsupported) {
+		t.Fatalf("unique symbol types %+v %+v", symbolA, symbolB)
+	}
+	get, legacyGet := x.returns("get"), x.returns("legacyGet")
+	if get.ID == legacyGet.ID || !incomplete(get, IncompleteUnsupported) {
+		t.Fatalf("indexed access types %+v %+v", get, legacyGet)
+	}
+	if constrained := x.param("constrained", 0); !incomplete(constrained, IncompleteConstraint) {
+		t.Fatalf("constrained type parameter %+v", constrained)
+	}
+	if plain := x.param("plain", 0); len(plain.Incomplete) != 0 {
+		t.Fatalf("type parameter without a constraint %+v", plain)
+	}
+	if indexed := x.param("indexed", 0); !incomplete(indexed, IncompleteSignatures) {
+		t.Fatalf("object with an index signature %+v", indexed)
+	}
+}
+
+// Optional and rest tuple elements and signature parameters were in the
+// key only in 0.6.0, with no relation that a rule could read.
+func TestTypeFactsMarks(t *testing.T) {
+	snap := buildTestSnapshot(t, map[string]string{
+		"src/use.ts": `export function optionalElement(x: [string, number?]): void {}
+export function restElement(x: [string, ...number[]]): void {}
+export function restParam(x: (a: string, ...b: number[]) => void): void {}
+export function optionalParam(x: (a: string, b?: number) => void): void {}
+`,
+	})
+	x := newTypeIndex(t, snap)
+	if item := x.param("optionalElement", 0); !slices.Equal(item.ArgMarks, []string{"", MarkOptional}) {
+		t.Fatalf("[string, number?] %+v", item)
+	}
+	if item := x.param("restElement", 0); !slices.Equal(item.ArgMarks, []string{"", MarkRest}) {
+		t.Fatalf("[string, ...number[]] %+v", item)
+	}
+	if item := x.param("restParam", 0); !slices.Equal(item.SigMarks, []string{"", MarkRest}) {
+		t.Fatalf("(a, ...b) => void %+v", item)
+	}
+	if item := x.param("optionalParam", 0); !slices.Equal(item.SigMarks, []string{"", MarkOptional}) {
+		t.Fatalf("(a, b?) => void %+v", item)
 	}
 }

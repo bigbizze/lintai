@@ -221,9 +221,22 @@ func (b *builder) typeFacts(item analysis.TypeFact) error {
 	b.add("type_kind", id, kind)
 	if item.Named {
 		b.add("type_named", id, str(item.Origin), str(item.Name))
+		if item.OriginKind != "" {
+			originKind, err := name(item.OriginKind)
+			if err != nil {
+				return err
+			}
+			b.add("type_origin_kind", id, originKind)
+		}
 	}
 	for index, arg := range item.Args {
 		b.add("type_arg", id, facts.Number(int64(index)), str(arg))
+	}
+	if err := b.marks(id, item.ArgMarks, "type_arg_optional", "type_arg_rest"); err != nil {
+		return err
+	}
+	if item.Readonly {
+		b.add("type_readonly", id)
 	}
 	for _, member := range item.Members {
 		b.add("type_member", id, str(member))
@@ -243,16 +256,46 @@ func (b *builder) typeFacts(item analysis.TypeFact) error {
 		if prop.Optional {
 			b.add("type_prop_optional", id, str(prop.Name))
 		}
+		if prop.Readonly {
+			b.add("type_prop_readonly", id, str(prop.Name))
+		}
 	}
 	if item.Kind == "function" {
 		for index, param := range item.SigParams {
 			b.add("type_sig_param", id, facts.Number(int64(index)), str(param))
 		}
+		if err := b.marks(id, item.SigMarks, "type_sig_param_optional", "type_sig_param_rest"); err != nil {
+			return err
+		}
 		b.add("type_sig_returns", id, str(item.SigReturns))
+	}
+	for _, reason := range item.Incomplete {
+		value, err := name(reason)
+		if err != nil {
+			return err
+		}
+		b.add("type_incomplete", id, value)
 	}
 	b.add("type_display", id, str(item.Display))
 	if item.Location != nil {
 		b.location(item.ID, *item.Location)
+	}
+	return nil
+}
+
+// marks adds a row of optional or rest for each marked tuple element or
+// signature parameter.
+func (b *builder) marks(id facts.Value, marks []string, optional, rest string) error {
+	for index, mark := range marks {
+		switch mark {
+		case "":
+		case "optional":
+			b.add(optional, id, facts.Number(int64(index)))
+		case "rest":
+			b.add(rest, id, facts.Number(int64(index)))
+		default:
+			return fmt.Errorf("unknown type mark %q", mark)
+		}
 	}
 	return nil
 }

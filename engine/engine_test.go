@@ -335,11 +335,15 @@ export async function legacy(): Promise<Legacy<number>> { return { done: 1 }; }
 export function load(input: { db: Db[] }): number { return input.db.length; }
 export function sync(): number { return 1; }
 export const plain = (): number => 1;
+export function maybe(): Promise<number> | undefined { return undefined; }
+export function constrained<T extends Db>(x: T): void {}
+export function picked<K extends keyof Db>(k: K): Db[K] { return null as never; }
 `)
 	writeTestFile(t, workspaceRoot, "lintai-rules/actions.ts", `import { dl, rule } from "@lintai/sdk";
 export default rule("arch.actions-return-action-result").version(1)
 	.program(dl`+"`"+`
 		Decl violation(Fn, Name, Returned).
+		Decl returns_action_result(Fn).
 		returns_action_result(Fn) :-
 			fn_returns_awaited(Fn, R),
 			type_named(R, "src/core/result.ts", "ActionResult").
@@ -355,11 +359,25 @@ export default rule("arch.actions-return-action-result").version(1)
 export default rule("arch.domain-signatures").version(1)
 	.program(dl`+"`"+`
 		Decl violation(Fn, Name).
+		Decl signature_type(Fn, T).
+		Decl mentions_infra(Fn).
 		signature_type(Fn, T) :- fn_param(Fn, _, T).
 		signature_type(Fn, T) :- fn_returns(Fn, T).
 		mentions_infra(Fn) :- signature_type(Fn, T), type_named(T, Origin, _), glob(Origin, "src/infra/**").
 		mentions_infra(Fn) :- signature_type(Fn, T), type_contains(T, Inner), type_named(Inner, Origin, _), glob(Origin, "src/infra/**").
 		violation(Fn, Name) :- fn(Fn, File, Name), fn_exported(Fn), glob(File, "src/domain/**"), mentions_infra(Fn).
+	`+"`"+`)
+	.report("violation")
+	.message((row) => row.Name);
+`)
+	writeTestFile(t, workspaceRoot, "lintai-rules/domain-strict.ts", `import { dl, rule } from "@lintai/sdk";
+export default rule("arch.domain-signatures-strict").version(1)
+	.program(dl`+"`"+`
+		Decl violation(Fn, Name).
+		Decl signature_type(Fn, T).
+		signature_type(Fn, T) :- fn_param(Fn, _, T).
+		signature_type(Fn, T) :- fn_returns(Fn, T).
+		violation(Fn, Name) :- fn(Fn, File, Name), fn_exported(Fn), glob(File, "src/domain/**"), signature_type(Fn, T), type_reaches_incomplete(T).
 	`+"`"+`)
 	.report("violation")
 	.message((row) => row.Name);
@@ -394,10 +412,17 @@ export default rule("t.awaited").version(1)
 	if got := byRule["arch.actions-return-action-result"]; len(got) != 1 || got[0] != "legacy returns Promise<Legacy<number>>" {
 		t.Fatalf("actions rule: %+v", items)
 	}
+	// type_contains does not see the Db in a type parameter constraint or
+	// in an indexed access type, so the plain rule passes them. The strict
+	// rule fails closed on both.
 	if got := byRule["arch.domain-signatures"]; len(got) != 1 || got[0] != "load" {
 		t.Fatalf("domain rule: %+v", items)
 	}
-	want := []string{"Db.query:number", "legacy:Legacy<number>", "load:number", "plain:number", "save:ActionResult<number>", "sync:number"}
+	if got := byRule["arch.domain-signatures-strict"]; strings.Join(got, ",") != "constrained,picked" {
+		t.Fatalf("strict domain rule: %v", got)
+	}
+	// fn_returns_awaited unwraps one lib Promise, not a union that has one.
+	want := []string{"Db.query:number", "constrained:void", "legacy:Legacy<number>", "load:number", "maybe:Promise<number> | undefined", "picked:Db[K]", "plain:number", "save:ActionResult<number>", "sync:number"}
 	if got := byRule["t.awaited"]; strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("fn_returns_awaited: got %v, want %v", got, want)
 	}

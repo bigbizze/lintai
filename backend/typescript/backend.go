@@ -374,20 +374,25 @@ func convertTypes(items []lintaiapi.TypeFact) []analysis.TypeFact {
 			ID:         item.ID,
 			Kind:       item.Kind,
 			Named:      item.Named,
+			OriginKind: item.OriginKind,
 			Origin:     item.Origin,
 			Name:       item.Name,
 			Args:       item.Args,
+			ArgMarks:   item.ArgMarks,
+			Readonly:   item.Readonly,
 			Members:    item.Members,
 			ParamName:  item.ParamName,
 			SigParams:  item.SigParams,
+			SigMarks:   item.SigMarks,
 			SigReturns: item.SigReturns,
+			Incomplete: item.Incomplete,
 			Display:    item.Display,
 		}
 		if item.Literal != nil {
 			converted.Literal = &analysis.TypeLiteral{Kind: item.Literal.Kind, Text: item.Literal.Text, Number: item.Literal.Number, Bool: item.Literal.Bool}
 		}
 		for _, prop := range item.Props {
-			converted.Props = append(converted.Props, analysis.TypeProp{Name: prop.Name, Type: prop.Type, Optional: prop.Optional})
+			converted.Props = append(converted.Props, analysis.TypeProp{Name: prop.Name, Type: prop.Type, Optional: prop.Optional, Readonly: prop.Readonly})
 		}
 		if item.Location != nil {
 			location := convertLocation(*item.Location)

@@ -282,7 +282,8 @@ type extractor struct {
 	globalSyms      map[string]*ast.Symbol
 	typeFacts       map[string]*TypeFact
 	typeIDs         map[*checker.Type]string
-	typeKeys        map[typeKeyAt]cachedTypeKey
+	typeKeys        map[typeKeyAt]typeKeyResult
+	typeFactSeen    map[*checker.Type]struct{}
 	typeShapes      map[*checker.Type]*typeShape
 	typeTruncated   map[*checker.Type]struct{}
 	timing          *extractTiming
@@ -503,7 +504,8 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 		ambient:         newAmbientIndex(ambientMatchers),
 		typeFacts:       make(map[string]*TypeFact),
 		typeIDs:         make(map[*checker.Type]string),
-		typeKeys:        make(map[typeKeyAt]cachedTypeKey),
+		typeKeys:        make(map[typeKeyAt]typeKeyResult),
+		typeFactSeen:    make(map[*checker.Type]struct{}),
 		typeShapes:      make(map[*checker.Type]*typeShape),
 		typeTruncated:   make(map[*checker.Type]struct{}),
 		timing:          timing,
@@ -1638,33 +1640,50 @@ func (e *extractor) externalCallFor(source callSource, callee *ast.Symbol, decl 
 // workspace-relative path of a declaration file. It returns "" for
 // declarations in workspace source files.
 func (e *extractor) externalModuleName(decl *ast.Node) string {
+	_, name := e.externalModule(decl)
+	return name
+}
+
+// Origin kinds of a declaration. The name of a declare module block can be
+// "lib" or a workspace path, so the name alone does not tell origins apart.
+const (
+	OriginKindLib             = "lib"
+	OriginKindPackage         = "package"
+	OriginKindAmbientModule   = "ambient_module"
+	OriginKindDeclarationFile = "declaration_file"
+	OriginKindSourceFile      = "source_file"
+)
+
+// externalModule returns the origin kind and the externalModuleName of a
+// declaration, or "" and "" for a declaration in a workspace source file.
+func (e *extractor) externalModule(decl *ast.Node) (string, string) {
 	for parent := decl.Parent; parent != nil; parent = parent.Parent {
 		if ast.IsModuleDeclaration(parent) && ast.IsStringLiteral(parent.Name()) {
-			return parent.Name().Text()
+			return OriginKindAmbientModule, parent.Name().Text()
 		}
 	}
 	file := ast.GetSourceFileOfNode(decl)
 	if file == nil {
-		return ""
+		return "", ""
 	}
 	if e.program.IsSourceFileDefaultLibrary(file.PathKey()) {
-		return "lib"
+		return OriginKindLib, "lib"
 	}
 	fileName := normalizeSlash(file.FileName().AsString())
 	if index := strings.LastIndex(fileName, "/node_modules/"); index >= 0 {
 		packageName := packageNameFromSpecifier(fileName[index+len("/node_modules/"):])
 		if typed, ok := strings.CutPrefix(packageName, "@types/"); ok {
 			if scope, name, scoped := strings.Cut(typed, "__"); scoped {
-				return "@" + scope + "/" + name
+				return OriginKindPackage, "@" + scope + "/" + name
 			}
-			return typed
+			return OriginKindPackage, typed
 		}
-		return packageName
+		return OriginKindPackage, packageName
 	}
 	if !file.IsDeclarationFile && isWithinRoot(e.workspaceRoot, fileName) {
-		return ""
+		return "", ""
 	}
-	return e.relativePath(fileName)
+	return OriginKindDeclarationFile, e.relativePath(fileName)
 }
 
 // qualifiedSymbolName returns the name of a symbol with the names of its
