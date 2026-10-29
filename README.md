@@ -153,7 +153,7 @@ Useful caveats:
 - plain `eslint` CLI usage defaults to one-shot analysis
 - long-lived editor sessions default to persistent `serve` mode
 - `lintai schema` prints every base relation and the prelude
-- the CLI exits with 0 (clean), 1 (violations), 2 (usage or configuration error) or 3 (a rule could not run)
+- the CLI exits with 0 (clean or only warnings), 1 (error violations), 2 (usage or configuration error) or 3 (a rule could not run)
 
 ## API and caveats
 
@@ -165,7 +165,7 @@ The full reference lives in [docs/api.md](docs/api.md). Highlights:
 - base relations: `module`, `fn`, `fn_*`, `import_edge`, `import_*`, `call_edge`, `external_call`, `type_ref`, `type_ref_target`, `meta_access`, `ambient_source`, `ambient_use`, `ambient_key`, `ambient_dynamic`, `ambient_write`, `global_ref`, `module_directive`, `module_parse_error`, `site_in_fn`, `location`
 - prelude: `glob`, `import_runtime`, `module_imports`, `imports_reach`, `calls_reach`, `fn_uses_ambient`, `fn_reaches_ambient`, `module_uses_ambient`, `module_reaches_ambient`
 - ambient sources: `clock` (`Date.now`, `new Date()`, `performance.now`), `env` (`process.env`), `random` (`Math.random`, `crypto.randomUUID` and other `crypto` random functions), `crypto` (`crypto.subtle`), `network` (`fetch`), `timer` (`setTimeout`, `setInterval`, `setImmediate`, `queueMicrotask`) and `process` (`process.cwd`, `process.argv`)
-- CLI: `lintai schema`, `lintai facts`, `--explain`, `--fact-limit`
+- CLI: `lintai schema`, `lintai facts`, `--explain`, `--fact-limit`, `--severity <rule-id>=error|warning|off`
 - optional `config` export:
   - `export const config = z.object({...})`
 

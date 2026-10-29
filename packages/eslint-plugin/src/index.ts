@@ -11,64 +11,87 @@ import {
 	type Diagnostic,
 } from "./client.js";
 
-const architectureBridge: Rule.RuleModule = {
-	meta: {
-		type: "problem",
-		docs: {
-			description: "surface whole-workspace architecture diagnostics from lintai",
-		},
-		schema: [
-			{
+const bridgeSchema: Rule.RuleMetaData["schema"] = [
+	{
+		type: "object",
+		properties: {
+			mode: {
+				enum: ["serve", "oneshot"],
+			},
+			binary: { type: "string" },
+			repoRoot: { type: "string" },
+			workspaceRoot: { type: "string" },
+			rules: {
+				type: "array",
+				items: { type: "string" },
+			},
+			exclude: {
+				type: "array",
+				items: { type: "string" },
+			},
+			files: {
+				enum: ["tsconfig", "walk"],
+			},
+			env: { type: "object" },
+			factLimit: { type: "integer", minimum: 1 },
+			severity: {
 				type: "object",
-				properties: {
-					mode: {
-						enum: ["serve", "oneshot"],
-					},
-					binary: { type: "string" },
-					repoRoot: { type: "string" },
-					workspaceRoot: { type: "string" },
-					rules: {
-						type: "array",
-						items: { type: "string" },
-					},
-					exclude: {
-						type: "array",
-						items: { type: "string" },
-					},
-					files: {
-						enum: ["tsconfig", "walk"],
-					},
-					env: { type: "object" },
-					factLimit: { type: "integer", minimum: 1 },
-				},
-				additionalProperties: false,
+				additionalProperties: { enum: ["error", "warning", "off"] },
 			},
-		],
+		},
+		additionalProperties: false,
 	},
-	create(context) {
-		const options = resolveBridgeOptions((context.options[0] ?? {}) as BridgeOptions, process.cwd());
-		const client = getClient(options);
+];
 
-		return {
-			Program(node) {
-				if (options.mode === "serve" && hasUnsavedChanges(context)) {
-					context.report({
-						node,
-						loc: { line: 1, column: 0 },
-						message: "[lintai] lintai checks saved files. Save this file to update its lintai diagnostics.",
-					});
-					return;
-				}
-				const filename = path.relative(options.workspaceRoot, context.filename).replace(/\\/g, "/");
-				const diagnostics = client.getDiagnostics(filename);
-				for (const message of client.problems()) {
-					context.report({ node, loc: { line: 1, column: 0 }, message });
-				}
-				reportDiagnostics(context, node, diagnostics);
-			},
-		};
-	},
-};
+// The ESLint level of a rule applies to every report of the rule, so lintai
+// error and warning diagnostics come from two rules. architecture reports
+// error diagnostics, rule errors and problems with the analysis.
+// architecture-warnings reports warning diagnostics. Give both rules the same
+// options, so that they share one lintai process.
+function bridgeRule(severity: "error" | "warning", description: string): Rule.RuleModule {
+	return {
+		meta: {
+			type: "problem",
+			docs: { description },
+			schema: bridgeSchema,
+		},
+		create(context) {
+			const options = resolveBridgeOptions((context.options[0] ?? {}) as BridgeOptions, process.cwd());
+			const client = getClient(options);
+
+			return {
+				Program(node) {
+					if (options.mode === "serve" && hasUnsavedChanges(context)) {
+						if (severity === "error") {
+							context.report({
+								node,
+								loc: { line: 1, column: 0 },
+								message: "[lintai] lintai checks saved files. Save this file to update its lintai diagnostics.",
+							});
+						}
+						return;
+					}
+					const filename = path.relative(options.workspaceRoot, context.filename).replace(/\\/g, "/");
+					const diagnostics = client
+						.getDiagnostics(filename)
+						.filter((diagnostic) => (diagnostic.severity === "warning") === (severity === "warning"));
+					if (severity === "error") {
+						for (const message of client.problems()) {
+							context.report({ node, loc: { line: 1, column: 0 }, message });
+						}
+					}
+					reportDiagnostics(context, node, diagnostics);
+				},
+			};
+		},
+	};
+}
+
+const architectureBridge = bridgeRule("error", "surface whole-workspace architecture diagnostics from lintai");
+const architectureWarningsBridge = bridgeRule(
+	"warning",
+	"surface whole-workspace architecture diagnostics from lintai rules with severity warning",
+);
 
 // lintai analyzes the files on disk. When the editor text is different from
 // the file on disk, the diagnostics would point at the wrong lines, so the
@@ -111,6 +134,7 @@ function reportDiagnostics(context: Rule.RuleContext, node: any, diagnostics: Di
 export const rules = {
 	...authoringRules,
 	architecture: architectureBridge,
+	"architecture-warnings": architectureWarningsBridge,
 };
 
 export default { rules };
