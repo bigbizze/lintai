@@ -14,6 +14,10 @@ import {
 	resolveBridgeOptions,
 	type Diagnostic,
 } from "./client.js";
+import { hasUnsavedChanges, toReports } from "./index.js";
+
+const editorHost = { defaultMode: "serve", reportProblemsOnce: false } as const;
+const cliHost = { defaultMode: "oneshot", reportProblemsOnce: true } as const;
 
 afterEach(() => {
 	resetClientsForTest();
@@ -83,6 +87,7 @@ test("first diagnostics request blocks until initialize completes", () => {
 				rules: ["lintai-rules/**/*.ts"],
 			},
 			"/repo",
+			editorHost,
 		),
 		createTestDependencies({
 			spawnServe: () => child,
@@ -133,6 +138,7 @@ test("serve initialization failure falls back to oneshot mode", () => {
 				factLimit: 1234,
 			},
 			"/repo",
+			editorHost,
 		),
 		createTestDependencies({
 			spawnServe: () => child,
@@ -180,6 +186,7 @@ test("idle gap triggers background reanalyze and swaps cached diagnostics", asyn
 				rules: ["lintai-rules/**/*.ts"],
 			},
 			"/repo",
+			editorHost,
 		),
 		createTestDependencies({
 			spawnServe: () => child,
@@ -248,6 +255,184 @@ test("idle gap triggers background reanalyze and swaps cached diagnostics", asyn
 	client.dispose();
 });
 
+test("a file saved after the analysis started is linted with a new analysis, once per saved version", () => {
+	const child = createTestProcess();
+	let now = 0;
+	let modifiedAt = -10_000;
+	const requests: string[] = [];
+	child.stdin.on("data", (chunk: Buffer) => {
+		const method = /"method":"([^"]+)"/.exec(chunk.toString("utf8"))?.[1];
+		if (method) {
+			requests.push(method);
+		}
+	});
+	const responses = [
+		createInitializeResult("arch.old"),
+		createFramedResponse({
+			jsonrpc: "2.0",
+			id: 2,
+			result: { rulesLoaded: 1, diagnosticCount: 0, snapshotVersion: "snap-2", diagnostics: [] },
+		}),
+	];
+	const client = new LintAIClient(
+		resolveBridgeOptions(
+			{ mode: "serve", binary: "/tmp/lintai", repoRoot: "/repo", workspaceRoot: "/workspace" },
+			"/repo",
+			editorHost,
+		),
+		createTestDependencies({
+			spawnServe: () => child,
+			readServeSync: () => responses.shift() ?? Buffer.alloc(0),
+			modifiedAt: () => modifiedAt,
+			now: () => now,
+			log: () => undefined,
+		}),
+	);
+
+	now = 10_000;
+	assert.equal(client.getDiagnostics("src/example.ts")[0]?.rule_id, "arch.old");
+	now = 20_000;
+	modifiedAt = 15_000;
+	assert.deepEqual(client.getDiagnostics("src/example.ts"), []);
+	assert.deepEqual(requests, ["initialize", "reanalyze"]);
+
+	modifiedAt = 1_000_000;
+	now = 20_100;
+	responses.push(
+		createFramedResponse({
+			jsonrpc: "2.0",
+			id: 3,
+			result: { rulesLoaded: 1, diagnosticCount: 0, snapshotVersion: "snap-3", diagnostics: [] },
+		}),
+	);
+	client.getDiagnostics("src/example.ts");
+	now = 20_200;
+	client.getDiagnostics("src/example.ts");
+	assert.deepEqual(requests, ["initialize", "reanalyze", "reanalyze"]);
+	client.dispose();
+});
+
+test("a background refresh that started before a save-triggered analysis does not replace its result", async () => {
+	const child = createTestProcess();
+	let now = 0;
+	let modifiedAt = -10_000;
+	const requests: string[] = [];
+	child.stdin.on("data", (chunk: Buffer) => {
+		const method = /"method":"([^"]+)"/.exec(chunk.toString("utf8"))?.[1];
+		if (method) {
+			requests.push(method);
+		}
+	});
+	const staleDiagnostic = {
+		rule_id: "arch.old",
+		assertion_id: "default",
+		message: "old",
+		source_location: { file: "src/example.ts", startLine: 1, startColumn: 1, endLine: 1, endColumn: 2 },
+	};
+	// lintai serve answers in request order, so the synchronous read for the
+	// save-triggered request (id 3) also returns the background answer (id 2).
+	const responses = [
+		createInitializeResult("arch.old"),
+		Buffer.concat([
+			createFramedResponse({
+				jsonrpc: "2.0",
+				id: 2,
+				result: { rulesLoaded: 1, diagnosticCount: 1, snapshotVersion: "snap-background", diagnostics: [staleDiagnostic] },
+			}),
+			createFramedResponse({
+				jsonrpc: "2.0",
+				id: 3,
+				result: { rulesLoaded: 1, diagnosticCount: 0, snapshotVersion: "snap-saved", diagnostics: [] },
+			}),
+		]),
+	];
+	const client = new LintAIClient(
+		resolveBridgeOptions(
+			{ mode: "serve", binary: "/tmp/lintai", repoRoot: "/repo", workspaceRoot: "/workspace" },
+			"/repo",
+			editorHost,
+		),
+		createTestDependencies({
+			spawnServe: () => child,
+			readServeSync: () => responses.shift() ?? Buffer.alloc(0),
+			modifiedAt: () => modifiedAt,
+			now: () => now,
+			log: () => undefined,
+		}),
+	);
+
+	now = 10_000;
+	client.getDiagnostics("src/example.ts");
+	now = 11_000;
+	client.getDiagnostics("src/example.ts");
+	now = 12_000;
+	modifiedAt = 11_500;
+	assert.deepEqual(client.getDiagnostics("src/example.ts"), []);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.deepEqual(client.getDiagnostics("src/example.ts"), []);
+
+	now = 20_000;
+	client.getDiagnostics("src/example.ts");
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.deepEqual(requests, ["initialize", "reanalyze", "reanalyze", "reanalyze"]);
+	client.dispose();
+});
+
+test("a save of many files causes one analysis", () => {
+	const child = createTestProcess();
+	let now = 0;
+	const modified = new Map<string, number>();
+	const requests: string[] = [];
+	child.stdin.on("data", (chunk: Buffer) => {
+		const method = /"method":"([^"]+)"/.exec(chunk.toString("utf8"))?.[1];
+		if (method) {
+			requests.push(method);
+		}
+	});
+	const responses = [
+		createInitializeResult("arch.old"),
+		createFramedResponse({
+			jsonrpc: "2.0",
+			id: 2,
+			result: { rulesLoaded: 1, diagnosticCount: 0, snapshotVersion: "snap-2", diagnostics: [] },
+		}),
+	];
+	const client = new LintAIClient(
+		resolveBridgeOptions(
+			{ mode: "serve", binary: "/tmp/lintai", repoRoot: "/repo", workspaceRoot: "/workspace" },
+			"/repo",
+			editorHost,
+		),
+		createTestDependencies({
+			spawnServe: () => child,
+			readServeSync: () => {
+				const response = responses.shift();
+				if (!response) {
+					throw new Error(`unexpected request after ${requests.join(", ")}`);
+				}
+				return response;
+			},
+			modifiedAt: (file) => modified.get(file),
+			now: () => now,
+			log: () => undefined,
+		}),
+	);
+
+	now = 10_000;
+	client.getDiagnostics("src/a.ts");
+	for (const name of ["a", "b", "c"]) {
+		modified.set(`/workspace/src/${name}.ts`, 20_000.5);
+	}
+	now = 20_100;
+	client.getDiagnostics("src/a.ts");
+	now = 20_200;
+	client.getDiagnostics("src/b.ts");
+	now = 20_300;
+	client.getDiagnostics("src/c.ts");
+	assert.deepEqual(requests, ["initialize", "reanalyze"]);
+	client.dispose();
+});
+
 test("rule file changes invalidate cached diagnostics and the next pass refreshes synchronously", async () => {
 	const child = createTestProcess();
 	const warnings: string[] = [];
@@ -288,6 +473,7 @@ test("rule file changes invalidate cached diagnostics and the next pass refreshe
 				rules: ["lintai-rules/**/*.ts"],
 			},
 			"/repo",
+			editorHost,
 		),
 		createTestDependencies({
 			spawnServe: () => child,
@@ -332,6 +518,7 @@ test("client cache reuses the same instance for the same resolved options", () =
 			rules: ["lintai-rules/**/*.ts"],
 		},
 		"/repo",
+		editorHost,
 	);
 
 	const first = getClient(options, deps);
@@ -340,21 +527,10 @@ test("client cache reuses the same instance for the same resolved options", () =
 });
 
 test("resolveBridgeOptions defaults to serve mode and workspace repo root", () => {
-	const options = resolveBridgeOptions({}, process.cwd());
+	const options = resolveBridgeOptions({}, process.cwd(), editorHost);
 	assert.equal(options.mode, "serve");
 	assert.equal(options.repoRoot, options.workspaceRoot);
-	assert.match(options.assetRoot, /packages[\\/]eslint-plugin$/);
-});
-
-test("resolveBridgeOptions defaults to oneshot under the eslint CLI", () => {
-	const previousArgv = process.argv;
-	process.argv = ["node", "/tmp/node_modules/eslint/bin/eslint.js"];
-	try {
-		const options = resolveBridgeOptions({}, process.cwd());
-		assert.equal(options.mode, "oneshot");
-	} finally {
-		process.argv = previousArgv;
-	}
+	assert.match(options.assetRoot, /packages[\\/]client$/);
 });
 
 test("resolveBridgeOptions finds the installed lintai binary from the workspace root", () => {
@@ -368,7 +544,7 @@ test("resolveBridgeOptions finds the installed lintai binary from the workspace 
 		);
 		writeFileSync(path.join(tempRoot, "node_modules", ".bin", "lintai"), "");
 
-		const options = resolveBridgeOptions({}, path.join(tempRoot, "packages", "app"));
+		const options = resolveBridgeOptions({}, path.join(tempRoot, "packages", "app"), editorHost);
 		assert.equal(options.workspaceRoot, tempRoot);
 		assert.equal(options.binary, path.join(tempRoot, "node_modules", ".bin", "lintai"));
 	} finally {
@@ -389,6 +565,7 @@ test("workspace problems are reported: rule errors, failed reanalyze and serve f
 				rules: ["lintai-rules/**/*.ts"],
 			},
 			"/repo",
+			editorHost,
 		),
 		createTestDependencies({
 			spawnServe: () => child,
@@ -438,73 +615,50 @@ test("workspace problems are reported: rule errors, failed reanalyze and serve f
 	client.dispose();
 });
 
-test("an eslint CLI process reports workspace problems on the first file only", () => {
-	const previousArgv = process.argv;
-	process.argv = ["node", "/tmp/node_modules/eslint/bin/eslint.js"];
-	try {
-		const client = new LintAIClient(
-			resolveBridgeOptions({ binary: "/tmp/lintai", repoRoot: "/repo", workspaceRoot: "/workspace" }, "/repo"),
-			createTestDependencies({
-				spawnSync: () => ({ stdout: "", stderr: "", error: undefined, status: 2 }),
-				log: () => undefined,
-			}),
-		);
-		client.getDiagnostics("src/a.ts");
-		assert.equal(client.problems().length, 1);
-		client.getDiagnostics("src/b.ts");
-		assert.deepEqual(client.problems(), []);
-		client.dispose();
-	} finally {
-		process.argv = previousArgv;
-	}
-});
-
-test("severity reaches lintai, and warning diagnostics go only to architecture-warnings", async () => {
-	const { Linter } = await import("eslint");
-	const { default: plugin } = await import("./index.js");
-	const spawned: string[][] = [];
-	const warning: Diagnostic = {
-		rule_id: "arch.soft",
-		assertion_id: "v",
-		severity: "warning",
-		message: "soft",
-		source_location: { file: "src/a.ts", startLine: 1, startColumn: 1, endLine: 1, endColumn: 2 },
-	};
-	const error: Diagnostic = { ...warning, rule_id: "arch.hard", severity: "error", message: "hard" };
-	const options = resolveBridgeOptions(
-		{ mode: "oneshot", binary: "/tmp/lintai", repoRoot: "/workspace", workspaceRoot: "/workspace", severity: { "arch.soft": "warning" } },
-		"/workspace",
-	);
-	const client = getClient(
-		options,
+test("a CLI host reports workspace problems on the first file only", () => {
+	const client = new LintAIClient(
+		resolveBridgeOptions({ binary: "/tmp/lintai", repoRoot: "/repo", workspaceRoot: "/workspace" }, "/repo", cliHost),
 		createTestDependencies({
-			spawnSync: (_binary, args) => {
-				spawned.push(args);
-				return { stdout: JSON.stringify([warning, error]), stderr: "", error: undefined, status: 1 };
-			},
+			spawnSync: () => ({ stdout: "", stderr: "", error: undefined, status: 2 }),
+			log: () => undefined,
 		}),
 	);
-	assert.ok(client);
-	const bridge = { mode: "oneshot", binary: "/tmp/lintai", repoRoot: "/workspace", workspaceRoot: "/workspace", severity: { "arch.soft": "warning" } };
-	const linter = new Linter({ configType: "flat", cwd: "/workspace" });
-	const messages = linter.verify(
-		"export const a = 1;\n",
+	client.getDiagnostics("src/a.ts");
+	assert.equal(client.problems().length, 1);
+	client.getDiagnostics("src/b.ts");
+	assert.deepEqual(client.problems(), []);
+	client.dispose();
+});
+
+test("toReports converts 1-based lintai columns to 0-based report columns and skips unlocated diagnostics", () => {
+	assert.deepEqual(
+		toReports([
+			{
+				rule_id: "arch.layers",
+				assertion_id: "no_up",
+				message: "bad import",
+				source_location: { file: "src/a.ts", startLine: 3, startColumn: 5, endLine: 3, endColumn: 12 },
+			},
+			{ rule_id: "arch.broken", assertion_id: "default", message: "no location" },
+		]),
 		[
 			{
-				files: ["**/*.ts"],
-				plugins: { lintai: plugin },
-				rules: { "lintai/architecture": ["error", bridge], "lintai/architecture-warnings": ["warn", bridge] },
+				loc: { start: { line: 3, column: 4 }, end: { line: 3, column: 11 } },
+				message: "[arch.layers/no_up] bad import",
 			},
 		],
-		"/workspace/src/a.ts",
 	);
-	assert.deepEqual(
-		messages.map((message) => [message.ruleId, message.message]).sort(),
-		[
-			["lintai/architecture", "[arch.hard/v] hard"],
-			["lintai/architecture-warnings", "[arch.soft/v] soft"],
-		],
-	);
-	assert.equal(spawned.length, 1);
-	assert.deepEqual(spawned[0]?.slice(spawned[0].indexOf("--severity")), ["--severity", "arch.soft=warning"]);
+});
+
+test("hasUnsavedChanges compares the editor text with the saved file and ignores a BOM", () => {
+	const tempRoot = mkdtempSync(path.join(os.tmpdir(), "lintai-client-"));
+	try {
+		const file = path.join(tempRoot, "a.ts");
+		writeFileSync(file, "\uFEFFexport const a = 1;\n");
+		assert.equal(hasUnsavedChanges(file, "export const a = 1;\n"), false);
+		assert.equal(hasUnsavedChanges(file, "export const a = 2;\n"), true);
+		assert.equal(hasUnsavedChanges(path.join(tempRoot, "missing.ts"), "x"), false);
+	} finally {
+		rmSync(tempRoot, { recursive: true, force: true });
+	}
 });

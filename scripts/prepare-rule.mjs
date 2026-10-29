@@ -1,1 +1,1 @@
-import "../packages/eslint-plugin/scripts/prepare-rule.mjs";
+import "../packages/client/scripts/prepare-rule.mjs";

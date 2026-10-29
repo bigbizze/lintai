@@ -57,6 +57,12 @@ Every backend schema must declare `location(Entity, File, StartLine,
 StartColumn, EndLine, EndColumn)`; report anchors use its string entity id to
 create the diagnostic source location.
 
+`AssetRoot` is the directory that contains `scripts/bundle-rule.mjs` and
+`scripts/prepare-rule.mjs`, which bundle and run the rules in Node. In an npm
+install it is `node_modules/@lintai/client` (with pnpm,
+`node_modules/.pnpm/node_modules/@lintai/client`); in this repository it is
+`packages/client`.
+
 `Version` identifies the snapshot in diagnostic provenance and in the server's
 analysis result. The engine does not cache facts between runs: it builds the
 fact store from `Facts` on every `Analyze` call.

@@ -1,9 +1,11 @@
 import { spawn, spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { PassThrough, type Readable, type Writable } from "node:stream";
-import { existsSync, readFileSync, readSync } from "node:fs";
+import { existsSync, readFileSync, readSync, statSync } from "node:fs";
 import path from "node:path";
 import chokidar from "chokidar";
 import { fileURLToPath } from "node:url";
+
+import { activeSpawner, spawnerFor, type SpawnedProcess } from "./spawner.js";
 
 export type Diagnostic = {
 	rule_id: string;
@@ -40,8 +42,9 @@ export type SetupSandbox = "auto" | "on" | "off";
 
 export type RuleSeverity = "error" | "warning" | "off";
 
-type ResolvedBridgeOptions = {
+export type ResolvedBridgeOptions = {
 	mode: "serve" | "oneshot";
+	reportProblemsOnce: boolean;
 	binary: string;
 	repoRoot: string;
 	assetRoot: string;
@@ -114,6 +117,7 @@ type ClientDependencies = {
 	spawnSync: SpawnSyncLike;
 	watchPath: WatchPath;
 	readServeSync: (child: ClientProcess, timeoutMs: number) => Buffer;
+	modifiedAt: (file: string) => number | undefined;
 	log: (message: string) => void;
 	now: () => number;
 };
@@ -125,6 +129,10 @@ const syncSleep = new Int32Array(new SharedArrayBuffer(4));
 
 const defaultDependencies: ClientDependencies = {
 	spawnServe(binary, args, cwd) {
+		const spawner = activeSpawner();
+		if (spawner) {
+			return spawner.spawn(binary, args, cwd) as unknown as ClientProcess;
+		}
 		const child = spawn(binary, args, {
 			cwd,
 			stdio: ["pipe", "pipe", "inherit"],
@@ -134,6 +142,10 @@ const defaultDependencies: ClientDependencies = {
 		return child as unknown as ClientProcess;
 	},
 	spawnSync(command, args, options) {
+		const spawner = activeSpawner();
+		if (spawner) {
+			return spawner.spawnSync(command, args, options.cwd);
+		}
 		return spawnSync(command, args, options);
 	},
 	watchPath(target, onChange) {
@@ -155,6 +167,10 @@ const defaultDependencies: ClientDependencies = {
 		};
 	},
 	readServeSync(child, timeoutMs) {
+		const spawner = spawnerFor(child);
+		if (spawner) {
+			return spawner.readSync(child as unknown as SpawnedProcess, timeoutMs);
+		}
 		const fd = getReadableFD(child.stdout);
 		if (fd == null) {
 			throw new Error("lintai serve stdout fd is unavailable for synchronous initialization");
@@ -179,6 +195,13 @@ const defaultDependencies: ClientDependencies = {
 				}
 				Atomics.wait(syncSleep, 0, 0, Math.min(10, remaining));
 			}
+		}
+	},
+	modifiedAt(file) {
+		try {
+			return statSync(file).mtimeMs;
+		} catch {
+			return undefined;
 		}
 	},
 	log(message) {
@@ -207,12 +230,13 @@ export class LintAIClient {
 	private serveFailure: string | undefined;
 	private analysisFailure: string | undefined;
 	private problemsReported = false;
-	private readonly reportProblemsOnce = isLikelyESLintCLIProcess();
 	private initialization: Promise<void> | undefined;
 	private refreshInFlight: Promise<void> | undefined;
 	private oneshotCache: IndexedDiagnostics | undefined;
 	private warned = new Set<string>();
 	private lastDiagnosticsRequestAt = -1;
+	private diagnosticsAnalyzedAt = -1;
+	private readonly savedVersionsAnalyzed = new Map<string, number>();
 	private attachedStdoutListener = false;
 	private readonly ruleWatchers: FileWatcher[] = [];
 	private ruleInvalidationTimer: ReturnType<typeof setTimeout> | undefined;
@@ -237,7 +261,13 @@ export class LintAIClient {
 			this.refreshInvalidatedDiagnosticsSync();
 		}
 		if (this.state === "ready") {
-			this.maybeStartRefresh();
+			const savedAt = this.savedSinceAnalysis(normalized);
+			if (savedAt !== undefined) {
+				this.savedVersionsAnalyzed.set(normalized, savedAt);
+				this.reanalyzeSync();
+			} else {
+				this.maybeStartRefresh();
+			}
 			return this.diagnosticsByFile.get(normalized) ?? [];
 		}
 		if (this.state === "fallback") {
@@ -251,11 +281,12 @@ export class LintAIClient {
 	// rules that could not run. Without them a broken setup shows no
 	// diagnostics, which looks the same as a clean workspace.
 	//
-	// The ESLint CLI lints each file once, so in that process the problems are
-	// returned for the first file only, so that they are not repeated for every
-	// file. An editor lints files again, so it gets them on every call.
+	// A linter CLI lints each file once, so the host adapter sets
+	// reportProblemsOnce and the problems are returned for the first file only,
+	// so that they are not repeated for every file. An editor lints files
+	// again, so it gets them on every call.
 	problems(): string[] {
-		if (this.reportProblemsOnce) {
+		if (this.options.reportProblemsOnce) {
 			if (this.problemsReported) {
 				return [];
 			}
@@ -264,7 +295,7 @@ export class LintAIClient {
 		const items: string[] = [];
 		if (this.serveFailure) {
 			items.push(
-				`[lintai] lintai serve failed, so diagnostics come from one lintai run and do not update until ESLint restarts: ${this.serveFailure}`,
+				`[lintai] lintai serve failed, so diagnostics come from one lintai run and do not update until the linter restarts: ${this.serveFailure}`,
 			);
 		}
 		if (this.analysisFailure) {
@@ -287,22 +318,19 @@ export class LintAIClient {
 			return this.refreshInFlight;
 		}
 		const targetEpoch = this.analysisEpoch;
+		const startedAt = this.dependencies.now();
 		this.refreshInFlight = this.sendRequest<InitializeResult>("reanalyze", {})
 			.then((result) => {
-				if (targetEpoch !== this.analysisEpoch || this.state !== "ready") {
+				if (this.isOutdated(targetEpoch, startedAt)) {
 					return;
 				}
-				this.setDiagnostics(result.diagnostics);
+				this.setDiagnostics(result.diagnostics, startedAt);
 			})
 			.catch((error) => {
-				if (targetEpoch !== this.analysisEpoch || this.state !== "ready") {
+				if (this.isOutdated(targetEpoch, startedAt)) {
 					return;
 				}
-				const message = asError(error).message;
-				this.warnOnce(`lintai serve reanalyze failed: ${message}`);
-				this.diagnosticsByFile = new Map();
-				this.unlocated = [];
-				this.analysisFailure = message;
+				this.setReanalyzeFailure(asError(error), startedAt);
 			})
 			.finally(() => {
 				this.refreshInFlight = undefined;
@@ -382,6 +410,7 @@ export class LintAIClient {
 			this.initialization = new Promise<void>((resolve) => {
 				finishInitialization = resolve;
 			});
+			const startedAt = this.dependencies.now();
 			const resultValue = this.requestSync<InitializeResult>("initialize", {
 				repoRoot: this.options.repoRoot,
 				assetRoot: this.options.assetRoot,
@@ -396,7 +425,7 @@ export class LintAIClient {
 				...(this.options.setupSandbox === undefined ? {} : { setupSandbox: this.options.setupSandbox }),
 			});
 			this.attachStdoutListener();
-			this.setDiagnostics(resultValue.diagnostics);
+			this.setDiagnostics(resultValue.diagnostics, startedAt);
 			this.state = this.pendingRuleInvalidation ? "invalidated" : "ready";
 			finishInitialization();
 		} catch (error) {
@@ -572,12 +601,13 @@ export class LintAIClient {
 			this.startServe();
 			return;
 		}
+		const startedAt = this.dependencies.now();
 		try {
 			const result = this.requestSync<InitializeResult>("reanalyze", { reason: "rule_changed" });
 			if (targetEpoch !== this.analysisEpoch || this.state !== "invalidated") {
 				return;
 			}
-			this.setDiagnostics(result.diagnostics);
+			this.setDiagnostics(result.diagnostics, startedAt);
 			this.state = "ready";
 		} catch (error) {
 			const child = this.child;
@@ -589,6 +619,59 @@ export class LintAIClient {
 			}
 			this.startServe();
 		}
+	}
+
+	// isOutdated reports whether a background refresh result must be dropped:
+	// the rule files changed, or a newer analysis (for a saved file) finished
+	// while the refresh ran.
+	private isOutdated(targetEpoch: number, startedAt: number): boolean {
+		return targetEpoch !== this.analysisEpoch || this.state !== "ready" || startedAt < this.diagnosticsAnalyzedAt;
+	}
+
+	// savedSinceAnalysis returns the modification time of the file when the
+	// file was saved after the analysis that produced the current diagnostics
+	// started. A linter lints a file again when it is saved, so that lint must
+	// not get the diagnostics of the old file. Each saved version causes one
+	// analysis at most, so a modification time in the future cannot cause an
+	// analysis on every lint. Some file systems store modification times in
+	// whole seconds, so for a whole-second time a save up to one second before
+	// the analysis started also counts.
+	private savedSinceAnalysis(file: string): number | undefined {
+		const modifiedAt = this.dependencies.modifiedAt(path.join(this.options.workspaceRoot, file));
+		if (modifiedAt === undefined) {
+			return undefined;
+		}
+		const margin = modifiedAt % 1_000 === 0 ? 1_000 : 0;
+		if (modifiedAt < this.diagnosticsAnalyzedAt - margin) {
+			return undefined;
+		}
+		return this.savedVersionsAnalyzed.get(file) === modifiedAt ? undefined : modifiedAt;
+	}
+
+	private reanalyzeSync(): void {
+		const targetEpoch = this.analysisEpoch;
+		const startedAt = this.dependencies.now();
+		this.lastDiagnosticsRequestAt = startedAt;
+		try {
+			const result = this.requestSync<InitializeResult>("reanalyze", { reason: "file_saved" });
+			if (targetEpoch !== this.analysisEpoch || this.state !== "ready") {
+				return;
+			}
+			this.setDiagnostics(result.diagnostics, startedAt);
+		} catch (error) {
+			if (targetEpoch !== this.analysisEpoch || this.state !== "ready") {
+				return;
+			}
+			this.setReanalyzeFailure(asError(error), startedAt);
+		}
+	}
+
+	private setReanalyzeFailure(error: Error, startedAt: number): void {
+		this.warnOnce(`lintai serve reanalyze failed: ${error.message}`);
+		this.diagnosticsByFile = new Map();
+		this.unlocated = [];
+		this.analysisFailure = error.message;
+		this.diagnosticsAnalyzedAt = startedAt;
 	}
 
 	private handleStdout(chunk: Buffer): void {
@@ -665,8 +748,9 @@ export class LintAIClient {
 		this.state = "fallback";
 	}
 
-	private setDiagnostics(diagnostics: Diagnostic[]): void {
+	private setDiagnostics(diagnostics: Diagnostic[], analyzedAt: number): void {
 		const indexed = indexDiagnostics(diagnostics);
+		this.diagnosticsAnalyzedAt = analyzedAt;
 		this.diagnosticsByFile = indexed.byFile;
 		this.unlocated = indexed.unlocated;
 		this.analysisFailure = undefined;
@@ -745,7 +829,12 @@ export class LintAIClient {
 	}
 }
 
-export function resolveBridgeOptions(options: BridgeOptions, cwd: string): ResolvedBridgeOptions {
+export type HostDefaults = {
+	defaultMode: "serve" | "oneshot";
+	reportProblemsOnce: boolean;
+};
+
+export function resolveBridgeOptions(options: BridgeOptions, cwd: string, host: HostDefaults): ResolvedBridgeOptions {
 	const workspaceRoot = options.workspaceRoot
 		? path.resolve(cwd, options.workspaceRoot)
 		: findWorkspaceRoot(cwd);
@@ -756,7 +845,8 @@ export function resolveBridgeOptions(options: BridgeOptions, cwd: string): Resol
 	const rawGlobs = options.rules ?? ["lintai-rules/**/*.ts"];
 	const ruleGlobs = rawGlobs.map((g) => (path.isAbsolute(g) ? g : path.join(workspaceRoot, g)));
 	return {
-		mode: options.mode ?? defaultMode(),
+		mode: options.mode ?? host.defaultMode,
+		reportProblemsOnce: host.reportProblemsOnce,
 		binary,
 		repoRoot,
 		assetRoot: findAssetRoot(),
@@ -839,21 +929,6 @@ function findAssetRoot(): string {
 	return packageRoot;
 }
 
-function defaultMode(): "serve" | "oneshot" {
-	return isLikelyESLintCLIProcess() ? "oneshot" : "serve";
-}
-
-function isLikelyESLintCLIProcess(): boolean {
-	return process.argv.some((arg) => {
-		const value = arg.toLowerCase();
-		if (value.includes("language-server")) {
-			return false;
-		}
-		const base = path.basename(value);
-		return base === "eslint" || base === "eslint.js";
-	});
-}
-
 export function getClient(
 	options: ResolvedBridgeOptions,
 	dependencies: ClientDependencies = defaultDependencies,
@@ -879,6 +954,7 @@ export function createTestDependencies(overrides: Partial<ClientDependencies>): 
 	return {
 		...defaultDependencies,
 		watchPath: () => ({ close() {} }),
+		modifiedAt: () => undefined,
 		...overrides,
 	};
 }

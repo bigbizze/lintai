@@ -91,7 +91,7 @@ func TestRuleErrorPhases(t *testing.T) {
 
 	items, err := New(typescript.New()).Run(context.Background(), Options{
 		RepoRoot:      repoRoot,
-		AssetRoot:     filepath.Join(repoRoot, "packages", "eslint-plugin"),
+		AssetRoot:     filepath.Join(repoRoot, "packages", "client"),
 		WorkspaceRoot: filepath.Join(repoRoot, "testdata/fixtures/workspace"),
 		RuleGlobs:     rulePaths,
 		Env:           map[string]any{},
@@ -146,7 +146,7 @@ export default rule("arch.no-async").version(1)
 `)
 	items, err := New(typescript.New()).Run(context.Background(), Options{
 		RepoRoot:      repoRoot,
-		AssetRoot:     filepath.Join(repoRoot, "packages", "eslint-plugin"),
+		AssetRoot:     filepath.Join(repoRoot, "packages", "client"),
 		WorkspaceRoot: workspaceRoot,
 		RuleGlobs:     []string{"lintai-rules/**/*.ts"},
 		Env:           map[string]any{},
@@ -191,7 +191,7 @@ export default rule("t.round-trip").version(1)
 `)
 	items, err := New(typescript.New()).Run(context.Background(), Options{
 		RepoRoot:      repoRoot,
-		AssetRoot:     filepath.Join(repoRoot, "packages", "eslint-plugin"),
+		AssetRoot:     filepath.Join(repoRoot, "packages", "client"),
 		WorkspaceRoot: filepath.Join(repoRoot, "testdata/fixtures/workspace"),
 		RuleGlobs:     []string{rulePath},
 		Env:           map[string]any{},
@@ -233,7 +233,7 @@ Decl w(F). w(F) :- module(F), F = "src/a/b.c", layer(F, /ui.x).`+"`"+`)
 `)
 	items, err := New(typescript.New()).Run(context.Background(), Options{
 		RepoRoot:      repoRoot,
-		AssetRoot:     filepath.Join(repoRoot, "packages", "eslint-plugin"),
+		AssetRoot:     filepath.Join(repoRoot, "packages", "client"),
 		WorkspaceRoot: workspaceRoot,
 		RuleGlobs:     []string{"lintai-rules/**/*.ts"},
 		Env:           map[string]any{},
@@ -283,7 +283,7 @@ export default rule("t.broken-warning").version(1)
 `)
 	items, err := New(typescript.New()).Run(context.Background(), Options{
 		RepoRoot:      repoRoot,
-		AssetRoot:     filepath.Join(repoRoot, "packages", "eslint-plugin"),
+		AssetRoot:     filepath.Join(repoRoot, "packages", "client"),
 		WorkspaceRoot: workspaceRoot,
 		RuleGlobs:     []string{"lintai-rules/broken-*.ts", "lintai-rules/soft.ts"},
 		Env:           map[string]any{},

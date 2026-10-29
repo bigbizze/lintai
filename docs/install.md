@@ -8,13 +8,13 @@ For npm consumers:
 
 - Linux or macOS
 - `x64` or `arm64`
-- Node `20+`
+- Node `22+`
 - a TypeScript repository with a `tsconfig.json` somewhere under the workspace you want to analyze
 
 For source builds:
 
 - Go on your `PATH`
-- Node `20+`
+- Node `22+`
 - `pnpm`
 
 Current caveats:
@@ -54,6 +54,16 @@ pnpm add -D zod
 ```
 
 Any schema object with `parse` or `safeParse` works.
+
+### CLI + SDK + oxlint integration
+
+```sh
+pnpm add -D @lintai/cli @lintai/sdk @lintai/oxlint-plugin oxlint
+# or
+npm install -D @lintai/cli @lintai/sdk @lintai/oxlint-plugin oxlint
+```
+
+This does not install ESLint. The plugin needs oxlint 1.90.0 or later. See [Oxlint plugin reference](api.md#oxlint-plugin-reference-and-caveats).
 
 ### pnpm caveat
 
@@ -158,7 +168,7 @@ Bridge caveats:
 - if `mode` is omitted, plain `eslint` CLI runs default to `oneshot`
 - long-lived editor/language-server use defaults to `serve`
 - rule-file edits trigger cache invalidation and a fresh analysis on the next lint pass
-- source-file edits refresh in the background; editor diagnostics may lag briefly
+- source-file edits refresh in the background; editor diagnostics may lag briefly. When the editor lints a file that was saved after the last analysis started, the plugin runs a new analysis first, so the diagnostics of a saved file are current, except for a second save in the same second on a file system that stores modification times in whole seconds
 - lintai reads saved files, not the editor buffer. While a file has unsaved changes, the editor shows one lintai message on line 1 that asks you to save the file.
 - when lintai cannot produce diagnostics, the plugin reports the reason on line 1 of each linted file, so a broken setup does not look like a clean workspace. This covers a failed analysis, a `serve` process that failed and fell back to one `oneshot` run, and a rule that could not run (a `rule_execution_error`). In an `eslint` CLI run, these messages appear on the first linted file only.
 
@@ -180,7 +190,8 @@ Useful source-build caveats:
 - removing the fork also removes the main obstacle to Windows builds, but this release does not ship them
 - npm packaging smoke tests use:
   - `pnpm build:dist`
-  - `pnpm smoke:npm`
+  - `pnpm smoke:npm` (ESLint)
+  - `pnpm smoke:oxlint` (oxlint CLI and language server, with no ESLint installed)
 
 ## Build and extraction cost
 
@@ -193,6 +204,23 @@ Measured on Linux x86_64 (16 cores) with Go 1.27.3. Extraction time is the media
 | 0.3.0 (adds tsconfig adjustment and timing) | 66 s | 69.4 MB | 0.04 s | 4.9 to 5.2 s |
 
 Set `LINTAI_EXTRACT_TIMING=1` to print one line to stderr with the number of files and programs and the milliseconds spent in config loading, program creation, the fact walk and in total. On zod, almost all of the time is the fact walk, which runs the type checker.
+
+## Linter cost
+
+Measured on Linux x86_64 (16 cores) on the fixture workspace (`testdata/fixtures/workspace`, 16 files, 8 rules, with `typescript-eslint` as the ESLint parser). Each value is the median wall-clock time of 5 cold CLI runs after one warm-up run. Each run is a new process, so it includes one full lintai analysis.
+
+| Command | Node 24.22 | Node 22.23 |
+|---|---|---|
+| `lintai` CLI alone | 312 ms | 312 ms |
+| `eslint src`, no rules | 322 ms | 343 ms |
+| `eslint src` with `@lintai/architecture` | 644 ms | 685 ms |
+| `oxlint src`, no JS plugin | 43 ms | 43 ms |
+| `oxlint src` with `@lintai/oxlint-plugin` loaded, one authoring rule | 149 ms | 158 ms |
+| `oxlint src` with `lintai/architecture` | 491 ms | 511 ms |
+
+The lintai analysis (about 310 ms) is the same under both linters. The rest is the host linter: about 330 ms for ESLint, and about 180 ms for oxlint. Most of the oxlint part is the start of its JS plugin runtime and, on Linux, of the spawner process (see the oxlint plugin caveats in [api.md](api.md#oxlint-plugin-reference-and-caveats)).
+
+The oxlint rule uses `create(context)`, not `createOnce`. `create()` costs about 28 µs per file (it resolves the options and gets the cached client), which is less than 0.1% of the run on this workspace. `createOnce` would save this cost but would make the oxlint rule different in structure from the ESLint rule.
 
 ## Troubleshooting and caveats
 
@@ -207,7 +235,7 @@ Reinstall `@lintai/cli` on a supported platform and architecture. The launcher r
 
 ### `could not find lintai asset root`
 
-Pass `--asset-root` explicitly if you are running the Go binary directly outside the npm package layout.
+The asset root is the directory that contains `scripts/bundle-rule.mjs` and `scripts/prepare-rule.mjs`. lintai looks for `node_modules/@lintai/client`, then `node_modules/.pnpm/node_modules/@lintai/client` (pnpm), then `packages/client`, then the repository root. Pass `--asset-root` explicitly if you are running the Go binary directly outside the npm package layout.
 
 ### Rule bundles fail unexpectedly
 

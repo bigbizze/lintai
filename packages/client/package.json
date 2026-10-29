@@ -1,0 +1,48 @@
+{
+	"name": "@lintai/client",
+	"version": "0.5.0",
+	"type": "module",
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/bigbizze/lintai.git",
+		"directory": "packages/client"
+	},
+	"homepage": "https://github.com/bigbizze/lintai#readme",
+	"bugs": {
+		"url": "https://github.com/bigbizze/lintai/issues"
+	},
+	"files": [
+		"dist",
+		"!dist/**/*.test.*",
+		"scripts"
+	],
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"default": "./dist/index.js"
+		},
+		"./package.json": "./package.json"
+	},
+	"main": "dist/index.js",
+	"types": "dist/index.d.ts",
+	"engines": {
+		"node": ">=22"
+	},
+	"scripts": {
+		"build": "tsc",
+		"dev": "tsc --watch",
+		"test": "node --test 'dist/**/*.test.js'"
+	},
+	"dependencies": {
+		"@lintai/sdk": "workspace:*",
+		"chokidar": "^4.0.3",
+		"esbuild": "^0.25.2"
+	},
+	"devDependencies": {
+		"typescript": "^5.7.0"
+	},
+	"publishConfig": {
+		"access": "public"
+	}
+}

@@ -273,8 +273,11 @@ func resolveAssetRoot(explicit, repoRoot string) (string, error) {
 		return filepath.Abs(explicit)
 	}
 	candidates := []string{
-		filepath.Join(repoRoot, "node_modules", "@lintai", "eslint-plugin"),
-		filepath.Join(repoRoot, "packages", "eslint-plugin"),
+		filepath.Join(repoRoot, "node_modules", "@lintai", "client"),
+		// pnpm does not link transitive dependencies into the root
+		// node_modules. It links them here.
+		filepath.Join(repoRoot, "node_modules", ".pnpm", "node_modules", "@lintai", "client"),
+		filepath.Join(repoRoot, "packages", "client"),
 		repoRoot,
 	}
 	for _, candidate := range candidates {
@@ -282,7 +285,7 @@ func resolveAssetRoot(explicit, repoRoot string) (string, error) {
 			return candidate, nil
 		}
 	}
-	return "", fmt.Errorf("could not find lintai asset root under %q or %q", candidates[0], candidates[1])
+	return "", fmt.Errorf("could not find lintai asset root under %s", strings.Join(candidates[:len(candidates)-1], ", "))
 }
 
 func hasHelperScripts(root string) bool {
