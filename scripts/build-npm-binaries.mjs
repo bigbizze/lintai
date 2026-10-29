@@ -22,7 +22,7 @@ for (const target of hostOnly ? [hostTarget] : targets) {
 	const outputDir = path.join(root, "packages", target.packageDir, "bin");
 	const outputPath = path.join(outputDir, "lintai");
 	await fs.mkdir(outputDir, { recursive: true });
-	const result = spawnSync("go", ["build", "-o", outputPath, "./cmd/lintai"], {
+	const result = spawnSync("go", ["build", "-trimpath", "-o", outputPath, "./cmd/lintai"], {
 		cwd: root,
 		stdio: "inherit",
 		env: {

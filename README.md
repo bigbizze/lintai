@@ -2,7 +2,7 @@
 
 Deterministic architectural policy enforcement for TypeScript repositories.
 
-LintAI lets you write rules like "components must not import domain code", "pure functions must not transitively call effectful code", or "API actions must return `Promise<ActionResult<T>>`", then run those rules from a CLI or surface them inside ESLint.
+LintAI lets you write rules like "components must not import domain code", "pure functions must not transitively call effectful code", or "API actions must return `Promise<ActionResult<T>>`", then run those rules from a CLI or surface them inside ESLint or oxlint.
 
 ## What and caveats
 
@@ -11,7 +11,7 @@ LintAI is a whole-workspace architecture engine:
 - it builds a semantic snapshot of your TypeScript workspace in Go
 - it converts the snapshot into base relations (facts) such as `fn`, `import_edge`, `call_edge` and `ambient_use`
 - each rule is a Datalog program, in the [Mangle](https://codeberg.org/TauCeti/mangle-go) dialect, that derives violation rows from those facts
-- it reports file-scoped diagnostics that can be consumed by the CLI or ESLint
+- it reports file-scoped diagnostics that can be consumed by the CLI, ESLint or oxlint
 
 It is meant for architectural invariants, not style rules.
 
@@ -19,6 +19,7 @@ Current caveats:
 
 - only the TypeScript backend ships today
 - npm distribution currently targets Linux and macOS on `x64` and `arm64`
+- the npm packages need Node 22 or later
 - the project is usable, but still early
 
 ## Why and caveats
@@ -215,7 +216,12 @@ More examples live in [docs/examples.md](docs/examples.md). They cover:
 - layer tables supplied through `.facts()`
 - required imports with negation
 - ambient-source rules for the clock and the environment
+- `import.meta` access, directives, library calls and unresolved imports
+- `--explain` output
 - testing rules with planted violations
+- ESLint integration
+- strict purity rules that also follow function values and report unresolved calls
+- a package capability table
 
 Important caveat:
 
