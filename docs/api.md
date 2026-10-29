@@ -404,6 +404,7 @@ Plugin caveats:
 - `files` is the same as the CLI `--files` flag
 - lintai reads the saved files on disk, not the editor buffer. In `serve` mode, when the editor text of a file is different from the saved file, the plugin shows one message on line 1 that asks you to save the file, in place of the lintai diagnostics for that file. After you save, the diagnostics update on the next lint pass.
 - rule-file edits force invalidation on the next lint pass
+- when lintai cannot produce diagnostics, the plugin reports the reason on line 1 of each linted file, so a broken setup does not look like a clean workspace. This covers a failed analysis, a `serve` process that failed and fell back to one `oneshot` run, and a rule that could not run (a `rule_execution_error`). In an `eslint` CLI run, these messages appear on the first linted file only.
 - the ESLint path never computes `explanation`
 
 ## Diagnostic shape and caveats

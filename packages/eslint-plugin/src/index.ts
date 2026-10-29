@@ -61,6 +61,9 @@ const architectureBridge: Rule.RuleModule = {
 				}
 				const filename = path.relative(options.workspaceRoot, context.filename).replace(/\\/g, "/");
 				const diagnostics = client.getDiagnostics(filename);
+				for (const message of client.problems()) {
+					context.report({ node, loc: { line: 1, column: 0 }, message });
+				}
 				reportDiagnostics(context, node, diagnostics);
 			},
 		};

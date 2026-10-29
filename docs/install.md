@@ -160,6 +160,7 @@ Bridge caveats:
 - rule-file edits trigger cache invalidation and a fresh analysis on the next lint pass
 - source-file edits refresh in the background; editor diagnostics may lag briefly
 - lintai reads saved files, not the editor buffer. While a file has unsaved changes, the editor shows one lintai message on line 1 that asks you to save the file.
+- when lintai cannot produce diagnostics, the plugin reports the reason on line 1 of each linted file, so a broken setup does not look like a clean workspace. This covers a failed analysis, a `serve` process that failed and fell back to one `oneshot` run, and a rule that could not run (a `rule_execution_error`). In an `eslint` CLI run, these messages appear on the first linted file only.
 
 ## Build from source and caveats
 

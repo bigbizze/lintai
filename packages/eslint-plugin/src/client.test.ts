@@ -375,3 +375,86 @@ test("resolveBridgeOptions finds the installed lintai binary from the workspace 
 		rmSync(tempRoot, { recursive: true, force: true });
 	}
 });
+
+test("workspace problems are reported: rule errors, failed reanalyze and serve fallback", async () => {
+	const child = createTestProcess();
+	let now = 0;
+	const client = new LintAIClient(
+		resolveBridgeOptions(
+			{
+				mode: "serve",
+				binary: "/tmp/lintai",
+				repoRoot: "/repo",
+				workspaceRoot: "/workspace",
+				rules: ["lintai-rules/**/*.ts"],
+			},
+			"/repo",
+		),
+		createTestDependencies({
+			spawnServe: () => child,
+			readServeSync: () =>
+				createFramedResponse({
+					jsonrpc: "2.0",
+					id: 1,
+					result: {
+						rulesLoaded: 1,
+						diagnosticCount: 1,
+						snapshotVersion: "snap-1",
+						diagnostics: [
+							{
+								rule_id: "arch.broken",
+								assertion_id: "default",
+								diagnostic_kind: "rule_execution_error",
+								phase: "program_parse",
+								message: "parse error",
+							},
+						],
+					},
+				}),
+			spawnSync: () => ({ stdout: "", stderr: "lintai: bad config", error: undefined, status: 2 }),
+			now: () => now,
+			log: () => undefined,
+		}),
+	);
+
+	assert.deepEqual(client.getDiagnostics("src/example.ts"), []);
+	assert.deepEqual(client.problems(), [
+		"[lintai] rule arch.broken could not run (phase program_parse): parse error",
+	]);
+
+	now = 1_000;
+	client.getDiagnostics("src/example.ts");
+	child.stdout.write(
+		createFramedResponse({ jsonrpc: "2.0", id: 2, error: { code: -32603, message: "tsconfig is invalid" } }),
+	);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.deepEqual(client.problems(), ["[lintai] lintai could not analyze the workspace: tsconfig is invalid"]);
+
+	child.emitExit(1, null);
+	assert.deepEqual(client.getDiagnostics("src/example.ts"), []);
+	const problems = client.problems().join("\n");
+	assert.match(problems, /lintai serve failed/);
+	assert.match(problems, /lintai exited with status 2 and no output: lintai: bad config/);
+	client.dispose();
+});
+
+test("an eslint CLI process reports workspace problems on the first file only", () => {
+	const previousArgv = process.argv;
+	process.argv = ["node", "/tmp/node_modules/eslint/bin/eslint.js"];
+	try {
+		const client = new LintAIClient(
+			resolveBridgeOptions({ binary: "/tmp/lintai", repoRoot: "/repo", workspaceRoot: "/workspace" }, "/repo"),
+			createTestDependencies({
+				spawnSync: () => ({ stdout: "", stderr: "", error: undefined, status: 2 }),
+				log: () => undefined,
+			}),
+		);
+		client.getDiagnostics("src/a.ts");
+		assert.equal(client.problems().length, 1);
+		client.getDiagnostics("src/b.ts");
+		assert.deepEqual(client.problems(), []);
+		client.dispose();
+	} finally {
+		process.argv = previousArgv;
+	}
+});

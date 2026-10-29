@@ -337,6 +337,25 @@ func writeRequest(t *testing.T, buffer *bytes.Buffer, id any, method string, par
 	}
 }
 
+// A clean workspace must return an empty diagnostics array, not null. The
+// ESLint plugin iterates the array and a null value made it leave serve mode.
+func TestServerCleanWorkspaceReturnsEmptyDiagnosticArrays(t *testing.T) {
+	input := &bytes.Buffer{}
+	writeRequest(t, input, 1, "initialize", InitializeParams{WorkspaceRoot: "/workspace", Env: map[string]any{}})
+	writeRequest(t, input, 2, "reanalyze", ReanalyzeParams{})
+	writeRequest(t, input, 3, "diagnostics/file", FileDiagnosticsParams{File: "src/clean.ts"})
+	output := &bytes.Buffer{}
+	if err := New(&fakeAnalyzer{}).Serve(context.Background(), input, output); err != nil {
+		t.Fatal(err)
+	}
+	if count := bytes.Count(output.Bytes(), []byte(`"diagnostics":[]`)); count != 3 {
+		t.Fatalf("expected 3 empty diagnostics arrays, got %d in %s", count, output.String())
+	}
+	if bytes.Contains(output.Bytes(), []byte(`null`)) {
+		t.Fatalf("response contains null: %s", output.String())
+	}
+}
+
 func readResponse(t *testing.T, reader *bufio.Reader) jsonrpc.Response {
 	t.Helper()
 
