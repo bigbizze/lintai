@@ -1,5 +1,7 @@
-import lintai from "@lintai/eslint-plugin";
+import { createLintaiPlugin } from "@lintai/eslint-plugin";
 import tsParser from "@typescript-eslint/parser";
+
+const lintai = createLintaiPlugin({ rules: ["lintai-rules/**/*.ts"] });
 
 export default [
 	{
@@ -7,16 +9,14 @@ export default [
 		languageOptions: {
 			parser: tsParser,
 		},
-		plugins: {
-			"@lintai": lintai,
-		},
+		...lintai.configs.all,
 		rules: {
-			"@lintai/architecture": [
-				"error",
-				{
-					rules: ["lintai-rules/**/*.ts"],
-				},
-			],
+			...lintai.configs.all.rules,
+			"lintai/arch.actions-return-action-result": "warn",
 		},
+	},
+	{
+		files: ["src/legacy.ts"],
+		rules: { "lintai/arch.no-async": "off" },
 	},
 ];

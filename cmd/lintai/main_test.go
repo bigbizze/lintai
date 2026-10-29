@@ -186,3 +186,119 @@ export default rule("t.expect-all").version(1).program(dl` + "`Decl a(F). a(F) :
 		}
 	}
 }
+
+// lintai rules lists the rule ids that the linter plugins create rules
+// for. A broken rule, a duplicate id and an invalid id are errors, and the
+// command still exits 0. A normal run reports the duplicate and the invalid
+// id as rule errors and still runs the other rules.
+func TestRulesCommand(t *testing.T) {
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	ruleSource := func(id string) string {
+		return `import { dl, rule } from "@lintai/sdk";
+export default rule(` + strconvQuote(id) + `).version(1).program(dl` + "`Decl v(F). v(F) :- module(F), glob(F, \"src/**\").`" + `).report("v").message(() => "x");
+`
+	}
+	files := map[string]string{
+		"src/a.ts":                 "export const a = 1;\n",
+		"lintai-rules/zeta.ts":     ruleSource("arch.zeta"),
+		"lintai-rules/alpha.ts":    ruleSource("arch.alpha"),
+		"lintai-rules/nested/b.ts": ruleSource("arch/nested.b"),
+		"lintai-rules/dup-one.ts":  ruleSource("arch.dup"),
+		"lintai-rules/dup-two.ts":  ruleSource("arch.dup"),
+		"lintai-rules/dup-setup.ts": `import { dl, rule } from "@lintai/sdk";
+export default rule("arch.dup-setup").version(1).setup(() => { throw new Error("setup failed"); }).program(dl` + "`Decl v(F). v(F) :- module(F), glob(F, \"src/**\").`" + `).report("v").message(() => "x");
+`,
+		"lintai-rules/dup-setup-ok.ts": ruleSource("arch.dup-setup"),
+		"lintai-rules/bad-id.ts":       "export default { id: \"Arch.Bad\", versionValue: 1 };\n",
+		"lintai-rules/no-program.ts":   "export default { id: \"arch.no-program\", versionValue: 1 };\n",
+		"lintai-rules/broken.ts":       "export default rule(\n",
+		"lintai-rules/helper.ts":       "export const shared = 1;\n",
+	}
+	for name, text := range files {
+		path := filepath.Join(workspace, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	var stdout bytes.Buffer
+	err = run(context.Background(), []string{"rules", "--json", "--repo-root", repoRoot, "--workspace-root", workspace}, &stdout)
+	if code := exitCode(err, io.Discard); code != exitClean {
+		t.Fatalf("exit code %d, want %d: %v", code, exitClean, err)
+	}
+	var list struct {
+		Rules  []struct{ ID, Path string }          `json:"rules"`
+		Errors []struct{ Path, ID, Message string } `json:"errors"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	gotRules := make([]string, 0, len(list.Rules))
+	for _, item := range list.Rules {
+		gotRules = append(gotRules, item.ID+" "+item.Path)
+	}
+	wantRules := []string{
+		"arch.alpha lintai-rules/alpha.ts",
+		"arch.zeta lintai-rules/zeta.ts",
+		"arch/nested.b lintai-rules/nested/b.ts",
+	}
+	if !slices.Equal(gotRules, wantRules) {
+		t.Fatalf("rules:\ngot  %q\nwant %q", gotRules, wantRules)
+	}
+	wantErrors := []struct{ path, id, message string }{
+		{"lintai-rules/bad-id.ts", "", `rule id "Arch.Bad" is not valid`},
+		{"lintai-rules/broken.ts", "", "Unexpected end of file"},
+		{"lintai-rules/dup-one.ts", "arch.dup", `rule id "arch.dup" is used by more than one rule file (lintai-rules/dup-one.ts, lintai-rules/dup-two.ts)`},
+		{"lintai-rules/dup-setup-ok.ts", "arch.dup-setup", `rule id "arch.dup-setup" is used by more than one rule file`},
+		{"lintai-rules/dup-setup.ts", "arch.dup-setup", `rule id "arch.dup-setup" is used by more than one rule file`},
+		{"lintai-rules/dup-two.ts", "arch.dup", `rule id "arch.dup" is used by more than one rule file`},
+		{"lintai-rules/no-program.ts", "arch.no-program", "rule is missing program()"},
+	}
+	if len(list.Errors) != len(wantErrors) {
+		t.Fatalf("errors: got %+v", list.Errors)
+	}
+	for index, want := range wantErrors {
+		got := list.Errors[index]
+		if got.Path != want.path || got.ID != want.id || !strings.Contains(got.Message, want.message) {
+			t.Errorf("error %d: got %+v, want path %s, id %q and a message with %q", index, got, want.path, want.id, want.message)
+		}
+	}
+
+	stdout.Reset()
+	err = run(context.Background(), []string{"--json", "--repo-root", repoRoot, "--workspace-root", workspace, "--rules", "lintai-rules/alpha.ts,lintai-rules/dup-*.ts,lintai-rules/bad-id.ts"}, &stdout)
+	if code := exitCode(err, io.Discard); code != exitRuleError {
+		t.Fatalf("exit code %d, want %d: %v", code, exitRuleError, err)
+	}
+	var items []diagnostics.Diagnostic
+	if err := json.Unmarshal(stdout.Bytes(), &items); err != nil {
+		t.Fatal(err)
+	}
+	got := make([]string, 0, len(items))
+	for _, item := range items {
+		got = append(got, item.RuleID+" "+string(item.DiagnosticKind)+" "+item.Phase)
+	}
+	slices.Sort(got)
+	want := []string{
+		"Arch.Bad rule_execution_error setup",
+		"arch.alpha architecture_violation ",
+		"arch.dup rule_execution_error config",
+		"arch.dup rule_execution_error config",
+		"arch.dup-setup rule_execution_error config",
+		"arch.dup-setup rule_execution_error setup",
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("normal run:\ngot  %q\nwant %q", got, want)
+	}
+}
+
+func strconvQuote(value string) string {
+	encoded, _ := json.Marshal(value)
+	return string(encoded)
+}

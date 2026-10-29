@@ -206,8 +206,17 @@ export class RuleDefinition<Env, Setup> {
 	}
 }
 
+// A rule id is also a linter rule name, lintai/<id>, so it uses only the
+// characters that a linter config and a disable comment accept unquoted.
+export const ruleIdPattern = /^[a-z0-9][a-z0-9._/-]*$/;
+
 export function rule<Env = Record<string, any>, Setup = Record<string, never>>(
 	id: string,
 ): RuleDefinition<Env, Setup> {
+	if (typeof id !== "string" || !ruleIdPattern.test(id)) {
+		throw new TypeError(
+			`rule id ${JSON.stringify(id)} is not valid: it must match ${ruleIdPattern}`,
+		);
+	}
 	return new RuleDefinition<Env, Setup>({ id });
 }

@@ -2,16 +2,15 @@ import path from "node:path";
 
 import { rules as authoringRules } from "@lintai/authoring-rules";
 import {
-	bridgeOptionsSchema,
-	getClient,
-	hasUnsavedChanges,
-	resolveBridgeOptions,
-	toReports,
-	unsavedChangesMessage,
-	type BridgeOptions,
 	type HostDefaults,
+	type LintaiOptions,
+	type LintedFile,
+	analysisRuleName,
+	createLintaiRules,
 } from "@lintai/client";
-import type { Rule } from "eslint";
+import type { ESLint, Rule } from "eslint";
+
+export type { LintaiOptions } from "@lintai/client";
 
 // The ESLint CLI lints each file once, so it runs lintai once (oneshot) and
 // reports workspace problems on the first file only. An editor lints files
@@ -32,62 +31,84 @@ export function eslintHostDefaults(argv: string[] = process.argv): HostDefaults 
 	return { defaultMode: cli ? "oneshot" : "serve", reportProblemsOnce: cli };
 }
 
-// The ESLint level of a rule applies to every report of the rule, so lintai
-// error and warning diagnostics come from two rules. architecture reports
-// error diagnostics, rule errors and problems with the analysis.
-// architecture-warnings reports warning diagnostics. Give both rules the same
-// options, so that they share one lintai process.
-function bridgeRule(severity: "error" | "warning", description: string): Rule.RuleModule {
-	return {
-		meta: {
-			type: "problem",
-			docs: { description },
-			schema: bridgeOptionsSchema as Rule.RuleMetaData["schema"],
-		},
-		create(context) {
-			const options = resolveBridgeOptions(
-				(context.options[0] ?? {}) as BridgeOptions,
-				process.cwd(),
-				eslintHostDefaults(),
-			);
-			const client = getClient(options);
+export type LintaiPlugin = {
+	meta: { name: "lintai" };
+	rules: Record<string, Rule.RuleModule>;
+	configs: {
+		all: LintaiConfig;
+		authoring: LintaiConfig;
+	};
+};
 
-			return {
-				Program(node) {
-					if (options.mode === "serve" && hasUnsavedChanges(context.filename, context.sourceCode.text)) {
-						if (severity === "error") {
-							context.report({ node, loc: { line: 1, column: 0 }, message: unsavedChangesMessage });
-						}
-						return;
-					}
-					const filename = path.relative(options.workspaceRoot, context.filename).replace(/\\/g, "/");
-					const diagnostics = client
-						.getDiagnostics(filename)
-						.filter((diagnostic) => (diagnostic.severity === "warning") === (severity === "warning"));
-					if (severity === "error") {
-						for (const message of client.problems()) {
-							context.report({ node, loc: { line: 1, column: 0 }, message });
-						}
-					}
-					for (const report of toReports(diagnostics)) {
-						context.report({ node, ...report });
-					}
-				},
-			};
+export type RuleLevel = "off" | "warn" | "error";
+
+// LintaiConfig is a flat config object that adds the plugin and sets rule
+// levels. Spread it in a config object, or spread its rules into the rules
+// of a config object.
+export type LintaiConfig = { plugins: { lintai: ESLint.Plugin }; rules: Record<string, RuleLevel> };
+
+function lintedFile(context: Rule.RuleContext): LintedFile {
+	return {
+		physicalFilename: context.physicalFilename,
+		text: context.sourceCode.text,
+		report(report) {
+			context.report(report);
 		},
 	};
 }
 
-const architectureBridge = bridgeRule("error", "surface whole-workspace architecture diagnostics from lintai");
-const architectureWarningsBridge = bridgeRule(
-	"warning",
-	"surface whole-workspace architecture diagnostics from lintai rules with severity warning",
-);
-
-export const rules = {
-	...authoringRules,
-	architecture: architectureBridge,
-	"architecture-warnings": architectureWarningsBridge,
-};
-
-export default { rules };
+// createLintaiPlugin creates one ESLint rule lintai/<id> for each lintai rule
+// that the rule globs select, the rule lintai/analysis and the authoring
+// rules. The rule list is read once, when the config calls this function.
+export function createLintaiPlugin(options: LintaiOptions = {}): LintaiPlugin {
+	const lintai = createLintaiRules(options, eslintHostDefaults());
+	const rules: Record<string, Rule.RuleModule> = { ...authoringRules };
+	for (const item of lintai.rules) {
+		rules[item.id] = {
+			meta: {
+				type: "problem",
+				docs: { description: `lintai rule ${item.id} (${item.path})` },
+				schema: [],
+			},
+			create(context) {
+				return {
+					Program() {
+						lintai.lintRule(item.id, lintedFile(context));
+					},
+				};
+			},
+		};
+	}
+	rules[analysisRuleName] = {
+		meta: {
+			type: "problem",
+			docs: {
+				description:
+					"report lintai rule errors, analysis problems and violations of rules that have no linter rule",
+			},
+			schema: [],
+		},
+		create(context) {
+			return {
+				Program() {
+					lintai.lintAnalysis(lintedFile(context));
+				},
+			};
+		},
+	};
+	const allRules: Record<string, RuleLevel> = { [`lintai/${analysisRuleName}`]: "error" };
+	for (const item of lintai.rules) {
+		allRules[`lintai/${item.id}`] = "error";
+	}
+	const authoring: Record<string, RuleLevel> = Object.fromEntries(
+		Object.keys(authoringRules).map((name) => [`lintai/${name}`, "error" as const]),
+	);
+	const plugin: LintaiPlugin = {
+		meta: { name: "lintai" },
+		rules,
+		configs: {} as LintaiPlugin["configs"],
+	};
+	plugin.configs.all = { plugins: { lintai: plugin }, rules: allRules };
+	plugin.configs.authoring = { plugins: { lintai: plugin }, rules: authoring };
+	return plugin;
+}

@@ -362,36 +362,39 @@ pnpm exec lintai facts --workspace-root testdata/fixtures/workspace --relation c
 ## 11. ESLint integration
 
 ```js
-import lintai from "@lintai/eslint-plugin";
+import { createLintaiPlugin } from "@lintai/eslint-plugin";
+
+const lintai = createLintaiPlugin({ rules: ["lintai-rules/**/*.ts"], factLimit: 1000000 });
 
 export default [
 	{
-		files: ["src/**/*.ts", "src/**/*.tsx", "lintai-rules/**/*.ts"],
-		plugins: {
-			"@lintai": lintai,
-		},
+		files: ["src/**/*.ts", "src/**/*.tsx"],
+		...lintai.configs.all,
 		rules: {
-			"@lintai/architecture": [
-				"error",
-				{
-					rules: ["lintai-rules/**/*.ts"],
-					factLimit: 1000000,
-				},
-			],
-			"@lintai/no-ambient-in-pure-phase": "error",
-			"@lintai/no-top-level-node-imports": "error",
-			"@lintai/require-rule-shape": "error",
+			...lintai.configs.all.rules,
+			"lintai/arch.legacy-imports": "warn",
 		},
+	},
+	{
+		files: ["src/legacy/**"],
+		rules: { "lintai/arch.legacy-imports": "off" },
+	},
+	{
+		files: ["lintai-rules/**/*.ts"],
+		plugins: { lintai },
+		rules: lintai.configs.authoring.rules,
 	},
 ];
 ```
 
 Caveats:
 
-- include `lintai-rules/**/*.ts` if you want ESLint to lint the rule files themselves
-- the architecture rule reports diagnostics on target source files, not on the rule file that produced them
+- each lintai rule is the ESLint rule `lintai/<rule-id>`. `configs.all` sets every one, and `lintai/analysis`, to `"error"`. Override single rules after the spread.
+- `// eslint-disable-next-line lintai/arch.legacy-imports` hides one violation of that rule
+- `lintai/analysis` reports rule errors and analysis problems; keep it at `"error"`
+- the lintai rules report diagnostics on target source files, not on the rule file that produced them. The authoring rules lint the rule files.
 - `factLimit` is optional. The default is 5,000,000 derived facts for each rule.
-- to make one rule a warning, add `severity: { "arch.rule-id": "warning" }` to the options, and add `"@lintai/architecture-warnings": ["warn", options]` with the same options object. `"off"` turns the rule off.
+- after you add a rule file or change a rule id, restart ESLint or the editor's ESLint server
 
 ## 12. Strict purity rule
 

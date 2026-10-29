@@ -127,29 +127,31 @@ pnpm exec lintai \
   --rules 'lintai-rules/**/*.ts'
 ```
 
-Wire it into ESLint:
+Wire it into ESLint. Each lintai rule becomes its own ESLint rule, `lintai/<rule-id>`, with its own level, per-file overrides and disable comments:
 
 ```js
 // eslint.config.mjs
-import lintai from "@lintai/eslint-plugin";
+import { createLintaiPlugin } from "@lintai/eslint-plugin";
+
+const lintai = createLintaiPlugin({ rules: ["lintai-rules/**/*.ts"] });
 
 export default [
 	{
 		files: ["src/**/*.ts", "src/**/*.tsx"],
-		plugins: {
-			"@lintai": lintai,
-		},
+		...lintai.configs.all,
 		rules: {
-			"@lintai/architecture": [
-				"error",
-				{
-					rules: ["lintai-rules/**/*.ts"],
-				},
-			],
+			...lintai.configs.all.rules,
+			"lintai/arch.legacy-imports": "warn",
 		},
+	},
+	{
+		files: ["src/legacy/**"],
+		rules: { "lintai/arch.legacy-imports": "off" },
 	},
 ];
 ```
+
+`configs.all` turns on every lintai rule and `lintai/analysis` at `"error"`. `lintai/analysis` reports rule errors and analysis problems, whatever level a rule has, so keep it at `"error"`. A lintai rule that is not in the config does not run.
 
 Or wire it into oxlint, without ESLint:
 
@@ -157,17 +159,32 @@ Or wire it into oxlint, without ESLint:
 pnpm add -D @lintai/cli @lintai/sdk @lintai/oxlint-plugin oxlint
 ```
 
-```json
-// .oxlintrc.json
-{
-	"jsPlugins": ["@lintai/oxlint-plugin"],
-	"rules": {
-		"lintai/architecture": ["error", { "rules": ["lintai-rules/**/*.ts"] }]
-	}
-}
+oxlint loads JS plugins from a module path, so create the plugin in a local file:
+
+```js
+// lintai.oxlint.mjs
+import { createLintaiPlugin } from "@lintai/oxlint-plugin";
+
+export default createLintaiPlugin({
+	workspaceRoot: import.meta.dirname,
+	rules: ["lintai-rules/**/*.ts"],
+});
 ```
 
-oxlint documents JS plugins as alpha and outside semver, so a later oxlint can break the plugin until lintai is updated. See [Oxlint plugin reference](docs/api.md#oxlint-plugin-reference-and-caveats).
+```ts
+// oxlint.config.ts
+import { defineConfig } from "oxlint";
+import lintai from "./lintai.oxlint.mjs";
+
+export default defineConfig({
+	jsPlugins: ["./lintai.oxlint.mjs"],
+	rules: { ...lintai.configs.all.rules, "lintai/arch.legacy-imports": "warn" },
+});
+```
+
+In `.oxlintrc.json`, name `"./lintai.oxlint.mjs"` in `jsPlugins` and list each `lintai/<rule-id>` and `lintai/analysis` by hand.
+
+The rule list is read when the linter loads the plugin. After you add a rule file or change a rule id, restart the linter or the editor's language server. oxlint documents JS plugins as alpha and outside semver, so a later oxlint can break the plugin until lintai is updated. See [Oxlint plugin reference](docs/api.md#oxlint-plugin-reference-and-caveats).
 
 Useful caveats:
 
@@ -188,12 +205,14 @@ The full reference lives in [docs/api.md](docs/api.md). Highlights:
 - prelude: `glob`, `import_runtime`, `module_imports`, `imports_reach`, `calls_reach`, `fn_uses_ambient`, `fn_reaches_ambient`, `module_uses_ambient`, `module_reaches_ambient`, `fn_calls_package`, `module_calls_package`, `type_child`, `type_contains`, `type_is_promise`, `fn_returns_awaited`
 - strict mode: `calls_or_refs_reach`, `fn_reaches_ambient_strict`, `fn_has_unresolved_call`, `module_has_unresolved_call` and `fn_reaches_unresolved` also follow function values and report calls that lintai cannot resolve
 - ambient sources: `clock` (`Date.now`, `new Date()`, `performance.now`), `env` (`process.env`), `random` (`Math.random`, `crypto.randomUUID` and other `crypto` random functions), `crypto` (`crypto.subtle`), `network` (`fetch`), `timer` (`setTimeout`, `setInterval`, `setImmediate`, `queueMicrotask`) and `process` (`process.cwd`, `process.argv`)
-- CLI: `lintai schema`, `lintai facts`, `lintai lock`, `--explain`, `--fact-limit`, `--severity <rule-id>=error|warning|off`, `--rules-lock`, `--setup-sandbox auto|on|off`
+- CLI: `lintai schema`, `lintai facts`, `lintai lock`, `lintai rules`, `--explain`, `--fact-limit`, `--severity <rule-id>=error|warning|off`, `--rules-lock`, `--setup-sandbox auto|on|off`
 - optional `config` export:
   - `export const config = z.object({...})`
 
 Important caveats:
 
+- a rule id must match `^[a-z0-9][a-z0-9._/-]*$`, and each rule file needs its own id
+- `--severity` sets rule levels for the CLI; under ESLint or oxlint, set the level of `lintai/<rule-id>` in the linter config
 - the first argument of a reported predicate is its anchor; it must be an entity id with a `location` fact
 - `type_display` is the text that TypeScript 7 prints; use it in messages, and match types with `type_named` and the other structural relations
 - TypeScript flattens nested unions, so `ActionResult<number> | null` has the members of `ActionResult<number>` and no `type_named` row for `ActionResult`
@@ -203,7 +222,7 @@ Important caveats:
 
 ### Oxlint plugin reference
 
-`@lintai/oxlint-plugin` exposes `lintai/architecture`, `lintai/architecture-warnings` and the authoring rules (`lintai/no-ambient-in-pure-phase`, `lintai/no-top-level-node-imports`, `lintai/require-rule-shape`). It takes the same options as the ESLint plugin. It runs `oneshot` under the `oxlint` CLI and `serve` under `oxlint --lsp`, and an explicit `mode` option always wins. It needs Node 22 or later and oxlint 1.90.0 or later. oxlint documents JS plugins as alpha and outside semver, so a later oxlint can break the plugin until lintai is updated. See [docs/api.md](docs/api.md#oxlint-plugin-reference-and-caveats).
+`@lintai/oxlint-plugin` and `@lintai/eslint-plugin` export `createLintaiPlugin(options)`. It creates one rule `lintai/<rule-id>` for each lintai rule, `lintai/analysis`, and the authoring rules (`lintai/no-ambient-in-pure-phase`, `lintai/no-top-level-node-imports`, `lintai/require-rule-shape`), with `configs.all` and `configs.authoring`. Both plugins take the same options. See [docs/api.md](docs/api.md#linter-rules). It runs `oneshot` under the `oxlint` CLI and `serve` under `oxlint --lsp`, and an explicit `mode` option always wins. It needs Node 22 or later and oxlint 1.90.0 or later. oxlint documents JS plugins as alpha and outside semver, so a later oxlint can break the plugin until lintai is updated. See [docs/api.md](docs/api.md#oxlint-plugin-reference-and-caveats).
 
 The Go engine, backend contract, generic fact model, diagnostics, runtime,
 bundling helpers, and JSON-RPC server are also public packages. See

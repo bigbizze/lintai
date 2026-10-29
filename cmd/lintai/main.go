@@ -72,6 +72,8 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 			return runFacts(ctx, args[1:], stdout)
 		case "lock":
 			return runLock(ctx, args[1:], stdout)
+		case "rules":
+			return runRules(ctx, args[1:], stdout)
 		}
 	}
 	return runOnce(ctx, args, stdout)
@@ -348,4 +350,53 @@ func runLock(ctx context.Context, args []string, stdout io.Writer) error {
 // on stderr.
 func newBackend() *typescript.Backend {
 	return &typescript.Backend{Log: os.Stderr}
+}
+
+// runRules prints the id and path of each rule. A rule that does not bundle
+// or load is in the errors, and the exit code is still 0, so that a linter
+// plugin can create the other rules.
+func runRules(ctx context.Context, args []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("lintai rules", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	workspaceRoot := flags.String("workspace-root", ".", "workspace root that contains the rules")
+	repoRoot := flags.String("repo-root", ".", "repository root containing scripts and packages")
+	assetRoot := flags.String("asset-root", "", "asset root containing lintai helper scripts")
+	rules := flags.String("rules", "lintai-rules/**/*.ts", "comma-separated list of rule globs, relative to --workspace-root")
+	jsonOutput := flags.Bool("json", false, "print the rules and the errors as JSON")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	absoluteWorkspace, err := filepath.Abs(*workspaceRoot)
+	if err != nil {
+		return err
+	}
+	absoluteRepo, err := filepath.Abs(*repoRoot)
+	if err != nil {
+		return err
+	}
+	absoluteAssetRoot, err := resolveAssetRoot(*assetRoot, absoluteRepo)
+	if err != nil {
+		return err
+	}
+	list, err := engine.ListRules(ctx, engine.Options{
+		RepoRoot:      absoluteRepo,
+		AssetRoot:     absoluteAssetRoot,
+		WorkspaceRoot: absoluteWorkspace,
+		RuleGlobs:     strings.Split(*rules, ","),
+	})
+	if err != nil {
+		return err
+	}
+	if *jsonOutput {
+		encoder := json.NewEncoder(stdout)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(list)
+	}
+	for _, item := range list.Rules {
+		fmt.Fprintf(stdout, "%s %s\n", item.ID, item.Path)
+	}
+	for _, item := range list.Errors {
+		fmt.Fprintf(os.Stderr, "%s: %s\n", item.Path, item.Message)
+	}
+	return nil
 }

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { dl } from "./index.js";
+import { dl, rule } from "./index.js";
 
 test("dl escapes strings for Mangle", () => {
 	const value = "a\"b'c\\d\ne\tf\u0001g\u007fé😀";
@@ -26,5 +26,12 @@ test("dl.name validates names", () => {
 	assert.equal(dl.name("a_1/b2").value, "a_1/b2");
 	for (const value of ["", "A", "/a", "a/", "1a", "a b", "a/B"]) {
 		assert.throws(() => dl.name(value), TypeError);
+	}
+});
+
+test("rule validates its id", () => {
+	assert.equal(rule("arch.no-service/imports_2").id, "arch.no-service/imports_2");
+	for (const value of ["", "Arch.x", ".arch", "-arch", "arch x", "arch:x", "arch@x"]) {
+		assert.throws(() => rule(value), TypeError);
 	}
 });

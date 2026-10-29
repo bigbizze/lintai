@@ -129,30 +129,26 @@ Add an ESLint config:
 
 ```js
 // eslint.config.mjs
-import lintai from "@lintai/eslint-plugin";
+import { createLintaiPlugin } from "@lintai/eslint-plugin";
+
+const lintai = createLintaiPlugin({ rules: ["lintai-rules/**/*.ts"] });
 
 export default [
 	{
 		files: ["src/**/*.ts", "src/**/*.tsx"],
-		plugins: {
-			"@lintai": lintai,
-		},
-		rules: {
-			"@lintai/architecture": [
-				"error",
-				{
-					rules: ["lintai-rules/**/*.ts"],
-				},
-			],
-			"@lintai/no-ambient-in-pure-phase": "error",
-			"@lintai/no-top-level-node-imports": "error",
-			"@lintai/require-rule-shape": "error",
-		},
+		...lintai.configs.all,
+	},
+	{
+		files: ["lintai-rules/**/*.ts"],
+		plugins: { lintai },
+		rules: lintai.configs.authoring.rules,
 	},
 ];
 ```
 
-Bridge options:
+Each lintai rule is the ESLint rule `lintai/<rule-id>`. Set its level, a per-file override or a disable comment as for any other rule. See [api.md](api.md#linter-rules).
+
+Options of `createLintaiPlugin`:
 
 - `mode?: "serve" | "oneshot"`
 - `binary?: string`
@@ -162,15 +158,19 @@ Bridge options:
 - `exclude?: string[]`
 - `files?: "tsconfig" | "walk"`
 - `env?: Record<string, unknown>`
+- `factLimit?: number`
+- `rulesLock?: string`
+- `setupSandbox?: "auto" | "on" | "off"`
 
-Bridge caveats:
+Plugin caveats:
 
 - if `mode` is omitted, plain `eslint` CLI runs default to `oneshot`
 - long-lived editor/language-server use defaults to `serve`
 - rule-file edits trigger cache invalidation and a fresh analysis on the next lint pass
 - source-file edits refresh in the background; editor diagnostics may lag briefly. When the editor lints a file that was saved after the last analysis started, the plugin runs a new analysis first, so the diagnostics of a saved file are current, except for a second save in the same second on a file system that stores modification times in whole seconds
-- lintai reads saved files, not the editor buffer. While a file has unsaved changes, the editor shows one lintai message on line 1 that asks you to save the file.
-- when lintai cannot produce diagnostics, the plugin reports the reason on line 1 of each linted file, so a broken setup does not look like a clean workspace. This covers a failed analysis, a `serve` process that failed and fell back to one `oneshot` run, and a rule that could not run (a `rule_execution_error`). In an `eslint` CLI run, these messages appear on the first linted file only.
+- lintai reads saved files, not the editor buffer. While a file has unsaved changes, `lintai/analysis` shows one message on line 1 that asks you to save the file, and the other lintai rules report nothing for that file.
+- when lintai cannot produce diagnostics, `lintai/analysis` reports the reason on line 1 of each linted file, so a broken setup does not look like a clean workspace. This covers a failed analysis, a `serve` process that failed and fell back to one `oneshot` run, a rule that could not run (a `rule_execution_error`) and a rule file that did not load. In an `eslint` CLI run, these messages appear on the first linted file only.
+- the rule list is read when ESLint loads the config. After you add a rule file or change a rule id, restart ESLint or the editor's ESLint server
 
 ## Build from source and caveats
 
@@ -213,10 +213,10 @@ Measured on Linux x86_64 (16 cores) on the fixture workspace (`testdata/fixtures
 |---|---|---|
 | `lintai` CLI alone | 312 ms | 312 ms |
 | `eslint src`, no rules | 322 ms | 343 ms |
-| `eslint src` with `@lintai/architecture` | 644 ms | 685 ms |
+| `eslint src` with the lintai rules (0.6.0, one bridge rule) | 644 ms | 685 ms |
 | `oxlint src`, no JS plugin | 43 ms | 43 ms |
 | `oxlint src` with `@lintai/oxlint-plugin` loaded, one authoring rule | 149 ms | 158 ms |
-| `oxlint src` with `lintai/architecture` | 491 ms | 511 ms |
+| `oxlint src` with the lintai rules (0.6.0, one bridge rule) | 491 ms | 511 ms |
 
 The lintai analysis (about 310 ms) is the same under both linters. The rest is the host linter: about 330 ms for ESLint, and about 180 ms for oxlint. Most of the oxlint part is the start of its JS plugin runtime and, on Linux, of the spawner process (see the oxlint plugin caveats in [api.md](api.md#oxlint-plugin-reference-and-caveats)).
 
