@@ -48,6 +48,7 @@ type ImportEdge struct {
 	HasNamespaceImport bool
 	HasNamedImports    bool
 	IsTypeOnly         bool
+	Retained           bool
 	Range              diagnostics.SourceLocation
 }
 
@@ -126,6 +127,15 @@ type AmbientUse struct {
 	Range               diagnostics.SourceLocation
 }
 
+type GlobalRef struct {
+	EntityID            string
+	SemanticKey         string
+	Name                string
+	FilePath            string
+	FunctionSemanticKey string
+	Range               diagnostics.SourceLocation
+}
+
 type Snapshot struct {
 	Version        string
 	BackendID      string
@@ -139,6 +149,7 @@ type Snapshot struct {
 	Accesses       []Access
 	AmbientSources []AmbientSource
 	AmbientUses    []AmbientUse
+	GlobalRefs     []GlobalRef
 	Directives     []ModuleDirective
 	ParseErrors    []ParseError
 }

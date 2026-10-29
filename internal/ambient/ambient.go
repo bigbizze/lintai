@@ -108,6 +108,13 @@ func Builtin() []Source {
 			},
 		},
 		{
+			ID:          "crypto",
+			Description: "Uses the Web Crypto API, which generates keys and random values.",
+			Matchers: []Matcher{
+				cryptoRef("subtle", "subtle"),
+			},
+		},
+		{
 			ID:          "network",
 			Description: "Sends a network request.",
 			Matchers: []Matcher{
@@ -121,6 +128,7 @@ func Builtin() []Source {
 				timerRef("setTimeout"),
 				timerRef("setInterval"),
 				timerRef("setImmediate"),
+				{Capability: "schedule", Root: "queueMicrotask", Path: []string{}, Form: FormReference, Key: KeyNone},
 			},
 		},
 		{

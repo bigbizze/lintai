@@ -26,4 +26,4 @@ require (
 	golang.org/x/text v0.42.0 // indirect
 )
 
-replace github.com/microsoft/TypeScript/tsc => github.com/bigbizze/typescript-go v0.0.0-20261028214434-1b2c2fa7c3bb
+replace github.com/microsoft/TypeScript/tsc => github.com/bigbizze/typescript-go v0.0.0-20261029015929-a83c484892b1

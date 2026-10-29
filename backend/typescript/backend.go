@@ -90,6 +90,7 @@ func (b *Backend) buildAnalysisSnapshot(ctx context.Context, repoRoot, workspace
 		Accesses:       accesses,
 		AmbientSources: convertAmbientSources(sources),
 		AmbientUses:    convertAmbientUses(extracted.AmbientUses),
+		GlobalRefs:     convertGlobalRefs(extracted.GlobalRefs),
 		Directives:     convertDirectives(extracted.Directives),
 		ParseErrors:    convertParseErrors(extracted.ParseErrors),
 	}, nil
@@ -173,6 +174,7 @@ func convertImportEdges(items []lintaiapi.ImportEdge) []analysis.ImportEdge {
 			HasNamespaceImport: item.HasNamespaceImport,
 			HasNamedImports:    item.HasNamedImports,
 			IsTypeOnly:         item.IsTypeOnly,
+			Retained:           item.Retained,
 			Range:              convertLocation(item.Range),
 		})
 	}
@@ -341,6 +343,21 @@ func convertAmbientUses(items []lintaiapi.AmbientUse) []analysis.AmbientUse {
 			HasKey:              item.HasKey,
 			Dynamic:             item.Dynamic,
 			Write:               item.Write,
+			FunctionSemanticKey: item.FunctionSemanticKey,
+			Range:               convertLocation(item.Range),
+		})
+	}
+	return result
+}
+
+func convertGlobalRefs(items []lintaiapi.GlobalRef) []analysis.GlobalRef {
+	result := make([]analysis.GlobalRef, 0, len(items))
+	for _, item := range items {
+		result = append(result, analysis.GlobalRef{
+			EntityID:            item.EntityID,
+			SemanticKey:         item.SemanticKey,
+			Name:                item.Name,
+			FilePath:            item.FilePath,
 			FunctionSemanticKey: item.FunctionSemanticKey,
 			Range:               convertLocation(item.Range),
 		})
