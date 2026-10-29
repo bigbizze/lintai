@@ -1,0 +1,233 @@
+[
+  {
+    "assertion_id": "violation",
+    "diagnostic_kind": "architecture_violation",
+    "entity_identity": {
+      "semantic_key": "src/core/entry.ts"
+    },
+    "message": "src/core/entry.ts reaches src/services/fetchData.ts through its imports",
+    "provenance": {
+      "backend_id": "typescript",
+      "rule_version": 1
+    },
+    "rule_id": "arch.core-no-service-reach",
+    "severity": "error",
+    "source_location": {
+      "endColumn": 1,
+      "endLine": 4,
+      "file": "src/core/entry.ts",
+      "startColumn": 1,
+      "startLine": 1
+    }
+  },
+  {
+    "assertion_id": "violation",
+    "diagnostic_kind": "architecture_violation",
+    "entity_identity": {
+      "semantic_key": "src/core/leaf.ts"
+    },
+    "message": "src/core/leaf.ts reaches src/services/fetchData.ts through its imports",
+    "provenance": {
+      "backend_id": "typescript",
+      "rule_version": 1
+    },
+    "rule_id": "arch.core-no-service-reach",
+    "severity": "error",
+    "source_location": {
+      "endColumn": 1,
+      "endLine": 4,
+      "file": "src/core/leaf.ts",
+      "startColumn": 1,
+      "startLine": 1
+    }
+  },
+  {
+    "assertion_id": "violation",
+    "diagnostic_kind": "architecture_violation",
+    "entity_identity": {
+      "semantic_key": "src/core/mid.ts"
+    },
+    "message": "src/core/mid.ts reaches src/services/fetchData.ts through its imports",
+    "provenance": {
+      "backend_id": "typescript",
+      "rule_version": 1
+    },
+    "rule_id": "arch.core-no-service-reach",
+    "severity": "error",
+    "source_location": {
+      "endColumn": 1,
+      "endLine": 4,
+      "file": "src/core/mid.ts",
+      "startColumn": 1,
+      "startLine": 1
+    }
+  },
+  {
+    "assertion_id": "violation",
+    "diagnostic_kind": "architecture_violation",
+    "entity_identity": {
+      "semantic_key": "src/pure/helper.ts::import::../services/fetchData"
+    },
+    "message": "Layer /pure must not import layer /services (src/pure/helper.ts -\u003e src/services/fetchData.ts)",
+    "provenance": {
+      "backend_id": "typescript",
+      "rule_version": 1
+    },
+    "rule_id": "arch.layers",
+    "severity": "error",
+    "source_location": {
+      "endColumn": 50,
+      "endLine": 1,
+      "file": "src/pure/helper.ts",
+      "startColumn": 27,
+      "startLine": 1
+    }
+  },
+  {
+    "assertion_id": "violation",
+    "diagnostic_kind": "architecture_violation",
+    "entity_identity": {
+      "semantic_key": "src/pure/helper.ts::import::../services/fetchData"
+    },
+    "message": "Pure module src/pure/helper.ts must not import src/services/fetchData.ts",
+    "provenance": {
+      "backend_id": "typescript",
+      "rule_version": 1
+    },
+    "rule_id": "arch.pure-no-service-imports",
+    "severity": "error",
+    "source_location": {
+      "endColumn": 50,
+      "endLine": 1,
+      "file": "src/pure/helper.ts",
+      "startColumn": 27,
+      "startLine": 1
+    }
+  },
+  {
+    "assertion_id": "violation",
+    "diagnostic_kind": "architecture_violation",
+    "entity_identity": {
+      "semantic_key": "src/pure/helper.ts::function::loadValue"
+    },
+    "message": "Pure function loadValue transitively calls effectful code",
+    "provenance": {
+      "backend_id": "typescript",
+      "rule_version": 1
+    },
+    "rule_id": "arch.pure-no-effects",
+    "severity": "error",
+    "source_location": {
+      "endColumn": 26,
+      "endLine": 3,
+      "file": "src/pure/helper.ts",
+      "startColumn": 17,
+      "startLine": 3
+    }
+  },
+  {
+    "assertion_id": "violation",
+    "diagnostic_kind": "architecture_violation",
+    "entity_identity": {
+      "semantic_key": "src/pure/math.ts::function::compute"
+    },
+    "message": "Pure function compute transitively calls effectful code",
+    "provenance": {
+      "backend_id": "typescript",
+      "rule_version": 1
+    },
+    "rule_id": "arch.pure-no-effects",
+    "severity": "error",
+    "source_location": {
+      "endColumn": 24,
+      "endLine": 3,
+      "file": "src/pure/math.ts",
+      "startColumn": 17,
+      "startLine": 3
+    }
+  },
+  {
+    "assertion_id": "clock_in_pure",
+    "diagnostic_kind": "architecture_violation",
+    "entity_identity": {
+      "semantic_key": "src/pure/time.ts::function::stamp"
+    },
+    "message": "Pure function stamp reads the clock",
+    "provenance": {
+      "backend_id": "typescript",
+      "rule_version": 1
+    },
+    "rule_id": "arch.ambient",
+    "severity": "error",
+    "source_location": {
+      "endColumn": 22,
+      "endLine": 1,
+      "file": "src/pure/time.ts",
+      "startColumn": 17,
+      "startLine": 1
+    }
+  },
+  {
+    "assertion_id": "missing_marker",
+    "diagnostic_kind": "architecture_violation",
+    "entity_identity": {
+      "semantic_key": "src/server/config.ts"
+    },
+    "message": "src/server/config.ts must import \"server-only\"",
+    "provenance": {
+      "backend_id": "typescript",
+      "rule_version": 1
+    },
+    "rule_id": "arch.server-only",
+    "severity": "error",
+    "source_location": {
+      "endColumn": 1,
+      "endLine": 8,
+      "file": "src/server/config.ts",
+      "startColumn": 1,
+      "startLine": 1
+    }
+  },
+  {
+    "assertion_id": "env_outside_config",
+    "diagnostic_kind": "architecture_violation",
+    "entity_identity": {
+      "semantic_key": "src/server/handler.ts::ambient::env.read::SECRET"
+    },
+    "message": "Read environment variable SECRET only in src/server/config.ts",
+    "provenance": {
+      "backend_id": "typescript",
+      "rule_version": 1
+    },
+    "rule_id": "arch.ambient",
+    "severity": "error",
+    "source_location": {
+      "endColumn": 47,
+      "endLine": 5,
+      "file": "src/server/handler.ts",
+      "startColumn": 29,
+      "startLine": 5
+    }
+  },
+  {
+    "assertion_id": "env_dynamic",
+    "diagnostic_kind": "architecture_violation",
+    "entity_identity": {
+      "semantic_key": "src/server/handler.ts::ambient::env.read::*"
+    },
+    "message": "Dynamic environment access in src/server/handler.ts",
+    "provenance": {
+      "backend_id": "typescript",
+      "rule_version": 1
+    },
+    "rule_id": "arch.ambient",
+    "severity": "error",
+    "source_location": {
+      "endColumn": 66,
+      "endLine": 5,
+      "file": "src/server/handler.ts",
+      "startColumn": 49,
+      "startLine": 5
+    }
+  }
+]
