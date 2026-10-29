@@ -8,7 +8,9 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const publishOrder = [
 	"packages/sdk",
 	"packages/authoring-rules",
+	"packages/client",
 	"packages/eslint-plugin",
+	"packages/oxlint-plugin",
 	"packages/lintai-linux-x64",
 	"packages/lintai-linux-arm64",
 	"packages/lintai-darwin-x64",

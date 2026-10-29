@@ -1,0 +1,16 @@
+{
+	"jsPlugins": ["@lintai/oxlint-plugin"],
+	"rules": {
+		"lintai/architecture": ["error", { "rules": ["lintai-rules/**/*.ts"] }]
+	},
+	"overrides": [
+		{
+			"files": ["lintai-rules/**/*.ts"],
+			"rules": {
+				"lintai/require-rule-shape": "error",
+				"lintai/no-ambient-in-pure-phase": "error",
+				"lintai/no-top-level-node-imports": "error"
+			}
+		}
+	]
+}

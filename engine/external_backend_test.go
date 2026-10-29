@@ -59,7 +59,7 @@ func TestExternalBackendComposesMixedFacts(t *testing.T) {
 	workspaceRoot := filepath.Join(repoRoot, "testdata/fixtures/external-backend/mixed-facts")
 	result, err := engine.New(mixedFactsBackend{typescript: typescript.New()}).Analyze(context.Background(), engine.Options{
 		RepoRoot:      repoRoot,
-		AssetRoot:     filepath.Join(repoRoot, "packages/eslint-plugin"),
+		AssetRoot:     filepath.Join(repoRoot, "packages/client"),
 		WorkspaceRoot: workspaceRoot,
 		RuleGlobs:     []string{"lintai-rules/**/*.ts"},
 		Env:           map[string]any{},
@@ -192,7 +192,7 @@ export default rule("fixture.generic-backend").version(1)
 
 	result, err := engine.New(genericFactsBackend{}).Analyze(context.Background(), engine.Options{
 		RepoRoot:      repoRoot,
-		AssetRoot:     filepath.Join(repoRoot, "packages/eslint-plugin"),
+		AssetRoot:     filepath.Join(repoRoot, "packages/client"),
 		WorkspaceRoot: workspaceRoot,
 		RuleGlobs:     []string{"lintai-rules/**/*.ts"},
 		Env:           map[string]any{},

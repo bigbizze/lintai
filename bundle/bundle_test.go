@@ -12,7 +12,7 @@ func TestBuildAllAndPrepareAllFixtureRules(t *testing.T) {
 	t.Parallel()
 
 	repoRoot := repoRootForBundleTest(t)
-	assetRoot := filepath.Join(repoRoot, "packages", "eslint-plugin")
+	assetRoot := filepath.Join(repoRoot, "packages", "client")
 	workspaceRoot := filepath.Join(repoRoot, "testdata/fixtures/workspace")
 	rulePaths := []string{
 		filepath.Join(repoRoot, "testdata/fixtures/rules/pure-no-effects.ts"),
@@ -70,7 +70,7 @@ func TestBuildAllReportsPerRuleErrors(t *testing.T) {
 	t.Parallel()
 
 	repoRoot := repoRootForBundleTest(t)
-	assetRoot := filepath.Join(repoRoot, "packages", "eslint-plugin")
+	assetRoot := filepath.Join(repoRoot, "packages", "client")
 	validRule := filepath.Join(repoRoot, "testdata/fixtures/rules/pure-no-effects.ts")
 	brokenRule := writeRuleFile(t, "broken-build.ts", "export default ;\n")
 
@@ -97,7 +97,7 @@ func TestPrepareAllReportsPerRuleErrors(t *testing.T) {
 	t.Parallel()
 
 	repoRoot := repoRootForBundleTest(t)
-	assetRoot := filepath.Join(repoRoot, "packages", "eslint-plugin")
+	assetRoot := filepath.Join(repoRoot, "packages", "client")
 	workspaceRoot := filepath.Join(repoRoot, "testdata/fixtures/workspace")
 	validRule := filepath.Join(repoRoot, "testdata/fixtures/rules/pure-no-effects.ts")
 	brokenRule := writeRuleFile(t, "broken-prepare.ts", `
@@ -147,7 +147,7 @@ func TestPrepareAllAllowsRequireInsideSetup(t *testing.T) {
 	t.Parallel()
 
 	repoRoot := repoRootForBundleTest(t)
-	assetRoot := filepath.Join(repoRoot, "packages", "eslint-plugin")
+	assetRoot := filepath.Join(repoRoot, "packages", "client")
 	workspaceRoot := filepath.Join(repoRoot, "testdata/fixtures/workspace")
 	rulePath := writeRuleFile(t, "require-in-setup.ts", `
 import { dl, rule } from "@lintai/sdk";
@@ -194,7 +194,7 @@ func TestBuildAllDoesNotExplodeOnTopLevelNodeBuiltinImports(t *testing.T) {
 	t.Parallel()
 
 	repoRoot := repoRootForBundleTest(t)
-	assetRoot := filepath.Join(repoRoot, "packages", "eslint-plugin")
+	assetRoot := filepath.Join(repoRoot, "packages", "client")
 	rulePath := writeRuleFile(t, "top-level-node-import.ts", `
 import fs from "node:fs";
 import { dl, rule } from "@lintai/sdk";

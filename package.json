@@ -2,7 +2,7 @@
 	"name": "lintai-workspace",
 	"private": true,
 	"type": "module",
-	"version": "0.4.0",
+	"version": "0.5.0",
 	"license": "MIT",
 	"repository": {
 		"type": "git",
@@ -21,6 +21,7 @@
 		"format": "biome format --write .",
 		"publish:npm": "node scripts/publish-npm.mjs",
 		"smoke:npm": "node scripts/smoke-npm-install.mjs",
+		"smoke:oxlint": "node scripts/smoke-oxlint-install.mjs",
 		"test": "go test ./..."
 	},
 	"devDependencies": {

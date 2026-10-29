@@ -21,7 +21,7 @@ What the lock covers:
 What the lock does not cover:
 
 - data files that `setup()` reads through `fs`, for example a JSON deny list. Put these files under the same review as the rules, or import them statically so that the bundler reads them and they are in the hash.
-- the lintai binary and the scripts in `@lintai/eslint-plugin` that bundle and run the rules. Pin their versions in your package lockfile.
+- the lintai binary and the scripts in `@lintai/client` that bundle and run the rules. Pin their versions in your package lockfile.
 
 With `--rules-lock`, `require()` in `setup()` loads only Node built-ins other than `module` and `vm`, and `import()` in `setup()` fails. This stops a rule that loads workspace code at run time by accident, for example with `require(path.join(root, name))`. It does not stop a rule author who wants to load code: `setup()` can read a file and evaluate it in other ways. The lock and the review of rule changes are the control for that case.
 

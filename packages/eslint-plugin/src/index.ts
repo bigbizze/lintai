@@ -1,49 +1,36 @@
-import { readFileSync } from "node:fs";
 import path from "node:path";
 
 import { rules as authoringRules } from "@lintai/authoring-rules";
+import {
+	bridgeOptionsSchema,
+	getClient,
+	hasUnsavedChanges,
+	resolveBridgeOptions,
+	toReports,
+	unsavedChangesMessage,
+	type BridgeOptions,
+	type HostDefaults,
+} from "@lintai/client";
 import type { Rule } from "eslint";
 
-import {
-	getClient,
-	resolveBridgeOptions,
-	type BridgeOptions,
-	type Diagnostic,
-} from "./client.js";
+// The ESLint CLI lints each file once, so it runs lintai once (oneshot) and
+// reports workspace problems on the first file only. An editor lints files
+// again, so it keeps a lintai serve process.
+export function isLikelyESLintCLIProcess(argv: string[] = process.argv): boolean {
+	return argv.some((arg) => {
+		const value = arg.toLowerCase();
+		if (value.includes("language-server")) {
+			return false;
+		}
+		const base = path.basename(value);
+		return base === "eslint" || base === "eslint.js";
+	});
+}
 
-const bridgeSchema: Rule.RuleMetaData["schema"] = [
-	{
-		type: "object",
-		properties: {
-			mode: {
-				enum: ["serve", "oneshot"],
-			},
-			binary: { type: "string" },
-			repoRoot: { type: "string" },
-			workspaceRoot: { type: "string" },
-			rules: {
-				type: "array",
-				items: { type: "string" },
-			},
-			exclude: {
-				type: "array",
-				items: { type: "string" },
-			},
-			files: {
-				enum: ["tsconfig", "walk"],
-			},
-			env: { type: "object" },
-			factLimit: { type: "integer", minimum: 1 },
-			severity: {
-				type: "object",
-				additionalProperties: { enum: ["error", "warning", "off"] },
-			},
-			rulesLock: { type: "string" },
-			setupSandbox: { enum: ["auto", "on", "off"] },
-		},
-		additionalProperties: false,
-	},
-];
+export function eslintHostDefaults(argv: string[] = process.argv): HostDefaults {
+	const cli = isLikelyESLintCLIProcess(argv);
+	return { defaultMode: cli ? "oneshot" : "serve", reportProblemsOnce: cli };
+}
 
 // The ESLint level of a rule applies to every report of the rule, so lintai
 // error and warning diagnostics come from two rules. architecture reports
@@ -55,21 +42,21 @@ function bridgeRule(severity: "error" | "warning", description: string): Rule.Ru
 		meta: {
 			type: "problem",
 			docs: { description },
-			schema: bridgeSchema,
+			schema: bridgeOptionsSchema as Rule.RuleMetaData["schema"],
 		},
 		create(context) {
-			const options = resolveBridgeOptions((context.options[0] ?? {}) as BridgeOptions, process.cwd());
+			const options = resolveBridgeOptions(
+				(context.options[0] ?? {}) as BridgeOptions,
+				process.cwd(),
+				eslintHostDefaults(),
+			);
 			const client = getClient(options);
 
 			return {
 				Program(node) {
-					if (options.mode === "serve" && hasUnsavedChanges(context)) {
+					if (options.mode === "serve" && hasUnsavedChanges(context.filename, context.sourceCode.text)) {
 						if (severity === "error") {
-							context.report({
-								node,
-								loc: { line: 1, column: 0 },
-								message: "[lintai] lintai checks saved files. Save this file to update its lintai diagnostics.",
-							});
+							context.report({ node, loc: { line: 1, column: 0 }, message: unsavedChangesMessage });
 						}
 						return;
 					}
@@ -82,7 +69,9 @@ function bridgeRule(severity: "error" | "warning", description: string): Rule.Ru
 							context.report({ node, loc: { line: 1, column: 0 }, message });
 						}
 					}
-					reportDiagnostics(context, node, diagnostics);
+					for (const report of toReports(diagnostics)) {
+						context.report({ node, ...report });
+					}
 				},
 			};
 		},
@@ -94,44 +83,6 @@ const architectureWarningsBridge = bridgeRule(
 	"warning",
 	"surface whole-workspace architecture diagnostics from lintai rules with severity warning",
 );
-
-// lintai analyzes the files on disk. When the editor text is different from
-// the file on disk, the diagnostics would point at the wrong lines, so the
-// plugin does not show them. Only serve mode checks this: under the ESLint
-// CLI, --fix lints the fixed text before it writes the file.
-function hasUnsavedChanges(context: Rule.RuleContext): boolean {
-	let saved: string;
-	try {
-		saved = readFileSync(context.filename, "utf8");
-	} catch {
-		return false;
-	}
-	const text = context.sourceCode.text;
-	return saved !== text && saved.replace(/^\uFEFF/, "") !== text;
-}
-
-function reportDiagnostics(context: Rule.RuleContext, node: any, diagnostics: Diagnostic[]): void {
-	for (const diagnostic of diagnostics) {
-		const location = diagnostic.source_location;
-		if (!location) {
-			continue;
-		}
-		context.report({
-			node,
-			loc: {
-				start: {
-					line: location.startLine,
-					column: location.startColumn - 1,
-				},
-				end: {
-					line: location.endLine,
-					column: location.endColumn - 1,
-				},
-			},
-			message: `[${diagnostic.rule_id}/${diagnostic.assertion_id}] ${diagnostic.message}`,
-		});
-	}
-}
 
 export const rules = {
 	...authoringRules,

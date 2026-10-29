@@ -477,10 +477,63 @@ Plugin caveats:
 - `oneshot` is the default under plain ESLint CLI detection
 - `exclude` is the same as the CLI `--exclude` flag
 - `files` is the same as the CLI `--files` flag
-- lintai reads the saved files on disk, not the editor buffer. In `serve` mode, when the editor text of a file is different from the saved file, the plugin shows one message on line 1 that asks you to save the file, in place of the lintai diagnostics for that file. After you save, the diagnostics update on the next lint pass.
+- lintai reads the saved files on disk, not the editor buffer. In `serve` mode, when the editor text of a file is different from the saved file, the plugin shows one message on line 1 that asks you to save the file, in place of the lintai diagnostics for that file. When the editor lints a file that was saved after the last analysis started, the plugin runs a new analysis first, so the diagnostics of the saved file are current.
 - rule-file edits force invalidation on the next lint pass
 - when lintai cannot produce diagnostics, the plugin reports the reason on line 1 of each linted file, so a broken setup does not look like a clean workspace. This covers a failed analysis, a `serve` process that failed and fell back to one `oneshot` run, and a rule that could not run (a `rule_execution_error`). In an `eslint` CLI run, these messages appear on the first linted file only.
 - the ESLint path never computes `explanation`
+
+## Oxlint plugin reference and caveats
+
+`@lintai/oxlint-plugin` is an oxlint JS plugin. It runs the same lintai analysis as the ESLint plugin, in the oxlint CLI and in the oxlint language server (`oxlint --lsp`), with no ESLint installed.
+
+Install:
+
+```sh
+pnpm add -D @lintai/cli @lintai/sdk @lintai/oxlint-plugin oxlint
+```
+
+The plugin name is `lintai`. Rule names:
+
+- `lintai/architecture`: lintai diagnostics with severity `error`, rule errors, and problems with the analysis
+- `lintai/architecture-warnings`: lintai diagnostics with severity `warning`
+- `lintai/no-ambient-in-pure-phase`, `lintai/no-top-level-node-imports` and `lintai/require-rule-shape`: the authoring rules, the same as in the ESLint plugin
+
+Example `.oxlintrc.json`:
+
+```json
+{
+	"jsPlugins": ["@lintai/oxlint-plugin"],
+	"rules": {
+		"lintai/architecture": ["error", { "rules": ["lintai-rules/**/*.ts"] }]
+	},
+	"overrides": [
+		{
+			"files": ["lintai-rules/**/*.ts"],
+			"rules": {
+				"lintai/require-rule-shape": "error",
+				"lintai/no-ambient-in-pure-phase": "error",
+				"lintai/no-top-level-node-imports": "error"
+			}
+		}
+	]
+}
+```
+
+Options: the same `BridgeOptions` object and JSON schema as the ESLint plugin. You can copy the options between the two configs. To show warning diagnostics, add `"lintai/architecture-warnings": ["warn", <the same options>]`. With the same options, both rules share one lintai process.
+
+Modes:
+
+- `oxlint` CLI: `oneshot`. The plugin runs lintai once, and reports workspace problems on the first linted file only.
+- `oxlint --lsp`: `serve`. The plugin keeps one `lintai serve` process and reports workspace problems on each lint. When the editor text of a file is different from the saved file, the plugin shows one message on line 1 that asks you to save the file. When the language server lints a file that was saved after the last analysis started, the plugin runs a new analysis first.
+- The plugin detects the language server from the `--lsp` argument of the oxlint process. An explicit `mode` option always wins.
+
+Plugin caveats:
+
+- oxlint documents JS plugins as alpha and outside semver. A later oxlint can break the plugin until lintai is updated. The plugin is tested with oxlint 1.90.0, and its peer dependency is `oxlint@^1.90.0`.
+- the plugin needs Node 22 or later
+- line and column values are the same as under ESLint. A lintai diagnostic at line 3, column 5 is shown by the oxlint CLI at line 3, column 5
+- the plugin reports only. It gives no fixes and no suggestions
+- oxlint 1.90.0 runs JS plugins on one thread of one Node.js process, in the CLI and in the language server, so one lintai analysis serves all files
 
 ## Diagnostic shape and caveats
 

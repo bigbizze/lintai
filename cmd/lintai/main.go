@@ -273,8 +273,8 @@ func resolveAssetRoot(explicit, repoRoot string) (string, error) {
 		return filepath.Abs(explicit)
 	}
 	candidates := []string{
-		filepath.Join(repoRoot, "node_modules", "@lintai", "eslint-plugin"),
-		filepath.Join(repoRoot, "packages", "eslint-plugin"),
+		filepath.Join(repoRoot, "node_modules", "@lintai", "client"),
+		filepath.Join(repoRoot, "packages", "client"),
 		repoRoot,
 	}
 	for _, candidate := range candidates {

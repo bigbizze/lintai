@@ -1,1 +1,1 @@
-import "../packages/eslint-plugin/scripts/bundle-rule.mjs";
+import "../packages/client/scripts/bundle-rule.mjs";
