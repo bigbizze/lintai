@@ -28,15 +28,16 @@ const builtinSpecifierSet = new Set(
 );
 
 // lockPath returns the path of a bundle input as the rules lock records it.
-// A file in any node_modules starts at the package directory, so the lock
-// does not depend on the install layout. A file in the workspace is
-// workspace-relative. Any other file is relative to the asset root.
+// A file in a node_modules directory starts at the outermost node_modules,
+// so the lock does not depend on the machine, and two nested copies of one
+// package, or two pnpm store entries of one package, have different paths.
+// A file in the workspace is workspace-relative. Any other file is relative
+// to the asset root.
 function lockPath(absolute, workspaceRoot) {
 	const normalized = absolute.split(path.sep).join("/");
-	const marker = "/node_modules/";
-	const index = normalized.lastIndexOf(marker);
+	const index = normalized.indexOf("/node_modules/");
 	if (index >= 0) {
-		return `node_modules/${normalized.slice(index + marker.length)}`;
+		return normalized.slice(index + 1);
 	}
 	const relative = path.relative(workspaceRoot, absolute);
 	if (!relative.startsWith("..") && !path.isAbsolute(relative)) {

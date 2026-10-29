@@ -166,7 +166,7 @@ Decl external_call(Call, Caller, Module, Name)
 Decl call_unresolved(Site, Caller)
   descr [
     extensional(),
-    doc("A call or new expression whose target the checker does not resolve to a collected workspace function or an external declaration. Callbacks, function-typed values, element-access callees, and any-typed callees produce this fact. Every call site has exactly one of: call_edge, external_call, call_unresolved."),
+    doc("A call that lintai cannot follow: a call, new or tagged template whose target the checker does not resolve to a collected workspace function or an external declaration (callbacks, function-typed values, element-access callees, any-typed callees); f.call() or f.apply() when f is not a collected function; a function value that is not a collected function, passed to an external call (the row is at the argument); new of a workspace class without a constructor whose fields have initializers that run code. Every call site has exactly one of: call_edge, external_call, call_unresolved."),
     arg(Site, "Call site entity id."),
     arg(Caller, "Entity id of the calling function, or the module path for a call at module scope.")
   ].
@@ -182,7 +182,7 @@ Decl import_opaque(Site, From)
 Decl fn_ref(Ref, From, To)
   descr [
     extensional(),
-    doc("A reference to a collected function as a value, outside the callee position of a call: passed as an argument, stored, returned, or used as a property value. Import and export specifiers are not references; import facts model them."),
+    doc("A reference to a collected function as a value, outside the callee position of a call: passed as an argument, stored, returned, or used as a property value. An inline arrow function, function expression or object literal method that is passed as a value is a reference from the function that contains it. Import and export specifiers are not references; import facts model them."),
     arg(Ref, "Reference entity id."),
     arg(From, "Entity id of the containing function, or the module path for a reference at module scope."),
     arg(To, "Entity id of the referenced function.")

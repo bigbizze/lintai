@@ -14,6 +14,7 @@ call_unresolved("lintai-rules/no-async.ts::calls_unresolved#2","lintai-rules/no-
 call_unresolved("lintai-rules/no-async.ts::calls_unresolved#3","lintai-rules/no-async.ts").
 call_unresolved("lintai-rules/no-async.ts::calls_unresolved#4","lintai-rules/no-async.ts").
 call_unresolved("lintai-rules/no-async.ts::calls_unresolved#5","lintai-rules/no-async.ts").
+call_unresolved("lintai-rules/no-async.ts::calls_unresolved#6","lintai-rules/no-async.ts").
 fn("src/example.ts::function::example","src/example.ts","example").
 fn_async("src/example.ts::function::example").
 fn_exported("src/example.ts::function::example").
@@ -30,6 +31,7 @@ location("lintai-rules/no-async.ts::calls_unresolved#2","lintai-rules/no-async.t
 location("lintai-rules/no-async.ts::calls_unresolved#3","lintai-rules/no-async.ts",5,3,5,10).
 location("lintai-rules/no-async.ts::calls_unresolved#4","lintai-rules/no-async.ts",4,3,4,10).
 location("lintai-rules/no-async.ts::calls_unresolved#5","lintai-rules/no-async.ts",3,16,3,20).
+location("lintai-rules/no-async.ts::calls_unresolved#6","lintai-rules/no-async.ts",5,11,5,13).
 location("lintai-rules/no-async.ts::import::@lintai/sdk","lintai-rules/no-async.ts",1,26,1,39).
 location("src/example.ts","src/example.ts",1,1,4,1).
 location("src/example.ts::function::example","src/example.ts",1,23,1,30).

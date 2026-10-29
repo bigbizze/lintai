@@ -43,9 +43,14 @@ function formatError(error) {
 	return String(error);
 }
 
+// Built-ins that load or compile other code. setup() cannot require them,
+// so that a require() of a workspace file through createRequire() or a
+// vm script is not available by accident.
+const codeLoaders = new Set(["module", "vm"]);
+
 // loadRestricted runs the CommonJS prepare bundle with a require() that
-// returns only Node built-ins. The bundle has no importModuleDynamically
-// option, so a dynamic import() in it fails.
+// returns only Node built-ins, except the code loaders. The bundle has no
+// importModuleDynamically option, so a dynamic import() in it fails.
 function loadRestricted(bundlePath) {
 	const source = fs.readFileSync(bundlePath, "utf8");
 	const run = vm.compileFunction(source, ["exports", "require", "module", "__filename", "__dirname"], {
@@ -53,11 +58,11 @@ function loadRestricted(bundlePath) {
 	});
 	const nodeRequire = createRequire(bundlePath);
 	const restrictedRequire = (specifier) => {
-		if (typeof specifier === "string" && isBuiltin(specifier)) {
+		if (typeof specifier === "string" && isBuiltin(specifier) && !codeLoaders.has(specifier.replace(/^node:/, ""))) {
 			return nodeRequire(specifier);
 		}
 		throw new RestrictedRequireError(
-			`require(${JSON.stringify(specifier)}) is not allowed in setup(): only Node built-ins can be required at run time when the rules lock or the setup sandbox is active. ${trustHelp}`,
+			`require(${JSON.stringify(specifier)}) is not allowed in setup(): only Node built-ins other than module and vm can be required at run time when the rules lock or the setup sandbox is active. ${trustHelp}`,
 		);
 	};
 	const module = { exports: {} };

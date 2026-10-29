@@ -38,7 +38,7 @@ type Options struct {
 	// whose bundle inputs differ from the lock, a rule that is not in the
 	// lock and a locked rule that no longer exists are rule errors with
 	// phase integrity, and setup() does not run for them. require() in
-	// setup() is then limited to Node built-ins.
+	// setup() is then limited to Node built-ins other than module and vm.
 	RulesLock string
 	// SetupSandbox selects whether setup() runs under the Node permission
 	// model. The default is auto.

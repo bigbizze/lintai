@@ -228,6 +228,25 @@ export async function load(name: string) {
 class Plain {}
 export const plain = new Plain();
 `,
+		"src/b.ts": `export function hidden(read: () => number, tag: (s: TemplateStringsArray) => string): void {
+  read.call(undefined);
+  read.apply(null, []);
+  [1].map(read);
+  tag` + "`x`" + `;
+  [1].map(() => 1);
+  [1].filter(Boolean);
+}
+class Stamped {
+  stamp = Date.now();
+}
+class Base {
+  constructor() {}
+}
+class Quiet extends Base {
+  handler = () => 1;
+}
+export const made = [new Stamped(), new Quiet()];
+`,
 	})
 	callers := func(items []CallUnresolved) []string {
 		result := make([]string, 0, len(items))
@@ -242,6 +261,11 @@ export const plain = new Plain();
 		"src/a.ts::function::inject:8",
 		"src/a.ts::function::inject:9",
 		"src/a.ts::function::inject:12",
+		"src/b.ts:18",
+		"src/b.ts::function::hidden:2",
+		"src/b.ts::function::hidden:3",
+		"src/b.ts::function::hidden:4",
+		"src/b.ts::function::hidden:5",
 	}; !slices.Equal(got, want) {
 		t.Fatalf("unresolved calls differ:\ngot  %q\nwant %q", got, want)
 	}

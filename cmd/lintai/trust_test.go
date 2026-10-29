@@ -7,9 +7,11 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
+	"github.com/bigbizze/lintai/bundle"
 	"github.com/bigbizze/lintai/diagnostics"
 )
 
@@ -107,6 +109,12 @@ export default rule("t.dynamic-require").version(1)
 	.program(dl` + "`Decl v(F). v(F) :- module(F), F = \"none\".`" + `)
 	.report("v").message(() => "x");
 `,
+		"lintai-rules/module-loader.ts": `import { dl, rule } from "@lintai/sdk";
+export default rule("t.module-loader").version(1)
+	.setup(({ workspaceRoot }) => { const { createRequire } = require("node:module"); createRequire(workspaceRoot + "/x.js")("./src/payload.js"); return {}; })
+	.program(dl` + "`Decl v(F). v(F) :- module(F), F = \"none\".`" + `)
+	.report("v").message(() => "x");
+`,
 		"lintai-rules/spawn.ts": `import { dl, rule } from "@lintai/sdk";
 import { execFileSync } from "node:child_process";
 export default rule("t.spawn").version(1)
@@ -126,15 +134,22 @@ export default rule("t.spawn").version(1)
 	}{
 		{"sandbox on", []string{"--setup-sandbox", "on"}, map[string]string{
 			"t.dynamic-require": `require("` + workspace,
+			"t.module-loader":   `require("node:module")`,
 			"t.spawn":           "denied permission ChildProcess",
 		}},
 		{"rules lock without sandbox", []string{"--setup-sandbox", "off", "--rules-lock", "lintai-rules.lock.json"}, map[string]string{
 			"t.dynamic-require": `require("` + workspace,
+			"t.module-loader":   `require("node:module")`,
 		}},
 		{"sandbox off", []string{"--setup-sandbox", "off"}, map[string]string{}},
 	}
 	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {
+			if slices.Contains(item.flags, "on") {
+				if _, _, err := bundle.ResolveSetupSandbox(bundle.SetupSandboxOn); err != nil {
+					t.Skipf("this Node cannot run the setup sandbox: %v", err)
+				}
+			}
 			code, items := runCode(t, append(append([]string(nil), base...), item.flags...))
 			got := make(map[string]string)
 			for _, diagnostic := range items {

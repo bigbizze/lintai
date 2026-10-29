@@ -16,13 +16,14 @@ What the lock covers:
 
 - the rule file
 - every file that the rule imports, directly or through other files, in the workspace and in `node_modules`
+- the `@lintai/sdk` files that the rule imports. Thus an upgrade of lintai changes every rule hash, and you must run `lintai lock` again after the upgrade.
 
 What the lock does not cover:
 
 - data files that `setup()` reads through `fs`, for example a JSON deny list. Put these files under the same review as the rules, or import them statically so that the bundler reads them and they are in the hash.
-- the lintai binary and the `@lintai/*` packages. Pin their versions in your package lockfile.
+- the lintai binary and the scripts in `@lintai/eslint-plugin` that bundle and run the rules. Pin their versions in your package lockfile.
 
-With `--rules-lock`, `require()` in `setup()` loads only Node built-ins, and `import()` in `setup()` fails. Thus a rule cannot load workspace code at run time that the lock did not hash.
+With `--rules-lock`, `require()` in `setup()` loads only Node built-ins other than `module` and `vm`, and `import()` in `setup()` fails. This stops a rule that loads workspace code at run time by accident, for example with `require(path.join(root, name))`. It does not stop a rule author who wants to load code: `setup()` can read a file and evaluate it in other ways. The lock and the review of rule changes are the control for that case.
 
 ## The lock must be outside the writable scope
 
@@ -45,7 +46,7 @@ The lock helps only if the author that you do not trust cannot also change the l
 
 - `setup()` can read the workspace, the lintai package and the rule bundles
 - it cannot write files, start child processes or start workers
-- `require()` loads only Node built-ins, and `import()` fails
+- `require()` loads only Node built-ins other than `module` and `vm`, and `import()` fails
 
 A denied operation is a `rule_execution_error` with phase `setup`. The message names the permission or the module specifier. If a rule must do more, use `--setup-sandbox off`.
 

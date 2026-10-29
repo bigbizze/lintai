@@ -126,9 +126,9 @@ Conventions:
 | `import_symbol_type_only(Imp, Name)` | `import { type X }`. |
 | `call_edge(Call, Caller, Callee)` | A call to a collected function. The callee is the declaration that the type checker resolves for the call. `Caller` is the module path for a call at module scope. A call through a function-typed value (a callback parameter, or a property of a record of functions) has no row; it is a `call_unresolved` row. |
 | `external_call(Call, Caller, Module, Name)` | A call to a declaration outside the workspace sources. `Module` is `"lib"`, a package name, a `declare module` name or a `.d.ts` path. `Name` is the qualified name, for example `"JSON.parse"` or `"Set.add"`. |
-| `call_unresolved(Site, Caller)` | A call or `new` expression whose target the checker does not resolve to a collected workspace function or an external declaration: a callback, a function-typed value, an element-access callee such as `table["k"]()`, an optional call through such a value, or an `any`-typed callee. Every call site has exactly one of `call_edge`, `external_call` and `call_unresolved`. `new` of a workspace class without a constructor runs no function and has no row. |
+| `call_unresolved(Site, Caller)` | A call that lintai cannot follow. These are rows: a call, `new` or tagged template whose target the checker does not resolve to a collected workspace function or an external declaration (a callback, a function-typed value, an element-access callee such as `table["k"]()`, an optional call through such a value, an `any`-typed callee); `f.call(...)` and `f.apply(...)` when `f` is not a collected function; a function value that is not a collected function, passed as an argument to an external call, for example `[1].map(read)` with a parameter `read` (the row is at the argument); and `new` of a workspace class without a constructor whose instance fields have initializers that can run code. Every call site has exactly one of `call_edge`, `external_call` and `call_unresolved`. `new` of a workspace class without a constructor and without such fields runs no function and has no row. |
 | `import_opaque(Site, From)` | An `import()` or `require()` whose specifier is not a string literal, for example `import(name)` or ``import(`./${name}`)``. It has no `import_edge` row. A template literal without substitutions is a string literal and gives a normal `import_edge`. |
-| `fn_ref(Ref, From, To)` | A reference to a collected function as a value, outside the callee of a call: an argument, a stored value, a return value or a property value. `From` is the containing function, or the module path at module scope. Import and export specifiers are not references. |
+| `fn_ref(Ref, From, To)` | A reference to a collected function as a value, outside the callee of a call: an argument, a stored value, a return value or a property value. An inline arrow function, function expression or object literal method that is passed as a value is a reference from the function that contains it, so `[1].map(() => Date.now())` connects the caller to the arrow function. `From` is the containing function, or the module path at module scope. Import and export specifiers are not references. |
 | `type_ref(Ref, File, Name)` | A type reference. |
 | `type_ref_target(Ref, TargetFile)` | The declaring file, when it is inside the workspace. |
 | `meta_access(Acc, File, AccessPath)` | An `import.meta.*` access. |
@@ -363,7 +363,7 @@ Rules lock:
 }
 ```
 
-The hash of a rule covers every source file that the bundler read for it: the rule file, the files it imports, and the package files it imports. Package files are recorded from the package directory inside `node_modules`, so the hash does not depend on the machine. The bundler output is not hashed.
+The hash of a rule covers every source file that the bundler read for it: the rule file, the files it imports, the package files it imports and the `@lintai/sdk` files. Package files are recorded from the outermost `node_modules` directory, so the hash does not depend on the machine. The bundler output is not hashed. An upgrade of lintai changes every hash, so run `lintai lock` again after an upgrade.
 
 With `--rules-lock`, lintai checks each rule against the lock after bundling and before `setup()`. These are `rule_execution_error` diagnostics with phase `integrity`, and exit code 3:
 
@@ -371,7 +371,7 @@ With `--rules-lock`, lintai checks each rule against the lock after bundling and
 - a rule is not in the lock
 - a rule in the lock no longer exists
 
-A rule with an integrity error does not run. With `--rules-lock`, `require()` in `setup()` loads only Node built-ins, and `import()` in `setup()` fails, so all workspace code that a rule uses is in the bundle and in the hash. See [trust.md](trust.md).
+A rule with an integrity error does not run. With `--rules-lock`, `require()` in `setup()` loads only Node built-ins other than `module` and `vm`, and `import()` in `setup()` fails, so workspace code that a rule uses must be imported statically, and is then in the bundle and in the hash. See [trust.md](trust.md).
 
 Setup sandbox:
 
@@ -379,7 +379,7 @@ Setup sandbox:
 - `on`: the same, but an older Node is a usage error (exit code 2).
 - `off`: `setup()` runs with full Node capabilities.
 
-In the sandbox, `setup()` can read files in the workspace. It cannot write files, start child processes or start workers. `require()` loads only Node built-ins. A denied operation is a `rule_execution_error` with phase `setup` that names the permission or the specifier. On Node 22.13 to 24 the permission model does not restrict the network. On Node 25 and later the network is denied. See [trust.md](trust.md).
+In the sandbox, `setup()` can read files in the workspace. It cannot write files, start child processes or start workers. `require()` loads only Node built-ins other than `module` and `vm`. A denied operation is a `rule_execution_error` with phase `setup` that names the permission or the specifier. On Node 22.13 to 24 the permission model does not restrict the network. On Node 25 and later the network is denied. See [trust.md](trust.md).
 
 Rule severity:
 
