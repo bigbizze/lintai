@@ -12,6 +12,8 @@ Go's rules for `internal/` directories mean that only `lintaiapi` can import the
 
 ## Upgrade TypeScript
 
+The same procedure is in `docs/upgrading-typescript.md`.
+
 1. Pick a `microsoft/TypeScript` commit. Normally use the `gitHead` of a published `typescript` npm release: `npm view typescript@<version> gitHead`.
 2. Run `scripts/sync-tsgo.sh <commit>`. It recomputes the package list, replaces `internal/`, rewrites import paths, updates `VERSION`, the license files and `go.mod`, and builds.
 3. Fix compile errors in `lintaiapi`.

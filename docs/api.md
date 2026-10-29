@@ -137,6 +137,7 @@ Conventions:
 | `global_ref(Site, Name, File)` | A reference to a global value. The identifier resolves to the global binding with that name, from the default library, an `@types` package or a declaration file. `globalThis.X`, `window.X`, `self.X` and `global.X` are references to `X` too. A local binding with the same name is not a global reference, and type positions are not references. Use it to ban a global completely, for example `crypto` or `process`, including aliases such as `const c = crypto`. |
 | `module_directive(Dir, File, Text)` | A prologue directive, for example `"use client"`. |
 | `module_parse_error(Err, File, Message)` | The first syntax error of a file. The other facts of that file can be incomplete. |
+| `config_adjusted(Config, Option, Action)` | lintai changed a compiler option that TypeScript 7 rejects before it loaded the tsconfig `Config`. `Action` is `/removed`, `/rewritten` (`baseUrl` and `paths` become absolute `paths`) or `/replaced` (a removed `moduleResolution` becomes the TypeScript 7 default). The analysis uses the adjusted configuration, which can differ from the project's own build. |
 | `site_in_fn(Site, Fn)` | The innermost collected function that contains a call, external-call, ambient-use, global-ref or meta-access site. A site inside an anonymous callback belongs to the nearest enclosing collected function. Module-scope sites have no row. |
 | `location(Entity, File, StartLine, StartCol, EndLine, EndCol)` | The source range of every entity id. |
 
