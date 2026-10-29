@@ -249,7 +249,15 @@ test("a misspelled lintai rule name fails the lint run", () => {
 
 test("a rule that cannot run but has a known id keeps its linter rule, so a config that names it loads", () => {
 	const duplicate = 'rule id "arch.dup" is used by more than one rule file';
-	stubLintai(["arch.soft"], [], {}, [
+	const configError: Diagnostic = {
+		rule_id: "arch.dup",
+		assertion_id: "default",
+		diagnostic_kind: "rule_execution_error",
+		severity: "error",
+		phase: "config",
+		message: duplicate,
+	};
+	stubLintai(["arch.soft"], [configError, configError], {}, [
 		{ path: "lintai-rules/dup-a.ts", id: "arch.dup", message: duplicate },
 		{ path: "lintai-rules/dup-b.ts", id: "arch.dup", message: duplicate },
 	]);
@@ -257,8 +265,8 @@ test("a rule that cannot run but has a known id keeps its linter rule, so a conf
 		line.startsWith("lintai/"),
 	);
 	assert.deepEqual(messages, [
-		`lintai/analysis 2 1 [lintai] rule file lintai-rules/dup-a.ts could not be loaded: ${duplicate}`,
-		`lintai/analysis 2 1 [lintai] rule file lintai-rules/dup-b.ts could not be loaded: ${duplicate}`,
+		`lintai/analysis 2 1 [lintai] rule arch.dup could not run (phase config): ${duplicate}`,
+		`lintai/analysis 2 1 [lintai] rule arch.dup could not run (phase config): ${duplicate}`,
 	]);
 });
 

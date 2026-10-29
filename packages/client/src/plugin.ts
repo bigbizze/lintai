@@ -83,16 +83,19 @@ export function createLintaiRules(
 		);
 	}
 	const ids = new Set(known.keys());
-	const loadErrors = list.errors.map((item) =>
+	const loadErrorMessages = list.errors.map((item) =>
 		item.path
 			? `[lintai] rule file ${item.path} could not be loaded: ${item.message}`
 			: `[lintai] ${item.message}`,
 	);
 	// A config that names the rule of a file that did not load fails before
 	// lintai/analysis can run, so the cause also goes to stderr now.
-	for (const message of loadErrors) {
+	for (const message of loadErrorMessages) {
 		console.error(message);
 	}
+	// An error with an id (a duplicate id) is also a rule error of the
+	// analysis, so lintai/analysis reports it only once, as a rule error.
+	const loadErrors = loadErrorMessages.filter((_, index) => !list.errors[index]?.id);
 	let loadErrorsReported = false;
 
 	// The linter calls every lintai rule for a file in one synchronous pass,

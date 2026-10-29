@@ -34,8 +34,10 @@ type RuleList struct {
 
 // ListRules bundles the rules that options select and reads the id of each
 // rule from its pure bundle. It does not run setup(), build a snapshot or
-// evaluate a program. A rule that does not bundle or load is in Errors. Two
-// rule files with one id are both in Errors and not in Rules. A file without
+// evaluate a program. A rule that does not bundle or load is in Errors. A
+// rule with a valid id that is not a complete rule (no program(), report()
+// or message()) is in Errors with its id. Two rule files with one id are
+// both in Errors with the id and not in Rules. A file without
 // a default export is a helper module and is in neither list. Paths are
 // relative to the workspace root. Rules is sorted by id, then path, and
 // Errors by path, then message.
@@ -68,7 +70,11 @@ func ListRules(ctx context.Context, options Options) (RuleList, error) {
 	for rulePath, failure := range failures {
 		list.Errors = append(list.Errors, RuleLoadError{Path: lockKey(options.WorkspaceRoot, rulePath), Message: failure.Error()})
 	}
-	found := make([]ListedRule, 0, len(rulePaths))
+	type foundRule struct {
+		ListedRule
+		shapeErr error
+	}
+	found := make([]foundRule, 0, len(rulePaths))
 	for _, rulePath := range rulePaths {
 		item, built := artifacts[rulePath]
 		if !built {
@@ -86,7 +92,8 @@ func ListRules(ctx context.Context, options Options) (RuleList, error) {
 			continue
 		}
 		if isRule {
-			found = append(found, ListedRule{ID: id, Path: key})
+			_, shapeErr := runtime.LoadPureBundle(string(code))
+			found = append(found, foundRule{ListedRule: ListedRule{ID: id, Path: key}, shapeErr: shapeErr})
 		}
 	}
 	pathsByID := make(map[string][]string, len(found))
@@ -99,7 +106,11 @@ func ListRules(ctx context.Context, options Options) (RuleList, error) {
 			list.Errors = append(list.Errors, RuleLoadError{Path: item.Path, ID: item.ID, Message: duplicateIDMessage(item.ID, paths)})
 			continue
 		}
-		list.Rules = append(list.Rules, item)
+		if item.shapeErr != nil {
+			list.Errors = append(list.Errors, RuleLoadError{Path: item.Path, ID: item.ID, Message: item.shapeErr.Error()})
+			continue
+		}
+		list.Rules = append(list.Rules, item.ListedRule)
 	}
 	sortRuleList(&list)
 	return list, nil

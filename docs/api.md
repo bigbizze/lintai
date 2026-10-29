@@ -348,7 +348,7 @@ lintai serve
 }
 ```
 
-`rules` is sorted by id, then by path. Paths are relative to the workspace root. A rule file that does not bundle or load, has an invalid id, or has the same id as another rule file is in `errors` and not in `rules`. An error has `id` when the id is valid and known, as for a duplicate id. These errors do not change the exit code: it is 0, so that a linter plugin can still create the other rules. Exit code 2 has its usual meaning, for example a glob that matches no file.
+`rules` is sorted by id, then by path. Paths are relative to the workspace root. A rule file that does not bundle or load, has an invalid id, is not a complete rule (no `program()`, `report()` or `message()`), or has the same id as another rule file is in `errors` and not in `rules`. An error has `id` when the id is valid and known, as for a duplicate id or an incomplete rule. These errors do not change the exit code: it is 0, so that a linter plugin can still create the other rules. Exit code 2 has its usual meaning, for example a glob that matches no file.
 
 Flags for analysis:
 
@@ -501,7 +501,7 @@ Linter rule caveats:
 - the rule list is fixed when the linter loads the plugin. After you add a rule file or change a rule id, restart the linter or the editor's language server. Until then, the violations of the new id appear under `lintai/analysis`, with a message that says to restart.
 - a lintai rule that is not in the linter config does not run, and neither linter has a wildcard such as `"lintai/*"`. Spread `configs.all` to enable every rule, then override single rules.
 - a misspelled rule name in the config, such as `"lintai/arch.no-servce-imports"`, fails the lint run, as for any unknown rule
-- a rule file that does not load has no linter rule, so a config that names its rule fails as an unknown rule. The plugin writes the load error to stderr when the linter loads it, and `lintai/analysis` reports it too. A duplicate id keeps its linter rule, so the config loads, and `lintai/analysis` reports the duplicate.
+- a rule file that does not load has no linter rule, so a config that names its rule fails as an unknown rule. The plugin writes the load error to stderr when the linter loads it, and `lintai/analysis` reports it too. A rule whose id is known (a duplicate id or an incomplete rule) keeps its linter rule, so the config loads, and `lintai/analysis` reports the problem as a rule error.
 - when `lintai rules` itself fails, for example because the binary is missing, the plugin has no lintai rules and writes the cause to stderr. The plugin does not keep this result, so a reload of the linter config tries again.
 - a rule set to `"off"` in the linter is still evaluated by lintai; only its output is dropped. To skip the evaluation, remove the rule file from the `rules` globs.
 - rule errors always appear under `lintai/analysis` at the level of `lintai/analysis`, whatever level the rule has, so a broken rule cannot pass as a warning or be hidden by `"off"`
@@ -567,7 +567,10 @@ oxlint loads a JS plugin from a module path, not from a plugin object, so call `
 ```js
 import { createLintaiPlugin } from "@lintai/oxlint-plugin";
 
-export default createLintaiPlugin({ rules: ["lintai-rules/**/*.ts"] });
+export default createLintaiPlugin({
+	workspaceRoot: import.meta.dirname,
+	rules: ["lintai-rules/**/*.ts"],
+});
 ```
 
 Name that module in `jsPlugins`. In `oxlint.config.ts` you can import it and spread `configs.all`. Node evaluates the module once, so `lintai rules` runs once:
@@ -612,6 +615,7 @@ Modes:
 - `oxlint` CLI: `oneshot`. The plugin runs lintai once, and reports workspace problems on the first linted file only.
 - `oxlint --lsp`: `serve`. The plugin keeps one `lintai serve` process and reports workspace problems on each lint. When the editor text of a file is different from the saved file, `lintai/analysis` shows one message on line 1 that asks you to save the file. When the language server lints a file that was saved after the last analysis started, the plugin runs a new analysis first.
 - The plugin detects the language server from the `--lsp` argument of the oxlint process. An explicit `mode` option always wins.
+- The plugin resolves relative paths in its options from the directory that the oxlint process runs in. An editor can start `oxlint --lsp` in a different directory, so set `workspaceRoot: import.meta.dirname` in `lintai.oxlint.mjs`, as in the example.
 
 Plugin caveats:
 

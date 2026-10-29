@@ -165,7 +165,10 @@ oxlint loads JS plugins from a module path, so create the plugin in a local file
 // lintai.oxlint.mjs
 import { createLintaiPlugin } from "@lintai/oxlint-plugin";
 
-export default createLintaiPlugin({ rules: ["lintai-rules/**/*.ts"] });
+export default createLintaiPlugin({
+	workspaceRoot: import.meta.dirname,
+	rules: ["lintai-rules/**/*.ts"],
+});
 ```
 
 ```ts
