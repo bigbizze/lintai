@@ -136,6 +136,10 @@ assert.deepEqual(JSON.parse(listed.stdout), {
 	errors: [],
 });
 
+// On macOS the temp directory is a symbolic link, and ESLint reports real
+// paths.
+const realRepoDir = await fs.realpath(repoDir);
+
 // ESLint: eslint.config.mjs spreads configs.all, sets one rule to warn,
 // turns arch.no-async off for src/legacy.ts, and src/disabled.ts has a
 // disable comment for arch.no-async.
@@ -143,7 +147,7 @@ function eslintMessages(args) {
 	const result = spawnSync("pnpm", ["exec", "eslint", ...args, "src/", "-f", "json"], { cwd: repoDir, encoding: "utf8" });
 	const messages = JSON.parse(result.stdout).flatMap((file) =>
 		(file.messages ?? []).map((message) => ({
-			file: path.relative(repoDir, file.filePath),
+			file: path.relative(realRepoDir, file.filePath),
 			ruleId: message.ruleId,
 			severity: message.severity,
 			message: String(message.message ?? ""),
