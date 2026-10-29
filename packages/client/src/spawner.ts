@@ -63,17 +63,33 @@ type Channel = {
 
 const syncSleep = new Int32Array(new SharedArrayBuffer(4));
 
+const owners = new WeakMap<SpawnedProcess, Spawner>();
+
+// spawnerFor returns the spawner that started a process, or undefined when
+// the process was not started by a spawner.
+export function spawnerFor(child: unknown): Spawner | undefined {
+	return owners.get(child as SpawnedProcess);
+}
+
 export class Spawner {
 	private readonly child: ChildProcess | undefined;
 	private readonly decoder = new FrameDecoder();
 	private readonly results = new Map<number, SpawnerMessage & { type: "result" }>();
 	private readonly channels = new Map<number, Channel>();
-	private readonly byProcess = new Map<SpawnedProcess, Channel>();
+	private readonly byProcess = new WeakMap<SpawnedProcess, Channel>();
 	private nextID = 1;
 	private failure: Error | undefined;
+	private started = false;
 
 	get failed(): boolean {
 		return this.failure !== undefined;
+	}
+
+	// restartable is true when the spawner process started and failed
+	// later. A spawner that could not start is not replaced, because each new
+	// start is one more fork() of the host process.
+	get restartable(): boolean {
+		return this.failed && this.started;
 	}
 
 	constructor(script: string = path.join(path.dirname(fileURLToPath(import.meta.url)), "spawner-child.js")) {
@@ -88,6 +104,9 @@ export class Spawner {
 			return;
 		}
 		this.child = child;
+		child.on("spawn", () => {
+			this.started = true;
+		});
 		child.on("error", (error) => this.fail(error));
 		child.on("exit", () => this.fail(new Error("the lintai spawner process exited")));
 		child.stdin?.on("error", (error) => this.fail(error));
@@ -170,6 +189,7 @@ export class Spawner {
 		};
 		this.channels.set(id, channel);
 		this.byProcess.set(channel.process, channel);
+		owners.set(channel.process, this);
 		try {
 			this.send({ type: "start", id, command, args, cwd });
 		} catch (error) {
@@ -211,8 +231,8 @@ export class Spawner {
 		const frame = encodeFrame(message);
 		const fd = (this.child?.stdin as unknown as { _handle?: { fd?: number } } | null)?._handle?.fd;
 		if (typeof fd !== "number") {
-			this.child?.stdin?.write(frame);
-			return;
+			this.fail(new Error("the lintai spawner stdin fd is unavailable"));
+			throw this.failure;
 		}
 		let offset = 0;
 		while (offset < frame.length) {
@@ -343,14 +363,15 @@ export function startSpawner(): void {
 }
 
 // activeSpawner returns the spawner when startSpawner was called. When the
-// spawner process failed, it starts a new one. If that start fails too
-// (with ENOMEM after the host reserved its memory), the new spawner reports
-// the error to the client, which reports it as a workspace problem.
+// spawner process failed after it started, it starts a new one. If that
+// start fails too (with ENOMEM after the host reserved its memory), it keeps
+// the failed spawner, which reports the error to the client. The client
+// reports it as a workspace problem.
 export function activeSpawner(): Spawner | undefined {
 	if (!enabled) {
 		return undefined;
 	}
-	if (!active || active.failed) {
+	if (!active || active.restartable) {
 		active = new Spawner();
 	}
 	return active;

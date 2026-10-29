@@ -5,7 +5,7 @@ import path from "node:path";
 import chokidar from "chokidar";
 import { fileURLToPath } from "node:url";
 
-import { activeSpawner, type SpawnedProcess } from "./spawner.js";
+import { activeSpawner, spawnerFor, type SpawnedProcess } from "./spawner.js";
 
 export type Diagnostic = {
 	rule_id: string;
@@ -167,7 +167,7 @@ const defaultDependencies: ClientDependencies = {
 		};
 	},
 	readServeSync(child, timeoutMs) {
-		const spawner = activeSpawner();
+		const spawner = spawnerFor(child);
 		if (spawner) {
 			return spawner.readSync(child as unknown as SpawnedProcess, timeoutMs);
 		}

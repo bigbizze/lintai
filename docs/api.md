@@ -477,7 +477,7 @@ Plugin caveats:
 - `oneshot` is the default under plain ESLint CLI detection
 - `exclude` is the same as the CLI `--exclude` flag
 - `files` is the same as the CLI `--files` flag
-- lintai reads the saved files on disk, not the editor buffer. In `serve` mode, when the editor text of a file is different from the saved file, the plugin shows one message on line 1 that asks you to save the file, in place of the lintai diagnostics for that file. When the editor lints a file that was saved after the last analysis started, the plugin runs a new analysis first, so the diagnostics of the saved file are current.
+- lintai reads the saved files on disk, not the editor buffer. In `serve` mode, when the editor text of a file is different from the saved file, the plugin shows one message on line 1 that asks you to save the file, in place of the lintai diagnostics for that file. When the editor lints a file that was saved after the last analysis started, the plugin runs a new analysis first, so the diagnostics of the saved file are current. On a file system that stores modification times in whole seconds, a second save in the same second can show the diagnostics of the first save until the next background refresh.
 - rule-file edits force invalidation on the next lint pass
 - when lintai cannot produce diagnostics, the plugin reports the reason on line 1 of each linted file, so a broken setup does not look like a clean workspace. This covers a failed analysis, a `serve` process that failed and fell back to one `oneshot` run, and a rule that could not run (a `rule_execution_error`). In an `eslint` CLI run, these messages appear on the first linted file only.
 - the ESLint path never computes `explanation`

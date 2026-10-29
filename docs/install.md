@@ -168,7 +168,7 @@ Bridge caveats:
 - if `mode` is omitted, plain `eslint` CLI runs default to `oneshot`
 - long-lived editor/language-server use defaults to `serve`
 - rule-file edits trigger cache invalidation and a fresh analysis on the next lint pass
-- source-file edits refresh in the background; editor diagnostics may lag briefly. When the editor lints a file that was saved after the last analysis started, the plugin runs a new analysis first, so the diagnostics of a saved file are current
+- source-file edits refresh in the background; editor diagnostics may lag briefly. When the editor lints a file that was saved after the last analysis started, the plugin runs a new analysis first, so the diagnostics of a saved file are current, except for a second save in the same second on a file system that stores modification times in whole seconds
 - lintai reads saved files, not the editor buffer. While a file has unsaved changes, the editor shows one lintai message on line 1 that asks you to save the file.
 - when lintai cannot produce diagnostics, the plugin reports the reason on line 1 of each linted file, so a broken setup does not look like a clean workspace. This covers a failed analysis, a `serve` process that failed and fell back to one `oneshot` run, and a rule that could not run (a `rule_execution_error`). In an `eslint` CLI run, these messages appear on the first linted file only.
 
