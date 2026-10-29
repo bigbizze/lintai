@@ -218,7 +218,7 @@ Decl type_named(Type, Origin, Name)
     extensional(),
     doc("The type is a class, interface, enum or type alias, or an instantiation of one. Two types with the same Origin and Name and different type arguments are different entities."),
     arg(Type, "Type entity id."),
-    arg(Origin, "\"lib\" for the default library, the package name for a package (the @types/ prefix is removed), the module name of a declare module block, or the workspace-relative path of the declaring file. Matches the Module argument of external_call."),
+    arg(Origin, "\"lib\" for the default library, the package name for a package (the @types/ prefix is removed), the module name of a declare module block, or the workspace-relative path of the declaring file. Matches the Module argument of external_call. type_origin_kind tells these apart."),
     arg(Name, "Name with its containing namespaces, for example \"Promise\" or \"Models.User\".")
   ].
 
@@ -287,6 +287,69 @@ Decl type_sig_returns(Type, ReturnType)
     doc("The return type of a /function type."),
     arg(Type, "Type entity id."),
     arg(ReturnType, "Type entity id of the return type.")
+  ].
+
+Decl type_origin_kind(Type, Kind)
+  descr [
+    extensional(),
+    doc("The kind of the origin of a named type. The Origin of type_named alone is ambiguous: a declare module block can have the name \"lib\" or the path of a workspace file."),
+    arg(Type, "Type entity id."),
+    arg(Kind, "/lib, /package, /ambient_module, /declaration_file or /source_file.")
+  ].
+
+Decl type_arg_optional(Type, Index)
+  descr [
+    extensional(),
+    doc("The tuple element is optional."),
+    arg(Type, "Type entity id of the tuple."),
+    arg(Index, "Element position, starting at 0.")
+  ].
+
+Decl type_arg_rest(Type, Index)
+  descr [
+    extensional(),
+    doc("The tuple element is a rest element."),
+    arg(Type, "Type entity id of the tuple."),
+    arg(Index, "Element position, starting at 0.")
+  ].
+
+Decl type_readonly(Type)
+  descr [
+    extensional(),
+    doc("The tuple is readonly. A readonly array is the lib interface ReadonlyArray."),
+    arg(Type, "Type entity id of the tuple.")
+  ].
+
+Decl type_prop_readonly(Type, Name)
+  descr [
+    extensional(),
+    doc("The property is readonly."),
+    arg(Type, "Type entity id."),
+    arg(Name, "Property name.")
+  ].
+
+Decl type_sig_param_optional(Type, Index)
+  descr [
+    extensional(),
+    doc("The parameter of a /function type is optional."),
+    arg(Type, "Type entity id."),
+    arg(Index, "Parameter position, starting at 0.")
+  ].
+
+Decl type_sig_param_rest(Type, Index)
+  descr [
+    extensional(),
+    doc("The parameter of a /function type is a rest parameter."),
+    arg(Type, "Type entity id."),
+    arg(Index, "Parameter position, starting at 0.")
+  ].
+
+Decl type_incomplete(Type, Reason)
+  descr [
+    extensional(),
+    doc("The facts of the type leave out structure that a rule can depend on. A rule that must see every type inside a signature fails closed on such a type, for example with type_reaches_incomplete."),
+    arg(Type, "Type entity id."),
+    arg(Reason, "/truncated (more than 16 levels), /unsupported (an /other type, or a type parameter with no declaration), /signatures (an /object with call, construct or index signatures), /constraint (a type parameter with a constraint) or /conflict (config groups give different structure).")
   ].
 
 Decl type_display(Type, Text)

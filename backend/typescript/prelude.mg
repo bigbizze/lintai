@@ -158,23 +158,31 @@ type_child(T, C) :- type_sig_returns(T, C).
 
 Decl type_contains(Type, Inner)
   descr [
-    doc("Transitive closure of type_child. Does not look inside classes, interfaces or enums, whose members are not emitted."),
+    doc("Transitive closure of type_child. It does not look inside classes, interfaces or enums, into the call, construct or index signatures of an /object, into type parameter constraints, or into /other, truncated or conflicting types. Use type_reaches_incomplete to fail closed."),
     arg(Type, "Type entity id."),
     arg(Inner, "Type entity id reached through one or more type_child steps.")
   ].
 type_contains(T, C) :- type_child(T, C).
 type_contains(T, D) :- type_child(T, C), type_contains(C, D).
 
-Decl type_is_promise(Type)
+Decl type_reaches_incomplete(Type)
   descr [
-    doc("Type is the default library's Promise, with any type argument."),
+    doc("Type, or a type that it contains, has a type_incomplete row, so type_contains may not see every type inside it."),
     arg(Type, "Type entity id.")
   ].
-type_is_promise(T) :- type_named(T, "lib", "Promise").
+type_reaches_incomplete(T) :- type_incomplete(T, _).
+type_reaches_incomplete(T) :- type_contains(T, I), type_incomplete(I, _).
+
+Decl type_is_promise(Type)
+  descr [
+    doc("Type is the default library's Promise, with any type argument. A Promise declared in a declare module \"lib\" block is not."),
+    arg(Type, "Type entity id.")
+  ].
+type_is_promise(T) :- type_named(T, "lib", "Promise"), type_origin_kind(T, /lib).
 
 Decl fn_returns_awaited(Fn, Type)
   descr [
-    doc("The return type of Fn with one level of Promise removed: the type argument of a returned Promise, otherwise the return type itself."),
+    doc("The return type of Fn with exactly one level of the lib Promise removed: the type argument of a returned Promise, otherwise the return type itself. This is not TypeScript's Awaited: it does not unwrap PromiseLike or other thenables, a Promise inside a Promise, or a union that contains a Promise, so Promise<A> | undefined is returned unchanged."),
     arg(Fn, "Function entity id."),
     arg(Type, "Type entity id.")
   ].

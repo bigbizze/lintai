@@ -134,16 +134,24 @@ Conventions:
 | `type_ref(Ref, File, Name)` | A type reference. |
 | `type_ref_target(Ref, TargetFile)` | The declaring file, when it is inside the workspace. |
 | `type_kind(Type, Kind)` | The structure of a type. Every type entity has one row. `Kind` is `/any`, `/unknown`, `/never`, `/void`, `/undefined`, `/null`, `/string`, `/number`, `/bigint`, `/boolean`, `/symbol`, `/object_keyword`, `/literal`, `/type_param`, `/union`, `/intersection`, `/tuple`, `/function`, `/object` or `/other`. |
-| `type_named(Type, Origin, Name)` | The type is a class, interface, enum or type alias, or an instantiation of one. `Origin` is `"lib"`, a package name (without `@types/`), a `declare module` name, or the workspace-relative path of the declaring file. It matches the `Module` of `external_call`. `Name` includes containing namespaces, for example `"Models.User"`. |
+| `type_named(Type, Origin, Name)` | The type is a class, interface, enum or type alias, or an instantiation of one. `Origin` is `"lib"`, a package name (without `@types/`), a `declare module` name, or the workspace-relative path of the declaring file. It matches the `Module` of `external_call`. `Name` includes containing namespaces, for example `"Models.User"`. Use `type_origin_kind` to tell the kinds of origin apart. |
+| `type_origin_kind(Type, Kind)` | The kind of the origin of a named type: `/lib`, `/package`, `/ambient_module`, `/declaration_file` or `/source_file`. A `declare module "lib"` block has the origin `"lib"` and the kind `/ambient_module`. |
 | `type_arg(Type, Index, Arg)` | A type argument of a named type, or an element of a tuple. The `this` argument of class and interface references is not included. |
+| `type_arg_optional(Type, Index)` | The tuple element is optional. |
+| `type_arg_rest(Type, Index)` | The tuple element is a rest element. |
+| `type_readonly(Type)` | The tuple is readonly. |
 | `type_member(Type, Member)` | A member of a union or intersection. Members are unordered. |
 | `type_literal(Type, Value)` | The value of a literal type: a string, a number, `/true` or `/false`, or the digits of a bigint as a string. An integer is a number and any other value is a float, so `2` matches `2` but not `2.0`. |
 | `type_param_name(Type, Name)` | The name of a type parameter, for example `"T"`. |
 | `type_prop(Type, Name, PropType)` | A property of an anonymous object type. |
 | `type_prop_optional(Type, Name)` | The property is optional. |
+| `type_prop_readonly(Type, Name)` | The property is readonly. |
 | `type_sig_param(Type, Index, ParamType)` | A parameter of a `/function` type. |
+| `type_sig_param_optional(Type, Index)` | The parameter of a `/function` type is optional. |
+| `type_sig_param_rest(Type, Index)` | The parameter of a `/function` type is a rest parameter. |
 | `type_sig_returns(Type, ReturnType)` | The return type of a `/function` type. |
 | `type_display(Type, Text)` | The type as the TypeScript 7 checker prints it. Use it in messages only. |
+| `type_incomplete(Type, Reason)` | The facts of the type leave out structure that a rule can depend on. `Reason` is `/truncated`, `/unsupported`, `/signatures`, `/constraint` or `/conflict`. See [Types](#types). |
 | `meta_access(Acc, File, AccessPath)` | An `import.meta.*` access. |
 | `ambient_source(Source, Capability)` | One row per capability of each ambient source. |
 | `ambient_use(Site, Source, Capability, File)` | One row per ambient use site. |
@@ -166,20 +174,37 @@ Caveats:
 
 ### Types
 
-A type is an entity. Its id is `"type:"` and a hash of the type's structure, so the same type has the same id in every file, every tsconfig and every run. `fn_param` and `fn_returns` give the type ids of a function's parameters and return type. The `type_*` relations describe those types and every type that they contain.
+A type is an entity. Its id is `"type:"` and a hash of the type's structure, so the same type has the same id in every file, every tsconfig, every file order and every run. `fn_param` and `fn_returns` give the type ids of a function's parameters and return type. The `type_*` relations describe those types and every type that they contain.
 
 - `type_kind` says what a type is. A named type also has a `type_named` row, and its kind describes what the name refers to. `ActionResult<number>`, where `ActionResult<T>` is an alias of a union, has kind `/union`, a `type_named` row for `ActionResult`, one `type_arg` row and one `type_member` row for each member of the union.
-- A named type is identified by its declaration, not by its text. Two types called `ActionResult` in different files are different entities, with different `Origin` values. `ActionResult<number>` and `ActionResult<string>` are different entities too.
+- A named type is identified by its declaration, not by its text. Two types called `ActionResult` in different files are different entities, with different `Origin` values. `ActionResult<number>` and `ActionResult<string>` are different entities too. A type parameter is identified by the position of its declaration, so the `T` of two generic functions are two entities.
 - Union members and object properties are sorted before the id is computed, so `A | B` and `B | A` are the same entity.
 - Classes, interfaces and enums are emitted by name and type arguments only. Their members are not expanded: a function that returns `Promise<User>` gives `Promise<User>`, `User`, and nothing inside `User`. Arrays are the lib interface `Array`.
-- Conditional, mapped, indexed access, `keyof` and template literal types are `/other`. They have no structure facts, only `type_display`. An alias of such a type still has its `type_named` and `type_arg` rows.
-- A function type with one call signature and no properties is `/function`, with `type_sig_param` and `type_sig_returns` rows. Other anonymous object types, including overloaded function types, are `/object` with `type_prop` rows only. Their index signatures and call signatures have no rows, so `{ [k: string]: Db }` has no `type_child` row for `Db`.
-- A type that refers to itself, such as `type Tree = { kids: Tree[] }`, refers to its own id. A type whose structure is more than 16 levels deep, such as a type that makes a new type at each level of nesting, is `/other`. A named type keeps its `type_named` row.
+- Conditional, mapped, indexed access, `keyof`, template literal, string mapping and `unique symbol` types are `/other` with `type_incomplete(T, /unsupported)`. They have no structure facts, only `type_display`. An alias of such a type still has its `type_named` and `type_arg` rows. The id of an `/other` type comes from its full text and its declaration, if it has one, so two `unique symbol` types in two files are two entities.
+- A function type with one call signature and no properties is `/function`, with `type_sig_param` and `type_sig_returns` rows. Other anonymous object types, including overloaded function types, are `/object` with `type_prop` rows only. If such a type has a call, construct or index signature, it has `type_incomplete(T, /signatures)`. `{ [k: string]: Db }` has no `type_child` row for `Db`.
+- A type parameter with a constraint has `type_incomplete(T, /constraint)`. The constraint is not emitted.
+- A type that refers to itself, such as `type Tree = { kids: Tree[] }`, refers to its own id. A type whose structure is more than 16 levels deep, such as a type that makes a new type at each level of nesting, is `/other` with `type_incomplete(T, /truncated)` and no structure facts. A named type keeps its `type_named` row. Its id includes its display text, so two truncated types with different text are two entities.
 - TypeScript flattens a union that contains another union. `ActionResult<number> | null` is one union with the members of `ActionResult<number>` and `null`, and it has no row for `ActionResult`. A rule that must find the alias inside such a union cannot do so. Write the union as a named alias, or match the members.
-- A named type has one id for its declaration and type arguments. If two tsconfig files compile the same declaration with different compiler options, such as `strictNullChecks`, the structure of that id can differ by group. lintai keeps the rows of the first group.
-- The id of an `/other` type comes from its display text. Two different `/other` types with the same text have the same id.
-- `type_display` is the text that TypeScript 7 prints. TypeScript stops the text at about 2000 characters and ends it with `...`. It can differ from the text in an editor that runs TypeScript 5, and it can change when lintai updates its compiler. Do not match a rule against it. Use the structural relations, and use `type_display` in messages.
+- A named type has one id for its declaration and type arguments. If two tsconfig files compile the same declaration with different compiler options, such as `strictNullChecks`, and the structure differs, the type keeps only `type_named`, `type_origin_kind` and `type_arg`, has kind `/other` if the kinds differ, and has `type_incomplete(T, /conflict)`. The result does not depend on the order of the tsconfig files.
+- Two different types can have one id only if the id is incomplete: two `/other` types with the same text and no declaration, or two truncated types that agree to depth 16 and have the same text. Every fact of such an id is true of each type. An id with structure facts is never shared by two types with different structure.
+- `type_display` is the text that TypeScript 7 prints. TypeScript stops the text at about 2000 characters and ends it with `...`. When one id has different text at different sites, lintai keeps the smallest text. The text can differ from the text in an editor that runs TypeScript 5, and it can change when lintai updates its compiler. Do not match a rule against it. Use the structural relations, and use `type_display` in messages.
 - Only a named type declared in a workspace source file has a `location` row, at its name. A rule that reports a type id as its anchor fails with a "no location fact" error for other types, so rules should report the function.
+
+What the facts show:
+
+| Distinction | Shown by |
+|---|---|
+| optional property | the id, `type_prop_optional` |
+| readonly property | the id, `type_prop_readonly` |
+| optional or rest tuple element | the id, `type_arg_optional`, `type_arg_rest` |
+| readonly tuple | the id, `type_readonly`. A readonly array is the lib interface `ReadonlyArray`. |
+| optional or rest parameter of a function type | the id, `type_sig_param_optional`, `type_sig_param_rest` |
+| origin kind | the id, `type_origin_kind` |
+| type alias name and arguments | the id, `type_named`, `type_arg`, when the checker keeps the alias |
+
+Not shown: members of classes, interfaces and enums; call, construct and index signatures of an `/object` (marked `/signatures`); type parameter constraints (marked `/constraint`) and defaults; the structure of `/other` types (marked `/unsupported`); parameter names.
+
+Removed by the checker before lintai sees the type, so no rule can see them: an alias of a primitive or of another named type (`type UserId = string` is `/string`, `type Handle = Db` is `Db`), a union inside a union (the members are flattened), and `undefined` in optional properties, elements and parameters.
 
 ## Prelude and caveats
 
@@ -205,9 +230,10 @@ The prelude is loaded before every rule program. A rule cannot redefine a prelud
 | `fn_calls_package(Fn, Pkg)` | `Fn` directly calls into the package `Pkg` (`external_call` with a module that is not `"lib"`). |
 | `module_calls_package(File, Pkg)` | `File` directly calls into the package `Pkg`, at any scope. |
 | `type_child(Type, Child)` | `Child` appears directly in `Type`: a type argument, tuple element, union or intersection member, property type, signature parameter or signature return. |
-| `type_contains(Type, Inner)` | Transitive closure of `type_child`. It does not look inside classes, interfaces or enums, whose members are not emitted, or into the index signatures and call signatures of an `/object`. |
-| `type_is_promise(Type)` | `Type` is the lib `Promise`, with any type argument. |
-| `fn_returns_awaited(Fn, Type)` | The return type of `Fn` with one level of `Promise` removed: the type argument of a returned `Promise`, otherwise the return type itself. |
+| `type_contains(Type, Inner)` | Transitive closure of `type_child`. It does not look inside classes, interfaces or enums, whose members are not emitted, into the call, construct or index signatures of an `/object`, into type parameter constraints, or into `/other`, truncated and conflicting types. Use `type_reaches_incomplete` to fail closed. |
+| `type_reaches_incomplete(Type)` | `Type`, or a type that it contains, has a `type_incomplete` row. A rule that must see every type in a signature reports such a type. |
+| `type_is_promise(Type)` | `Type` is the lib `Promise` (`type_origin_kind` `/lib`), with any type argument. A `Promise` declared in a `declare module "lib"` block is not. |
+| `fn_returns_awaited(Fn, Type)` | The return type of `Fn` with exactly one level of the lib `Promise` removed: the type argument of a returned `Promise`, otherwise the return type itself. This is not TypeScript's `Awaited`: it does not unwrap `PromiseLike`, a `Promise` inside a `Promise`, or a union that contains a `Promise`, so `Promise<A> \| undefined` is returned unchanged. |
 
 Caveats:
 

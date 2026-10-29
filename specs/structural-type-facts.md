@@ -2,7 +2,7 @@
 
 You are working in a clone of `bigbizze/lintai`. This document is the full specification for release 0.6.0. It assumes 0.5.0 has landed (the oxlint plugin and `@lintai/client`). Bump every package to 0.6.0. Before writing code, copy this document into the repository as `specs/structural-type-facts.md`.
 
-Corrections after 0.6.0 (unreleased): key framing, incompleteness, recursion order, config group conflicts, represented distinctions, the limits of `type_contains` and the declarations of the example rules. These sections replace the 0.6.0 text: 4.2 to 4.4 and 4.7 to 4.9, the new relations in section 5, section 7, the examples in section 8 and the tests in section 9.
+Corrections released in 0.6.2: key framing, incompleteness, recursion order, config group conflicts, represented distinctions, the limits of `type_contains` and the declarations of the example rules. These sections replace the 0.6.0 text: 4.2 to 4.4 and 4.7 to 4.9, the new relations in section 5, section 7, the examples in section 8 and the tests in section 9.
 
 ## 1. Problem
 
@@ -408,6 +408,7 @@ import { dl, rule } from "@lintai/sdk";
 export default rule("arch.actions-return-action-result")
 	.version(1)
 	.program(dl`
+		Decl violation(Fn, Name, Returned).
 		Decl returns_action_result(Fn).
 		returns_action_result(Fn) :-
 			fn_returns_awaited(Fn, R),

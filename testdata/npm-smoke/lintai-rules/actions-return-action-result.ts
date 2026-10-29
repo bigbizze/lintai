@@ -4,6 +4,7 @@ export default rule("arch.actions-return-action-result")
 	.version(1)
 	.program(dl`
 		Decl violation(Fn, Name, Returned).
+		Decl returns_action_result(Fn).
 		returns_action_result(Fn) :-
 			fn_returns_awaited(Fn, R),
 			type_named(R, "src/core/result.ts", "ActionResult").

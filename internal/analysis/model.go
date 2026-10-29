@@ -213,6 +213,7 @@ type TypeProp struct {
 	Name     string
 	Type     string
 	Optional bool
+	Readonly bool
 }
 
 // TypeFact is a type entity. The fields that refer to other types hold
@@ -221,15 +222,22 @@ type TypeFact struct {
 	ID         string
 	Kind       string
 	Named      bool
+	OriginKind string
 	Origin     string
 	Name       string
 	Args       []string
+	// ArgMarks and SigMarks, when not nil, have "optional", "rest" or ""
+	// for each tuple element or signature parameter.
+	ArgMarks   []string
+	Readonly   bool
 	Members    []string
 	Literal    *TypeLiteral
 	ParamName  string
 	Props      []TypeProp
 	SigParams  []string
+	SigMarks   []string
 	SigReturns string
+	Incomplete []string
 	Display    string
 	Location   *diagnostics.SourceLocation
 }
