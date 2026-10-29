@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/bigbizze/lintai/backend"
+	"github.com/bigbizze/lintai/internal/analysis"
 )
 
 func TestBuildSnapshotExposesStableFunctionKeysAndCalls(t *testing.T) {
@@ -66,6 +67,83 @@ func TestSnapshotVersionIgnoresFileOrderAndAbsoluteRoot(t *testing.T) {
 	if left != right {
 		t.Fatalf("expected stable hash across order and roots, got %q != %q", left, right)
 	}
+}
+
+// A tsconfig with options that TypeScript 7 removed still loads, its path
+// aliases still resolve, and the changes are visible as config_adjusted
+// facts. Neither mode writes a file into the workspace.
+func TestLegacyTsconfigIsAdjusted(t *testing.T) {
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceRoot := filepath.Join(repoRoot, "testdata/fixtures/legacy-tsconfig")
+	before := listTree(t, workspaceRoot)
+	for _, files := range []backend.FileScope{backend.FileScopeTsconfig, backend.FileScopeWalk} {
+		snapshot, err := New().buildAnalysisSnapshot(context.Background(), repoRoot, workspaceRoot, backend.SnapshotOptions{Files: files})
+		if err != nil {
+			t.Fatalf("%s: %v", files, err)
+		}
+		var alias *analysis.ImportEdge
+		for index := range snapshot.ImportEdges {
+			if snapshot.ImportEdges[index].Specifier == "@/lib/helper" {
+				alias = &snapshot.ImportEdges[index]
+			}
+		}
+		if alias == nil || !alias.Internal || alias.ToPath != "src/lib/helper.ts" {
+			t.Fatalf("%s: expected @/lib/helper to resolve to src/lib/helper.ts, got %+v", files, alias)
+		}
+		got := make([]string, 0, len(snapshot.Adjustments))
+		for _, item := range snapshot.Adjustments {
+			got = append(got, item.Config+" "+item.Option+" "+item.Action)
+		}
+		want := []string{
+			"tsconfig.json baseUrl rewritten",
+			"tsconfig.json moduleResolution replaced",
+			"tsconfig.json paths rewritten",
+			"tsconfig.json target removed",
+		}
+		if !slices.Equal(got, want) {
+			t.Fatalf("%s: adjustments\ngot  %q\nwant %q", files, got, want)
+		}
+	}
+	if after := listTree(t, workspaceRoot); !slices.Equal(before, after) {
+		t.Fatalf("extraction changed the workspace:\nbefore %q\nafter  %q", before, after)
+	}
+}
+
+// Walk mode analyzes files outside any tsconfig with a synthetic config,
+// which must not be written into the workspace.
+func TestWalkModeWritesNothingIntoTheWorkspace(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "src/a.ts", "export const a = 1;\n")
+	snapshot, err := New().buildAnalysisSnapshot(context.Background(), root, root, backend.SnapshotOptions{Files: backend.FileScopeWalk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Modules) != 1 {
+		t.Fatalf("expected one module, got %+v", snapshot.Modules)
+	}
+	if got := listTree(t, root); !slices.Equal(got, []string{"src", "src/a.ts"}) {
+		t.Fatalf("extraction changed the workspace: %q", got)
+	}
+}
+
+func listTree(t *testing.T, root string) []string {
+	t.Helper()
+	var result []string
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil || path == root {
+			return err
+		}
+		relative, err := filepath.Rel(root, path)
+		result = append(result, filepath.ToSlash(relative))
+		return err
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
 }
 
 func TestSnapshotVersionUsesDelimitersBetweenPathsAndContents(t *testing.T) {

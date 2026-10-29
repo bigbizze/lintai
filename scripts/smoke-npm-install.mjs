@@ -98,6 +98,18 @@ const facts = spawnSync("pnpm", ["exec", "lintai", "facts", "--workspace-root", 
 assert.equal(facts.status, 0, `expected lintai facts to succeed through the launcher, got ${facts.status}\n${facts.stderr}`);
 assert.ok(facts.stdout.includes(`module("src/example.ts").`), facts.stdout);
 
+const schema = spawnSync("pnpm", ["exec", "lintai", "schema"], { cwd: repoDir, encoding: "utf8" });
+assert.equal(schema.status, 0, `expected lintai schema to succeed, got ${schema.status}\n${schema.stderr}`);
+assert.ok(schema.stdout.includes("Decl config_adjusted("), "expected the schema to declare config_adjusted");
+
+const walked = spawnSync(
+	"pnpm",
+	["exec", "lintai", "facts", "--workspace-root", ".", "--files", "walk", "--exclude", "lintai-rules/**", "--relation", "module"],
+	{ cwd: repoDir, encoding: "utf8" },
+);
+assert.equal(walked.status, 0, `expected lintai facts --files walk to succeed, got ${walked.status}\n${walked.stderr}`);
+assert.equal(walked.stdout.trim(), `module("src/example.ts").`);
+
 const eslint = spawnSync("pnpm", ["exec", "eslint", "src/example.ts", "-f", "json"], {
 	cwd: repoDir,
 	encoding: "utf8",
@@ -107,3 +119,25 @@ const eslintReport = JSON.parse(eslint.stdout);
 assert.ok(Array.isArray(eslintReport) && eslintReport.length > 0);
 const lintaiMessages = eslintReport.flatMap((file) => file.messages ?? []).map((message) => String(message.message ?? ""));
 assert.ok(lintaiMessages.some((message) => message.includes("[arch.no-async/violation]")));
+
+// Serve mode: the plugin starts lintai serve and reads diagnostics from it.
+await fs.writeFile(
+	path.join(repoDir, "eslint.serve.config.mjs"),
+	`import lintai from "@lintai/eslint-plugin";
+export default [{
+	files: ["src/**/*.ts"],
+	plugins: { "@lintai": lintai },
+	rules: { "@lintai/architecture": ["error", { rules: ["lintai-rules/**/*.ts"], mode: "serve" }] },
+}];
+`,
+);
+const served = spawnSync("pnpm", ["exec", "eslint", "-c", "eslint.serve.config.mjs", "src/example.ts", "-f", "json"], {
+	cwd: repoDir,
+	encoding: "utf8",
+});
+assert.equal(served.status, 1, `expected eslint in serve mode to report the lintai error, got ${served.status}\n${served.stderr}`);
+const servedMessages = JSON.parse(served.stdout)
+	.flatMap((file) => file.messages ?? [])
+	.map((message) => String(message.message ?? ""));
+assert.ok(servedMessages.some((message) => message.includes("[arch.no-async/violation]")), servedMessages.join("\n"));
+assert.ok(!servedMessages.some((message) => message.includes("falling back")), servedMessages.join("\n"));

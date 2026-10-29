@@ -119,10 +119,13 @@ const syncSleep = new Int32Array(new SharedArrayBuffer(4));
 
 const defaultDependencies: ClientDependencies = {
 	spawnServe(binary, args, cwd) {
-		return spawn(binary, args, {
+		const child = spawn(binary, args, {
 			cwd,
 			stdio: ["pipe", "pipe", "inherit"],
-		}) as unknown as ClientProcess;
+		});
+		(child.stdin as unknown as { unref?: () => void }).unref?.();
+		(child.stdout as unknown as { unref?: () => void }).unref?.();
+		return child as unknown as ClientProcess;
 	},
 	spawnSync(command, args, options) {
 		return spawnSync(command, args, options);

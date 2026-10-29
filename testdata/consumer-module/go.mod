@@ -16,7 +16,6 @@ require (
 	github.com/google/pprof v0.0.0-20230207041349-798e818bf904 // indirect
 	github.com/klauspost/compress v1.20.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.10 // indirect
-	github.com/microsoft/TypeScript/tsc v0.0.0-00010101000000-000000000000 // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	golang.org/x/exp v0.0.0-20260611194520-c48552f49976 // indirect
@@ -26,5 +25,3 @@ require (
 )
 
 replace github.com/bigbizze/lintai => ../..
-
-replace github.com/microsoft/TypeScript/tsc => github.com/bigbizze/typescript-go v0.0.0-20261029015929-a83c484892b1

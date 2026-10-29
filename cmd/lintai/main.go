@@ -124,7 +124,7 @@ func runFacts(ctx context.Context, args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	snapshot, err := typescript.New().BuildSnapshot(ctx, absoluteWorkspace, absoluteWorkspace, backend.SnapshotOptions{Excludes: excludes, Files: scope})
+	snapshot, err := newBackend().BuildSnapshot(ctx, absoluteWorkspace, absoluteWorkspace, backend.SnapshotOptions{Excludes: excludes, Files: scope})
 	if err != nil {
 		return err
 	}
@@ -139,7 +139,7 @@ func runFacts(ctx context.Context, args []string, stdout io.Writer) error {
 }
 
 func runServe(ctx context.Context) error {
-	runner := engine.New(typescript.New())
+	runner := engine.New(newBackend())
 	return server.New(runner).Serve(ctx, os.Stdin, os.Stdout)
 }
 
@@ -195,7 +195,7 @@ func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 		return fmt.Errorf("invalid --env-json value: %w", err)
 	}
 	ruleGlobs := strings.Split(*rules, ",")
-	runner := engine.New(typescript.New())
+	runner := engine.New(newBackend())
 	result, err := runner.Analyze(ctx, engine.Options{
 		RepoRoot:      absoluteRepo,
 		AssetRoot:     absoluteAssetRoot,
@@ -280,4 +280,10 @@ func hasHelperScripts(root string) bool {
 		}
 	}
 	return true
+}
+
+// newBackend returns the TypeScript backend that reports adjusted tsconfigs
+// on stderr.
+func newBackend() *typescript.Backend {
+	return &typescript.Backend{Log: os.Stderr}
 }

@@ -109,6 +109,13 @@ func factsFromAnalysis(snapshot *analysis.Snapshot) ([]facts.Fact, error) {
 		b.add("module_parse_error", str(parseError.SemanticKey), str(parseError.FilePath), str(parseError.Message))
 		b.location(parseError.SemanticKey, parseError.Range)
 	}
+	for _, adjustment := range snapshot.Adjustments {
+		action, err := name(adjustment.Action)
+		if err != nil {
+			return nil, err
+		}
+		b.add("config_adjusted", str(adjustment.Config), str(adjustment.Option), action)
+	}
 	for _, ref := range snapshot.TypeRefs {
 		id := str(ref.SemanticKey)
 		b.add("type_ref", id, str(ref.FilePath), str(ref.Name))

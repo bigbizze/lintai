@@ -176,11 +176,23 @@ go test ./...
 Useful source-build caveats:
 
 - `@lintai/cli` is the npm launcher package, but the repo-root Go binary is still built from `./cmd/lintai`
-- source builds use the pinned `bigbizze/typescript-go` fork declared in `go.mod` (TypeScript v7.1-beta `tsc` plus the `lintaiapi` adapter); no local fork checkout is required
-- source builds need Go 1.27.3 or later
+- source builds need stock Go 1.27.3 or later and pnpm only. There is no compiler fork, no `tsc` binary and no `typescript` npm dependency for extraction: the TypeScript 7 compiler is copied into `internal/tsgo/internal/` and compiled into the `lintai` binary. Its version is in `internal/tsgo/VERSION`.
+- removing the fork also removes the main obstacle to Windows builds, but this release does not ship them
 - npm packaging smoke tests use:
   - `pnpm build:dist`
   - `pnpm smoke:npm`
+
+## Build and extraction cost
+
+Measured on Linux x86_64 (16 cores) with Go 1.27.3. Extraction time is the median of 5 `lintai facts --relation module` runs. The public repository is `colinhacks/zod` at `b1f6ba06c5de`, which has 511 modules and 11 tsconfig programs. Timings vary by about ±10% between repeated sets on this machine.
+
+| Build | Clean `go build ./cmd/lintai` | Binary size | Fixture workspace | zod |
+|---|---|---|---|---|
+| 0.2.4 (`bigbizze/typescript-go` fork) | 61 s | 68.7 MB | 0.03 s | 4.8 s |
+| Compiler copied in, same commit | 61 s | 69.4 MB | 0.03 s | 4.8 s |
+| 0.3.0 (adds tsconfig adjustment and timing) | 66 s | 69.4 MB | 0.04 s | 4.9 to 5.2 s |
+
+Set `LINTAI_EXTRACT_TIMING=1` to print one line to stderr with the number of files and programs and the milliseconds spent in config loading, program creation, the fact walk and in total. On zod, almost all of the time is the fact walk, which runs the type checker.
 
 ## Troubleshooting and caveats
 

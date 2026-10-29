@@ -4,19 +4,31 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
+	"fmt"
+	"io"
 	"slices"
 	"sort"
+	"strings"
+	"sync"
 
 	"github.com/bigbizze/lintai/backend"
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/facts"
 	"github.com/bigbizze/lintai/internal/ambient"
 	"github.com/bigbizze/lintai/internal/analysis"
+	"github.com/bigbizze/lintai/internal/tsgo/lintaiapi"
 	"github.com/bigbizze/lintai/internal/workspace"
-	"github.com/microsoft/TypeScript/tsc/lintaiapi"
 )
 
-type Backend struct{}
+// Backend extracts facts from TypeScript and JavaScript files.
+type Backend struct {
+	// Log receives one line for each tsconfig that lintai adjusted for
+	// TypeScript 7, once per config and adjustment set. Nil discards them.
+	Log io.Writer
+
+	reportedMu sync.Mutex
+	reported   map[string]string
+}
 
 var _ backend.Backend = (*Backend)(nil)
 
@@ -61,6 +73,8 @@ func (b *Backend) buildAnalysisSnapshot(ctx context.Context, repoRoot, workspace
 		return nil, err
 	}
 	files := moduleFiles(workspaceRoot, walked, extracted.Modules)
+	adjustments := convertAdjustments(workspaceRoot, extracted.ConfigAdjustments)
+	b.reportAdjustments(adjustments)
 
 	modules := convertModules(extracted.Modules)
 	functions := convertFunctions(extracted.Functions)
@@ -93,6 +107,7 @@ func (b *Backend) buildAnalysisSnapshot(ctx context.Context, repoRoot, workspace
 		GlobalRefs:     convertGlobalRefs(extracted.GlobalRefs),
 		Directives:     convertDirectives(extracted.Directives),
 		ParseErrors:    convertParseErrors(extracted.ParseErrors),
+		Adjustments:    adjustments,
 	}, nil
 }
 
@@ -243,6 +258,49 @@ func convertParseErrors(items []lintaiapi.ParseError) []analysis.ParseError {
 		})
 	}
 	return result
+}
+
+func convertAdjustments(workspaceRoot string, items []lintaiapi.ConfigAdjustment) []analysis.ConfigAdjustment {
+	result := make([]analysis.ConfigAdjustment, 0, len(items))
+	for _, item := range items {
+		result = append(result, analysis.ConfigAdjustment{
+			Config: workspace.RelativePath(workspaceRoot, item.Config),
+			Option: item.Option,
+			Action: item.Action,
+		})
+	}
+	return result
+}
+
+// reportAdjustments writes one line per adjusted tsconfig to b.Log, for
+// example "lintai: adjusted tsconfig.json for TypeScript 7 (baseUrl
+// rewritten, target removed)". A line that b.Log already received for the
+// config is not written again, so lintai serve does not repeat it on every
+// refresh. The adjustments are sorted by config.
+func (b *Backend) reportAdjustments(adjustments []analysis.ConfigAdjustment) {
+	if b.Log == nil {
+		return
+	}
+	b.reportedMu.Lock()
+	defer b.reportedMu.Unlock()
+	if b.reported == nil {
+		b.reported = make(map[string]string)
+	}
+	for start := 0; start < len(adjustments); {
+		end := start
+		changes := make([]string, 0)
+		for end < len(adjustments) && adjustments[end].Config == adjustments[start].Config {
+			changes = append(changes, adjustments[end].Option+" "+adjustments[end].Action)
+			end++
+		}
+		config := adjustments[start].Config
+		line := fmt.Sprintf("lintai: adjusted %s for TypeScript 7 (%s)\n", config, strings.Join(changes, ", "))
+		if b.reported[config] != line {
+			b.reported[config] = line
+			_, _ = io.WriteString(b.Log, line)
+		}
+		start = end
+	}
 }
 
 func convertTypeRefs(items []lintaiapi.TypeRef) []analysis.TypeRef {

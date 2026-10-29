@@ -30,8 +30,18 @@ jobs:
       - name: Build
         run: pnpm build
 
+      - name: Go vet
+        run: go vet $(go list ./... | grep -v /internal/tsgo/internal/)
+
       - name: Go tests
         run: go test ./...
+
+      - name: TypeScript compiler copy matches sync script
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          scripts/sync-tsgo.sh "$(sed -n 's/^commit: //p' internal/tsgo/VERSION)"
+          git status --porcelain
+          test -z "$(git status --porcelain)"
 
       - name: Go consumer module smoke
         working-directory: testdata/consumer-module

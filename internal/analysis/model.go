@@ -84,6 +84,16 @@ type ModuleDirective struct {
 	Range       diagnostics.SourceLocation
 }
 
+// ConfigAdjustment is a compiler option that the backend changed before it
+// loaded a tsconfig, because its compiler rejects the option.
+type ConfigAdjustment struct {
+	// Config is the workspace-relative path of the original tsconfig.
+	Config string
+	Option string
+	// Action is removed, rewritten or replaced.
+	Action string
+}
+
 type ParseError struct {
 	EntityID    string
 	SemanticKey string
@@ -152,6 +162,7 @@ type Snapshot struct {
 	GlobalRefs     []GlobalRef
 	Directives     []ModuleDirective
 	ParseErrors    []ParseError
+	Adjustments    []ConfigAdjustment
 }
 
 type AmbientSource struct {
