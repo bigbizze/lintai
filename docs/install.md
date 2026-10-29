@@ -129,30 +129,26 @@ Add an ESLint config:
 
 ```js
 // eslint.config.mjs
-import lintai from "@lintai/eslint-plugin";
+import { createLintaiPlugin } from "@lintai/eslint-plugin";
+
+const lintai = createLintaiPlugin({ rules: ["lintai-rules/**/*.ts"] });
 
 export default [
 	{
 		files: ["src/**/*.ts", "src/**/*.tsx"],
-		plugins: {
-			"@lintai": lintai,
-		},
-		rules: {
-			"@lintai/architecture": [
-				"error",
-				{
-					rules: ["lintai-rules/**/*.ts"],
-				},
-			],
-			"@lintai/no-ambient-in-pure-phase": "error",
-			"@lintai/no-top-level-node-imports": "error",
-			"@lintai/require-rule-shape": "error",
-		},
+		...lintai.configs.all,
+	},
+	{
+		files: ["lintai-rules/**/*.ts"],
+		plugins: { lintai },
+		rules: lintai.configs.authoring.rules,
 	},
 ];
 ```
 
-Bridge options:
+Each lintai rule is the ESLint rule `lintai/<rule-id>`. Set its level, a per-file override or a disable comment as for any other rule. See [api.md](api.md#linter-rules).
+
+Options of `createLintaiPlugin`:
 
 - `mode?: "serve" | "oneshot"`
 - `binary?: string`
@@ -162,46 +158,16 @@ Bridge options:
 - `exclude?: string[]`
 - `files?: "tsconfig" | "walk"`
 - `env?: Record<string, unknown>`
+- `factLimit?: number`
+- `rulesLock?: string`
+- `setupSandbox?: "auto" | "on" | "off"`
 
-Bridge caveats:
+Plugin caveats:
 
 - if `mode` is omitted, plain `eslint` CLI runs default to `oneshot`
 - long-lived editor/language-server use defaults to `serve`
 - rule-file edits trigger cache invalidation and a fresh analysis on the next lint pass
-- source-file edits refresh in the background; editor diagnostics may lag briefly. When the editor lints a file that was saved after the last analysis started, the plugin runs a new analysis first, so the diagnostics of a saved file are current, except for a second save in the same second on a file system that stores modification times in whole seconds
-- lintai reads saved files, not the editor buffer. While a file has unsaved changes, the editor shows one lintai message on line 1 that asks you to save the file.
-- when lintai cannot produce diagnostics, the plugin reports the reason on line 1 of each linted file, so a broken setup does not look like a clean workspace. This covers a failed analysis, a `serve` process that failed and fell back to one `oneshot` run, and a rule that could not run (a `rule_execution_error`). In an `eslint` CLI run, these messages appear on the first linted file only.
-
-## Build from source and caveats
-
-If you are developing LintAI itself:
-
-```sh
-pnpm install
-go build ./cmd/lintai
-pnpm build
-go test ./...
-```
-
-Useful source-build caveats:
-
-- `@lintai/cli` is the npm launcher package, but the repo-root Go binary is still built from `./cmd/lintai`
-- source builds need stock Go 1.27.3 or later and pnpm only. There is no compiler fork, no `tsc` binary and no `typescript` npm dependency for extraction: the TypeScript 7 compiler is copied into `internal/tsgo/internal/` and compiled into the `lintai` binary. Its version is in `internal/tsgo/VERSION`.
-- removing the fork also removes the main obstacle to Windows builds, but this release does not ship them
-- npm packaging smoke tests use:
-  - `pnpm build:dist`
-  - `pnpm smoke:npm` (ESLint)
-  - `pnpm smoke:oxlint` (oxlint CLI and language server, with no ESLint installed)
-
-## Build and extraction cost
-
-Measured on Linux x86_64 (16 cores) with Go 1.27.3. Extraction time is the median of 5 `lintai facts --relation module` runs. The public repository is `colinhacks/zod` at `b1f6ba06c5de`, which has 511 modules and 11 tsconfig programs. Timings vary by about ±10% between repeated sets on this machine.
-
-| Build | Clean `go build ./cmd/lintai` | Binary size | Fixture workspace | zod |
-|---|---|---|---|---|
-| 0.2.4 (`bigbizze/typescript-go` fork) | 61 s | 68.7 MB | 0.03 s | 4.8 s |
-| Compiler copied in, same commit | 61 s | 69.4 MB | 0.03 s | 4.8 s |
-| 0.3.0 (adds tsconfig adjustment and timing) | 66 s | 69.4 MB | 0.04 s | 4.9 to 5.2 s |
+- the rule list is read when ESLint loads the config. After you add a rule file or change a rule id, restart ESLint or the editor's ESLint server
 
 Set `LINTAI_EXTRACT_TIMING=1` to print one line to stderr with the number of files and programs and the milliseconds spent in config loading, program creation, the fact walk and in total. On zod, almost all of the time is the fact walk, which runs the type checker.
 
@@ -213,10 +179,10 @@ Measured on Linux x86_64 (16 cores) on the fixture workspace (`testdata/fixtures
 |---|---|---|
 | `lintai` CLI alone | 312 ms | 312 ms |
 | `eslint src`, no rules | 322 ms | 343 ms |
-| `eslint src` with `@lintai/architecture` | 644 ms | 685 ms |
+| `eslint src` with the lintai rules (0.6.0, one bridge rule) | 644 ms | 685 ms |
 | `oxlint src`, no JS plugin | 43 ms | 43 ms |
 | `oxlint src` with `@lintai/oxlint-plugin` loaded, one authoring rule | 149 ms | 158 ms |
-| `oxlint src` with `lintai/architecture` | 491 ms | 511 ms |
+| `oxlint src` with the lintai rules (0.6.0, one bridge rule) | 491 ms | 511 ms |
 
 The lintai analysis (about 310 ms) is the same under both linters. The rest is the host linter: about 330 ms for ESLint, and about 180 ms for oxlint. Most of the oxlint part is the start of its JS plugin runtime and, on Linux, of the spawner process (see the oxlint plugin caveats in [api.md](api.md#oxlint-plugin-reference-and-caveats)).
 

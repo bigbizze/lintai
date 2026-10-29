@@ -44,7 +44,9 @@ assert.deepEqual(
 	cliDiagnostics.map((diagnostic) => [diagnostic.rule_id, diagnostic.source_location?.file, diagnostic.source_location?.startLine]),
 	[
 		["arch.actions-return-action-result", "src/actions/save.ts", 7],
+		["arch.no-async", "src/disabled.ts", 2],
 		["arch.no-async", "src/example.ts", 1],
+		["arch.no-async", "src/legacy.ts", 1],
 	],
 );
 // The structural type rule reports the action that does not return
@@ -73,7 +75,13 @@ const walked = spawnSync(
 assert.equal(walked.status, 0, `expected lintai facts --files walk to succeed, got ${walked.status}\n${walked.stderr}`);
 assert.equal(
 	walked.stdout.trim(),
-	[`module("src/actions/save.ts").`, `module("src/core/result.ts").`, `module("src/example.ts").`].join("\n"),
+	[
+		`module("src/actions/save.ts").`,
+		`module("src/core/result.ts").`,
+		`module("src/disabled.ts").`,
+		`module("src/example.ts").`,
+		`module("src/legacy.ts").`,
+	].join("\n"),
 );
 
 // Rules lock and setup sandbox through the installed package layout.
@@ -101,7 +109,7 @@ const locked = spawnSync("pnpm", lockedRunArgs, { cwd: repoDir, encoding: "utf8"
 assert.equal(locked.status, 1, `expected a locked, sandboxed run to report the violation, got ${locked.status}\n${locked.stderr}`);
 assert.deepEqual(
 	JSON.parse(locked.stdout).map((diagnostic) => diagnostic.rule_id),
-	["arch.actions-return-action-result", "arch.no-async"],
+	["arch.actions-return-action-result", "arch.no-async", "arch.no-async", "arch.no-async"],
 );
 const rulePath = path.join(repoDir, "lintai-rules", "no-async.ts");
 const ruleSource = await fs.readFile(rulePath, "utf8");
@@ -114,49 +122,93 @@ assert.ok(
 );
 await fs.writeFile(rulePath, ruleSource);
 
-const eslint = spawnSync("pnpm", ["exec", "eslint", "src/example.ts", "src/actions/save.ts", "-f", "json"], {
+// lintai rules lists the rule ids that the plugins create rules for.
+const listed = spawnSync("pnpm", ["exec", "lintai", "rules", "--json", "--workspace-root", ".", "--rules", "lintai-rules/**/*.ts"], {
 	cwd: repoDir,
 	encoding: "utf8",
 });
-assert.equal(eslint.status, 1, `expected eslint to report the lintai architecture error, got ${eslint.status}\n${eslint.stderr}`);
-const eslintReport = JSON.parse(eslint.stdout);
-assert.ok(Array.isArray(eslintReport) && eslintReport.length > 0);
-const lintaiMessages = eslintReport.flatMap((file) => file.messages ?? []).map((message) => String(message.message ?? ""));
-assert.ok(lintaiMessages.some((message) => message.includes("[arch.no-async/violation]")));
+assert.equal(listed.status, 0, `expected lintai rules to succeed, got ${listed.status}\n${listed.stderr}`);
+assert.deepEqual(JSON.parse(listed.stdout), {
+	rules: [
+		{ id: "arch.actions-return-action-result", path: "lintai-rules/actions-return-action-result.ts" },
+		{ id: "arch.no-async", path: "lintai-rules/no-async.ts" },
+	],
+	errors: [],
+});
+
+// ESLint: eslint.config.mjs spreads configs.all, sets one rule to warn,
+// turns arch.no-async off for src/legacy.ts, and src/disabled.ts has a
+// disable comment for arch.no-async.
+function eslintMessages(args) {
+	const result = spawnSync("pnpm", ["exec", "eslint", ...args, "src/", "-f", "json"], { cwd: repoDir, encoding: "utf8" });
+	const messages = JSON.parse(result.stdout).flatMap((file) =>
+		(file.messages ?? []).map((message) => ({
+			file: path.relative(repoDir, file.filePath),
+			ruleId: message.ruleId,
+			severity: message.severity,
+			message: String(message.message ?? ""),
+		})),
+	);
+	return { status: result.status, stderr: result.stderr, messages };
+}
+function summary(messages) {
+	return messages.map((message) => `${message.ruleId} ${message.severity} ${message.file}`).sort();
+}
+const expectedESLint = [
+	"lintai/arch.actions-return-action-result 1 src/actions/save.ts",
+	"lintai/arch.no-async 2 src/example.ts",
+];
+const eslint = eslintMessages([]);
+assert.equal(eslint.status, 1, `expected eslint to report the lintai error, got ${eslint.status}\n${eslint.stderr}`);
+assert.deepEqual(summary(eslint.messages), expectedESLint, JSON.stringify(eslint.messages, null, 2));
 assert.ok(
-	lintaiMessages.some((message) => message.includes("[arch.actions-return-action-result/violation] legacySave")),
-	lintaiMessages.join("\n"),
+	eslint.messages.some((message) => message.message.includes("[arch.actions-return-action-result/violation] legacySave")),
+	JSON.stringify(eslint.messages),
 );
-assert.ok(!lintaiMessages.some((message) => message.includes("save must return")), lintaiMessages.join("\n"));
+
+// One lintai process serves every rule: count lintai runs through a
+// wrapper binary.
+const countFile = path.join(repoDir, "lintai-runs.log");
+const wrapper = path.join(repoDir, "lintai-counting");
+await fs.writeFile(
+	wrapper,
+	`#!/bin/sh\necho "$1" >> ${JSON.stringify(countFile)}\nexec ${JSON.stringify(path.join(repoDir, "node_modules", ".bin", "lintai"))} "$@"\n`,
+	{ mode: 0o755 },
+);
 
 // Serve mode: the plugin starts lintai serve and reads diagnostics from it.
 await fs.writeFile(
 	path.join(repoDir, "eslint.serve.config.mjs"),
-	`import lintai from "@lintai/eslint-plugin";
+	`import { createLintaiPlugin } from "@lintai/eslint-plugin";
 import tsParser from "@typescript-eslint/parser";
-export default [{
-	files: ["src/**/*.ts"],
-	languageOptions: { parser: tsParser },
-	plugins: { "@lintai": lintai },
-	rules: { "@lintai/architecture": ["error", { rules: ["lintai-rules/**/*.ts"], mode: "serve" }] },
-}];
+const lintai = createLintaiPlugin({ rules: ["lintai-rules/**/*.ts"], mode: "serve", binary: ${JSON.stringify(wrapper)} });
+export default [
+	{
+		files: ["src/**/*.ts"],
+		languageOptions: { parser: tsParser },
+		...lintai.configs.all,
+		rules: { ...lintai.configs.all.rules, "lintai/arch.actions-return-action-result": "warn" },
+	},
+	{ files: ["src/legacy.ts"], rules: { "lintai/arch.no-async": "off" } },
+];
 `,
 );
-const served = spawnSync(
-	"pnpm",
-	["exec", "eslint", "-c", "eslint.serve.config.mjs", "src/example.ts", "src/actions/save.ts", "-f", "json"],
-	{
-	cwd: repoDir,
-	encoding: "utf8",
-},
-);
+const served = eslintMessages(["-c", "eslint.serve.config.mjs"]);
 assert.equal(served.status, 1, `expected eslint in serve mode to report the lintai error, got ${served.status}\n${served.stderr}`);
-const servedMessages = JSON.parse(served.stdout)
-	.flatMap((file) => file.messages ?? [])
-	.map((message) => String(message.message ?? ""));
-assert.ok(servedMessages.some((message) => message.includes("[arch.no-async/violation]")), servedMessages.join("\n"));
-assert.ok(
-	servedMessages.some((message) => message.includes("[arch.actions-return-action-result/violation] legacySave")),
-	servedMessages.join("\n"),
+assert.deepEqual(summary(served.messages), expectedESLint, JSON.stringify(served.messages, null, 2));
+assert.ok(!served.messages.some((message) => message.message.includes("falling back")), JSON.stringify(served.messages));
+const runs = (await fs.readFile(countFile, "utf8")).trim().split("\n");
+assert.deepEqual(runs, ["rules", "serve"], `expected one lintai rules run and one lintai serve process, got ${runs}`);
+
+// A misspelled lintai rule name fails the lint run.
+await fs.writeFile(
+	path.join(repoDir, "eslint.typo.config.mjs"),
+	`import { createLintaiPlugin } from "@lintai/eslint-plugin";
+import tsParser from "@typescript-eslint/parser";
+const lintai = createLintaiPlugin({ rules: ["lintai-rules/**/*.ts"] });
+export default [{ files: ["src/**/*.ts"], languageOptions: { parser: tsParser }, plugins: { lintai }, rules: { "lintai/arch.no-asnyc": "error" } }];
+`,
 );
-assert.ok(!servedMessages.some((message) => message.includes("falling back")), servedMessages.join("\n"));
+const typo = spawnSync("pnpm", ["exec", "eslint", "-c", "eslint.typo.config.mjs", "src/example.ts"], { cwd: repoDir, encoding: "utf8" });
+assert.equal(typo.status, 2, `expected a misspelled rule to fail eslint, got ${typo.status}\n${typo.stdout}\n${typo.stderr}`);
+assert.match(typo.stdout + typo.stderr, /Could not find "arch\.no-asnyc" in plugin "lintai"/);

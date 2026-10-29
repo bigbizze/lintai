@@ -23,14 +23,52 @@ const eslintInstalled = spawnSync("pnpm", ["why", "eslint"], { cwd: repoDir, enc
 assert.ok(!eslintInstalled.stdout.includes("eslint "), `expected no eslint in the install\n${eslintInstalled.stdout}`);
 assert.ok(!existsSync(path.join(repoDir, "node_modules", "eslint")), "expected no node_modules/eslint");
 
-// CLI: oneshot mode.
-const cli = spawnSync("pnpm", ["exec", "oxlint", "--format", "json", "src/"], { cwd: repoDir, encoding: "utf8" });
-assert.notEqual(cli.status, 0, `expected oxlint to fail on the planted violation\n${cli.stdout}\n${cli.stderr}`);
-const cliDiagnostics = JSON.parse(cli.stdout).diagnostics;
-const planted = cliDiagnostics.find(
-	(diagnostic) => diagnostic.code === "lintai(architecture)" && diagnostic.message.includes("[arch.no-async/violation]"),
+// One lintai process serves every rule: lintai.oxlint.mjs names a wrapper
+// binary that logs the first argument of each lintai run. "rules" is lintai
+// rules, "--json" is a oneshot run and "serve" is lintai serve.
+const countFile = path.join(repoDir, "lintai-runs.log");
+const wrapper = path.join(repoDir, "lintai-counting");
+await fs.writeFile(
+	wrapper,
+	`#!/bin/sh\necho "$1" >> ${JSON.stringify(countFile)}\nexec ${JSON.stringify(path.join(repoDir, "node_modules", ".bin", "lintai"))} "$@"\n`,
+	{ mode: 0o755 },
 );
-assert.ok(planted, `expected a lintai/architecture diagnostic\n${cli.stdout}`);
+const pluginFile = path.join(repoDir, "lintai.oxlint.mjs");
+const pluginSource = await fs.readFile(pluginFile, "utf8");
+await fs.writeFile(pluginFile, pluginSource.replace(`rules: ["lintai-rules/**/*.ts"]`, `rules: ["lintai-rules/**/*.ts"], binary: ${JSON.stringify(wrapper)}`));
+async function lintaiRuns() {
+	const text = existsSync(countFile) ? await fs.readFile(countFile, "utf8") : "";
+	await fs.writeFile(countFile, "");
+	return text.trim().split("\n").filter(Boolean);
+}
+
+function oxlint(args) {
+	const result = spawnSync("pnpm", ["exec", "oxlint", "--format", "json", ...args, "src/"], { cwd: repoDir, encoding: "utf8" });
+	let diagnostics = [];
+	try {
+		diagnostics = JSON.parse(result.stdout).diagnostics;
+	} catch {
+		// The caller checks the status and the output.
+	}
+	return { ...result, diagnostics };
+}
+function summary(diagnostics) {
+	return diagnostics.map((diagnostic) => `${diagnostic.code} ${diagnostic.severity} ${diagnostic.filename}`).sort();
+}
+
+// CLI: oneshot mode. .oxlintrc.json lists the rules by hand, sets the type
+// rule to warn and turns arch.no-async off for src/legacy.ts.
+// src/disabled.ts has a disable comment for arch.no-async.
+const cli = oxlint([]);
+assert.notEqual(cli.status, 0, `expected oxlint to fail on the planted violation\n${cli.stdout}\n${cli.stderr}`);
+const cliDiagnostics = cli.diagnostics;
+assert.deepEqual(
+	summary(cliDiagnostics),
+	["lintai(arch.actions-return-action-result) warning src/actions/save.ts", "lintai(arch.no-async) error src/example.ts"],
+	cli.stdout,
+);
+assert.deepEqual(await lintaiRuns(), ["rules", "--json"]);
+const planted = cliDiagnostics.find((diagnostic) => diagnostic.code === "lintai(arch.no-async)");
 assert.match(planted.message, /\[arch\.no-async\/violation\] example in src\/example\.ts must not be async/);
 assert.equal(planted.filename, "src/example.ts");
 // lintai reports line 1, column 23 (1-based); oxlint prints the same values.
@@ -43,6 +81,40 @@ assert.match(typeRule[0].message, /legacySave must return Promise<ActionResult<T
 assert.equal(typeRule[0].filename, "src/actions/save.ts");
 assert.deepEqual([typeRule[0].labels[0].span.line, typeRule[0].labels[0].span.column], [7, 23]);
 
+// A misspelled lintai rule name fails the lint run.
+await fs.writeFile(
+	path.join(repoDir, "typo.oxlintrc.json"),
+	JSON.stringify({ jsPlugins: ["./lintai.oxlint.mjs"], rules: { "lintai/arch.no-asnyc": "error" } }),
+);
+const typo = oxlint(["-c", "typo.oxlintrc.json"]);
+assert.notEqual(typo.status, 0, `expected a misspelled rule to fail oxlint\n${typo.stdout}\n${typo.stderr}`);
+assert.match(typo.stdout + typo.stderr, /Rule 'arch\.no-asnyc' not found in plugin 'lintai'/);
+await lintaiRuns();
+
+// oxlint.config.ts imports the plugin module to spread configs.all. Node
+// evaluates the module once, so lintai rules runs once.
+await fs.writeFile(
+	path.join(repoDir, "oxlint.config.ts"),
+	`import { defineConfig } from "oxlint";
+import lintai from "./lintai.oxlint.mjs";
+
+export default defineConfig({
+	jsPlugins: ["./lintai.oxlint.mjs"],
+	rules: { ...lintai.configs.all.rules, "lintai/arch.actions-return-action-result": "warn" },
+	overrides: [{ files: ["src/legacy.ts"], rules: { "lintai/arch.no-async": "off" } }],
+});
+`,
+);
+const spread = oxlint(["-c", "oxlint.config.ts"]);
+assert.notEqual(spread.status, 0, `expected oxlint.config.ts to report the violation\n${spread.stdout}\n${spread.stderr}`);
+assert.deepEqual(
+	summary(spread.diagnostics),
+	["lintai(arch.actions-return-action-result) warning src/actions/save.ts", "lintai(arch.no-async) error src/example.ts"],
+	spread.stdout,
+);
+assert.deepEqual(await lintaiRuns(), ["rules", "--json"]);
+await fs.rename(path.join(repoDir, "oxlint.config.ts"), path.join(repoDir, "oxlint.config.ts.off"));
+
 // Authoring rules run on the rule files.
 const authoring = spawnSync("pnpm", ["exec", "oxlint", "--format", "json", "lintai-rules/"], {
 	cwd: repoDir,
@@ -51,6 +123,7 @@ const authoring = spawnSync("pnpm", ["exec", "oxlint", "--format", "json", "lint
 assert.equal(authoring.status, 0, `expected the rule file to pass the authoring rules\n${authoring.stdout}\n${authoring.stderr}`);
 
 // Language server: serve mode.
+await lintaiRuns();
 const examplePath = path.join(repoDir, "src", "example.ts");
 const exampleURI = pathToFileURL(examplePath).href;
 const exampleText = await fs.readFile(examplePath, "utf8");
@@ -96,12 +169,15 @@ try {
 	server.notify("textDocument/didSave", { textDocument: { uri: exampleURI } });
 	const saved = await server.diagnostics(exampleURI);
 	assert.ok(
-		!saved.some((diagnostic) => diagnostic.code === "lintai(architecture)"),
+		!saved.some((diagnostic) => String(diagnostic.code).startsWith("lintai(arch.")),
 		`expected no lintai diagnostics after didSave\n${JSON.stringify(saved)}`,
 	);
 } finally {
 	server.close();
 }
+// The language server read the rule list once and used one lintai serve
+// process for all rules.
+assert.deepEqual(await lintaiRuns(), ["rules", "serve"]);
 
 function startLanguageServer(cwd) {
 	// Start oxlint directly, not through pnpm exec, so that close() stops the

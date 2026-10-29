@@ -1,25 +1,20 @@
-import path from "node:path";
-
 import { rules as authoringRules } from "@lintai/authoring-rules";
 import {
-	bridgeOptionsSchema,
-	getClient,
-	hasUnsavedChanges,
-	resolveBridgeOptions,
-	startSpawner,
-	toReports,
-	unsavedChangesMessage,
-	type BridgeOptions,
 	type HostDefaults,
+	type LintaiOptions,
+	type LintedFile,
 	type Report,
+	analysisRuleName,
+	createLintaiRules,
+	startSpawner,
 } from "@lintai/client";
+
+export type { LintaiOptions } from "@lintai/client";
 
 // The parts of the oxlint rule context that this plugin uses. oxlint does not
 // export its plugin types from the package entry point.
 type OxlintContext = {
 	physicalFilename: string;
-	cwd: string;
-	options: readonly unknown[];
 	sourceCode: { text: string };
 	report(diagnostic: Report): void;
 };
@@ -31,6 +26,17 @@ type OxlintRule = {
 		schema: unknown;
 	};
 	create(context: OxlintContext): { Program(): void };
+};
+
+type RuleLevel = "off" | "warn" | "error";
+
+export type LintaiPlugin = {
+	meta: { name: "lintai" };
+	rules: Record<string, OxlintRule>;
+	configs: {
+		all: { rules: Record<string, RuleLevel> };
+		authoring: { rules: Record<string, RuleLevel> };
+	};
 };
 
 // oxlint 1.90.0 runs JS plugins in one Node.js process, on the main thread
@@ -58,68 +64,74 @@ export function oxlintHostDefaults(argv: string[] = process.argv): HostDefaults 
 // On Linux, oxlint reserves a large amount of address space after it loads
 // the plugins, and then the oxlint process cannot start lintai. The spawner
 // process starts now, before that, and starts lintai later. See spawner.ts
-// in @lintai/client.
+// in @lintai/client. createLintaiPlugin runs lintai rules through the
+// spawner too.
 startSpawner();
 
-const programLocation = { start: { line: 1, column: 0 }, end: { line: 1, column: 0 } };
-
-// The level of a rule in .oxlintrc.json applies to every report of the rule,
-// so lintai error and warning diagnostics come from two rules, as in the
-// ESLint plugin. architecture reports error diagnostics, rule errors and
-// problems with the analysis. architecture-warnings reports warning
-// diagnostics. Give both rules the same options, so that they share one
-// lintai process.
-function bridgeRule(severity: "error" | "warning", description: string): OxlintRule {
+function lintedFile(context: OxlintContext): LintedFile {
 	return {
-		meta: {
-			type: "problem",
-			docs: { description },
-			schema: bridgeOptionsSchema,
-		},
-		create(context) {
-			const options = resolveBridgeOptions(
-				(context.options[0] ?? {}) as BridgeOptions,
-				context.cwd,
-				oxlintHostDefaults(),
-			);
-			const client = getClient(options);
-
-			return {
-				Program() {
-					if (options.mode === "serve" && hasUnsavedChanges(context.physicalFilename, context.sourceCode.text)) {
-						if (severity === "error") {
-							context.report({ loc: programLocation, message: unsavedChangesMessage });
-						}
-						return;
-					}
-					const filename = path.relative(options.workspaceRoot, context.physicalFilename).replace(/\\/g, "/");
-					const diagnostics = client
-						.getDiagnostics(filename)
-						.filter((diagnostic) => (diagnostic.severity === "warning") === (severity === "warning"));
-					if (severity === "error") {
-						for (const message of client.problems()) {
-							context.report({ loc: programLocation, message });
-						}
-					}
-					for (const report of toReports(diagnostics)) {
-						context.report(report);
-					}
-				},
-			};
+		physicalFilename: context.physicalFilename,
+		text: context.sourceCode.text,
+		report(report) {
+			context.report(report);
 		},
 	};
 }
 
-export const rules = {
-	...authoringRules,
-	architecture: bridgeRule("error", "surface whole-workspace architecture diagnostics from lintai"),
-	"architecture-warnings": bridgeRule(
-		"warning",
-		"surface whole-workspace architecture diagnostics from lintai rules with severity warning",
-	),
-};
-
-export default {
-	meta: { name: "lintai" },
-	rules,
-};
+// createLintaiPlugin creates one oxlint rule lintai/<id> for each lintai rule
+// that the rule globs select, the rule lintai/analysis and the authoring
+// rules. oxlint loads a JS plugin from a module path, so call this function
+// in a local module and name that module in jsPlugins. The rule list is read
+// once, when oxlint loads the module. Relative paths in options resolve from
+// the directory that oxlint runs in.
+export function createLintaiPlugin(options: LintaiOptions = {}): LintaiPlugin {
+	const lintai = createLintaiRules(options, oxlintHostDefaults());
+	const rules: Record<string, OxlintRule> = {
+		...(authoringRules as unknown as Record<string, OxlintRule>),
+	};
+	for (const item of lintai.rules) {
+		rules[item.id] = {
+			meta: {
+				type: "problem",
+				docs: { description: `lintai rule ${item.id} (${item.path})` },
+				schema: [],
+			},
+			create(context) {
+				return {
+					Program() {
+						lintai.lintRule(item.id, lintedFile(context));
+					},
+				};
+			},
+		};
+	}
+	rules[analysisRuleName] = {
+		meta: {
+			type: "problem",
+			docs: {
+				description:
+					"report lintai rule errors, analysis problems and violations of rules that have no linter rule",
+			},
+			schema: [],
+		},
+		create(context) {
+			return {
+				Program() {
+					lintai.lintAnalysis(lintedFile(context));
+				},
+			};
+		},
+	};
+	const all: Record<string, RuleLevel> = { [`lintai/${analysisRuleName}`]: "error" };
+	for (const item of lintai.rules) {
+		all[`lintai/${item.id}`] = "error";
+	}
+	const authoring: Record<string, RuleLevel> = Object.fromEntries(
+		Object.keys(authoringRules).map((name) => [`lintai/${name}`, "error" as const]),
+	);
+	return {
+		meta: { name: "lintai" },
+		rules,
+		configs: { all: { rules: all }, authoring: { rules: authoring } },
+	};
+}

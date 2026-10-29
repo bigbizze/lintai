@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"regexp"
 
 	"github.com/dop251/goja"
 )
@@ -30,6 +31,50 @@ type ProgramOutput struct {
 // Name is a Mangle name constant value, without its leading slash.
 type Name struct {
 	Value string
+}
+
+// RuleIDPattern is the format of a rule id. Linters use the id in a rule
+// name, lintai/<id>, so it has no upper case letters, spaces or other
+// characters that need quotes in a config or a disable comment.
+var RuleIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._/-]*$`)
+
+// ValidateRuleID returns an error when id does not match RuleIDPattern.
+func ValidateRuleID(id string) error {
+	if !RuleIDPattern.MatchString(id) {
+		return fmt.Errorf("rule id %q is not valid: it must match %s", id, RuleIDPattern)
+	}
+	return nil
+}
+
+// ReadRuleID evaluates a pure bundle and returns the id of its rule. It does
+// not check the rest of the rule. ok is false when the module has no default
+// export, which makes it a helper module and not a rule.
+func ReadRuleID(code string) (id string, ok bool, err error) {
+	vm := goja.New()
+	disableAmbientCapabilities(vm)
+	if _, err := vm.RunString(code); err != nil {
+		return "", false, err
+	}
+	moduleValue := vm.Get("LintAIPureModule")
+	if moduleValue == nil || goja.IsUndefined(moduleValue) || goja.IsNull(moduleValue) {
+		return "", false, fmt.Errorf("pure bundle did not initialize LintAIPureModule")
+	}
+	ruleValue := moduleValue.ToObject(vm).Get("rule")
+	if ruleValue == nil || goja.IsUndefined(ruleValue) || goja.IsNull(ruleValue) {
+		return "", false, nil
+	}
+	idValue := ruleValue.ToObject(vm).Get("id")
+	if idValue == nil {
+		return "", true, fmt.Errorf("the default export is not a lintai rule; create it with rule(id) from @lintai/sdk")
+	}
+	value, isString := idValue.Export().(string)
+	if !isString || value == "" {
+		return "", true, fmt.Errorf("the default export is not a lintai rule; create it with rule(id) from @lintai/sdk")
+	}
+	if err := ValidateRuleID(value); err != nil {
+		return "", true, err
+	}
+	return value, true, nil
 }
 
 func LoadPureBundle(code string) (*LoadedRule, error) {

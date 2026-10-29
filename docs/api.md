@@ -11,6 +11,8 @@ A rule file exports:
 
 A file in the rule glob with no default export is a helper module. LintAI skips it, so shared `dl` fragments can live next to the rules. A default export that is not a rule is an error.
 
+The rule id, the argument of `rule(id)`, must match `^[a-z0-9][a-z0-9._/-]*$`: lower case letters, digits, `.`, `_`, `/` and `-`, starting with a letter or a digit. The linter plugins use it in the rule name `lintai/<id>`. `rule()` throws for an invalid id, and lintai reports a `rule_execution_error` with phase `setup` for it. Each rule file must have its own id: two rule files with one id are a `rule_execution_error` with phase `config` for each file, and neither rule runs. The ids `analysis`, `no-ambient-in-pure-phase`, `no-top-level-node-imports` and `require-rule-shape` are reserved for the plugins' own rules: the CLI runs such a rule, but `createLintaiPlugin` throws.
+
 A rule is a Datalog program in the [Mangle](https://codeberg.org/TauCeti/mangle-go) dialect. The program runs over facts that LintAI extracts from the workspace. The rule names one or more predicates whose rows are violations.
 
 ```ts
@@ -330,8 +332,20 @@ lintai [flags]
 lintai schema
 lintai facts --workspace-root <dir> [--exclude <glob>]... [--files tsconfig|walk] [--relation <name>]...
 lintai lock [--workspace-root <dir>] [--rules <globs>] [--lock-file <path>]
+lintai rules [--workspace-root <dir>] [--repo-root <dir>] [--rules <globs>] [--json]
 lintai serve
 ```
+
+`lintai rules` bundles the rules and reads the id of each rule. It does not run `setup()`, build a snapshot or evaluate a program. Without `--json` it prints one `<id> <path>` line for each rule, and the errors on stderr. With `--json` it prints:
+
+```json
+{
+	"rules": [{ "id": "arch.no-service-imports", "path": "lintai-rules/no-service-imports.ts" }],
+	"errors": [{ "path": "lintai-rules/broken.ts", "message": "..." }]
+}
+```
+
+`rules` is sorted by id, then by path. Paths are relative to the workspace root. A rule file that does not bundle or load, has an invalid id, or has the same id as another rule file is in `errors` and not in `rules`. These errors do not change the exit code: it is 0, so that a linter plugin can still create the other rules. Exit code 2 has its usual meaning, for example a glob that matches no file.
 
 Flags for analysis:
 
@@ -415,7 +429,8 @@ In the sandbox, `setup()` can read files in the workspace. It cannot write files
 
 Rule severity:
 
-- every rule has severity `error` unless `--severity` (or the `severity` option of the ESLint plugin) names it
+- `--severity` sets rule levels for the CLI. Under ESLint or oxlint, set the level of each rule `lintai/<id>` in the linter config, as for any other rule. The plugins run lintai without `--severity`.
+- every rule has severity `error` unless `--severity` names it
 - `warning`: the violations of the rule have `"severity": "warning"`. Warnings do not change the exit code.
 - `off`: lintai does not evaluate the rule and reports nothing for it, also when its `setup` or program fails. A rule file that fails to bundle, or whose `setup` fails before it gives its id, still gives a `rule_execution_error`, because lintai does not know its id yet.
 - a `rule_execution_error` always has severity `error`, also for a rule with severity `warning`, so a broken rule cannot pass without notice
@@ -436,53 +451,27 @@ CLI caveats:
 - each rule glob must match at least one file; otherwise the run fails with an error
 - `lintai serve` is for editor integration; it keeps the base facts of the current snapshot and rebuilds them when the snapshot changes
 
-## ESLint plugin reference and caveats
+## Linter rules
 
-Install:
+The ESLint plugin and the oxlint plugin give each lintai rule its own linter rule, `lintai/<rule-id>`. You set its level, `"off"`, `"warn"` or `"error"` (or `0`, `1`, `2`), in the linter config, as for any other rule. Per-file overrides, disable comments (`// eslint-disable-next-line lintai/arch.legacy-imports`, `// oxlint-disable-next-line lintai/arch.legacy-imports`) and the linter CLI all work per lintai rule.
 
-```sh
-pnpm add -D @lintai/eslint-plugin eslint
-```
+Each plugin package exports `createLintaiPlugin(options)`. It runs `lintai rules` once to read the rule ids, and returns a plugin with these rules:
 
-Rule names exported by the plugin:
+- `lintai/<rule-id>` for each rule that `lintai rules` lists. It reports the violations of that rule. It has no options.
+- `lintai/analysis`: everything that is not a violation of a configured rule. This is every `rule_execution_error` (any phase), a failed analysis, a `serve` process that fell back to one `oneshot` run, each rule file that `lintai rules` could not load, the "save this file" message in `serve` mode, and a violation of a rule that has no linter rule in the plugin (see the caveats). Keep `lintai/analysis` at `"error"`.
+- the authoring rules `lintai/no-ambient-in-pure-phase` (forbids ambient APIs in callbacks passed to `.program(`, `.facts(` and `.message(`), `lintai/no-top-level-node-imports` and `lintai/require-rule-shape` (requires `.version(`, `.program(`, `.report(` and `.message(`, and rejects `.assert(`).
 
-- `@lintai/architecture`: lintai diagnostics with severity `error`, rule errors, and problems with the analysis
-- `@lintai/architecture-warnings`: lintai diagnostics with severity `warning`
-- `@lintai/no-ambient-in-pure-phase`: forbids ambient APIs in callbacks passed to `.program(`, `.facts(` and `.message(`
-- `@lintai/no-top-level-node-imports`
-- `@lintai/require-rule-shape`: requires `.version(`, `.program(`, `.report(` and `.message(`, and rejects `.assert(`
+The plugin object also has two configs:
 
-Example config:
+- `configs.all`: every `lintai/<rule-id>` and `lintai/analysis` at `"error"`. In the ESLint plugin it is a flat config object with `plugins` and `rules`. In the oxlint plugin it has `rules` only, to spread in `oxlint.config.ts`.
+- `configs.authoring`: the three authoring rules at `"error"`, in the same form.
 
-```js
-import lintai from "@lintai/eslint-plugin";
+All generated rules and `lintai/analysis` share one client, so one lintai process serves every rule in a lint run. `createLintaiPlugin({ rules: [] })` creates only `lintai/analysis` and the authoring rules and never starts lintai, for a repository that only lints rule files.
 
-const bridge = {
-	rules: ["lintai-rules/**/*.ts"],
-	severity: { "arch.legacy-imports": "warning" },
-};
-
-export default [
-	{
-		files: ["src/**/*.ts", "src/**/*.tsx", "lintai-rules/**/*.ts"],
-		plugins: {
-			"@lintai": lintai,
-		},
-		rules: {
-			"@lintai/architecture": ["error", bridge],
-			"@lintai/architecture-warnings": ["warn", bridge],
-			"@lintai/no-ambient-in-pure-phase": "error",
-			"@lintai/no-top-level-node-imports": "error",
-			"@lintai/require-rule-shape": "error",
-		},
-	},
-];
-```
-
-Bridge options:
+Options:
 
 ```ts
-type BridgeOptions = {
+type LintaiOptions = {
 	mode?: "serve" | "oneshot";
 	binary?: string;
 	repoRoot?: string;
@@ -492,26 +481,70 @@ type BridgeOptions = {
 	files?: "tsconfig" | "walk";
 	env?: Record<string, unknown>;
 	factLimit?: number;
-	severity?: Record<string, "error" | "warning" | "off">;
 	rulesLock?: string;
 	setupSandbox?: "auto" | "on" | "off";
 };
 ```
 
-Plugin caveats:
-
-- ESLint gives one level to all reports of one rule, so lintai warnings come from a second rule, `@lintai/architecture-warnings`. Give both rules the same options object. Then they share one lintai process, and each diagnostic appears once. If you omit `@lintai/architecture-warnings`, warning diagnostics are not shown.
-- `severity` is the same as the CLI `--severity` flag
+- `rules` is the same as the CLI `--rules` flag, as an array of globs (default `["lintai-rules/**/*.ts"]`)
+- `exclude` is the same as the CLI `--exclude` flag
+- `files` is the same as the CLI `--files` flag
 - `rulesLock` is the same as the CLI `--rules-lock` flag. A relative path is resolved from the workspace root
 - `setupSandbox` is the same as the CLI `--setup-sandbox` flag
+- relative roots resolve from the directory that the linter runs in
+
+Linter rule caveats:
+
+- the rule list is fixed when the linter loads the plugin. After you add a rule file or change a rule id, restart the linter or the editor's language server. Until then, the violations of the new id appear under `lintai/analysis`, with a message that says to restart.
+- a lintai rule that is not in the linter config does not run, and neither linter has a wildcard such as `"lintai/*"`. Spread `configs.all` to enable every rule, then override single rules.
+- a misspelled rule name in the config, such as `"lintai/arch.no-servce-imports"`, fails the lint run, as for any unknown rule
+- a rule set to `"off"` in the linter is still evaluated by lintai; only its output is dropped. To skip the evaluation, remove the rule file from the `rules` globs.
+- rule errors always appear under `lintai/analysis` at the level of `lintai/analysis`, whatever level the rule has, so a broken rule cannot pass as a warning or be hidden by `"off"`
+- `lintai rules` takes about 0.1 to 0.3 s for 1 to 20 rules. It runs once when the linter loads the plugin.
+
+## ESLint plugin reference and caveats
+
+Install:
+
+```sh
+pnpm add -D @lintai/cli @lintai/sdk @lintai/eslint-plugin eslint
+```
+
+Example `eslint.config.js`:
+
+```js
+import { createLintaiPlugin } from "@lintai/eslint-plugin";
+
+const lintai = createLintaiPlugin({ rules: ["lintai-rules/**/*.ts"] });
+
+export default [
+	{
+		files: ["src/**/*.ts", "src/**/*.tsx"],
+		...lintai.configs.all,
+		rules: {
+			...lintai.configs.all.rules,
+			"lintai/arch.legacy-imports": "warn",
+		},
+	},
+	{
+		files: ["src/legacy/**"],
+		rules: { "lintai/arch.legacy-imports": "off" },
+	},
+	{
+		files: ["lintai-rules/**/*.ts"],
+		plugins: { lintai },
+		rules: lintai.configs.authoring.rules,
+	},
+];
+```
+
+Plugin caveats:
 
 - `serve` is the default in editor-like long-lived processes
 - `oneshot` is the default under plain ESLint CLI detection
-- `exclude` is the same as the CLI `--exclude` flag
-- `files` is the same as the CLI `--files` flag
-- lintai reads the saved files on disk, not the editor buffer. In `serve` mode, when the editor text of a file is different from the saved file, the plugin shows one message on line 1 that asks you to save the file, in place of the lintai diagnostics for that file. When the editor lints a file that was saved after the last analysis started, the plugin runs a new analysis first, so the diagnostics of the saved file are current. On a file system that stores modification times in whole seconds, a second save in the same second can show the diagnostics of the first save until the next background refresh.
-- rule-file edits force invalidation on the next lint pass
-- when lintai cannot produce diagnostics, the plugin reports the reason on line 1 of each linted file, so a broken setup does not look like a clean workspace. This covers a failed analysis, a `serve` process that failed and fell back to one `oneshot` run, and a rule that could not run (a `rule_execution_error`). In an `eslint` CLI run, these messages appear on the first linted file only.
+- lintai reads the saved files on disk, not the editor buffer. In `serve` mode, when the editor text of a file is different from the saved file, `lintai/analysis` shows one message on line 1 that asks you to save the file, and the other lintai rules report nothing for that file. When the editor lints a file that was saved after the last analysis started, the plugin runs a new analysis first, so the diagnostics of the saved file are current. On a file system that stores modification times in whole seconds, a second save in the same second can show the diagnostics of the first save until the next background refresh.
+- rule-file edits force invalidation on the next lint pass. A new rule id still needs a restart (see "Linter rules").
+- when lintai cannot produce diagnostics, `lintai/analysis` reports the reason on line 1 of each linted file, so a broken setup does not look like a clean workspace. In an `eslint` CLI run, these messages appear on the first linted file only.
 - the ESLint path never computes `explanation`
 
 ## Oxlint plugin reference and caveats
@@ -524,19 +557,35 @@ Install:
 pnpm add -D @lintai/cli @lintai/sdk @lintai/oxlint-plugin oxlint
 ```
 
-The plugin name is `lintai`. Rule names:
+oxlint loads a JS plugin from a module path, not from a plugin object, so call `createLintaiPlugin` in a small local module, for example `lintai.oxlint.mjs`:
 
-- `lintai/architecture`: lintai diagnostics with severity `error`, rule errors, and problems with the analysis
-- `lintai/architecture-warnings`: lintai diagnostics with severity `warning`
-- `lintai/no-ambient-in-pure-phase`, `lintai/no-top-level-node-imports` and `lintai/require-rule-shape`: the authoring rules, the same as in the ESLint plugin
+```js
+import { createLintaiPlugin } from "@lintai/oxlint-plugin";
 
-Example `.oxlintrc.json`:
+export default createLintaiPlugin({ rules: ["lintai-rules/**/*.ts"] });
+```
+
+Name that module in `jsPlugins`. In `oxlint.config.ts` you can import it and spread `configs.all`. Node evaluates the module once, so `lintai rules` runs once:
+
+```ts
+import { defineConfig } from "oxlint";
+import lintai from "./lintai.oxlint.mjs";
+
+export default defineConfig({
+	jsPlugins: ["./lintai.oxlint.mjs"],
+	rules: { ...lintai.configs.all.rules, "lintai/arch.legacy-imports": "warn" },
+});
+```
+
+In `.oxlintrc.json`, list the rules by hand:
 
 ```json
 {
-	"jsPlugins": ["@lintai/oxlint-plugin"],
+	"jsPlugins": ["./lintai.oxlint.mjs"],
 	"rules": {
-		"lintai/architecture": ["error", { "rules": ["lintai-rules/**/*.ts"] }]
+		"lintai/analysis": "error",
+		"lintai/arch.no-service-imports": "error",
+		"lintai/arch.legacy-imports": "warn"
 	},
 	"overrides": [
 		{
@@ -551,12 +600,12 @@ Example `.oxlintrc.json`:
 }
 ```
 
-Options: the same `BridgeOptions` object and JSON schema as the ESLint plugin. You can copy the options between the two configs. To show warning diagnostics, add `"lintai/architecture-warnings": ["warn", <the same options>]`. With the same options, both rules share one lintai process.
+Options: the same `LintaiOptions` as the ESLint plugin.
 
 Modes:
 
 - `oxlint` CLI: `oneshot`. The plugin runs lintai once, and reports workspace problems on the first linted file only.
-- `oxlint --lsp`: `serve`. The plugin keeps one `lintai serve` process and reports workspace problems on each lint. When the editor text of a file is different from the saved file, the plugin shows one message on line 1 that asks you to save the file. When the language server lints a file that was saved after the last analysis started, the plugin runs a new analysis first.
+- `oxlint --lsp`: `serve`. The plugin keeps one `lintai serve` process and reports workspace problems on each lint. When the editor text of a file is different from the saved file, `lintai/analysis` shows one message on line 1 that asks you to save the file. When the language server lints a file that was saved after the last analysis started, the plugin runs a new analysis first.
 - The plugin detects the language server from the `--lsp` argument of the oxlint process. An explicit `mode` option always wins.
 
 Plugin caveats:
@@ -566,7 +615,7 @@ Plugin caveats:
 - line and column values are the same as under ESLint. A lintai diagnostic at line 3, column 5 is shown by the oxlint CLI at line 3, column 5
 - the plugin reports only. It gives no fixes and no suggestions
 - oxlint 1.90.0 runs JS plugins on one thread of one Node.js process, in the CLI and in the language server, so one lintai analysis serves all files
-- on Linux, the plugin starts a small Node.js process (the spawner) when oxlint loads it, and starts lintai through that process. After it loads JS plugins, oxlint 1.90.0 reserves 6 GiB of address space for each lint thread. Then Node cannot start a child process from the oxlint process when the system does not allow that much memory to be committed, and the start fails with `ENOMEM` (see [oxc#20331](https://github.com/oxc-project/oxc/issues/20331)). This occurs, for example, with 4 threads on a machine with 16 GiB of RAM and 4 GiB of swap, such as a GitHub Actions `ubuntu-latest` runner
+- on Linux, the plugin starts a small Node.js process (the spawner) when oxlint loads it, and starts lintai (also `lintai rules`) through that process. After it loads JS plugins, oxlint 1.90.0 reserves 6 GiB of address space for each lint thread. Then Node cannot start a child process from the oxlint process when the system does not allow that much memory to be committed, and the start fails with `ENOMEM` (see [oxc#20331](https://github.com/oxc-project/oxc/issues/20331)). This occurs, for example, with 4 threads on a machine with 16 GiB of RAM and 4 GiB of swap, such as a GitHub Actions `ubuntu-latest` runner
 
 ## Diagnostic shape and caveats
 

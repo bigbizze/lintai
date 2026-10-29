@@ -23,7 +23,7 @@ export type Diagnostic = {
 	};
 };
 
-export type BridgeOptions = {
+export type LintaiOptions = {
 	mode?: "serve" | "oneshot";
 	binary?: string;
 	repoRoot?: string;
@@ -33,14 +33,11 @@ export type BridgeOptions = {
 	files?: "tsconfig" | "walk";
 	env?: Record<string, unknown>;
 	factLimit?: number;
-	severity?: Record<string, RuleSeverity>;
 	rulesLock?: string;
 	setupSandbox?: SetupSandbox;
 };
 
 export type SetupSandbox = "auto" | "on" | "off";
-
-export type RuleSeverity = "error" | "warning" | "off";
 
 export type ResolvedBridgeOptions = {
 	mode: "serve" | "oneshot";
@@ -54,7 +51,6 @@ export type ResolvedBridgeOptions = {
 	files: "tsconfig" | "walk";
 	env: Record<string, unknown>;
 	factLimit?: number;
-	severity: Record<string, RuleSeverity>;
 	rulesLock?: string;
 	setupSandbox?: SetupSandbox;
 };
@@ -419,7 +415,6 @@ export class LintAIClient {
 				excludes: this.options.excludes,
 				files: this.options.files,
 				env: this.options.env,
-				severity: this.options.severity,
 				...(this.options.factLimit === undefined ? {} : { factLimit: this.options.factLimit }),
 				...(this.options.rulesLock === undefined ? {} : { rulesLock: this.options.rulesLock }),
 				...(this.options.setupSandbox === undefined ? {} : { setupSandbox: this.options.setupSandbox }),
@@ -463,7 +458,6 @@ export class LintAIClient {
 				"--env-json",
 				JSON.stringify(this.options.env),
 				...(this.options.factLimit === undefined ? [] : ["--fact-limit", String(this.options.factLimit)]),
-				...Object.entries(this.options.severity).flatMap(([ruleID, level]) => ["--severity", `${ruleID}=${level}`]),
 				...(this.options.rulesLock === undefined ? [] : ["--rules-lock", this.options.rulesLock]),
 				...(this.options.setupSandbox === undefined ? [] : ["--setup-sandbox", this.options.setupSandbox]),
 			],
@@ -834,7 +828,7 @@ export type HostDefaults = {
 	reportProblemsOnce: boolean;
 };
 
-export function resolveBridgeOptions(options: BridgeOptions, cwd: string, host: HostDefaults): ResolvedBridgeOptions {
+export function resolveBridgeOptions(options: LintaiOptions, cwd: string, host: HostDefaults): ResolvedBridgeOptions {
 	const workspaceRoot = options.workspaceRoot
 		? path.resolve(cwd, options.workspaceRoot)
 		: findWorkspaceRoot(cwd);
@@ -855,7 +849,6 @@ export function resolveBridgeOptions(options: BridgeOptions, cwd: string, host: 
 		excludes: options.exclude ?? [],
 		files: options.files ?? "tsconfig",
 		env: options.env ?? {},
-		severity: options.severity ?? {},
 		...(options.factLimit === undefined ? {} : { factLimit: options.factLimit }),
 		...(options.rulesLock === undefined ? {} : { rulesLock: path.resolve(workspaceRoot, options.rulesLock) }),
 		...(options.setupSandbox === undefined ? {} : { setupSandbox: options.setupSandbox }),
@@ -948,6 +941,74 @@ export function resetClientsForTest(): void {
 		client.dispose();
 	}
 	clientCache.clear();
+	ruleIdCache.clear();
+}
+
+export type RuleIdList = {
+	rules: Array<{ id: string; path: string }>;
+	errors: Array<{ path: string; message: string }>;
+};
+
+const ruleIdCache = new Map<string, RuleIdList>();
+
+// loadRuleIds runs lintai rules --json and returns the id and path of each
+// rule, and the rule files that did not load. The linter plugins create one
+// rule for each id. The result is cached for each set of resolved options.
+// When lintai rules itself fails, for example because the binary is
+// missing or a glob matches nothing, the failure is one error with an empty
+// path and there are no rules.
+export function loadRuleIds(
+	options: ResolvedBridgeOptions,
+	dependencies: ClientDependencies = defaultDependencies,
+): RuleIdList {
+	const key = JSON.stringify(options);
+	const cached = ruleIdCache.get(key);
+	if (cached) {
+		return cached;
+	}
+	const result = dependencies.spawnSync(
+		options.binary,
+		[
+			"rules",
+			"--json",
+			"--repo-root",
+			options.repoRoot,
+			"--asset-root",
+			options.assetRoot,
+			"--workspace-root",
+			options.workspaceRoot,
+			"--rules",
+			options.ruleGlobs.join(","),
+		],
+		{ cwd: options.repoRoot, encoding: "utf8" },
+	);
+	const list = parseRuleIds(result);
+	ruleIdCache.set(key, list);
+	return list;
+}
+
+function parseRuleIds(result: ReturnType<SpawnSyncLike>): RuleIdList {
+	const fail = (message: string): RuleIdList => ({
+		rules: [],
+		errors: [
+			{ path: "", message: `lintai rules failed, so no lintai rules were created: ${message}` },
+		],
+	});
+	if (result.error) {
+		return fail(result.error.message);
+	}
+	if (result.status !== 0 || !result.stdout) {
+		const stderr = result.stderr?.trim();
+		return fail(
+			`lintai exited with status ${result.status ?? "null"}${stderr ? `: ${stderr}` : ""}`,
+		);
+	}
+	try {
+		const parsed = JSON.parse(result.stdout) as RuleIdList;
+		return { rules: parsed.rules ?? [], errors: parsed.errors ?? [] };
+	} catch (error) {
+		return fail(`lintai returned invalid JSON: ${asError(error).message}`);
+	}
 }
 
 export function createTestDependencies(overrides: Partial<ClientDependencies>): ClientDependencies {

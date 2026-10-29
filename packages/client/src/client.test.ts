@@ -10,6 +10,7 @@ import {
 	createTestDependencies,
 	createTestProcess,
 	getClient,
+	loadRuleIds,
 	resetClientsForTest,
 	resolveBridgeOptions,
 	type Diagnostic,
@@ -661,4 +662,44 @@ test("hasUnsavedChanges compares the editor text with the saved file and ignores
 	} finally {
 		rmSync(tempRoot, { recursive: true, force: true });
 	}
+});
+
+test("loadRuleIds runs lintai rules once for each set of resolved options and keeps the load errors", () => {
+	const calls: string[][] = [];
+	const deps = createTestDependencies({
+		spawnSync: (_command, args) => {
+			calls.push(args);
+			return {
+				stdout: JSON.stringify({
+					rules: [{ id: "arch.a", path: "lintai-rules/a.ts" }],
+					errors: [{ path: "lintai-rules/broken.ts", message: "Unexpected end of file" }],
+				}),
+				stderr: "",
+				error: undefined,
+				status: 0,
+			};
+		},
+	});
+	const options = resolveBridgeOptions(
+		{ binary: "/tmp/lintai", repoRoot: "/repo", workspaceRoot: "/workspace" },
+		"/repo",
+		cliHost,
+	);
+	const first = loadRuleIds(options, deps);
+	assert.deepEqual(first, {
+		rules: [{ id: "arch.a", path: "lintai-rules/a.ts" }],
+		errors: [{ path: "lintai-rules/broken.ts", message: "Unexpected end of file" }],
+	});
+	assert.equal(loadRuleIds({ ...options }, deps), first);
+	assert.equal(calls.length, 1);
+	assert.deepEqual(calls[0]?.slice(0, 2), ["rules", "--json"]);
+	loadRuleIds({ ...options, ruleGlobs: ["/workspace/other/*.ts"] }, deps);
+	assert.equal(calls.length, 2);
+
+	const failed = loadRuleIds(
+		{ ...options, binary: "/tmp/missing" },
+		createTestDependencies({ spawnSync: () => ({ stdout: "", stderr: "rule glob matched no files", error: undefined, status: 2 }) }),
+	);
+	assert.deepEqual(failed.rules, []);
+	assert.match(failed.errors[0]?.message ?? "", /lintai rules failed.*status 2: rule glob matched no files/);
 });

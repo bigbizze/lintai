@@ -183,6 +183,11 @@ func (e *Engine) Analyze(ctx context.Context, options Options) (Result, error) {
 	for _, prepareErr := range prepareFailures {
 		knownRules[prepareErr.RuleID] = struct{}{}
 	}
+	for rulePath, failure := range invalidPreparedRules(options.WorkspaceRoot, preparedByRule) {
+		delete(preparedByRule, rulePath)
+		knownRules[failure.ruleID] = struct{}{}
+		allDiagnostics = append(allDiagnostics, errorDiagnostic(failure.ruleID, failure.phase, failure.ruleVersion, snapshot.Version, e.backend.ID(), failure.message))
+	}
 
 	for _, rulePath := range rulePaths {
 		artifacts, built := artifactsByRule[rulePath]

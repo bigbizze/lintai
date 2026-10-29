@@ -1,9 +1,17 @@
 {
-	"jsPlugins": ["@lintai/oxlint-plugin"],
+	"jsPlugins": ["./lintai.oxlint.mjs"],
 	"rules": {
-		"lintai/architecture": ["error", { "rules": ["lintai-rules/**/*.ts"] }]
+		"lintai/analysis": "error",
+		"lintai/arch.no-async": "error",
+		"lintai/arch.actions-return-action-result": "warn"
 	},
 	"overrides": [
+		{
+			"files": ["src/legacy.ts"],
+			"rules": {
+				"lintai/arch.no-async": "off"
+			}
+		},
 		{
 			"files": ["lintai-rules/**/*.ts"],
 			"rules": {
