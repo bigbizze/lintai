@@ -301,14 +301,14 @@ type cachedTypeKey struct {
 // result is true when the key has no ^n. Such a key depends only on the
 // type and its depth, and is cached for that depth.
 func (e *extractor) typeKey(t *checker.Type, stack []*checker.Type) (string, int, bool) {
-	at := typeKeyAt{t: t, depth: len(stack)}
-	if cached, ok := e.typeKeys[at]; ok {
-		return cached.key, cached.height, true
-	}
 	for index := len(stack) - 1; index >= 0; index-- {
 		if stack[index] == t {
 			return "^" + strconv.Itoa(len(stack)-index), 0, false
 		}
+	}
+	at := typeKeyAt{t: t, depth: len(stack)}
+	if cached, ok := e.typeKeys[at]; ok {
+		return cached.key, cached.height, true
 	}
 	if len(stack) > maxTypeKeyDepth {
 		// The parent of this position is already too high for structure

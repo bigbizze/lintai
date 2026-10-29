@@ -594,5 +594,6 @@ The rule reports `loadUser` with `Db` from `src/infra/db.ts`.
 
 Caveats:
 
+- `type_contains` does not look into index signatures or call signatures, so `{ [k: string]: Db }` is not reported.
 - `type_contains` does not look inside classes, interfaces or enums. If `User` is an interface with a property of type `Db`, a function that returns `User` is not reported. Add a rule for the declaration of `User`, or use `type_ref` and `type_ref_target` on the file that declares it.
 - an `Origin` is a workspace-relative path only for types declared in workspace source files. A type from a package has the package name, so `glob(Origin, "src/infra/**")` does not match it.

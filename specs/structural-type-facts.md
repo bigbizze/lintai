@@ -87,7 +87,7 @@ Canonical key, defined recursively. `K(x)` is the key of `x`.
 
 Sorting union members and object properties makes `A | B` and `B | A` the same id, and makes the id independent of declaration order.
 
-In a key, a child key that is not a keyword kind or `^n` is written as `#` and the hex xxh3-128 of the child key. This keeps every key short, so a type that uses the same subtype in several places does not get a key that grows exponentially with depth. Object property names are JSON-quoted. A named type that is declared in a function body has `@` and the position of its declaration after its name in the key, so two local types with the same name in one file are different entities. `type_display` is truncated by the checker at about 2000 characters.
+In a key, a child key that is not a keyword kind or `^n` is written as `#` and the hex xxh3-128 of the child key. This keeps every key short, so a type that uses the same subtype in several places does not get a key that grows exponentially with depth. Object property names are JSON-quoted. The cycle check is done before the key cache is read, so a key does not depend on the order in which types are keyed. A named type that is declared in a function body has `@` and the position of its declaration after its name in the key, so two local types with the same name in one file are different entities. `type_display` is truncated by the checker at about 2000 characters.
 
 Cycles: keep a stack of types being keyed. When a type already on the stack recurs, emit `^n`, where `n` is the distance to it on the stack. Beyond a depth of 16, emit `trunc` and give that position kind `/other`. Named types stop most recursion on their own, because a named type's key uses its name and arguments, not its structure.
 
