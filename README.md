@@ -251,6 +251,12 @@ Important caveat:
 
 - example rules are intentionally narrow and deterministic; treat them as templates, not as a promise that LintAI already models every possible language feature
 
+## Grandfathering existing violations
+
+Run `lintai --suppress-all` to record known error violations in `lintai-suppressions.json`, or use repeatable `--suppress-rule <id>` flags. Commit the file. Subsequent runs suppress those findings while reporting new entities. After fixing findings, run `lintai --prune-suppressions`; stale entries otherwise fail with exit 2 when no violations remain.
+
+Use suppressions for known violations to fix later. Keep policy exception lists in rule configuration or a `.facts()` ratchet rule. Review suppression changes and regenerate the rules lock to cover approved allowances. See [bulk suppressions](specs/bulk-suppressions.md) for matching, scope and trust details.
+
 ## Repository layout and caveats
 
 - `cmd/lintai/` — Go CLI entry point

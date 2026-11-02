@@ -25,6 +25,12 @@ What the lock does not cover:
 
 With `--rules-lock`, `require()` in `setup()` loads only Node built-ins other than `module` and `vm`, and `import()` in `setup()` fails. This stops a rule that loads workspace code at run time by accident, for example with `require(path.join(root, name))`. It does not stop a rule author who wants to load code: `setup()` can read a file and evaluate it in other ways. The lock and the review of rule changes are the control for that case.
 
+## Suppressions
+
+Suppression allowances can weaken enforcement just as rule edits can. Version 2 locks written by lintai 0.6.3 record the current suppression entries. New entries, increased counts and weakened entity matching produce integrity errors with exit 3. Lower counts and removed entries are allowed without re-locking. Review newly recorded suppressions before running `lintai lock` again.
+
+Version 1 locks remain readable and allow no suppression entries because none were recorded. Regenerate them with 0.6.3 to approve suppression allowances. Put `lintai-suppressions.json` under CODEOWNERS and require owner review. Protect custom suppression locations in the same way. The ESLint and oxlint plugins also report overlapping `lintai/*` entries in their hosts' default suppression files; they only read those files.
+
 ## The lock must be outside the writable scope
 
 The lock helps only if the author that you do not trust cannot also change the lock or the CI command. Use your repository host for this:
