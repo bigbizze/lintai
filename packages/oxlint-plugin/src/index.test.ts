@@ -61,6 +61,24 @@ const loadErrorReport = { message: loadError, line: 1, column: 1 };
 
 const bridge = { binary: "/tmp/lintai", workspaceRoot: workspace, repoRoot: workspace };
 
+it("unused suppressions report through analysis rather than the generated rule", () => {
+	resetClientsForTest();
+	const options = { ...bridge, mode: "oneshot" as const };
+	const resolved = resolveBridgeOptions(options, process.cwd(), oxlintHostDefaults());
+	const unused = { ...violation, diagnostic_kind: "unused_suppression", message: "unused suppression" };
+	const dependencies = createTestDependencies({ spawnSync: (_binary, args) => ({ status: args[0] === "rules" ? 0 : 2, stderr: "", stdout: JSON.stringify(args[0] === "rules" ? { rules: [{ id: "arch.no-async", path: "rule.ts" }], errors: [] } : [unused]) }) });
+	loadRuleIds(resolved, dependencies);
+	getClient(resolved, dependencies);
+	const plugin = createLintaiPlugin(options);
+	const messages: string[] = [];
+	const context = { physicalFilename: path.join(workspace, "src/a.ts"), sourceCode: { text: savedText }, report: (report: { message: string }) => messages.push(report.message) };
+	plugin.rules["arch.no-async"]?.create(context).Program();
+	deepEqual(messages, []);
+	plugin.rules.analysis?.create(context).Program();
+	deepEqual(messages, ["[arch.no-async/violation] unused suppression"]);
+	resetClientsForTest();
+});
+
 // Each case sets process.argv to the observed oxlint CLI or language-server
 // argv, primes the rule list and the client cache with a stubbed lintai, and
 // creates the plugin, so that its rules get the client that they would

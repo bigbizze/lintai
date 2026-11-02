@@ -18,6 +18,7 @@ import (
 	"github.com/bigbizze/lintai/engine"
 	"github.com/bigbizze/lintai/facts"
 	"github.com/bigbizze/lintai/server"
+	"github.com/bigbizze/lintai/suppressions"
 )
 
 // Exit codes. CI can tell "the rules found violations" apart from "lintai
@@ -169,6 +170,12 @@ func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 	flags.Var(&severities, "severity", "rule severity as <rule-id>=error|warning|off (repeatable; default: error)")
 	rulesLock := flags.String("rules-lock", "", "rules lock file to enforce (see lintai lock); a changed, new or removed rule is a rule error with phase integrity")
 	setupSandbox := flags.String("setup-sandbox", string(bundle.SetupSandboxAuto), "run setup() under the Node permission model: auto, on or off")
+	suppressAll := flags.Bool("suppress-all", false, "record every error-severity violation in the suppressions file")
+	var suppressRules stringList
+	flags.Var(&suppressRules, "suppress-rule", "record the error-severity violations of this rule in the suppressions file (repeatable)")
+	pruneSuppressions := flags.Bool("prune-suppressions", false, "lower or remove the suppressions that allow more violations than the run found")
+	suppressionsLocation := flags.String("suppressions-location", "", "suppressions file, relative to --workspace-root (default "+suppressions.DefaultFile+")")
+	passOnUnpruned := flags.Bool("pass-on-unpruned-suppressions", false, "do not report unused suppressions and do not exit with code 2 for them")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -223,12 +230,21 @@ func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 		Explain:       *explain,
 		RulesLock:     *rulesLock,
 		SetupSandbox:  sandbox,
+
+		SuppressionsLocation:       *suppressionsLocation,
+		SuppressAll:                *suppressAll,
+		SuppressRules:              suppressRules,
+		PruneSuppressions:          *pruneSuppressions,
+		PassOnUnprunedSuppressions: *passOnUnpruned,
 	})
 	if err != nil {
 		return err
 	}
 	for _, warning := range result.Warnings {
 		fmt.Fprintln(os.Stderr, warning)
+	}
+	if result.SuppressionsWritten {
+		fmt.Fprintf(os.Stderr, "lintai: wrote %s\n", result.SuppressionsPath)
 	}
 	if *jsonOutput {
 		encoder := json.NewEncoder(stdout)
@@ -245,7 +261,10 @@ func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 			fmt.Fprintf(stdout, "%s%s [%s/%s] %s\n", location, item.Severity, item.RuleID, item.AssertionID, item.Message)
 		}
 	}
-	return diagnosticsOutcome(result.Diagnostics)
+	if err := diagnosticsOutcome(result.Diagnostics); err != nil {
+		return err
+	}
+	return suppressionsOutcome(result, *passOnUnpruned)
 }
 
 // diagnosticsOutcome returns a rule error when a rule could not run, and a
@@ -257,6 +276,7 @@ func diagnosticsOutcome(items []diagnostics.Diagnostic) error {
 		switch {
 		case item.DiagnosticKind == diagnostics.KindRuleExecutionError:
 			ruleErrors++
+		case item.DiagnosticKind == diagnostics.KindUnusedSuppression:
 		case item.Severity == diagnostics.SeverityError:
 			violations++
 		}
@@ -268,6 +288,28 @@ func diagnosticsOutcome(items []diagnostics.Diagnostic) error {
 		return &exitError{code: exitViolations, message: fmt.Sprintf("lintai: %d violations", violations)}
 	}
 	return nil
+}
+
+// suppressionsOutcome returns an error with exit code 2 when the
+// suppressions file allows more violations than the run found, as ESLint
+// does. diagnosticsOutcome runs first, so a rule error (3) or a violation
+// (1) takes priority. The message names the suppressions file, so it is not
+// mistaken for a usage error, which also exits with code 2.
+func suppressionsOutcome(result engine.Result, passOnUnpruned bool) error {
+	if passOnUnpruned || len(result.UnusedSuppressions) == 0 {
+		return nil
+	}
+	lines := make([]string, 0, len(result.UnusedSuppressions)+1)
+	lines = append(lines, fmt.Sprintf("lintai: %d unused suppressions in %s. The run found fewer violations than these entries allow:", len(result.UnusedSuppressions), result.SuppressionsPath))
+	for _, unused := range result.UnusedSuppressions {
+		entity := ""
+		if unused.Entity != "" {
+			entity = " entity " + unused.Entity
+		}
+		lines = append(lines, fmt.Sprintf("  %s %s%s: allows %d, found %d", unused.File, unused.RuleID, entity, unused.Allowed, unused.Found))
+	}
+	lines = append(lines, "Run lintai --prune-suppressions to remove them, or pass --pass-on-unpruned-suppressions to ignore them.")
+	return &exitError{code: exitUsage, message: strings.Join(lines, "\n")}
 }
 
 func resolveAssetRoot(explicit, repoRoot string) (string, error) {
@@ -312,6 +354,7 @@ func runLock(ctx context.Context, args []string, stdout io.Writer) error {
 	assetRoot := flags.String("asset-root", "", "asset root containing lintai helper scripts")
 	rules := flags.String("rules", "lintai-rules/**/*.ts", "comma-separated list of rule globs, relative to --workspace-root")
 	lockFile := flags.String("lock-file", engine.DefaultRulesLockFile, "rules lock file to write, relative to --workspace-root")
+	suppressionsLocation := flags.String("suppressions-location", "", "suppressions file to lock, relative to --workspace-root (default "+suppressions.DefaultFile+")")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -328,10 +371,11 @@ func runLock(ctx context.Context, args []string, stdout io.Writer) error {
 		return err
 	}
 	lock, locked, err := engine.BuildRulesLock(ctx, engine.Options{
-		RepoRoot:      absoluteRepo,
-		AssetRoot:     absoluteAssetRoot,
-		WorkspaceRoot: absoluteWorkspace,
-		RuleGlobs:     strings.Split(*rules, ","),
+		RepoRoot:             absoluteRepo,
+		AssetRoot:            absoluteAssetRoot,
+		WorkspaceRoot:        absoluteWorkspace,
+		RuleGlobs:            strings.Split(*rules, ","),
+		SuppressionsLocation: *suppressionsLocation,
 	})
 	if err != nil {
 		return err
@@ -342,6 +386,9 @@ func runLock(ctx context.Context, args []string, stdout io.Writer) error {
 	}
 	for _, item := range locked {
 		fmt.Fprintf(stdout, "%s %s\n", item.Hash, item.Path)
+	}
+	if entries := lock.Suppressions.Entries(); entries > 0 {
+		fmt.Fprintf(stdout, "%d suppressions entries\n", entries)
 	}
 	return nil
 }

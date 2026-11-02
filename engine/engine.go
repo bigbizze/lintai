@@ -14,6 +14,7 @@ import (
 	"github.com/bigbizze/lintai/facts"
 	"github.com/bigbizze/lintai/internal/canonical"
 	"github.com/bigbizze/lintai/runtime"
+	"github.com/bigbizze/lintai/suppressions"
 	"github.com/bmatcuk/doublestar/v4"
 )
 
@@ -43,6 +44,25 @@ type Options struct {
 	// SetupSandbox selects whether setup() runs under the Node permission
 	// model. The default is auto.
 	SetupSandbox bundle.SetupSandbox
+	// SuppressionsLocation is the path of the suppressions file, relative
+	// to the workspace root when it is not absolute. The default is
+	// lintai-suppressions.json at the workspace root. A missing file at
+	// the default location suppresses nothing. A missing file at a
+	// location that is set is an error, unless SuppressAll or
+	// SuppressRules is set.
+	SuppressionsLocation string
+	// SuppressAll records every error-severity violation of the run in
+	// the suppressions file before the suppressions are applied.
+	SuppressAll bool
+	// SuppressRules records the error-severity violations of these rules
+	// in the suppressions file before the suppressions are applied.
+	SuppressRules []string
+	// PruneSuppressions lowers or removes the entries of the suppressions
+	// file that allow more violations than the run found.
+	PruneSuppressions bool
+	// PassOnUnprunedSuppressions leaves out the unused_suppression
+	// diagnostics. Result.UnusedSuppressions still lists the entries.
+	PassOnUnprunedSuppressions bool
 }
 
 type Result struct {
@@ -52,6 +72,19 @@ type Result struct {
 	// Warnings are messages for the user that are not diagnostics, for
 	// example that setup() ran without a sandbox.
 	Warnings []string
+	// Suppressed are the violations that the suppressions file
+	// suppressed. They are not in Diagnostics.
+	Suppressed []diagnostics.Diagnostic
+	// UnusedSuppressions are the entries of the suppressions file that
+	// allow more violations than the run found. Unless
+	// PassOnUnprunedSuppressions is set, each one is also an
+	// unused_suppression diagnostic in Diagnostics.
+	UnusedSuppressions []suppressions.Unused
+	// SuppressionsPath is the absolute path of the suppressions file.
+	SuppressionsPath string
+	// SuppressionsWritten is true when the run wrote the suppressions
+	// file.
+	SuppressionsWritten bool
 }
 
 type Engine struct {
@@ -70,38 +103,64 @@ func (e *Engine) Run(ctx context.Context, options Options) ([]diagnostics.Diagno
 	return result.Diagnostics, nil
 }
 
+// Analyze evaluates the rules, then applies the suppressions file: it
+// records or prunes suppressions when options ask for it, and removes the
+// suppressed violations from the diagnostics.
 func (e *Engine) Analyze(ctx context.Context, options Options) (Result, error) {
-	sandbox, sandboxWarning, err := bundle.ResolveSetupSandbox(options.SetupSandbox)
+	state, err := loadSuppressions(options)
 	if err != nil {
 		return Result{}, err
+	}
+	result, run, err := e.analyze(ctx, options)
+	if err != nil {
+		return Result{}, err
+	}
+	if err := applySuppressions(options, state, run, &result); err != nil {
+		return Result{}, err
+	}
+	return result, nil
+}
+
+func (e *Engine) analyze(ctx context.Context, options Options) (Result, runInfo, error) {
+	run := runInfo{
+		evaluated: make(map[string]struct{}),
+		known:     make(map[string]struct{}),
+		backendID: e.backend.ID(),
+	}
+	sandbox, sandboxWarning, err := bundle.ResolveSetupSandbox(options.SetupSandbox)
+	if err != nil {
+		return Result{}, run, err
 	}
 	var lock *RulesLock
 	if options.RulesLock != "" {
 		loaded, err := ReadRulesLock(ResolveRulesLockPath(options.WorkspaceRoot, options.RulesLock))
 		if err != nil {
-			return Result{}, err
+			return Result{}, run, err
 		}
 		lock = &loaded
+		run.lock = lock
 	}
 	snapshot, err := e.backend.BuildSnapshot(ctx, options.RepoRoot, options.WorkspaceRoot, backend.SnapshotOptions{Excludes: options.Excludes, Files: options.Files})
 	if err != nil {
-		return Result{}, err
+		return Result{}, run, err
 	}
 	if err := facts.Validate(snapshot); err != nil {
-		return Result{}, fmt.Errorf("backend %q returned an invalid snapshot: %w", e.backend.ID(), err)
+		return Result{}, run, fmt.Errorf("backend %q returned an invalid snapshot: %w", e.backend.ID(), err)
 	}
 	schemaDecls, prelude, err := facts.ParseSchema(snapshot.Schema)
 	if err != nil {
-		return Result{}, fmt.Errorf("backend %q schema: %w", e.backend.ID(), err)
+		return Result{}, run, fmt.Errorf("backend %q schema: %w", e.backend.ID(), err)
 	}
 	base, err := facts.Store(snapshot.Facts)
 	if err != nil {
-		return Result{}, fmt.Errorf("backend %q facts: %w", e.backend.ID(), err)
+		return Result{}, run, fmt.Errorf("backend %q facts: %w", e.backend.ID(), err)
 	}
 	rulePaths, err := discoverRulePaths(options.WorkspaceRoot, options.RuleGlobs)
 	if err != nil {
-		return Result{}, err
+		return Result{}, run, err
 	}
+	run.files = snapshotFiles(snapshot)
+	run.snapshotVersion = snapshot.Version
 	allDiagnostics := make([]diagnostics.Diagnostic, 0)
 	result := Result{
 		Diagnostics:     allDiagnostics,
@@ -112,12 +171,13 @@ func (e *Engine) Analyze(ctx context.Context, options Options) (Result, error) {
 		result.Warnings = append(result.Warnings, sandboxWarning)
 	}
 	if len(rulePaths) == 0 {
-		return result, nil
+		run.complete = true
+		return result, run, nil
 	}
 
 	bundleDir, err := os.MkdirTemp("", "lintai-bundle-*")
 	if err != nil {
-		return Result{}, err
+		return Result{}, run, err
 	}
 	defer os.RemoveAll(bundleDir)
 
@@ -136,7 +196,7 @@ func (e *Engine) Analyze(ctx context.Context, options Options) (Result, error) {
 		}
 		sortDiagnostics(allDiagnostics)
 		result.Diagnostics = allDiagnostics
-		return result, nil
+		return result, run, nil
 	}
 
 	for rulePath, itemErr := range buildFailures {
@@ -169,7 +229,7 @@ func (e *Engine) Analyze(ctx context.Context, options Options) (Result, error) {
 		}
 		sortDiagnostics(allDiagnostics)
 		result.Diagnostics = allDiagnostics
-		return result, nil
+		return result, run, nil
 	}
 
 	for rulePath, prepareErr := range prepareFailures {
@@ -268,14 +328,19 @@ func (e *Engine) Analyze(ctx context.Context, options Options) (Result, error) {
 		if ruleFailed {
 			continue
 		}
+		if severity == diagnostics.SeverityError {
+			run.evaluated[ruleID] = struct{}{}
+		}
 		allDiagnostics = append(allDiagnostics, provisional...)
 	}
-	if len(buildFailures) == 0 && integrityFailures == 0 {
+	run.known = knownRules
+	run.complete = len(buildFailures) == 0 && integrityFailures == 0
+	if run.complete {
 		allDiagnostics = append(allDiagnostics, unknownSeverityRules(options, knownRules, snapshot.Version, e.backend.ID())...)
 	}
 	sortDiagnostics(allDiagnostics)
 	result.Diagnostics = allDiagnostics
-	return result, nil
+	return result, run, nil
 }
 
 // severityOf returns the configured severity of a rule: its RuleSeverity

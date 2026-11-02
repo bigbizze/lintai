@@ -34,6 +34,8 @@ export type LintaiOptions = {
 	env?: Record<string, unknown>;
 	factLimit?: number;
 	rulesLock?: string;
+	suppressionsLocation?: string;
+	passOnUnprunedSuppressions?: boolean;
 	setupSandbox?: SetupSandbox;
 };
 
@@ -52,6 +54,8 @@ export type ResolvedBridgeOptions = {
 	env: Record<string, unknown>;
 	factLimit?: number;
 	rulesLock?: string;
+	suppressionsLocation?: string;
+	passOnUnprunedSuppressions?: boolean;
 	setupSandbox?: SetupSandbox;
 };
 
@@ -417,6 +421,12 @@ export class LintAIClient {
 				env: this.options.env,
 				...(this.options.factLimit === undefined ? {} : { factLimit: this.options.factLimit }),
 				...(this.options.rulesLock === undefined ? {} : { rulesLock: this.options.rulesLock }),
+				...(this.options.suppressionsLocation === undefined
+					? {}
+					: { suppressionsLocation: this.options.suppressionsLocation }),
+				...(this.options.passOnUnprunedSuppressions === undefined
+					? {}
+					: { passOnUnprunedSuppressions: this.options.passOnUnprunedSuppressions }),
 				...(this.options.setupSandbox === undefined ? {} : { setupSandbox: this.options.setupSandbox }),
 			});
 			this.attachStdoutListener();
@@ -459,6 +469,10 @@ export class LintAIClient {
 				JSON.stringify(this.options.env),
 				...(this.options.factLimit === undefined ? [] : ["--fact-limit", String(this.options.factLimit)]),
 				...(this.options.rulesLock === undefined ? [] : ["--rules-lock", this.options.rulesLock]),
+				...(this.options.suppressionsLocation === undefined
+					? []
+					: ["--suppressions-location", this.options.suppressionsLocation]),
+				...(this.options.passOnUnprunedSuppressions ? ["--pass-on-unpruned-suppressions"] : []),
 				...(this.options.setupSandbox === undefined ? [] : ["--setup-sandbox", this.options.setupSandbox]),
 			],
 			{
@@ -851,6 +865,12 @@ export function resolveBridgeOptions(options: LintaiOptions, cwd: string, host: 
 		env: options.env ?? {},
 		...(options.factLimit === undefined ? {} : { factLimit: options.factLimit }),
 		...(options.rulesLock === undefined ? {} : { rulesLock: path.resolve(workspaceRoot, options.rulesLock) }),
+		...(options.suppressionsLocation === undefined
+			? {}
+			: { suppressionsLocation: path.resolve(workspaceRoot, options.suppressionsLocation) }),
+		...(options.passOnUnprunedSuppressions === undefined
+			? {}
+			: { passOnUnprunedSuppressions: options.passOnUnprunedSuppressions }),
 		...(options.setupSandbox === undefined ? {} : { setupSandbox: options.setupSandbox }),
 	};
 }

@@ -7,6 +7,10 @@ type Kind string
 const (
 	KindArchitectureViolation Kind = "architecture_violation"
 	KindRuleExecutionError    Kind = "rule_execution_error"
+	// KindUnusedSuppression is an entry of the suppressions file that
+	// allows more violations than the run found. Its rule id is the rule
+	// of the entry, and its location is line 1 of the file of the entry.
+	KindUnusedSuppression Kind = "unused_suppression"
 )
 
 type Severity string

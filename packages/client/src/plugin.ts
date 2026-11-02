@@ -1,6 +1,8 @@
 import { realpathSync } from "node:fs";
 import path from "node:path";
 
+import { suppressionOverlaps } from "./suppressions.js";
+
 import {
 	type Diagnostic,
 	type HostDefaults,
@@ -96,6 +98,7 @@ export function createLintaiRules(
 	// An error with an id (a duplicate id) is also a rule error of the
 	// analysis, so lintai/analysis reports it only once, as a rule error.
 	const loadErrors = loadErrorMessages.filter((_, index) => !list.errors[index]?.id);
+	loadErrors.push(...suppressionOverlaps(resolved.workspaceRoot));
 	let loadErrorsReported = false;
 
 	// The linter calls every lintai rule for a file in one synchronous pass,
@@ -137,7 +140,9 @@ export function createLintaiRules(
 			}
 			const own = diagnostics.filter(
 				(diagnostic) =>
-					diagnostic.rule_id === id && diagnostic.diagnostic_kind !== "rule_execution_error",
+					diagnostic.rule_id === id &&
+					diagnostic.diagnostic_kind !== "rule_execution_error" &&
+					diagnostic.diagnostic_kind !== "unused_suppression",
 			);
 			for (const report of toReports(own)) {
 				file.report(report);
@@ -158,14 +163,18 @@ export function createLintaiRules(
 				file.report({ loc: programLocation, message });
 			}
 			const ruleErrors = diagnostics.filter(
-				(diagnostic) => diagnostic.diagnostic_kind === "rule_execution_error",
+				(diagnostic) =>
+					diagnostic.diagnostic_kind === "rule_execution_error" ||
+					diagnostic.diagnostic_kind === "unused_suppression",
 			);
 			for (const report of toReports(ruleErrors)) {
 				file.report(report);
 			}
 			const orphans = diagnostics.filter(
 				(diagnostic) =>
-					diagnostic.diagnostic_kind !== "rule_execution_error" && !ids.has(diagnostic.rule_id),
+					diagnostic.diagnostic_kind !== "rule_execution_error" &&
+					diagnostic.diagnostic_kind !== "unused_suppression" &&
+					!ids.has(diagnostic.rule_id),
 			);
 			for (const diagnostic of orphans) {
 				for (const report of toReports(

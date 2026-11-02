@@ -1,5 +1,13 @@
 # Go API
 
+## Bulk suppressions
+
+`Engine.Analyze` automatically applies workspace-root `lintai-suppressions.json`. Set `Options.SuppressionsLocation` to override it, `SuppressAll` or `SuppressRules []string` to record violations, `PruneSuppressions` to lower stale counts, and `PassOnUnprunedSuppressions` to omit unused-entry diagnostics. Missing explicit locations fail except when recording. Writing modes are mutually exclusive.
+
+`Result.Diagnostics` contains reported findings; `Suppressed` contains suppressed findings. `UnusedSuppressions` lists stale allowances even when their diagnostics are omitted. `SuppressionsPath` and `SuppressionsWritten` describe the file operation. Only error-severity architecture violations with locations can be suppressed. Provide `location` facts for each analyzed file so unused-entry scope is accurate, including files with no violations.
+
+The public `suppressions` package exposes `Load`, `Parse`, `Write`, `Apply`, `Record`, `Prune`, and `Limit`. `Apply(File, []diagnostics.Diagnostic, Scope)` returns reported/suppressed diagnostics, unused entries and exceeded allowances. `Record` takes a rule list (nil means all). `Prune` additionally accepts an optional file-existence callback; nil preserves unanalyzed files. `Scope` identifies analyzed files, error-severity rules that completed, known rule IDs and whether unknown rules can be classified as unused. See [the specification](../specs/bulk-suppressions.md).
+
 The reusable engine is exported from the `github.com/bigbizze/lintai` module.
 Backends implement `backend.Backend` and return `facts.Snapshot`, which carries
 a snapshot version, relation declarations, prelude, and typed base facts.

@@ -1,5 +1,13 @@
 # API and Caveats
 
+## Bulk suppressions (0.6.3)
+
+The CLI automatically reads workspace-root `lintai-suppressions.json`. Use `--suppress-all` or repeatable `--suppress-rule <id>` to record current errors, `--prune-suppressions` to lower stale counts, `--suppressions-location <path>` to override the file, and `--pass-on-unpruned-suppressions` to ignore unused entries. Recording and pruning flags are mutually exclusive. Relative locations resolve from the workspace root. `lintai lock --suppressions-location <path>` includes that file in a version 2 rules lock.
+
+Both plugin factories and `@lintai/client` accept `suppressionsLocation?: string` and `passOnUnprunedSuppressions?: boolean`. Serve initialization uses the same parameter names. Unused entries appear under `lintai/analysis`; JSON stdout remains a diagnostic array with kind `unused_suppression` for stale entries. Rule errors take exit priority (3), then violations (1), then unused suppressions (2).
+
+Go `engine.Options` adds `SuppressionsLocation`, `SuppressAll`, `SuppressRules`, `PruneSuppressions`, and `PassOnUnprunedSuppressions`. `engine.Result` exposes `Suppressed`, `UnusedSuppressions`, `SuppressionsPath`, and `SuppressionsWritten`. See the [complete specification](../specs/bulk-suppressions.md) for scope, entity keys, overlap checking and lock compatibility.
+
 This page documents the rule-authoring and integration surface of LintAI 0.2.
 
 ## Rule module shape and caveats
