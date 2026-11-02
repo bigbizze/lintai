@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"path/filepath"
 	"strings"
 	"sync"
 
@@ -15,6 +14,7 @@ import (
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/engine"
 	"github.com/bigbizze/lintai/jsonrpc"
+	"github.com/bigbizze/lintai/suppressions"
 )
 
 const (
@@ -60,6 +60,12 @@ type InitializeParams struct {
 	RulesLock string `json:"rulesLock,omitempty"`
 	// SetupSandbox is "auto", "on" or "off". The default is auto.
 	SetupSandbox string `json:"setupSandbox,omitempty"`
+	// SuppressionsLocation is the path of the suppressions file. The
+	// default is lintai-suppressions.json at the workspace root.
+	SuppressionsLocation string `json:"suppressionsLocation,omitempty"`
+	// PassOnUnprunedSuppressions leaves out the unused_suppression
+	// diagnostics.
+	PassOnUnprunedSuppressions bool `json:"passOnUnprunedSuppressions,omitempty"`
 }
 
 type FileDiagnosticsParams struct {
@@ -197,6 +203,9 @@ func (s *Server) handleInitialize(ctx context.Context, rawParams json.RawMessage
 		FactLimit:     params.FactLimit,
 		RulesLock:     params.RulesLock,
 		SetupSandbox:  sandbox,
+
+		SuppressionsLocation:       params.SuppressionsLocation,
+		PassOnUnprunedSuppressions: params.PassOnUnprunedSuppressions,
 	}
 	s.mu.Lock()
 	s.options = options
@@ -335,7 +344,8 @@ func classifyError(err error) *jsonrpc.ResponseError {
 	}
 }
 
+// normalizeWorkspacePath is the key of a file: forward slashes and no
+// leading slash. The suppressions file uses the same key.
 func normalizeWorkspacePath(path string) string {
-	normalized := filepath.ToSlash(path)
-	return strings.TrimPrefix(normalized, "/")
+	return suppressions.NormalizePath(path)
 }

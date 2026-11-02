@@ -11,17 +11,27 @@ import (
 	"strings"
 
 	"github.com/bigbizze/lintai/bundle"
+	"github.com/bigbizze/lintai/suppressions"
 )
 
 // DefaultRulesLockFile is the name of the rules lock at the workspace root.
 const DefaultRulesLockFile = "lintai-rules.lock.json"
 
+// RulesLockVersion is the version of the rules lock that lintai lock
+// writes. lintai reads versions 1 and 2. Version 1 has no suppressions.
+const RulesLockVersion = 2
+
 // RulesLock is the content of a rules lock file. Rules maps the path of
 // each rule file, relative to the workspace root, to the hash of every
-// source file that the bundler read for the rule.
+// source file that the bundler read for the rule. Suppressions are the
+// entries of the suppressions file when the lock was written. A run with
+// the lock fails for an entry of the suppressions file that allows more
+// violations than the locked entry. Version 1 locks have no suppressions
+// and allow no suppression entries until the lock is regenerated.
 type RulesLock struct {
-	Version int                      `json:"version"`
-	Rules   map[string]RulesLockRule `json:"rules"`
+	Version      int                      `json:"version"`
+	Rules        map[string]RulesLockRule `json:"rules"`
+	Suppressions suppressions.File        `json:"suppressions,omitempty"`
 }
 
 // RulesLockRule is the locked hash of one rule.
@@ -36,8 +46,14 @@ type LockedRule struct {
 }
 
 // BuildRulesLock bundles the rules that options select and returns the
-// rules lock for them. A rule that does not bundle is an error.
+// rules lock for them and for the suppressions file at
+// options.SuppressionsLocation. A rule that does not bundle is an error. A
+// missing suppressions file locks no suppressions.
 func BuildRulesLock(ctx context.Context, options Options) (RulesLock, []LockedRule, error) {
+	suppressionsFile, err := suppressions.Load(suppressions.ResolvePath(options.WorkspaceRoot, options.SuppressionsLocation))
+	if err != nil && !errors.Is(err, suppressions.ErrNotExist) {
+		return RulesLock{}, nil, err
+	}
 	rulePaths, err := discoverRulePaths(options.WorkspaceRoot, options.RuleGlobs)
 	if err != nil {
 		return RulesLock{}, nil, err
@@ -59,7 +75,10 @@ func BuildRulesLock(ctx context.Context, options Options) (RulesLock, []LockedRu
 		sort.Strings(messages)
 		return RulesLock{}, nil, fmt.Errorf("could not bundle rules:\n%s", strings.Join(messages, "\n"))
 	}
-	lock := RulesLock{Version: 1, Rules: make(map[string]RulesLockRule, len(rulePaths))}
+	lock := RulesLock{Version: RulesLockVersion, Rules: make(map[string]RulesLockRule, len(rulePaths))}
+	if len(suppressionsFile) > 0 {
+		lock.Suppressions = suppressionsFile
+	}
 	locked := make([]LockedRule, 0, len(rulePaths))
 	for _, rulePath := range rulePaths {
 		key := lockKey(options.WorkspaceRoot, rulePath)
@@ -88,12 +107,30 @@ func ReadRulesLock(path string) (RulesLock, error) {
 		}
 		return RulesLock{}, err
 	}
-	var lock RulesLock
-	if err := json.Unmarshal(data, &lock); err != nil {
+	var raw struct {
+		Version      int                      `json:"version"`
+		Rules        map[string]RulesLockRule `json:"rules"`
+		Suppressions json.RawMessage          `json:"suppressions"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
 		return RulesLock{}, fmt.Errorf("rules lock %s is not valid JSON: %w", path, err)
 	}
-	if lock.Version != 1 {
-		return RulesLock{}, fmt.Errorf("rules lock %s has version %d; this lintai reads version 1", path, lock.Version)
+	lock := RulesLock{Version: raw.Version, Rules: raw.Rules}
+	switch lock.Version {
+	case 1:
+		if raw.Suppressions != nil {
+			return RulesLock{}, fmt.Errorf("rules lock %s has version 1, which has no suppressions; run lintai lock to write it again", path)
+		}
+	case 2:
+		if raw.Suppressions != nil {
+			locked, err := suppressions.Parse(path, raw.Suppressions)
+			if err != nil {
+				return RulesLock{}, fmt.Errorf("rules lock %s has invalid suppressions: %w", path, err)
+			}
+			lock.Suppressions = locked
+		}
+	default:
+		return RulesLock{}, fmt.Errorf("rules lock %s has version %d; this lintai reads versions 1 and 2", path, lock.Version)
 	}
 	return lock, nil
 }

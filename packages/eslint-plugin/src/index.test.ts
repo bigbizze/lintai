@@ -40,6 +40,21 @@ const options: LintaiOptions = {
 	workspaceRoot: "/workspace",
 };
 
+test("unused suppressions report only through lintai/analysis", () => {
+	const unused = located("arch.example", "unused suppression", 1);
+	unused.diagnostic_kind = "unused_suppression";
+	stubLintai(["arch.example"], [unused], {}, []);
+	const plugin = createLintaiPlugin(options);
+	const messages = new Linter({ configType: "flat", cwd: "/workspace" }).verify(
+		"export const a = 1;\n",
+		[{ files: ["**/*.ts"], ...plugin.configs.all }],
+		"/workspace/src/a.ts",
+	);
+	assert.equal(messages.length, 1);
+	assert.equal(messages[0]?.ruleId, "lintai/analysis");
+	assert.match(messages[0]?.message ?? "", /unused suppression/);
+});
+
 function located(ruleID: string, message: string, line: number): Diagnostic {
 	return {
 		rule_id: ruleID,
