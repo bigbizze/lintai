@@ -48,9 +48,14 @@ type LockedRule struct {
 // BuildRulesLock bundles the rules that options select and returns the
 // rules lock for them and for the suppressions file at
 // options.SuppressionsLocation. A rule that does not bundle is an error. A
-// missing suppressions file locks no suppressions.
+// missing suppressions file at the default location locks no suppressions.
+// A missing file at a location that is set is an error.
 func BuildRulesLock(ctx context.Context, options Options) (RulesLock, []LockedRule, error) {
-	suppressionsFile, err := suppressions.Load(suppressions.ResolvePath(options.WorkspaceRoot, options.SuppressionsLocation))
+	suppressionsPath := suppressions.ResolvePath(options.WorkspaceRoot, options.SuppressionsLocation)
+	suppressionsFile, err := suppressions.Load(suppressionsPath)
+	if errors.Is(err, suppressions.ErrNotExist) && options.SuppressionsLocation != "" {
+		return RulesLock{}, nil, fmt.Errorf("the suppressions file %s does not exist", suppressionsPath)
+	}
 	if err != nil && !errors.Is(err, suppressions.ErrNotExist) {
 		return RulesLock{}, nil, err
 	}

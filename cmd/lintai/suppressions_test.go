@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -247,5 +248,39 @@ func TestSuppressionUsageErrors(t *testing.T) {
 		if code != exitUsage {
 			t.Fatalf("%v: %d %+v", flags, code, items)
 		}
+	}
+	if code, _ := runCode(t, []string{"lock", "--repo-root", repoRoot, "--workspace-root", workspace, "--suppressions-location", "missing.json"}); code != exitUsage {
+		t.Fatalf("lock with missing suppressions file: %d", code)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, engine.DefaultRulesLockFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("lock written for missing suppressions file: %v", err)
+	}
+}
+
+func TestUnknownSuppressRuleWritesNothing(t *testing.T) {
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	writeFiles(t, workspace, map[string]string{
+		"src/a.ts":                 "export async function first() { return 1; }\n",
+		"lintai-rules/no-async.ts": "import { dl, rule } from '@lintai/sdk';\nexport default rule('no-async').version(1).program(dl`Decl v(Fn). v(Fn) :- fn_async(Fn).`).report('v').message(() => 'no async');\n",
+	})
+	code, items := runCode(t, []string{"--json", "--workspace-root", workspace, "--repo-root", repoRoot, "--suppress-rule", "no-async", "--suppress-rule", "no-asnyc"})
+	if code != exitRuleError {
+		t.Fatalf("exit %d %+v", code, items)
+	}
+	found := false
+	for _, item := range items {
+		if item.RuleID == "no-asnyc" && item.Phase == "config" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("unknown rule not reported: %+v", items)
+	}
+	if _, err := os.Stat(filepath.Join(workspace, suppressions.DefaultFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("suppressions written with an unknown rule: %v", err)
 	}
 }

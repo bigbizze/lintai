@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/facts"
@@ -90,8 +91,9 @@ func snapshotFiles(snapshot facts.Snapshot) map[string]struct{} {
 // suppressed violations from result.Diagnostics.
 func applySuppressions(options Options, state suppressionsState, run runInfo, result *Result) error {
 	result.SuppressionsPath = state.path
+	var unknownRules []diagnostics.Diagnostic
 	if len(options.SuppressRules) > 0 && run.complete {
-		result.Diagnostics = append(result.Diagnostics, unknownSuppressRules(options, run)...)
+		unknownRules = unknownSuppressRules(options, run)
 	}
 	allRulesLoaded := len(options.RuleGlobs) == 1 &&
 		filepath.Clean(options.RuleGlobs[0]) == filepath.Clean("lintai-rules/**/*.ts")
@@ -113,7 +115,13 @@ func applySuppressions(options Options, state suppressionsState, run runInfo, re
 	}
 	file := state.file
 	if options.SuppressAll || len(options.SuppressRules) > 0 || options.PruneSuppressions {
-		if blocked := blockingRuleErrors(options, result.Diagnostics, run.known); blocked > 0 {
+		if len(unknownRules) > 0 {
+			ids := make([]string, 0, len(unknownRules))
+			for _, item := range unknownRules {
+				ids = append(ids, item.RuleID)
+			}
+			result.Warnings = append(result.Warnings, fmt.Sprintf("lintai did not update the suppressions file %s, because --suppress-rule names rules that are not loaded: %s", state.path, strings.Join(ids, ", ")))
+		} else if blocked := blockingRuleErrors(options, result.Diagnostics, run.known); blocked > 0 {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("lintai did not update the suppressions file %s, because %d rules could not run; fix the rule errors and run the command again", state.path, blocked))
 		} else {
 			var updated suppressions.File
@@ -137,6 +145,7 @@ func applySuppressions(options Options, state suppressionsState, run runInfo, re
 			file = updated
 		}
 	}
+	result.Diagnostics = append(result.Diagnostics, unknownRules...)
 	if run.lock != nil {
 		limited, failures := suppressions.Limit(file, run.lock.Suppressions)
 		for _, failure := range failures {

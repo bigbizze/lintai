@@ -227,9 +227,11 @@ type Scope struct {
 	// KnownRules are the ids of every loaded rule, including rules that
 	// failed or that a severity setting turned off or down.
 	KnownRules map[string]struct{}
-	// AllRulesLoaded is true when the run had no rule execution error.
-	// An entry for a rule id that is not in KnownRules is then unused,
-	// because the rule was renamed or deleted.
+	// AllRulesLoaded is true when the run loaded every rule of the
+	// workspace (the default rule glob), with the default error severity,
+	// and had no rule execution error. An entry for a rule id that is not
+	// in KnownRules is then unused, because the rule was renamed or
+	// deleted.
 	AllRulesLoaded bool
 }
 

@@ -27,7 +27,7 @@ With `--rules-lock`, `require()` in `setup()` loads only Node built-ins other th
 
 ## Suppressions
 
-Suppression allowances can weaken enforcement just as rule edits can. Version 2 locks written by lintai 0.6.3 record the current suppression entries. New entries, increased counts and weakened entity matching produce integrity errors with exit 3. Lower counts and removed entries are allowed without re-locking. Review newly recorded suppressions before running `lintai lock` again.
+Suppression allowances can weaken enforcement just as rule edits can. Version 2 locks written by lintai 0.6.3 record the current suppression entries. New entries, increased counts and weakened entity matching produce integrity errors with exit 3. Lower counts and removed entries are allowed without re-locking. The lock keeps the earlier allowance until `lintai lock` runs again, so a violation that was fixed and pruned can be recorded again without an integrity error. Run `lintai lock` after pruning to remove the allowance. Review newly recorded suppressions before running `lintai lock` again.
 
 Version 1 locks remain readable and allow no suppression entries because none were recorded. Regenerate them with 0.6.3 to approve suppression allowances. Put `lintai-suppressions.json` under CODEOWNERS and require owner review. Protect custom suppression locations in the same way. The ESLint and oxlint plugins also report overlapping `lintai/*` entries in their hosts' default suppression files; they only read those files.
 
