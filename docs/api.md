@@ -1,5 +1,9 @@
 # API and Caveats
 
+## Linear reachability predicates (0.6.4)
+
+`fn_reaches_ambient`, `fn_reaches_ambient_strict`, `fn_reaches_unresolved`, `module_reaches_ambient` and `type_reaches_incomplete` now propagate backward from their targets one edge at a time. They no longer build `calls_reach`, `calls_or_refs_reach`, `imports_reach` or `type_contains`, so their cost grows with nodes × targets instead of nodes². Their results are unchanged. The closure predicates remain for rules that need both ends of a pair. See example 16 in [examples.md](examples.md) for the same pattern with your own target relation.
+
 ## Bulk suppressions (0.6.3)
 
 The CLI automatically reads workspace-root `lintai-suppressions.json`. Use `--suppress-all` or repeatable `--suppress-rule <id>` to record current errors, `--prune-suppressions` to lower stale counts, `--suppressions-location <path>` to override the file, and `--pass-on-unpruned-suppressions` to ignore unused entries. Recording and pruning flags are mutually exclusive. Relative locations resolve from the workspace root. `lintai lock --suppressions-location <path>` includes that file in a version 2 rules lock.
@@ -32,10 +36,14 @@ export const config = z.object({ pureDir: z.string().default("src/pure") });
 export default rule("arch.pure-no-effects")
 	.version(1)
 	.program(({ env }) => dl`
+		Decl reaches_await(Fn).
+		reaches_await(Fn) :- fn_awaits(Fn).
+		reaches_await(Fn) :- call_edge(_, Fn, Callee), reaches_await(Callee).
+
 		Decl violation(Fn, Name).
 		violation(Fn, Name) :-
 			fn(Fn, File, Name), glob(File, ${`${env.pureDir}/**`}),
-			calls_reach(Fn, Callee), fn_awaits(Callee).
+			call_edge(_, Fn, Callee), reaches_await(Callee).
 	`)
 	.report("violation")
 	.message((row) => `Pure function ${row.Name} transitively calls effectful code`);
@@ -224,21 +232,21 @@ The prelude is loaded before every rule program. A rule cannot redefine a prelud
 | `import_has_symbols(Imp)` | The import introduces at least one binding. |
 | `import_runtime(Imp)` | The import loads its target at runtime: it is not type-only, and it is a side-effect import, has a value binding, or has `import_retained`. |
 | `module_imports(From, To)` | `From` has a runtime import of `To`. |
-| `imports_reach(From, To)` | Transitive closure of `module_imports`. |
-| `calls_reach(Caller, Callee)` | Transitive closure of `call_edge`. |
+| `imports_reach(From, To)` | Transitive closure of `module_imports`. It stores every connected pair, O(nodes²) rows on a large graph. To check only whether a file reaches a target, use `module_reaches_ambient` or propagate backward from the target (example 16 in [examples.md](examples.md)). |
+| `calls_reach(Caller, Callee)` | Transitive closure of `call_edge`. It stores every connected pair, O(nodes²) rows on a large graph. To check only whether a function reaches a target, use `fn_reaches_ambient` or propagate backward from the target. |
 | `fn_uses_ambient(Fn, Source)` | `Fn` contains a use of `Source`. |
 | `fn_reaches_ambient(Fn, Source)` | `Fn` uses `Source` directly or through a call chain. |
 | `module_uses_ambient(File, Source)` | `File` contains a use of `Source` at any scope. |
 | `module_reaches_ambient(File, Source)` | `File` uses `Source` directly or through runtime imports. |
-| `calls_or_refs_reach(From, To)` | Transitive closure over `call_edge` and `fn_ref` together. A function that refers to another function as a value is treated as if it called it. This is more than the code can reach, never less, for the calls that lintai sees. |
+| `calls_or_refs_reach(From, To)` | Transitive closure over `call_edge` and `fn_ref` together. A function that refers to another function as a value is treated as if it called it. This is more than the code can reach, never less, for the calls that lintai sees. It stores every connected pair, O(nodes²) rows on a large graph. To check only whether a function reaches a target, use `fn_reaches_ambient_strict` or `fn_reaches_unresolved`, or propagate backward from the target. |
 | `fn_has_unresolved_call(Fn)` | `Fn` directly contains a `call_unresolved` site. |
 | `module_has_unresolved_call(File)` | `File` contains a `call_unresolved` site at any scope. |
-| `fn_reaches_unresolved(Fn)` | `Fn` contains an unresolved call, directly or through `calls_or_refs_reach`. A strict rule treats this as leaving the analyzed code. |
-| `fn_reaches_ambient_strict(Fn, Source)` | Like `fn_reaches_ambient`, but over `calls_or_refs_reach`. |
+| `fn_reaches_unresolved(Fn)` | `Fn` contains an unresolved call, directly or through `call_edge` and `fn_ref` steps. A strict rule treats this as leaving the analyzed code. |
+| `fn_reaches_ambient_strict(Fn, Source)` | Like `fn_reaches_ambient`, but also follows `fn_ref` steps. |
 | `fn_calls_package(Fn, Pkg)` | `Fn` directly calls into the package `Pkg` (`external_call` with a module that is not `"lib"`). |
 | `module_calls_package(File, Pkg)` | `File` directly calls into the package `Pkg`, at any scope. |
 | `type_child(Type, Child)` | `Child` appears directly in `Type`: a type argument, tuple element, union or intersection member, property type, signature parameter or signature return. |
-| `type_contains(Type, Inner)` | Transitive closure of `type_child`. It does not look inside classes, interfaces or enums, whose members are not emitted, into the call, construct or index signatures of an `/object`, into type parameter constraints, or into `/other`, truncated and conflicting types. Use `type_reaches_incomplete` to fail closed. |
+| `type_contains(Type, Inner)` | Transitive closure of `type_child`. It does not look inside classes, interfaces or enums, whose members are not emitted, into the call, construct or index signatures of an `/object`, into type parameter constraints, or into `/other`, truncated and conflicting types. Use `type_reaches_incomplete` to fail closed. It stores every connected pair, O(nodes²) rows on a large graph. To check only whether a type contains a target, propagate backward from the target over `type_child`. |
 | `type_reaches_incomplete(Type)` | `Type`, or a type that it contains, has a `type_incomplete` row. A rule that must see every type in a signature reports such a type. Classes, interfaces and enums have no `type_incomplete` row for their members, so a type inside a member is not found. |
 | `type_is_promise(Type)` | `Type` is the lib `Promise` (`type_origin_kind` `/lib`), with any type argument. A `Promise` declared in a `declare module "lib"` block is not. |
 | `fn_returns_awaited(Fn, Type)` | The return type of `Fn` with exactly one level of the lib `Promise` removed: the type argument of a returned `Promise`, otherwise the return type itself. This is not TypeScript's `Awaited`: it does not unwrap `PromiseLike`, a `Promise` inside a `Promise`, or a union that contains a `Promise`, so `Promise<A> \| undefined` is returned unchanged. |
@@ -248,7 +256,7 @@ Caveats:
 - `glob` is an external predicate. Both arguments of `glob` and `!glob` must be bound by earlier premises in the same clause.
 - a clause can end with a name constant, as in `L != /composition.` lintai separates the final `.` from the constant when whitespace, a comment or the end of the program follows it. A name constant cannot itself end with `.`.
 - Mangle requires every variable in a negated atom to be bound. `_` in a negated atom is an error with phase `program_analysis`. Move the negated pattern into a helper predicate without the unused argument, and negate the helper.
-- `calls_reach(Caller, Callee)` also has rows where `Caller` is a module path, from calls at module scope.
+- `calls_reach(Caller, Callee)` and `fn_reaches_ambient(Fn, Source)` also have rows where the first argument is a module path, from calls at module scope. The strict predicates do the same for `fn_ref` rows at module scope.
 - LintAI evaluates only the prelude clauses that a rule uses.
 
 ## Ambient sources and caveats
