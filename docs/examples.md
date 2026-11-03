@@ -15,14 +15,20 @@ export const config = z.object({ pureDir: z.string().default("src/pure") });
 export default rule("arch.pure-no-effects")
 	.version(1)
 	.program(({ env }) => dl`
+		Decl reaches_await(Fn).
+		reaches_await(Fn) :- fn_awaits(Fn).
+		reaches_await(Fn) :- call_edge(_, Fn, Callee), reaches_await(Callee).
+
 		Decl violation(Fn, Name).
 		violation(Fn, Name) :-
 			fn(Fn, File, Name), glob(File, ${`${env.pureDir}/**`}),
-			calls_reach(Fn, Callee), fn_awaits(Callee).
+			call_edge(_, Fn, Callee), reaches_await(Callee).
 	`)
 	.report("violation")
 	.message((row) => `Pure function ${row.Name} transitively calls effectful code`);
 ```
+
+`reaches_await` is computed backward from `fn_awaits`, one `call_edge` at a time. Section 16 explains why the rule does not join `calls_reach` with `fn_awaits`.
 
 Caveats:
 
@@ -326,8 +332,8 @@ Caveats:
   "violation(\"src/pure/helper.ts::function::loadValue\",\"loadValue\")",
   "fn(\"src/pure/helper.ts::function::loadValue\",\"src/pure/helper.ts\",\"loadValue\")",
   "glob(\"src/pure/helper.ts\",\"src/pure/**\")",
-  "calls_reach(\"src/pure/helper.ts::function::loadValue\",\"src/services/fetchData.ts::function::fetchData\")",
   "call_edge(\"src/pure/helper.ts::function::loadValue::calls::src/services/fetchData.ts::function::fetchData\",\"src/pure/helper.ts::function::loadValue\",\"src/services/fetchData.ts::function::fetchData\")",
+  "reaches_await(\"src/services/fetchData.ts::function::fetchData\")",
   "fn_awaits(\"src/services/fetchData.ts::function::fetchData\")"
 ]
 ```
@@ -478,14 +484,14 @@ export default rule("arch.pure-no-package-effects")
 	.program(dl`
 		Decl package_capability(Pkg, Capability) descr [extensional()].
 
+		Decl reaches_package(Fn, Pkg).
+		reaches_package(Fn, Pkg) :- fn_calls_package(Fn, Pkg).
+		reaches_package(Fn, Pkg) :- call_edge(_, Fn, Callee), reaches_package(Callee, Pkg).
+
 		Decl fn_effect(Fn, Name, Pkg, Capability).
 		fn_effect(Fn, Name, Pkg, Capability) :-
 			fn(Fn, File, Name), glob(File, "src/pure/**"),
-			calls_reach(Fn, Callee), fn_calls_package(Callee, Pkg),
-			package_capability(Pkg, Capability).
-		fn_effect(Fn, Name, Pkg, Capability) :-
-			fn(Fn, File, Name), glob(File, "src/pure/**"),
-			fn_calls_package(Fn, Pkg), package_capability(Pkg, Capability).
+			reaches_package(Fn, Pkg), package_capability(Pkg, Capability).
 
 		Decl module_effect(File, Pkg, Capability).
 		module_effect(File, Pkg, Capability) :-
@@ -628,3 +634,22 @@ Caveats:
 - `type_contains` does not look inside classes, interfaces or enums. If `User` is an interface with a property of type `Db`, a function that returns `User` is not reported. Add a rule for the declaration of `User`, or use `type_ref` and `type_ref_target` on the file that declares it.
 - the checker erases some types before lintai sees them. `type Handle = Db` is `Db`, and `type UserId = string` is `/string`.
 - an `Origin` is a workspace-relative path only for types declared in workspace source files. A type from a package has the package name, so `glob(Origin, "src/infra/**")` does not match it.
+
+## 16. Reachability without a closure
+
+`calls_reach`, `calls_or_refs_reach`, `imports_reach` and `type_contains` store one row for each pair of nodes that are connected, so they can have O(nodes²) rows on a large workspace. Do not join a closure with your own target relation:
+
+```
+Decl slow(Fn).
+slow(Fn) :- calls_reach(Fn, Callee), my_target(Callee).
+```
+
+Propagate backward from the target, one edge at a time:
+
+```
+Decl reaches_target(Fn).
+reaches_target(Fn) :- my_target(Fn).
+reaches_target(Fn) :- call_edge(_, Fn, Callee), reaches_target(Callee).
+```
+
+The backward relation has at most one row for each node and target, because it never stores the pairs that do not lead to a target. The second form also includes `Fn` when `Fn` is a target. To exclude that case, require one edge first, as in section 1: `call_edge(_, Fn, Callee), reaches_target(Callee)`. Use a closure only when the rule reports both ends of the pair. The prelude predicates `fn_reaches_ambient`, `fn_reaches_ambient_strict`, `fn_reaches_unresolved`, `module_reaches_ambient` and `type_reaches_incomplete` use the backward form.

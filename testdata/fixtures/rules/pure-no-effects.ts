@@ -9,10 +9,14 @@ export const config = z.object({
 export default rule("arch.pure-no-effects")
 	.version(1)
 	.program(({ env }) => dl`
+		Decl reaches_await(Fn).
+		reaches_await(Fn) :- fn_awaits(Fn).
+		reaches_await(Fn) :- call_edge(_, Fn, Callee), reaches_await(Callee).
+
 		Decl violation(Fn, Name).
 		violation(Fn, Name) :-
 			fn(Fn, File, Name), glob(File, ${`${env.pureDir}/**`}),
-			calls_reach(Fn, Callee), fn_awaits(Callee).
+			call_edge(_, Fn, Callee), reaches_await(Callee).
 	`)
 	.report("violation")
 	.message((row) => `Pure function ${row.Name} transitively calls effectful code`);
