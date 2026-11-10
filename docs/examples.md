@@ -4,7 +4,7 @@ These examples use the 0.2 rule API. A rule is a Datalog program that LintAI eva
 
 ## 1. Transitive purity rule
 
-Reject functions in a pure directory that call, through any call chain, a function that contains `await`:
+For example, a pure function may call a helper that contains `await`. This rule reports that caller. It also sees `for await` and `await using`:
 
 ```ts
 import { dl, rule } from "@lintai/sdk";
@@ -15,26 +15,65 @@ export const config = z.object({ pureDir: z.string().default("src/pure") });
 export default rule("arch.pure-no-effects")
 	.version(1)
 	.program(({ env }) => dl`
-		Decl reaches_await(Fn).
-		reaches_await(Fn) :- fn_awaits(Fn).
-		reaches_await(Fn) :- call_edge(_, Fn, Callee), reaches_await(Callee).
+		Decl reaches_suspension(Fn).
+		reaches_suspension(Fn) :- fn_suspends(Fn).
+		reaches_suspension(Fn) :- call_edge(Site, Fn, Callee), !site_attribution_unknown(Site), reaches_suspension(Callee).
 
 		Decl violation(Fn, Name).
 		violation(Fn, Name) :-
 			fn(Fn, File, Name), glob(File, ${`${env.pureDir}/**`}),
-			call_edge(_, Fn, Callee), reaches_await(Callee).
+			call_edge(Site, Fn, Callee), !site_attribution_unknown(Site), reaches_suspension(Callee).
 	`)
 	.report("violation")
-	.message((row) => `Pure function ${row.Name} transitively calls effectful code`);
+	.message((row) => `Pure function ${row.Name} calls code with suspension syntax`);
 ```
 
-`reaches_await` is computed backward from `fn_awaits`, one `call_edge` at a time. Section 16 explains why the rule does not join `calls_reach` with `fn_awaits`.
+`reaches_suspension` starts at functions with suspension syntax and follows calls backward. This rule reports callers; it does not report a function solely because that function has a site. Section 16 explains this way of following edges.
 
 Caveats:
 
-- `fn_awaits` is a narrow signal for effectful code. Use the ambient relations (section 4) for clock and environment reads.
+- Suspension syntax does not prove that the code runs. Use the ambient relations (section 4) for clock and environment reads.
 - `call_edge` contains only calls between collected functions in the workspace. Calls into packages and the default library are in `external_call`. Calls through function values are not followed; see section 12.
 - the interpolated string becomes an escaped Mangle string constant, so a config value cannot change the program structure
+
+### Scorecard transformations
+
+Suppose `src/scorecard/total.ts` exports a transformation that passes a callback to a helper:
+
+```ts
+export function total(rows: number[]) {
+  return rows.map(async row => await loadAdjustment(row));
+}
+```
+
+The arrow owns the `await`. A direct-call rule does not put that site on `total`. If this project wants to review callbacks that transformations pass or return, it can follow `fn_ref` as a separate policy:
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+export default rule("scorecard.suspension")
+  .version(1)
+  .program(dl`
+    Decl selected(Fn).
+    selected(Fn) :- fn(Fn, File, _), fn_exported(Fn), glob(File, "src/scorecard/**").
+
+    Decl depends_on_suspension(Fn).
+    depends_on_suspension(Fn) :- suspension_in_fn(_, Fn).
+    depends_on_suspension(Fn) :- call_edge(Site, Fn, Next), !site_attribution_unknown(Site), depends_on_suspension(Next).
+    depends_on_suspension(Fn) :- fn_ref(Site, Fn, Next), !site_attribution_unknown(Site), depends_on_suspension(Next).
+
+    Decl suspension_dependency(Fn).
+    suspension_dependency(Fn) :- selected(Fn), depends_on_suspension(Fn).
+    Decl unresolved_path(Fn).
+    unresolved_path(Fn) :- selected(Fn), fn_reaches_unresolved(Fn).
+    Decl unsupported_site(Site).
+    unsupported_site(Site) :- site_attribution_unsupported(Site, _), location(Site, File, _, _, _, _), glob(File, "src/scorecard/**").
+  `)
+  .report("suspension_dependency", "unresolved_path", "unsupported_site")
+  .message((row, ctx) => `Scorecard review: ${ctx.assertion_id}`);
+```
+
+Start this rule as a warning, for example with `--severity scorecard.suspension=warning`. An unresolved call or unsupported owner is indeterminate. Following a function value can report a callback that is never called, while a returned promise by itself creates no suspension site. Calls into packages, composition and currying, and callbacks returned by factories can hide dependencies. This rule does not prove which code runs or provide complete async-effect analysis.
 
 ## 2. Import boundary
 
@@ -180,7 +219,7 @@ export default rule("arch.ambient")
 Caveats:
 
 - the built-in sources are `/clock`, `/env`, `/random`, `/network`, `/timer` and `/process`. `docs/api.md` gives their matchers.
-- a use inside an anonymous callback belongs to the nearest enclosing collected function, so `fn_reaches_ambient` sees it
+- a use inside an anonymous callback belongs to the callback. `fn_reaches_ambient` follows calls; `fn_reaches_ambient_strict` also follows function values explicitly.
 - a use at module scope has no `site_in_fn` row. `module_uses_ambient` and `module_reaches_ambient` see it, `fn_reaches_ambient` does not.
 - aliases such as `const env = process.env` are recorded as a dynamic use, because the whole object escapes
 
@@ -275,9 +314,11 @@ export default rule("arch.no-direct-import-meta-env")
 
 Caveats:
 
-- extraction is semantic, so strings and comments that contain `import.meta.env` do not match
+- strings, comments and regular expressions that contain `import.meta.env` do not match; an access inside a template expression does
 - the access path stops at the first member, so `import.meta.env.API_URL` is recorded as `import.meta.env`
-- `site_in_fn(Acc, Fn)` gives the enclosing function of the access
+- spaces and comments between the tokens do not change the access path
+- the first member must use a plain dot: `import.meta?.env`, `import.meta["env"]` and `(import.meta).env` are not recorded
+- `site_in_fn(Acc, Fn)` gives the lexical function owner of the access; unsupported owners have `site_attribution_unsupported`
 
 ## 8. Directives, library calls and unresolved imports
 
@@ -333,8 +374,10 @@ Caveats:
   "fn(\"src/pure/helper.ts::function::loadValue\",\"src/pure/helper.ts\",\"loadValue\")",
   "glob(\"src/pure/helper.ts\",\"src/pure/**\")",
   "call_edge(\"src/pure/helper.ts::function::loadValue::calls::src/services/fetch-data.ts::function::fetchData\",\"src/pure/helper.ts::function::loadValue\",\"src/services/fetch-data.ts::function::fetchData\")",
-  "reaches_await(\"src/services/fetch-data.ts::function::fetchData\")",
-  "fn_awaits(\"src/services/fetch-data.ts::function::fetchData\")"
+  "!site_attribution_unknown(\"src/pure/helper.ts::function::loadValue::calls::src/services/fetch-data.ts::function::fetchData\")",
+  "reaches_suspension(\"src/services/fetch-data.ts::function::fetchData\")",
+  "fn_suspends(\"src/services/fetch-data.ts::function::fetchData\")",
+  "suspension_in_fn(\"suspension:src/services/fetch-data.ts::suspension::await::37\",\"src/services/fetch-data.ts::function::fetchData\")"
 ]
 ```
 
@@ -404,7 +447,7 @@ Caveats:
 
 ## 12. Strict purity rule
 
-`call_edge` contains only calls that the type checker resolves to a workspace function. A call through a parameter, a record of functions or a callback has no `call_edge` row, so `calls_reach` and `fn_reaches_ambient` do not see it. The strict relations close this gap:
+`call_edge` contains only calls that the type checker resolves to a workspace function. A call through a parameter, a record of functions or a callback has no `call_edge` row, so `calls_reach` and `fn_reaches_ambient` do not see it. The strict relations make some of this uncertainty visible:
 
 - `call_unresolved` is a call that lintai cannot resolve
 - `fn_ref` is a reference to a workspace function as a value, for example a function passed as an argument
@@ -421,6 +464,12 @@ export default rule("arch.pure-no-effects-strict")
 
 		Decl reaches_effect(Fn, Name).
 		reaches_effect(Fn, Name) :- pure_fn(Fn, Name), fn_reaches_ambient_strict(Fn, _).
+		reaches_effect(Fn, Name) :- pure_fn(Fn, Name), depends_on_suspension(Fn).
+
+		Decl depends_on_suspension(Fn).
+		depends_on_suspension(Fn) :- fn_suspends(Fn).
+		depends_on_suspension(Fn) :- call_edge(Site, Fn, Callee), !site_attribution_unknown(Site), depends_on_suspension(Callee).
+		depends_on_suspension(Fn) :- fn_ref(Site, Fn, Callee), !site_attribution_unknown(Site), depends_on_suspension(Callee).
 
 		Decl leaves_analysis(Fn, Name).
 		leaves_analysis(Fn, Name) :- pure_fn(Fn, Name), fn_reaches_unresolved(Fn).
@@ -428,7 +477,7 @@ export default rule("arch.pure-no-effects-strict")
 	.report("reaches_effect", "leaves_analysis")
 	.message((row, ctx) =>
 		ctx.assertion_id === "reaches_effect"
-			? `Pure function ${row.Name} reaches an ambient source through calls or function values`
+			? `Pure function ${row.Name} depends on an ambient source or suspension syntax through calls or function values`
 			: `Pure function ${row.Name} calls a function value that lintai cannot resolve`,
 	);
 ```
@@ -458,11 +507,11 @@ import { now } from "../services/clock";
 export const reading = wired(now);
 ```
 
-The non-strict rule in section 1 reports nothing here. The strict rule reports `launder` and `wired` with `leaves_analysis`, because `read()` is a call that lintai cannot resolve. A rule over `calls_or_refs_reach("src/server/wire-clock.ts", Fn)` also sees that the server module reaches `now`.
+The non-strict rule in section 1 reports nothing here. The strict rule reports `launder` and `wired` with `leaves_analysis`, because `read()` is a call that lintai cannot resolve. A rule over `calls_or_refs_reach("src/server/wire-clock.ts", Fn)` also links the server module to the `now` value. That link does not prove that `now` runs.
 
 Caveats:
 
-- strict mode also reports harmless callbacks, for example a pure `map` callback passed as a parameter. This is why it is a separate opt-in rule and not the default.
+- following `fn_ref` can report a callback that is stored or passed but never called. This is why it is a separate opt-in rule.
 - `calls_or_refs_reach` is an over-approximation: a function that is referenced but never called still counts as reached
 - `import_opaque` marks `import(expr)` and `require(expr)` with a computed argument. Use it to reject code loading that lintai cannot follow.
 
@@ -534,25 +583,48 @@ import { dl, rule } from "@lintai/sdk";
 export default rule("arch.actions-return-action-result")
 	.version(1)
 	.program(dl`
+		Decl action(Fn, Name).
+		action(Fn, Name) :-
+			fn(Fn, File, Name), fn_exported(Fn), glob(File, "src/actions/**"), fn_async(Fn).
+
+		Decl has_return(Fn).
+		has_return(Fn) :- fn_returns(Fn, _).
+		Decl signature_issue(Fn, Reason).
+		signature_issue(Fn, "omitted") :- action(Fn, _), fn_signature_omitted(Fn).
+		signature_issue(Fn, "unresolved") :- action(Fn, _), fn_signature_unresolved(Fn).
+		signature_issue(Fn, "conflict") :- action(Fn, _), fn_signature_conflict(Fn).
+		signature_issue(Fn, "missing") :-
+			action(Fn, _), !has_return(Fn), !fn_signature_omitted(Fn),
+			!fn_signature_unresolved(Fn), !fn_signature_conflict(Fn).
+		Decl signature_uncertain(Fn).
+		signature_uncertain(Fn) :- signature_issue(Fn, _).
+
 		Decl violation(Fn, Name, Returned, Reason).
 		Decl returns_action_result(Fn).
 		returns_action_result(Fn) :-
-			fn_returns_awaited(Fn, R), !fn_signature_conflict(Fn),
+			fn_returns_awaited(Fn, R), !signature_uncertain(Fn),
 			type_named(R, "src/core/result.ts", "ActionResult").
 		violation(Fn, Name, Returned, "wrong") :-
-			fn(Fn, File, Name), fn_exported(Fn), glob(File, "src/actions/**"),
-			fn_async(Fn), !fn_signature_conflict(Fn), !returns_action_result(Fn),
+			action(Fn, Name), !signature_uncertain(Fn), !returns_action_result(Fn),
 			fn_returns(Fn, T), type_display(T, Returned).
-		violation(Fn, Name, "", "conflict") :-
-			fn(Fn, File, Name), fn_exported(Fn), glob(File, "src/actions/**"),
-			fn_async(Fn), fn_signature_conflict(Fn).
+		violation(Fn, Name, "", Reason) :- action(Fn, Name), signature_issue(Fn, Reason).
 	`)
 	.report("violation")
-	.message((row) =>
-		row.Reason === "conflict"
-			? `${row.Name} has conflicting checked signatures; cannot determine whether its return type is allowed`
-			: `${row.Name} must return Promise<ActionResult<T>>, but returns ${row.Returned}`,
-	);
+	.message((row) => {
+		if (row.Reason === "conflict") {
+			return `${row.Name} has conflicting checked signatures; cannot determine whether its return type is allowed`;
+		}
+		if (row.Reason === "omitted") {
+			return `${row.Name} has no collected signature; cannot determine whether its return type is allowed`;
+		}
+		if (row.Reason === "unresolved") {
+			return `${row.Name} has an unresolved signature; cannot determine whether its return type is allowed`;
+		}
+		if (row.Reason === "missing") {
+			return `${row.Name} has no recorded return type; cannot determine whether its return type is allowed`;
+		}
+		return `${row.Name} must return Promise<ActionResult<T>>, but returns ${row.Returned}`;
+	});
 ```
 
 Planted violation:
@@ -568,6 +640,8 @@ export async function save(): Promise<ActionResult<number>> {
 The rule reports `save`. Its return type is written `Promise<ActionResult<number>>`, but `ActionResult` is declared in `src/legacy/types.ts`, so `type_named` has a different `Origin`. `fn_returns_awaited` removes one level of `Promise` from the return type. If TypeScript infers the return type, the rule accepts the function only when the returned value already has the type `ActionResult`. An inferred object literal type, such as `Promise<{ ok: boolean; value: number }>`, has no `ActionResult` name, so the rule reports it.
 
 The same function can be checked by more than one TypeScript configuration. If the checked signatures disagree, `fn_returns` contains observations from those configurations. Even if one return type matches `ActionResult`, the rule reports that the result is uncertain. A signature conflict can also come from different parameter types, so it does not necessarily mean the return types differ.
+
+The rule also reports a signature that was omitted or could not be fully resolved. An unresolved signature can still have a return row, but that row alone does not establish a complete signature. If there is no return row and no signature marker, the rule reports the missing return type. A conflict and an unresolved signature can occur together, so the rule reports both. These findings mean the rule cannot decide whether the return type is allowed.
 
 Caveats:
 
@@ -613,7 +687,7 @@ export function loadUser(input: { db: Db; id: string }): Promise<string> {
 
 The rule reports `loadUser` with `Db` from `src/infra/db.ts`.
 
-`type_contains` does not look into every part of a type. The strict variant also reports a signature that reaches a type with an incomplete marker (`type_incomplete`). Class, interface and enum members are not expanded, but the named type receives `/members_omitted`, so the strict rule catches a parameter or return type using it. This marker does not claim that a forbidden member exists or expose that member's type.
+`type_contains` does not look into every part of a type. The strict variant also reports a signature that reaches a type with an incomplete marker (`type_incomplete`), or whose signature evidence is incomplete or conflicting. Class, interface and enum members are not expanded, but the named type receives `/members_omitted`, so the strict rule catches a parameter or return type using it. This marker does not claim that a forbidden member exists or expose that member's type.
 
 Strict completeness also reaches default library interfaces. Ordinary `Promise<T>` and `T[]` use the library interfaces `Promise` and `Array`, which receive `/members_omitted`; a strict rule therefore reports these common wrappers even when `T` is fully represented. The rule below treats every incomplete type as a result, so it is intentionally conservative.
 
@@ -623,20 +697,52 @@ import { dl, rule } from "@lintai/sdk";
 export default rule("arch.domain-signatures-strict")
 	.version(1)
 	.program(dl`
+		Decl domain_function(Fn, Name).
+		domain_function(Fn, Name) :-
+			fn(Fn, File, Name), fn_exported(Fn), glob(File, "src/domain/**").
+
 		Decl signature_type(Fn, T).
 		signature_type(Fn, T) :- fn_param(Fn, _, T).
 		signature_type(Fn, T) :- fn_returns(Fn, T).
 
-		Decl violation(Fn, Name, Shown).
-		violation(Fn, Name, Shown) :-
-			fn(Fn, File, Name), fn_exported(Fn), glob(File, "src/domain/**"),
+		Decl has_return(Fn).
+		has_return(Fn) :- fn_returns(Fn, _).
+		Decl signature_issue(Fn, Reason).
+		signature_issue(Fn, "omitted") :- domain_function(Fn, _), fn_signature_omitted(Fn).
+		signature_issue(Fn, "unresolved") :- domain_function(Fn, _), fn_signature_unresolved(Fn).
+		signature_issue(Fn, "conflict") :- domain_function(Fn, _), fn_signature_conflict(Fn).
+		signature_issue(Fn, "missing") :-
+			domain_function(Fn, _), !has_return(Fn), !fn_signature_omitted(Fn),
+			!fn_signature_unresolved(Fn), !fn_signature_conflict(Fn).
+
+		Decl violation(Fn, Name, Shown, Reason).
+		violation(Fn, Name, Shown, "type") :-
+			domain_function(Fn, Name),
 			signature_type(Fn, T), type_reaches_incomplete(T), type_display(T, Shown).
+		violation(Fn, Name, "", Reason) :-
+			domain_function(Fn, Name), signature_issue(Fn, Reason).
 	`)
 	.report("violation")
-	.message((row) => `${row.Name} has a type that lintai cannot inspect: ${row.Shown}`);
+	.message((row) => {
+		if (row.Reason === "type") {
+			return `${row.Name} has a type that lintai cannot inspect: ${row.Shown}`;
+		}
+		if (row.Reason === "conflict") {
+			return `${row.Name} has conflicting checked signatures; cannot determine whether its signature exposes infrastructure types`;
+		}
+		if (row.Reason === "omitted") {
+			return `${row.Name} has no collected signature; cannot determine whether its signature exposes infrastructure types`;
+		}
+		if (row.Reason === "unresolved") {
+			return `${row.Name} has an unresolved signature; cannot determine whether its signature exposes infrastructure types`;
+		}
+		return `${row.Name} has no recorded return type; cannot determine whether its signature exposes infrastructure types`;
+	});
 ```
 
 For example, `export function pick<K extends keyof Db>(key: K): Db[K]` is reported: `K` has a constraint and `Db[K]` is an indexed access type, which is `/other`.
+
+The strict rule checks for signature problems after selecting each exported domain function. It reports omitted, unresolved and conflicting signatures, as well as a missing return row when no marker explains it. It can also report an incomplete type from any parameter or return row that is present. These are different gaps: `type_reaches_incomplete` describes a collected type graph, while the signature markers and missing return check describe missing or conflicting signature evidence. No `fn_param` rows alone do not mean a signature is missing; a function can have zero parameters.
 
 A rule can make a narrower policy for known opaque leaves. The following helpers accept only the default library `Promise` and `Array` member-omission markers. Every other incompleteness reason remains a seed. Backward propagation still follows `type_child`, including the represented type arguments of those accepted wrappers:
 
@@ -654,7 +760,7 @@ reaches_disallowed_incomplete(T) :- disallowed_incomplete(T).
 reaches_disallowed_incomplete(T) :- type_child(T, Child), reaches_disallowed_incomplete(Child).
 ```
 
-Use `reaches_disallowed_incomplete(T)` in the violation rule in place of `type_reaches_incomplete(T)`. This ignores only `/members_omitted` on the two named library leaves. If `Promise<Hidden>` reaches an unaccepted opaque `Hidden` type, that marker still propagates through the `Promise` type argument to the signature. The policy does not mark `any`, `unknown`, unconstrained parameters, or unknown runtime values as safe; those need separate rule-specific handling when they matter.
+Use `reaches_disallowed_incomplete(T)` in the type-graph violation rule in place of `type_reaches_incomplete(T)`. Keep the signature issue rules as well. This ignores only `/members_omitted` on the two named library leaves. If `Promise<Hidden>` reaches an unaccepted opaque `Hidden` type, that marker still propagates through the `Promise` type argument to the signature. The policy does not mark `any`, `unknown`, unconstrained parameters, or unknown runtime values as safe; those need separate rule-specific handling when they matter.
 
 This exception trusts all omitted members of those interfaces, including members added by workspace or dependency augmentations. An augmented `Promise<T>` can retain its library identity while gaining a forbidden member that this policy does not inspect. Keep its `/members_omitted` marker as a disallowed seed if that trust is unsuitable; matching the library origin does not prove that its declarations are unmodified.
 

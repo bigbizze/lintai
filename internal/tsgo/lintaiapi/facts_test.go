@@ -188,8 +188,69 @@ export default () => add(4);
 	for _, call := range snapshot.CallsUnresolved {
 		unresolved = append(unresolved, call.FromSemanticKey)
 	}
-	if want := []string{"src/a.ts::function::show"}; !slices.Equal(unresolved, want) {
+	if want := []string{"src/a.ts", "src/a.ts::function::show"}; !slices.Equal(unresolved, want) {
 		t.Fatalf("unresolved calls differ:\ngot  %q\nwant %q", unresolved, want)
+	}
+}
+
+func TestGetterReturnedCallablesRemainUnresolved(t *testing.T) {
+	snapshot := buildTestSnapshot(t, map[string]string{
+		"node_modules/pkg/package.json": `{ "name": "pkg", "types": "index.d.ts" }`,
+		"node_modules/pkg/index.d.ts":   "export declare class External { constructor(); get run(): () => void; method(): void; }\n",
+		"src/a.ts": `import { External } from "pkg";
+async function suspends() { await 0; }
+const box = {
+  get run() { return suspends; },
+  get callback() { return async () => { await 0; }; },
+  get maker() { return Worker; },
+  method() {}
+};
+class Worker {
+  constructor() {}
+  get run() { return suspends; }
+  method() {}
+}
+const worker = new Worker();
+const external = new External();
+export function invoke(mixed: Worker | { run(): void }) {
+  box.run();
+  box.callback();
+  new box.maker();
+  worker.run();
+  box.method();
+  worker.method();
+  external.run();
+  external.method();
+  mixed.run();
+}
+`,
+	})
+	var calls []string
+	for _, edge := range snapshot.CallEdges {
+		calls = append(calls, fmt.Sprintf("%d: call %s", edge.Range.StartLine, edge.ToName))
+	}
+	for _, call := range snapshot.ExternalCalls {
+		calls = append(calls, fmt.Sprintf("%d: external %s %s", call.Range.StartLine, call.Module, call.Name))
+	}
+	for _, call := range snapshot.CallsUnresolved {
+		calls = append(calls, fmt.Sprintf("%d: unresolved", call.Range.StartLine))
+	}
+	slices.Sort(calls)
+	want := []string{
+		"14: call Worker.constructor",
+		"15: external pkg External",
+		"17: unresolved",
+		"18: unresolved",
+		"19: unresolved",
+		"20: unresolved",
+		"21: call box.method",
+		"22: call Worker.method",
+		"23: unresolved",
+		"24: external pkg External.method",
+		"25: unresolved",
+	}
+	if !slices.Equal(calls, want) {
+		t.Fatalf("call outcomes differ:\ngot:\n%s\nwant:\n%s", strings.Join(calls, "\n"), strings.Join(want, "\n"))
 	}
 }
 
@@ -256,6 +317,7 @@ export const made = [new Stamped(), new Quiet()];
 		return result
 	}
 	if got, want := callers(snapshot.CallsUnresolved), []string{
+		"src/a.ts:25",
 		"src/a.ts::function::inject:6",
 		"src/a.ts::function::inject:7",
 		"src/a.ts::function::inject:8",
@@ -290,6 +352,8 @@ export const made = [new Stamped(), new Quiet()];
 		"src/a.ts::function::wire::refs::src/effect.ts::function::effect#2:15",
 		"src/a.ts::function::wire::refs::src/effect.ts::function::effect:15",
 		"src/a.ts::refs::src/effect.ts::function::effect:17",
+		"src/b.ts::function::hidden::refs::src/b.ts::arrow_function::<anonymous@178>:6",
+		"src/b.ts::unsupported::refs::src/b.ts::arrow_function::Quiet.handler:16",
 	}; !slices.Equal(refs, want) {
 		t.Fatalf("function references differ:\ngot  %q\nwant %q", refs, want)
 	}
@@ -309,6 +373,91 @@ export const made = [new Stamped(), new Quiet()];
 	}
 	if dynamic != 1 {
 		t.Fatalf("want one dynamic import edge for the template literal without substitutions, got %d", dynamic)
+	}
+}
+
+func TestWrappedFunctionBindings(t *testing.T) {
+	const source = `interface OwnershipOnly { secret: string }
+const callback = (async (value: OwnershipOnly) => { await value; });
+export const exported = ((async () => { await 1; })!);
+const object = { handler: (((function () { return 1; }) as () => number)!) };
+class Box { handler = (<() => number>(() => 1)); }
+const alias = (function original() { return 1; });
+const direct = () => 1;
+export const directAsync = async () => 1;
+export const wrappedAsync = (async () => 1);
+export const checkedAsync = (async () => 1) satisfies () => Promise<number>;
+export function total(box: Box): void { void callback; void object.handler; void box.handler; void alias; void direct; }
+export default ((() => 1) satisfies () => number);
+`
+	snapshot := buildTestSnapshot(t, map[string]string{"src/main.ts": source})
+	functions := make(map[string]Function)
+	for _, fn := range snapshot.Functions {
+		functions[fn.SemanticKey] = fn
+	}
+	var anonymous []string
+	for _, item := range []struct {
+		fragment, token, kind string
+		exported              bool
+		parameters            int
+	}{
+		{"const callback = (async (value:", "async", "arrow_function", false, 1},
+		{"export const exported = ((async", "async", "arrow_function", true, 0},
+		{"handler: (((function () { return 1; })", "function", "function_expression", false, 0},
+		{"handler = (<() => number>(() => 1)", "() => 1", "arrow_function", false, 0},
+		{"export default ((() => 1)", "() => 1", "arrow_function", true, 0},
+		{"export const wrappedAsync = (async", "async", "arrow_function", true, 0},
+		{"export const checkedAsync = (async", "async", "arrow_function", true, 0},
+	} {
+		offset := strings.Index(source, item.fragment) + strings.Index(item.fragment, item.token)
+		key := fmt.Sprintf("src/main.ts::%s::<anonymous@%d>", item.kind, offset)
+		fn, ok := functions[key]
+		if !ok || fn.IsExported != item.exported || fn.SignatureOmitted || fn.SignatureUnresolved || len(fn.ParameterTypes) != item.parameters || fn.ReturnType == "" || len(fn.SignatureObservations) != 1 || !fn.SignatureObservations[0].Complete {
+			t.Errorf("wrapped function %q: %+v", item.fragment, fn)
+		}
+		anonymous = append(anonymous, key)
+	}
+	if direct := functions["src/main.ts::arrow_function::directAsync"]; direct.ReturnType == "" || direct.ReturnType != functions[anonymous[5]].ReturnType || direct.ReturnType != functions[anonymous[6]].ReturnType {
+		t.Errorf("direct, wrapped and satisfies bindings have different return types: %q, %q, %q", direct.ReturnType, functions[anonymous[5]].ReturnType, functions[anonymous[6]].ReturnType)
+	}
+	for _, key := range []string{"src/main.ts::function_expression::original", "src/main.ts::arrow_function::direct"} {
+		if fn, ok := functions[key]; !ok || fn.SignatureOmitted || fn.ReturnType == "" {
+			t.Errorf("named function identity or signature changed: %+v", fn)
+		}
+	}
+	wantRefs := []string{anonymous[0], anonymous[2], anonymous[3], "src/main.ts::function_expression::original", "src/main.ts::arrow_function::direct"}
+	var refs []string
+	for _, ref := range snapshot.FnRefs {
+		if ref.FromSemanticKey == "src/main.ts::function::total" {
+			refs = append(refs, ref.ToSemanticKey)
+		}
+	}
+	slices.Sort(refs)
+	slices.Sort(wantRefs)
+	if !slices.Equal(refs, wantRefs) {
+		t.Errorf("binding references = %v, want %v", refs, wantRefs)
+	}
+	var suspensionOwners []string
+	for _, site := range snapshot.SuspensionSites {
+		suspensionOwners = append(suspensionOwners, site.FunctionSemanticKey)
+	}
+	slices.Sort(suspensionOwners)
+	wantOwners := []string{anonymous[0], anonymous[1]}
+	slices.Sort(wantOwners)
+	if !slices.Equal(suspensionOwners, wantOwners) {
+		t.Errorf("suspension owners = %v, want %v", suspensionOwners, wantOwners)
+	}
+	if fn := functions[anonymous[0]]; len(fn.ParameterTypes) == 1 {
+		var parameter *TypeFact
+		for i := range snapshot.Types {
+			if snapshot.Types[i].ID == fn.ParameterTypes[0] {
+				parameter = &snapshot.Types[i]
+				break
+			}
+		}
+		if parameter == nil || parameter.Name != "OwnershipOnly" {
+			t.Errorf("wrapped binding parameter type = %+v, want OwnershipOnly", parameter)
+		}
 	}
 }
 
@@ -409,5 +558,156 @@ func TestRetainedTypeImports(t *testing.T) {
 		if want := map[bool]int{true: 2, false: 0}[verbatim]; retained != want {
 			t.Fatalf("verbatim=%t: got %d retained imports, want %d", verbatim, retained, want)
 		}
+	}
+}
+
+// Suspension sites describe each syntax node and the context evaluating it.
+func TestSuspensionSitesAndFunctionIdentity(t *testing.T) {
+	const source = `interface OwnershipOnly { secret: string }
+await top();
+function zero(): void {}
+async function noSite() {}
+function promiseOnly() { return Promise.resolve(); }
+async function main(arg = await defaultValue()) {
+  const value = await acquire();
+  await using first = await acquire(), second = acquire();
+  for await (await using x of stream()) { await consume(x); }
+  return [1].map(async (unused: OwnershipOnly) => { await work(); });
+}
+async function factory() {
+  const object = { [await key()] (arg = await methodDefault()) { return 1; } };
+  class WithCtor extends base(await heritage()) {
+    [await fieldName()] = await field();
+    @decorate(await decoratorArg()) method(@decorate(await parameterDecorator()) arg = await parameterDefault()) {}
+    static field = await staticValue();
+    static { await blockValue(); }
+    constructor() {}
+  }
+  class NoCtor { field = await unsupported(); }
+  class Ambiguous { field = await ambiguous(); constructor() {} constructor(x: number) {} }
+  return object;
+}
+`
+	root := t.TempDir()
+	paths := writeWorkspace(t, root, map[string]string{
+		"tsconfig.json":       `{"compilerOptions":{"target":"esnext","module":"preserve","noEmit":true},"files":["src/main.ts"]}`,
+		"src/main.ts":         source,
+		"src/excluded.ts":     `async function excluded() { await nope(); }`,
+		"other/tsconfig.json": `{"compilerOptions":{"target":"esnext","module":"preserve","noEmit":true},"files":["main.ts"]}`,
+		"other/main.ts":       `import "../src/main";`,
+	})
+	snapshot, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{WorkspaceRoot: root, Files: paths, TsconfigFiles: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	callbackOffset := strings.Index(source, "async (unused:")
+	callback := fmt.Sprintf("src/main.ts::arrow_function::<anonymous@%d>", callbackOffset)
+	// Each snippet starts at the expected first token of the site.
+	want := []struct{ text, kind, owner string }{
+		{"await top()", "await", "module"},
+		{"await defaultValue()", "await", "src/main.ts::function::main"},
+		{"await acquire();", "await", "src/main.ts::function::main"},
+		{"await using first", "await_using", "src/main.ts::function::main"},
+		{"await acquire(),", "await", "src/main.ts::function::main"},
+		{"for await (", "for_await", "src/main.ts::function::main"},
+		{"await using x", "await_using", "src/main.ts::function::main"},
+		{"await consume(x)", "await", "src/main.ts::function::main"},
+		{"await work()", "await", callback},
+		{"await key()", "await", "src/main.ts::function::factory"},
+		{"await methodDefault()", "await", "src/main.ts::method::factory.object.[await key()]"},
+		{"await heritage()", "await", "src/main.ts::function::factory"},
+		{"await fieldName()", "await", "src/main.ts::function::factory"},
+		{"await field()", "await", "src/main.ts::constructor::factory.WithCtor.constructor"},
+		{"await decoratorArg()", "await", "src/main.ts::function::factory"},
+		{"await parameterDecorator()", "await", "src/main.ts::function::factory"},
+		{"await parameterDefault()", "await", "src/main.ts::method::factory.WithCtor.method"},
+		{"await staticValue()", "await", "src/main.ts::function::factory"},
+		{"await blockValue()", "await", "src/main.ts::function::factory"},
+		{"await unsupported()", "await", "unsupported:instance_construction"},
+		{"await ambiguous()", "await", "unsupported:unsupported_context"},
+	}
+	byKey := make(map[string]SuspensionSite)
+	for _, site := range snapshot.SuspensionSites {
+		byKey[site.SemanticKey] = site
+	}
+	if len(byKey) != len(want) || len(snapshot.SuspensionSites) != len(want) {
+		t.Fatalf("unexpected suspension sites: %+v", snapshot.SuspensionSites)
+	}
+	for _, expected := range want {
+		offset := strings.Index(source, expected.text)
+		key := fmt.Sprintf("src/main.ts::suspension::%s::%d", expected.kind, offset)
+		site, ok := byKey[key]
+		if !ok {
+			t.Errorf("missing %s at %q", key, expected.text)
+			continue
+		}
+		classifications := 0
+		if site.FunctionSemanticKey != "" {
+			classifications++
+		}
+		if site.AtModule {
+			classifications++
+		}
+		if site.UnsupportedReason != "" {
+			classifications++
+		}
+		if classifications != 1 {
+			t.Errorf("site %q has %d owner classifications: %+v", expected.text, classifications, site)
+		}
+		owner := site.FunctionSemanticKey
+		if site.AtModule {
+			owner = "module"
+		}
+		if site.UnsupportedReason != "" {
+			owner = "unsupported:" + site.UnsupportedReason
+		}
+		line := strings.Count(source[:offset], "\n") + 1
+		column := offset - strings.LastIndex(source[:offset], "\n")
+		if owner != expected.owner || site.Range.File != "src/main.ts" || site.Range.StartLine != line || site.Range.StartColumn != column || site.Range.EndLine < line || site.EntityID != "suspension:"+key {
+			t.Errorf("site %q: got %+v, owner %q; want owner %q at %d:%d", expected.text, site, owner, expected.owner, line, column)
+		}
+	}
+	for _, full := range []struct{ kind, text string }{
+		{"await", "await top()"},
+		{"await_using", "await using first = await acquire(), second = acquire()"},
+		{"for_await", "for await (await using x of stream()) { await consume(x); }"},
+	} {
+		start := strings.Index(source, full.text)
+		end := start + len(full.text)
+		site := byKey[fmt.Sprintf("src/main.ts::suspension::%s::%d", full.kind, start)]
+		line := strings.Count(source[:end], "\n") + 1
+		column := end - strings.LastIndex(source[:end], "\n")
+		if site.Range.EndLine != line || site.Range.EndColumn != column {
+			t.Errorf("end of %q: got %+v, want %d:%d", full.text, site.Range, line, column)
+		}
+	}
+	var anonymous, zero *Function
+	for i := range snapshot.Functions {
+		fn := &snapshot.Functions[i]
+		if fn.SemanticKey == callback {
+			anonymous = fn
+		}
+		if fn.SemanticKey == "src/main.ts::function::zero" {
+			zero = fn
+		}
+	}
+	if anonymous == nil || !anonymous.SignatureOmitted || anonymous.SignatureUnresolved || len(anonymous.ParameterTypes) != 0 || anonymous.ReturnType != "" {
+		t.Fatalf("anonymous signature was not omitted: %+v", anonymous)
+	}
+	if zero == nil || zero.SignatureOmitted || zero.SignatureUnresolved || len(zero.ParameterTypes) != 0 || zero.ReturnType == "" {
+		t.Fatalf("zero-parameter signature was not collected: %+v", zero)
+	}
+	var void bool
+	for _, typ := range snapshot.Types {
+		if typ.ID == zero.ReturnType && typ.Kind == "void" {
+			void = true
+		}
+		if typ.Name == "OwnershipOnly" {
+			t.Fatalf("anonymous signature added a type root: %+v", typ)
+		}
+	}
+	if !void {
+		t.Fatalf("zero return type is not void: %+v", zero)
 	}
 }

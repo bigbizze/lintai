@@ -8,15 +8,17 @@ export const config = z.object({
 
 export default rule("arch.pure-no-effects")
 	.version(1)
-	.program(({ env }) => dl`
-		Decl reaches_await(Fn).
-		reaches_await(Fn) :- fn_awaits(Fn).
-		reaches_await(Fn) :- call_edge(_, Fn, Callee), reaches_await(Callee).
+	.program(
+		({ env }) => dl`
+		Decl reaches_suspension(Fn).
+		reaches_suspension(Fn) :- fn_suspends(Fn).
+		reaches_suspension(Fn) :- call_edge(Site, Fn, Callee), !site_attribution_unknown(Site), reaches_suspension(Callee).
 
 		Decl violation(Fn, Name).
 		violation(Fn, Name) :-
 			fn(Fn, File, Name), glob(File, ${`${env.pureDir}/**`}),
-			call_edge(_, Fn, Callee), reaches_await(Callee).
-	`)
+			call_edge(Site, Fn, Callee), !site_attribution_unknown(Site), reaches_suspension(Callee).
+	`,
+	)
 	.report("violation")
-	.message((row) => `Pure function ${row.Name} transitively calls effectful code`);
+	.message((row) => `Pure function ${row.Name} calls code with suspension syntax`);

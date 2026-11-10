@@ -69,7 +69,6 @@ type Function struct {
 	Kind           string
 	FilePath       string
 	ContainerName  string
-	ContainsAwait  bool
 	IsExported     bool
 	IsAsync        bool
 	ParameterCount int
@@ -79,9 +78,33 @@ type Function struct {
 	ParameterTypes        []string
 	SignatureObservations []FunctionSignatureObservation
 	SignatureConflict     bool
+	SignatureOmitted      bool
+	SignatureUnresolved   bool
 	Range                 SourceLocation
-	BodyStart             int
-	BodyEnd               int
+}
+
+type SuspensionSite struct {
+	EntityID, SemanticKey, FilePath, Kind  string
+	FunctionSemanticKey, UnsupportedReason string
+	AtModule                               bool
+	Range                                  SourceLocation
+}
+
+type Access struct {
+	EntityID, SemanticKey, FilePath        string
+	AccessPath                             string
+	FunctionSemanticKey, UnsupportedReason string
+	Range                                  SourceLocation
+}
+
+type UnsupportedAttribution struct{ Site, Reason string }
+
+// An escaping callback needs an unresolved site if its collected target is
+// removed by tsconfig filtering. Keep this separate from ordinary references.
+type escapingCallback struct {
+	target string
+	call   CallUnresolved
+	reason string
 }
 
 type FunctionSignatureObservation struct {
@@ -253,9 +276,9 @@ type ExternalCall struct {
 	Range           SourceLocation
 }
 
-// CallUnresolved is a call or new expression whose target the checker does
-// not resolve to a collected function or to an external declaration, for
-// example a call through a callback parameter or an any-typed value.
+// CallUnresolved is a call or new expression without a retained function
+// target or an external declaration, for example a call through a callback
+// parameter or to a function in a filtered-out file.
 type CallUnresolved struct {
 	EntityID        string
 	SemanticKey     string
@@ -313,19 +336,23 @@ type TypeRef struct {
 }
 
 type Snapshot struct {
-	Modules         []Module
-	Functions       []Function
-	ImportEdges     []ImportEdge
-	CallEdges       []CallEdge
-	ExternalCalls   []ExternalCall
-	CallsUnresolved []CallUnresolved
-	ImportsOpaque   []ImportOpaque
-	FnRefs          []FnRef
-	TypeRefs        []TypeRef
-	AmbientUses     []AmbientUse
-	GlobalRefs      []GlobalRef
-	Directives      []ModuleDirective
-	ParseErrors     []ParseError
+	Modules                 []Module
+	Functions               []Function
+	ImportEdges             []ImportEdge
+	CallEdges               []CallEdge
+	ExternalCalls           []ExternalCall
+	CallsUnresolved         []CallUnresolved
+	ImportsOpaque           []ImportOpaque
+	FnRefs                  []FnRef
+	SuspensionSites         []SuspensionSite
+	Accesses                []Access
+	UnsupportedAttributions []UnsupportedAttribution
+	TypeRefs                []TypeRef
+	AmbientUses             []AmbientUse
+	GlobalRefs              []GlobalRef
+	escapingCallbacks       []escapingCallback
+	Directives              []ModuleDirective
+	ParseErrors             []ParseError
 	// Types are the type entities that function parameter and return types
 	// refer to, sorted by ID.
 	Types                       []TypeFact
@@ -370,6 +397,8 @@ type extractor struct {
 	functionKeys                map[string]*Function
 	functionSyms                map[*ast.Symbol]*Function
 	functionCount               map[string]int
+	accessCount                 map[string]int
+	instanceOwners              map[*ast.Node]*functionState
 	importCount                 map[string]int
 	callCount                   map[string]int
 	externalCount               map[string]int
@@ -396,6 +425,10 @@ type extractor struct {
 	unresolved                  []CallUnresolved
 	opaque                      []ImportOpaque
 	refs                        []FnRef
+	escapingCallbacks           []escapingCallback
+	suspensionSites             []SuspensionSite
+	accesses                    []Access
+	unsupportedAttributions     []UnsupportedAttribution
 	typeRefs                    []TypeRef
 	ambientUses                 []AmbientUse
 	globalRefs                  []GlobalRef
@@ -430,7 +463,9 @@ type functionMeta struct {
 }
 
 type functionState struct {
-	record *Function
+	record         *Function
+	reason         string
+	decoratorOwner *functionState
 }
 
 // callSource is the caller of a call: a collected function, or module scope.
@@ -439,6 +474,7 @@ type callSource struct {
 	name   string
 	path   string
 	module bool
+	reason string
 }
 
 // extractTiming records where extraction spends its time. BuildSnapshot
@@ -546,6 +582,7 @@ func BuildSnapshot(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, er
 		keepRetainedSemantics(merged)
 		keepReachableTypes(merged)
 	}
+	merged.escapingCallbacks = nil
 	merged.ConfigFiles = configs.files()
 	merged.Inputs = append(merged.Inputs, configs.inputs()...)
 	merged.Inputs = append(merged.Inputs, trackedFS.snapshotInputs()...)
@@ -561,10 +598,9 @@ func BuildSnapshot(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, er
 	return merged, nil
 }
 
-// keepModuleFiles removes the functions in files that are not modules, and
-// the call edges to them. A group can collect the functions of a file that
-// it imports from another group, and that group can leave the file out.
-// Import edges to such a file stay: the import is in the source.
+// keepModuleFiles removes functions in files that are not modules. A group
+// can collect functions from an imported file that its own group leaves out.
+// Calls to those functions stay unresolved; imports to the file also stay.
 func keepModuleFiles(snap *Snapshot) {
 	modules := make(map[string]struct{}, len(snap.Modules))
 	for _, item := range snap.Modules {
@@ -575,22 +611,78 @@ func keepModuleFiles(snap *Snapshot) {
 		return ok
 	}
 	snap.Functions = slices.DeleteFunc(snap.Functions, func(item Function) bool { return !isModule(item.FilePath) })
-	snap.CallEdges = slices.DeleteFunc(snap.CallEdges, func(item CallEdge) bool { return !isModule(item.ToPath) })
 	functions := make(map[string]struct{}, len(snap.Functions))
 	for _, item := range snap.Functions {
 		functions[item.SemanticKey] = struct{}{}
 	}
-	snap.FnSignatureConflicts = slices.DeleteFunc(snap.FnSignatureConflicts, func(id string) bool {
-		_, ok := functions[id]
-		return !ok
+	hasFunction := func(key string) bool {
+		_, ok := functions[key]
+		return ok
+	}
+	keepSource := func(path, key string, module bool) bool {
+		return isModule(path) && (module || key == "" || hasFunction(key))
+	}
+	removedSites := make(map[string]bool)
+	snap.CallEdges = slices.DeleteFunc(snap.CallEdges, func(item CallEdge) bool {
+		if !keepSource(item.FromPath, item.FromSemanticKey, item.FromModule) {
+			removedSites[item.SemanticKey] = true
+			return true
+		}
+		if isModule(item.ToPath) && hasFunction(item.ToSemanticKey) {
+			return false
+		}
+		snap.CallsUnresolved = append(snap.CallsUnresolved, CallUnresolved{
+			EntityID: item.EntityID, SemanticKey: item.SemanticKey,
+			FromSemanticKey: item.FromSemanticKey, FromModule: item.FromModule,
+			FromPath: item.FromPath, Range: item.Range,
+		})
+		return true
 	})
-	for index := range snap.Declarations {
-		if snap.Declarations[index].Function == "" {
+	snap.ExternalCalls = slices.DeleteFunc(snap.ExternalCalls, func(item ExternalCall) bool {
+		remove := !keepSource(item.FromPath, item.FromSemanticKey, item.FromModule)
+		if remove {
+			removedSites[item.SemanticKey] = true
+		}
+		return remove
+	})
+	snap.CallsUnresolved = slices.DeleteFunc(snap.CallsUnresolved, func(item CallUnresolved) bool {
+		remove := !keepSource(item.FromPath, item.FromSemanticKey, item.FromModule)
+		if remove {
+			removedSites[item.SemanticKey] = true
+		}
+		return remove
+	})
+	snap.FnRefs = slices.DeleteFunc(snap.FnRefs, func(item FnRef) bool {
+		remove := !keepSource(item.FromPath, item.FromSemanticKey, item.FromModule) || !isModule(item.ToPath) || !hasFunction(item.ToSemanticKey)
+		if remove {
+			removedSites[item.SemanticKey] = true
+		}
+		return remove
+	})
+	snap.UnsupportedAttributions = slices.DeleteFunc(snap.UnsupportedAttributions, func(item UnsupportedAttribution) bool {
+		return removedSites[item.Site]
+	})
+	emittedEscapes := make(map[string]bool)
+	for _, item := range snap.escapingCallbacks {
+		call := item.call
+		if !keepSource(call.FromPath, call.FromSemanticKey, call.FromModule) || hasFunction(item.target) || emittedEscapes[call.EntityID] {
 			continue
 		}
-		if _, ok := functions[snap.Declarations[index].Function]; !ok {
+		emittedEscapes[call.EntityID] = true
+		snap.CallsUnresolved = append(snap.CallsUnresolved, call)
+		if item.reason != "" {
+			snap.UnsupportedAttributions = append(snap.UnsupportedAttributions, UnsupportedAttribution{Site: call.SemanticKey, Reason: item.reason})
+		}
+	}
+	snap.escapingCallbacks = nil
+	snap.FnSignatureConflicts = slices.DeleteFunc(snap.FnSignatureConflicts, func(id string) bool {
+		return !hasFunction(id)
+	})
+	for index := range snap.Declarations {
+		if !hasFunction(snap.Declarations[index].Function) {
 			snap.Declarations[index].Function = ""
 		}
+		snap.Declarations[index].FunctionObservations = slices.DeleteFunc(snap.Declarations[index].FunctionObservations, func(id string) bool { return !hasFunction(id) })
 	}
 }
 
@@ -714,6 +806,8 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 		typeTruncated:   make(map[*checker.Type]struct{}),
 		timing:          timing,
 		sourceEntries:   sourceEntries,
+		accessCount:     make(map[string]int),
+		instanceOwners:  make(map[*ast.Node]*functionState),
 	}
 	for _, file := range requestedFiles {
 		ex.requestedFiles[file] = struct{}{}
@@ -786,6 +880,10 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 		CallsUnresolved:             ex.unresolved,
 		ImportsOpaque:               ex.opaque,
 		FnRefs:                      ex.refs,
+		escapingCallbacks:           ex.escapingCallbacks,
+		SuspensionSites:             ex.suspensionSites,
+		Accesses:                    ex.accesses,
+		UnsupportedAttributions:     ex.unsupportedAttributions,
 		TypeRefs:                    ex.typeRefs,
 		AmbientUses:                 ex.ambientUses,
 		GlobalRefs:                  ex.globalRefs,
@@ -1119,6 +1217,10 @@ func mergeSnapshot(into *Snapshot, partial *Snapshot) {
 	into.CallsUnresolved = mergeByEntityID(into.CallsUnresolved, partial.CallsUnresolved, func(item CallUnresolved) string { return item.EntityID })
 	into.ImportsOpaque = mergeByEntityID(into.ImportsOpaque, partial.ImportsOpaque, func(item ImportOpaque) string { return item.EntityID })
 	into.FnRefs = mergeByEntityID(into.FnRefs, partial.FnRefs, func(item FnRef) string { return item.EntityID })
+	into.escapingCallbacks = mergeByEntityID(into.escapingCallbacks, partial.escapingCallbacks, func(item escapingCallback) string { return item.call.EntityID + "\x00" + item.target })
+	into.SuspensionSites = mergeByEntityID(into.SuspensionSites, partial.SuspensionSites, func(item SuspensionSite) string { return item.EntityID })
+	into.Accesses = mergeByEntityID(into.Accesses, partial.Accesses, func(item Access) string { return item.EntityID })
+	into.UnsupportedAttributions = mergeByEntityID(into.UnsupportedAttributions, partial.UnsupportedAttributions, func(item UnsupportedAttribution) string { return item.Site })
 	into.TypeRefs = mergeByEntityID(into.TypeRefs, partial.TypeRefs, func(item TypeRef) string { return item.EntityID })
 	into.AmbientUses = mergeByEntityID(into.AmbientUses, partial.AmbientUses, func(item AmbientUse) string { return item.EntityID })
 	into.GlobalRefs = mergeByEntityID(into.GlobalRefs, partial.GlobalRefs, func(item GlobalRef) string { return item.EntityID })
@@ -1146,6 +1248,8 @@ func sortSnapshot(snapshot *Snapshot) {
 	slices.SortFunc(snapshot.CallsUnresolved, func(a, b CallUnresolved) int { return strings.Compare(a.SemanticKey, b.SemanticKey) })
 	slices.SortFunc(snapshot.ImportsOpaque, func(a, b ImportOpaque) int { return strings.Compare(a.SemanticKey, b.SemanticKey) })
 	slices.SortFunc(snapshot.FnRefs, func(a, b FnRef) int { return strings.Compare(a.SemanticKey, b.SemanticKey) })
+	slices.SortFunc(snapshot.SuspensionSites, func(a, b SuspensionSite) int { return strings.Compare(a.SemanticKey, b.SemanticKey) })
+	slices.SortFunc(snapshot.Accesses, func(a, b Access) int { return strings.Compare(a.SemanticKey, b.SemanticKey) })
 	slices.SortFunc(snapshot.TypeRefs, func(a, b TypeRef) int { return strings.Compare(a.SemanticKey, b.SemanticKey) })
 	slices.SortFunc(snapshot.AmbientUses, func(a, b AmbientUse) int { return strings.Compare(a.SemanticKey, b.SemanticKey) })
 	slices.SortFunc(snapshot.GlobalRefs, func(a, b GlobalRef) int { return strings.Compare(a.SemanticKey, b.SemanticKey) })
@@ -1209,6 +1313,16 @@ func (e *extractor) walkFacts(node *ast.Node, currentFunction *functionState) {
 	if node == nil {
 		return
 	}
+	if node.Kind == ast.KindAwaitExpression {
+		e.collectSuspension(node, "await", currentFunction)
+	} else if node.Kind == ast.KindForOfStatement && node.AsForInOrOfStatement().AwaitModifier != nil {
+		e.collectSuspension(node, "for_await", currentFunction)
+	} else if node.Kind == ast.KindVariableDeclarationList && ast.IsVarAwaitUsing(node) {
+		e.collectSuspension(node, "await_using", currentFunction)
+	}
+	if ast.IsPropertyAccessExpression(node) {
+		e.collectAccess(node, currentFunction)
+	}
 	switch {
 	case ast.IsImportDeclaration(node):
 		e.collectImport(node, node.ModuleSpecifier(), ImportFormStatic, node.ImportClause() != nil && node.ImportClause().IsTypeOnly())
@@ -1251,38 +1365,114 @@ func (e *extractor) walkFacts(node *ast.Node, currentFunction *functionState) {
 		}
 	}
 
-	nextFunction := currentFunction
+	var functionOwner *functionState
 	if ast.IsFunctionLike(node) {
-		if record := e.lookupFunction(node); record != nil {
-			if e.ambientFile != nil && createsFunctionValue(node) {
-				e.recordFnRef(e.callSourceFor(node, currentFunction), record, record.Range)
+		record := e.functionNodes[node]
+		functionOwner = &functionState{record: record, decoratorOwner: currentFunction}
+		if record == nil || node.Body() == nil {
+			functionOwner.reason = "unsupported_context"
+		} else if e.ambientFile != nil && createsFunctionValue(node) {
+			location := e.nodeLocation(ast.GetSourceFileOfNode(node), node)
+			if ast.IsMethodDeclaration(node) || ast.IsGetAccessorDeclaration(node) || ast.IsSetAccessorDeclaration(node) {
+				location = record.Range
 			}
-			nextFunction = &functionState{record: record}
+			e.recordFnRef(e.callSourceFor(node, currentFunction), record, location)
 		}
 	}
-	if ast.IsPropertyDeclaration(node) && !ast.IsStatic(node) && node.Initializer() != nil && ast.IsClassLike(node.Parent) {
-		if constructor := ast.GetFirstConstructorWithBody(node.Parent); constructor != nil {
-			if record := e.lookupFunction(constructor); record != nil {
-				nextFunction = &functionState{record: record}
-			}
-		}
-	}
-
 	node.ForEachChild(func(child *ast.Node) bool {
-		e.walkFacts(child, nextFunction)
+		owner := currentFunction
+		if functionOwner != nil && (child == node.Body() || ast.IsParameterDeclaration(child)) {
+			owner = functionOwner
+		} else if ast.IsParameterDeclaration(node) && ast.IsDecorator(child) && currentFunction != nil {
+			owner = currentFunction.decoratorOwner
+		} else if ast.IsPropertyDeclaration(node) && !ast.IsStatic(node) && child == node.Initializer() {
+			owner = e.instanceInitializerOwner(node)
+		}
+		e.walkFacts(child, owner)
 		return false
 	})
+}
+
+func (e *extractor) instanceInitializerOwner(node *ast.Node) *functionState {
+	if node.Parent == nil || !ast.IsClassLike(node.Parent) {
+		return &functionState{reason: "unsupported_context"}
+	}
+	class := node.Parent
+	if owner, ok := e.instanceOwners[class]; ok {
+		return owner
+	}
+	owner := e.classConstructorOwner(class)
+	e.instanceOwners[class] = owner
+	return owner
+}
+
+func (e *extractor) classConstructorOwner(class *ast.Node) *functionState {
+	var constructor *ast.Node
+	for _, member := range class.Members() {
+		if ast.IsConstructorDeclaration(member) && ast.NodeIsPresent(member.Body()) {
+			if constructor != nil {
+				return &functionState{reason: "unsupported_context"}
+			}
+			constructor = member
+		}
+	}
+	if constructor == nil {
+		return &functionState{reason: "instance_construction"}
+	}
+	if record := e.functionNodes[constructor]; record != nil {
+		return &functionState{record: record}
+	}
+	return &functionState{reason: "unsupported_context"}
+}
+
+func (e *extractor) collectSuspension(node *ast.Node, kind string, owner *functionState) {
+	file := ast.GetSourceFileOfNode(node)
+	if file == nil {
+		return
+	}
+	path := e.relativePath(normalizeSlash(file.FileName().AsString()))
+	offset := scanner.GetTokenPosOfNode(node, file, false)
+	key := fmt.Sprintf("%s::suspension::%s::%d", path, kind, offset)
+	source := e.callSourceFor(node, owner)
+	site := SuspensionSite{EntityID: "suspension:" + key, SemanticKey: key, FilePath: path, Kind: kind, AtModule: source.module, UnsupportedReason: source.reason, Range: e.nodeLocation(file, node)}
+	if !source.module && source.reason == "" {
+		site.FunctionSemanticKey = source.key
+	}
+	e.suspensionSites = append(e.suspensionSites, site)
+}
+
+func (e *extractor) collectAccess(node *ast.Node, owner *functionState) {
+	access := node.AsPropertyAccessExpression()
+	meta := access.Expression
+	if meta == nil || !ast.IsMetaProperty(meta) || meta.AsMetaProperty().KeywordToken != ast.KindImportKeyword || !ast.NodeIsPresent(meta.Name()) || meta.Name().Text() != "meta" ||
+		access.QuestionDotToken != nil || !ast.NodeIsPresent(access.Name()) || !ast.IsIdentifier(access.Name()) {
+		return
+	}
+	file := ast.GetSourceFileOfNode(node)
+	if file == nil {
+		return
+	}
+	source := e.callSourceFor(node, owner)
+	path := "import.meta." + access.Name().Text()
+	baseKey := fmt.Sprintf("%s::access::%s", source.path, path)
+	key := withOrdinal(baseKey, nextOrdinal(e.accessCount, baseKey))
+	entry := Access{EntityID: "access:" + key, SemanticKey: key, FilePath: source.path, AccessPath: path, UnsupportedReason: source.reason, Range: e.nodeLocation(file, node)}
+	if !source.module && source.reason == "" {
+		entry.FunctionSemanticKey = source.key
+	}
+	e.accesses = append(e.accesses, entry)
+}
+
+func (e *extractor) markUnsupported(site, reason string) {
+	if reason != "" {
+		e.unsupportedAttributions = append(e.unsupportedAttributions, UnsupportedAttribution{Site: site, Reason: reason})
+	}
 }
 
 func (e *extractor) collectFunction(node *ast.Node) *Function {
 	if node.Body() == nil {
 		return nil
 	}
-	meta := functionMetaForNode(node)
-	if meta == nil || meta.localName == "" || meta.nameNode == nil {
-		return nil
-	}
-
 	file := ast.GetSourceFileOfNode(node)
 	if file == nil {
 		return nil
@@ -1291,17 +1481,65 @@ func (e *extractor) collectFunction(node *ast.Node) *Function {
 	if _, ok := e.requestedFiles[fileName]; !ok {
 		return nil
 	}
+	meta := functionMetaForNode(node)
+	positional := meta == nil || meta.localName == "" || meta.nameNode == nil
+	if positional {
+		kind := "function"
+		switch {
+		case ast.IsArrowFunction(node):
+			kind = "arrow_function"
+		case ast.IsFunctionExpression(node):
+			kind = "function_expression"
+		case ast.IsMethodDeclaration(node):
+			kind = "method"
+		case ast.IsConstructorDeclaration(node):
+			kind = "constructor"
+		case ast.IsGetAccessorDeclaration(node):
+			kind = "get_accessor"
+		case ast.IsSetAccessorDeclaration(node):
+			kind = "set_accessor"
+		}
+		meta = &functionMeta{localName: fmt.Sprintf("<anonymous@%d>", scanner.GetTokenPosOfNode(node, file, false)), kind: kind, nameNode: node, namingSource: node, lookupNodes: []*ast.Node{node}}
+	}
+	// Keep existing positional identities for wrapped bindings, but use the
+	// binding to decide whether the function is an ownership-only callback.
+	var binding *functionMeta
+	if ast.IsFunctionExpressionOrArrowFunction(node) {
+		expression := node
+		for expression.Parent != nil && ast.IsOuterExpression(expression.Parent, ast.OEKAll) && expression.Parent.Expression() == expression {
+			expression = expression.Parent
+		}
+		if expression != node {
+			binding = expressionFunctionBinding(node, expression, meta.kind)
+			if binding != nil {
+				meta.lookupNodes = append(meta.lookupNodes, binding.lookupNodes[1:]...)
+			}
+		}
+	}
+	omitted := positional && binding == nil
 
-	containerName := containerNameForNode(node, meta.namingSource)
+	containerName := ""
+	if !positional {
+		containerName = containerNameForNode(node, meta.namingSource)
+	}
 	displayName := meta.localName
 	if containerName != "" {
 		displayName = containerName + "." + meta.localName
 	}
 
 	nameRange := e.nodeLocation(file, meta.nameNode)
-	returnType, parameterTypes := e.functionTypes(node)
+	var returnType string
+	var parameterTypes []string
+	var observations []FunctionSignatureObservation
+	if !omitted {
+		returnType, parameterTypes = e.functionTypes(node)
+		observations = []FunctionSignatureObservation{e.functionSignatureObservation(node, parameterTypes, returnType)}
+	}
 	baseKey := fmt.Sprintf("%s::%s::%s", nameRange.File, meta.kind, displayName)
-	semanticKey := withOrdinal(baseKey, nextOrdinal(e.functionCount, baseKey))
+	semanticKey := baseKey
+	if !positional {
+		semanticKey = withOrdinal(baseKey, nextOrdinal(e.functionCount, baseKey))
+	}
 	record := Function{
 		EntityID:              "function:" + semanticKey,
 		SemanticKey:           semanticKey,
@@ -1309,16 +1547,15 @@ func (e *extractor) collectFunction(node *ast.Node) *Function {
 		Kind:                  meta.kind,
 		FilePath:              nameRange.File,
 		ContainerName:         containerName,
-		ContainsAwait:         containsAwait(node),
-		IsExported:            meta.exported || e.isExportedFunction(node, meta),
+		IsExported:            meta.exported || e.isExportedFunction(node, meta) || binding != nil && (binding.exported || e.isExportedFunction(node, binding)),
 		IsAsync:               ast.HasSyntacticModifier(node, ast.ModifierFlagsAsync),
 		ParameterCount:        len(node.Parameters()),
 		ReturnType:            returnType,
 		ParameterTypes:        parameterTypes,
-		SignatureObservations: []FunctionSignatureObservation{e.functionSignatureObservation(node, parameterTypes, returnType)},
+		SignatureObservations: observations,
+		SignatureOmitted:      omitted,
+		SignatureUnresolved:   !omitted && !observations[0].Complete,
 		Range:                 nameRange,
-		BodyStart:             node.Body().Pos(),
-		BodyEnd:               node.Body().End(),
 	}
 	e.functions = append(e.functions, record)
 	stored := &e.functions[len(e.functions)-1]
@@ -1333,12 +1570,6 @@ func (e *extractor) collectFunction(node *ast.Node) *Function {
 		if symbol := lookupNode.Symbol(); symbol != nil {
 			e.functionSyms[symbol] = stored
 		}
-	}
-	if key := nodeKey(node); key != "" {
-		e.functionKeys[key] = stored
-	}
-	if symbol := node.Symbol(); symbol != nil {
-		e.functionSyms[symbol] = stored
 	}
 	return stored
 }
@@ -1446,11 +1677,26 @@ func packageNameFromSpecifier(specifier string) string {
 
 func (e *extractor) callSourceFor(node *ast.Node, currentFunction *functionState) callSource {
 	if currentFunction != nil {
+		if currentFunction.record == nil {
+			path := e.relativePath(normalizeSlash(ast.GetSourceFileOfNode(node).FileName().AsString()))
+			reason := currentFunction.reason
+			if reason == "" {
+				reason = "unsupported_context"
+			}
+			return callSource{path: path, reason: reason}
+		}
 		record := currentFunction.record
 		return callSource{key: record.SemanticKey, name: record.Name, path: record.FilePath}
 	}
 	relative := e.relativePath(normalizeSlash(ast.GetSourceFileOfNode(node).FileName().AsString()))
 	return callSource{key: relative, name: relative, path: relative, module: true}
+}
+
+func (source callSource) siteKey() string {
+	if source.reason != "" {
+		return source.path + "::unsupported"
+	}
+	return source.key
 }
 
 // collectOpaqueImport records an import() or require() whose specifier is
@@ -1494,29 +1740,31 @@ func (e *extractor) collectCall(source callSource, node *ast.Node) {
 	}
 	if target == nil {
 		callee := e.calleeSymbol(node)
+		if accessorSymbol(callee) {
+			e.recordUnresolvedCall(source, location)
+			return
+		}
 		declarationExternal := declaration != nil && e.isExternalDeclaration(declaration)
 		if workspaceClass != nil && declarationExternal {
 			callee = e.externalBaseClass(workspaceClass)
 		}
 		calleeExternal := callee != nil && e.isExternalSymbol(callee)
-		if (declarationExternal && (calleeExternal || !isValueSignature(declaration))) || (declaration == nil && calleeExternal) {
+		if calleeExternal && (declarationExternal || declaration == nil) {
 			if external, ok := e.externalCallFor(source, callee, declaration, location); ok {
 				if e.invokesFunctionValue(node, external) {
 					e.recordUnresolvedCall(source, location)
 					return
 				}
 				e.externalCalls = append(e.externalCalls, external)
+				e.markUnsupported(external.SemanticKey, source.reason)
 				e.collectEscapingCallbacks(source, file, node)
 				return
 			}
 		}
-		if declaration == nil && workspaceClass != nil {
-			return
-		}
 		e.recordUnresolvedCall(source, location)
 		return
 	}
-	baseKey := fmt.Sprintf("%s::calls::%s", source.key, target.SemanticKey)
+	baseKey := fmt.Sprintf("%s::calls::%s", source.siteKey(), target.SemanticKey)
 	semanticKey := withOrdinal(baseKey, nextOrdinal(e.callCount, baseKey))
 	e.calls = append(e.calls, CallEdge{
 		EntityID:        "call:" + semanticKey,
@@ -1530,6 +1778,7 @@ func (e *extractor) collectCall(source callSource, node *ast.Node) {
 		ToPath:          target.FilePath,
 		Range:           location,
 	})
+	e.markUnsupported(semanticKey, source.reason)
 }
 
 // invokesFunctionValue reports f.call(...) or f.apply(...) where f is not a
@@ -1553,7 +1802,7 @@ func (e *extractor) invokesFunctionValue(node *ast.Node, external ExternalCall) 
 	if !ast.IsIdentifier(receiver) && !ast.IsPropertyAccessExpression(receiver) {
 		return true
 	}
-	return e.lookupFunction(e.checker.GetSymbolAtLocation(receiver)) == nil
+	return e.certainBindingTarget(e.checker.GetSymbolAtLocation(receiver)) == nil
 }
 
 // collectEscapingCallbacks records a call_unresolved row for each argument
@@ -1576,8 +1825,23 @@ func (e *extractor) collectEscapingCallbacks(source callSource, file *ast.Source
 			if symbol != nil && symbol.Flags()&ast.SymbolFlagsAlias != 0 {
 				symbol = e.checker.SkipAlias(symbol)
 			}
-			if symbol != nil && (e.lookupFunction(symbol) != nil || e.isExternalSymbol(symbol)) {
-				continue
+			if symbol != nil {
+				if target := e.lookupFunction(symbol); target != nil {
+					if e.certainBindingTarget(symbol) == nil {
+						e.recordUnresolvedCall(source, e.nodeLocation(file, value))
+					} else {
+						key := fmt.Sprintf("%s::escaping_callback::%d", source.siteKey(), scanner.GetTokenPosOfNode(value, file, false))
+						e.escapingCallbacks = append(e.escapingCallbacks, escapingCallback{
+							target: target.SemanticKey,
+							call:   CallUnresolved{EntityID: "call_unresolved:" + key, SemanticKey: key, FromSemanticKey: source.key, FromModule: source.module, FromPath: source.path, Range: e.nodeLocation(file, value)},
+							reason: source.reason,
+						})
+					}
+					continue
+				}
+				if e.isExternalSymbol(symbol) {
+					continue
+				}
 			}
 		}
 		valueType := e.checker.GetTypeAtLocation(value)
@@ -1602,12 +1866,9 @@ func isLiteralValue(node *ast.Node) bool {
 	return ast.IsLiteralExpression(node)
 }
 
-// createsFunctionValue reports a collected function that its definition
-// passes on as a value: an arrow function or function expression in an
-// argument, an array or a return, and a method or function in an object
-// literal. A function that is stored in a variable, a class property or a
-// default export is a value only where its name is used, and matchFnRef
-// records those uses.
+// createsFunctionValue reports inline function values and object-literal
+// methods. A declaration by itself does not create a reference, and a
+// directly invoked expression is represented by its call instead.
 func createsFunctionValue(node *ast.Node) bool {
 	parent := node.Parent
 	if parent == nil {
@@ -1617,14 +1878,14 @@ func createsFunctionValue(node *ast.Node) bool {
 	case ast.IsMethodDeclaration(node), ast.IsGetAccessorDeclaration(node), ast.IsSetAccessorDeclaration(node):
 		return ast.IsObjectLiteralExpression(parent)
 	case ast.IsFunctionExpressionOrArrowFunction(node):
-		return !ast.IsVariableDeclaration(parent) && !ast.IsPropertyDeclaration(parent) && !ast.IsExportAssignment(parent)
+		return !isCallee(node)
 	}
 	return false
 }
 
 // recordFnRef records a reference from source to a collected function.
 func (e *extractor) recordFnRef(source callSource, target *Function, location SourceLocation) {
-	baseKey := fmt.Sprintf("%s::refs::%s", source.key, target.SemanticKey)
+	baseKey := fmt.Sprintf("%s::refs::%s", source.siteKey(), target.SemanticKey)
 	semanticKey := withOrdinal(baseKey, nextOrdinal(e.refCount, baseKey))
 	e.refs = append(e.refs, FnRef{
 		EntityID:        "fn_ref:" + semanticKey,
@@ -1636,12 +1897,13 @@ func (e *extractor) recordFnRef(source callSource, target *Function, location So
 		ToPath:          target.FilePath,
 		Range:           location,
 	})
+	e.markUnsupported(semanticKey, source.reason)
 }
 
 // recordUnresolvedCall records a call whose target is not known: a call
 // through a callback, a function-typed value or an any-typed value.
 func (e *extractor) recordUnresolvedCall(source callSource, location SourceLocation) {
-	baseKey := source.key + "::calls_unresolved"
+	baseKey := source.siteKey() + "::calls_unresolved"
 	semanticKey := withOrdinal(baseKey, nextOrdinal(e.unresolvedCount, baseKey))
 	e.unresolved = append(e.unresolved, CallUnresolved{
 		EntityID:        "call_unresolved:" + semanticKey,
@@ -1651,6 +1913,7 @@ func (e *extractor) recordUnresolvedCall(source callSource, location SourceLocat
 		FromPath:        source.path,
 		Range:           location,
 	})
+	e.markUnsupported(semanticKey, source.reason)
 }
 
 // calleeSymbol returns the symbol of the value that a call calls: the
@@ -1658,7 +1921,7 @@ func (e *extractor) recordUnresolvedCall(source callSource, location SourceLocat
 // the base class of a super() call. It returns nil for other callees, for
 // example an element access or the result of another call.
 func (e *extractor) calleeSymbol(node *ast.Node) *ast.Symbol {
-	callee := ast.SkipParentheses(calleeOf(node))
+	callee := ast.SkipOuterExpressions(calleeOf(node), ast.OEKAll)
 	var symbol *ast.Symbol
 	switch {
 	case callee.Kind == ast.KindSuperKeyword:
@@ -1672,18 +1935,6 @@ func (e *extractor) calleeSymbol(node *ast.Node) *ast.Symbol {
 		symbol = e.checker.SkipAlias(symbol)
 	}
 	return symbol
-}
-
-// isValueSignature reports a signature that a type declares for a function
-// value: a function type, a constructor type, or a call or construct
-// signature of an interface or type literal. A call with such a signature
-// calls a value of that type, and the type does not tell which function.
-func isValueSignature(declaration *ast.Node) bool {
-	switch declaration.Kind {
-	case ast.KindFunctionType, ast.KindConstructorType, ast.KindCallSignature, ast.KindConstructSignature:
-		return true
-	}
-	return false
 }
 
 // isExternalDeclaration reports a declaration outside the workspace source
@@ -1818,7 +2069,7 @@ func (e *extractor) matchFnRef(node *ast.Node, currentFunction *functionState) {
 	}
 	for ancestor := parent; ancestor != nil; ancestor = ancestor.Parent {
 		switch ancestor.Kind {
-		case ast.KindImportDeclaration, ast.KindExportDeclaration, ast.KindImportEqualsDeclaration, ast.KindExportAssignment:
+		case ast.KindImportDeclaration, ast.KindExportDeclaration, ast.KindImportEqualsDeclaration:
 			return
 		}
 		if ast.IsStatement(ancestor) || ast.IsFunctionLike(ancestor) {
@@ -1832,10 +2083,10 @@ func (e *extractor) matchFnRef(node *ast.Node, currentFunction *functionState) {
 	e.recordFnRef(e.callSourceFor(node, currentFunction), target, e.nodeLocation(e.ambientFile.file, node))
 }
 
-// isCallee reports the callee of a call or new expression, through
-// parentheses.
+// isCallee reports the callee of a call, new or tagged template expression,
+// through transparent wrappers.
 func isCallee(node *ast.Node) bool {
-	for node.Parent != nil && node.Parent.Kind == ast.KindParenthesizedExpression {
+	for node.Parent != nil && ast.IsOuterExpression(node.Parent, ast.OEKAll) && node.Parent.Expression() == node {
 		node = node.Parent
 	}
 	parent := node.Parent
@@ -1858,31 +2109,70 @@ func calleeNameNode(node *ast.Node) *ast.Node {
 	return callee
 }
 
-// resolveCallTarget returns the collected function that a call resolves to.
-// When it finds none, it returns the declaration of the checker's resolved
-// signature, if there is one. A call links to a function only through the
-// checker's signature or through the callee's own symbol, never through a
-// name lookup, so seen.add() on a Set does not link to a local add.
+// resolveCallTarget uses the value being called, not the signature alone, to
+// identify a workspace function. A signature can describe a mutable binding
+// or just one branch of a conditional expression.
 func (e *extractor) resolveCallTarget(node *ast.Node) (*Function, *ast.Node) {
+	expression := ast.SkipOuterExpressions(calleeOf(node), ast.OEKAll)
+	if expression != nil && ast.IsFunctionExpressionOrArrowFunction(expression) {
+		if target := e.lookupFunction(expression); target != nil {
+			return target, nil
+		}
+	}
+	// Other expression forms, including conditionals, do not identify one
+	// runtime value even when the checker selects a particular signature.
+	if expression == nil || !(ast.IsIdentifier(expression) || ast.IsPropertyAccessExpression(expression) || expression.Kind == ast.KindSuperKeyword) {
+		return nil, nil
+	}
+	symbol := e.calleeSymbol(node)
+	if symbol != nil && !e.isExternalSymbol(symbol) && mutableFunctionBinding(symbol) {
+		return nil, nil
+	}
+	if target := e.certainBindingTarget(symbol); target != nil {
+		return target, nil
+	}
 	var declaration *ast.Node
 	if signature := e.checker.GetResolvedSignature(node); signature != nil {
 		declaration = signature.Declaration()
-		if target := e.lookupFunction(declaration); target != nil {
-			return target, nil
-		}
-		if declaration != nil {
-			if target := e.lookupFunction(declaration.Symbol()); target != nil {
+		// The signature of a class value identifies its constructor, including
+		// an inherited constructor. Other function-valued signatures do not.
+		if symbol != nil && symbol.Flags()&ast.SymbolFlagsClass != 0 && declaration != nil && ast.IsConstructorDeclaration(declaration) {
+			if target := e.lookupFunction(declaration); target != nil {
 				return target, nil
 			}
 		}
 	}
-	expression := ast.SkipParentheses(calleeOf(node))
-	if expression != nil && (ast.IsIdentifier(expression) || ast.IsPropertyAccessExpression(expression)) {
-		if target := e.lookupFunction(e.checker.GetSymbolAtLocation(expression)); target != nil {
-			return target, nil
+	return nil, declaration
+}
+
+// A variable initializer or writable property does not fix the function
+// value at a later use. Aliases are resolved before making this decision.
+func mutableFunctionBinding(symbol *ast.Symbol) bool {
+	for _, declaration := range symbol.Declarations() {
+		if ast.IsVariableDeclaration(declaration) && !ast.IsVarConst(declaration) || ast.IsPropertyDeclaration(declaration) || ast.IsPropertyAssignment(declaration) {
+			return true
 		}
 	}
-	return nil, declaration
+	return false
+}
+
+func accessorSymbol(symbol *ast.Symbol) bool {
+	return symbol != nil && (symbol.Flags()&ast.SymbolFlagsAccessor != 0 || slices.ContainsFunc(symbol.Declarations(), func(declaration *ast.Node) bool {
+		return ast.IsGetAccessorDeclaration(declaration) || ast.IsSetAccessorDeclaration(declaration)
+	}))
+}
+
+func (e *extractor) certainBindingTarget(symbol *ast.Symbol) *Function {
+	if symbol == nil {
+		return nil
+	}
+	if symbol.Flags()&ast.SymbolFlagsAlias != 0 {
+		symbol = e.checker.SkipAlias(symbol)
+	}
+	if symbol == nil || accessorSymbol(symbol) || mutableFunctionBinding(symbol) {
+		return nil
+	}
+	return e.lookupFunction(symbol)
 }
 
 // externalCallFor returns the external call for a call of callee, a symbol
@@ -1901,7 +2191,7 @@ func (e *extractor) externalCallFor(source callSource, callee *ast.Symbol, decl 
 	if moduleName == "" || name == "" {
 		return ExternalCall{}, false
 	}
-	baseKey := fmt.Sprintf("%s::external::%s::%s", source.key, moduleName, name)
+	baseKey := fmt.Sprintf("%s::external::%s::%s", source.siteKey(), moduleName, name)
 	semanticKey := withOrdinal(baseKey, nextOrdinal(e.externalCount, baseKey))
 	return ExternalCall{
 		EntityID:        "external_call:" + semanticKey,
@@ -2407,33 +2697,6 @@ func (e *extractor) relativePath(fileName string) string {
 	return filepath.ToSlash(relative)
 }
 
-func containsAwait(node *ast.Node) bool {
-	body := node.Body()
-	if body == nil {
-		return false
-	}
-	found := false
-	var visit func(current *ast.Node, root bool)
-	visit = func(current *ast.Node, root bool) {
-		if current == nil || found {
-			return
-		}
-		if !root && ast.IsFunctionLike(current) {
-			return
-		}
-		if current.Kind == ast.KindAwaitExpression {
-			found = true
-			return
-		}
-		current.ForEachChild(func(child *ast.Node) bool {
-			visit(child, false)
-			return found
-		})
-	}
-	visit(body, true)
-	return found
-}
-
 func functionMetaForNode(node *ast.Node) *functionMeta {
 	switch {
 	case ast.IsFunctionDeclaration(node):
@@ -2507,49 +2770,8 @@ func functionMetaForNode(node *ast.Node) *functionMeta {
 }
 
 func expressionFunctionMeta(node *ast.Node, kind string) *functionMeta {
-	parent := node.Parent
-	if parent == nil {
-		return nil
-	}
-	if ast.IsVariableDeclaration(parent) && parent.Name() != nil {
-		nameNode := parent.Name().AsNode()
-		return &functionMeta{
-			localName:    parent.Name().Text(),
-			kind:         kind,
-			nameNode:     nameNode,
-			namingSource: parent,
-			lookupNodes:  []*ast.Node{node, parent, nameNode},
-		}
-	}
-	if ast.IsPropertyAssignment(parent) && parent.Name() != nil {
-		nameNode := parent.Name().AsNode()
-		return &functionMeta{
-			localName:    propertyNameText(nameNode),
-			kind:         kind,
-			nameNode:     nameNode,
-			namingSource: parent,
-			lookupNodes:  []*ast.Node{node, parent, nameNode},
-		}
-	}
-	if ast.IsPropertyDeclaration(parent) && parent.Initializer() == node && parent.Name() != nil {
-		nameNode := parent.Name().AsNode()
-		return &functionMeta{
-			localName:    propertyNameText(nameNode),
-			kind:         kind,
-			nameNode:     nameNode,
-			namingSource: parent,
-			lookupNodes:  []*ast.Node{node, parent, nameNode},
-		}
-	}
-	if ast.IsExportAssignment(parent) && !parent.AsExportAssignment().IsExportEquals && node.Name() == nil {
-		return &functionMeta{
-			localName:    "default",
-			kind:         kind,
-			nameNode:     node,
-			namingSource: parent,
-			lookupNodes:  []*ast.Node{node, parent},
-			exported:     true,
-		}
+	if binding := expressionFunctionBinding(node, node, kind); binding != nil {
+		return binding
 	}
 	name := node.Name()
 	if name == nil {
@@ -2563,6 +2785,54 @@ func expressionFunctionMeta(node *ast.Node, kind string) *functionMeta {
 		namingSource: node,
 		lookupNodes:  []*ast.Node{node, nameNode},
 	}
+}
+
+func expressionFunctionBinding(node, expression *ast.Node, kind string) *functionMeta {
+	parent := expression.Parent
+	if parent == nil {
+		return nil
+	}
+	if ast.IsVariableDeclaration(parent) && parent.Initializer() == expression && parent.Name() != nil && (expression == node || ast.IsIdentifier(parent.Name())) {
+		nameNode := parent.Name().AsNode()
+		return &functionMeta{
+			localName:    parent.Name().Text(),
+			kind:         kind,
+			nameNode:     nameNode,
+			namingSource: parent,
+			lookupNodes:  []*ast.Node{node, parent, nameNode},
+		}
+	}
+	if ast.IsPropertyAssignment(parent) && parent.Initializer() == expression && parent.Name() != nil {
+		nameNode := parent.Name().AsNode()
+		return &functionMeta{
+			localName:    propertyNameText(nameNode),
+			kind:         kind,
+			nameNode:     nameNode,
+			namingSource: parent,
+			lookupNodes:  []*ast.Node{node, parent, nameNode},
+		}
+	}
+	if ast.IsPropertyDeclaration(parent) && parent.Initializer() == expression && parent.Name() != nil {
+		nameNode := parent.Name().AsNode()
+		return &functionMeta{
+			localName:    propertyNameText(nameNode),
+			kind:         kind,
+			nameNode:     nameNode,
+			namingSource: parent,
+			lookupNodes:  []*ast.Node{node, parent, nameNode},
+		}
+	}
+	if ast.IsExportAssignment(parent) && parent.AsExportAssignment().Expression == expression && !parent.AsExportAssignment().IsExportEquals && (node.Name() == nil || expression != node) {
+		return &functionMeta{
+			localName:    "default",
+			kind:         kind,
+			nameNode:     node,
+			namingSource: parent,
+			lookupNodes:  []*ast.Node{node, parent},
+			exported:     true,
+		}
+	}
+	return nil
 }
 
 func containerNameForNode(node *ast.Node, namingSource *ast.Node) string {

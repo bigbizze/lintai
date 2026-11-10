@@ -56,10 +56,13 @@ func TestFixtureRulesReportPlantedViolations(t *testing.T) {
 		"arch.layers violation src/pure/helper.ts:1",
 		"arch.pure-no-service-imports violation src/pure/helper.ts:1",
 		"arch.pure-no-effects violation src/pure/helper.ts:3",
+		"arch.pure-no-effects-strict reaches_effect src/pure/helper.ts:3",
 		"arch.pure-no-effects-strict leaves_analysis src/pure/launder.ts:1",
 		"arch.pure-no-effects violation src/pure/math.ts:3",
-		"arch.ambient clock_in_pure src/pure/time.ts:1",
+		"arch.pure-no-effects-strict reaches_effect src/pure/math.ts:3",
 		"arch.pure-no-effects-strict reaches_effect src/pure/time.ts:1",
+		"arch.ambient clock_in_pure src/pure/time.ts:2",
+		"arch.pure-no-effects-strict reaches_effect src/pure/time.ts:2",
 		"arch.pure-no-effects-strict leaves_analysis src/pure/wired.ts:3",
 		"arch.server-only missing_marker src/server/config.ts:1",
 		"arch.ambient env_outside_config src/server/handler.ts:5",
@@ -70,14 +73,22 @@ func TestFixtureRulesReportPlantedViolations(t *testing.T) {
 		t.Fatalf("planted violations differ:\ngot:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 
-	for _, item := range items {
-		if item.RuleID != "arch.pure-no-effects" || item.SourceLocation.File != "src/pure/math.ts" {
-			continue
-		}
-		last := item.Explanation[len(item.Explanation)-1]
-		if !strings.HasPrefix(last, "fn_awaits(") {
-			t.Fatalf("expected the explanation to end with a base fact, got %q in %q", last, item.Explanation)
-		}
+	const source = `async function ordinary() { await task(); }
+async function iteration() { for await (const x of xs) {} }
+async function disposing() { await using x = acquire(); }
+function parent() { return async () => { await task(); }; }
+`
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "source.ts"), []byte(source), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var output bytes.Buffer
+	if err := run(context.Background(), []string{"facts", "--workspace-root", workspace, "--relation", "fn_awaits"}, &output); err != nil {
+		t.Fatal(err)
+	}
+	wantFacts := fmt.Sprintf("fn_awaits(\"source.ts::arrow_function::<anonymous@%d>\").\nfn_awaits(\"source.ts::function::ordinary\").\n", strings.Index(source, "async () =>"))
+	if output.String() != wantFacts {
+		t.Fatalf("ordinary-await CLI facts = %q, want %q", output.String(), wantFacts)
 	}
 }
 

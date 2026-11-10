@@ -16,16 +16,24 @@ type Function struct {
 	Kind                  string
 	FilePath              string
 	ContainerName         string
-	ContainsAwait         bool
 	IsExported            bool
 	IsAsync               bool
 	ParameterCount        int
 	SignatureObservations []FunctionSignatureObservation
 	SignatureConflict     bool
+	SignatureOmitted      bool
+	SignatureUnresolved   bool
 	Range                 diagnostics.SourceLocation
-	BodyStart             int
-	BodyEnd               int
 }
+
+type SuspensionSite struct {
+	EntityID, SemanticKey, FilePath, Kind  string
+	FunctionSemanticKey, UnsupportedReason string
+	AtModule                               bool
+	Range                                  diagnostics.SourceLocation
+}
+
+type UnsupportedAttribution struct{ Site, Reason string }
 
 type FunctionSignatureObservation struct {
 	ParameterTypes []string
@@ -225,15 +233,15 @@ type TypeRef struct {
 }
 
 type Access struct {
-	EntityID    string
-	SemanticKey string
-	Root        string
-	AccessPath  string
-	Origin      string
-	FilePath    string
-	Range       diagnostics.SourceLocation
-	Start       int
-	End         int
+	EntityID            string
+	SemanticKey         string
+	Root                string
+	AccessPath          string
+	Origin              string
+	FilePath            string
+	Range               diagnostics.SourceLocation
+	FunctionSemanticKey string
+	UnsupportedReason   string
 }
 
 type AmbientUse struct {
@@ -271,6 +279,8 @@ type Snapshot struct {
 	CallsUnresolved             []CallUnresolved
 	ImportsOpaque               []ImportOpaque
 	FnRefs                      []FnRef
+	SuspensionSites             []SuspensionSite
+	UnsupportedAttributions     []UnsupportedAttribution
 	TypeRefs                    []TypeRef
 	Accesses                    []Access
 	AmbientSources              []AmbientSource

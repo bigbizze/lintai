@@ -128,8 +128,8 @@ export_via("export:ddea621a12c613a938de298d13658272","src/core/leaf.ts::export-s
 export_via("export:e96ab579e8417c52f511576eddc4bd81","src/server/wire-clock.ts::export-site::103").
 export_via("export:ed71261aedde6a199e8ca4b3a8ba17eb","src/services/clock.ts::export-site::0").
 export_via("export:f8b5161a533abe6d59b8742154237396","src/core/plugin-loader.ts::export-site::0").
+external_call("src/pure/time.ts::arrow_function::<anonymous@59>::external::lib::DateConstructor.now","src/pure/time.ts::arrow_function::<anonymous@59>","lib","DateConstructor.now").
 external_call("src/pure/time.ts::function::stamp::external::lib::Array.map","src/pure/time.ts::function::stamp","lib","Array.map").
-external_call("src/pure/time.ts::function::stamp::external::lib::DateConstructor.now","src/pure/time.ts::function::stamp","lib","DateConstructor.now").
 external_call("src/services/clock.ts::function::now::external::lib::DateConstructor.now","src/services/clock.ts::function::now","lib","DateConstructor.now").
 external_call("src/services/fetch-data.ts::function::fetchData::external::lib::PromiseConstructor.resolve","src/services/fetch-data.ts::function::fetchData","lib","PromiseConstructor.resolve").
 fn("src/core/entry.ts::arrow_function::entry","src/core/entry.ts","entry").
@@ -139,6 +139,7 @@ fn("src/core/plugin-loader.ts::function::loadPlugin","src/core/plugin-loader.ts"
 fn("src/pure/helper.ts::function::loadValue","src/pure/helper.ts","loadValue").
 fn("src/pure/launder.ts::function::launder","src/pure/launder.ts","launder").
 fn("src/pure/math.ts::function::compute","src/pure/math.ts","compute").
+fn("src/pure/time.ts::arrow_function::<anonymous@59>","src/pure/time.ts","<anonymous@59>").
 fn("src/pure/time.ts::function::stamp","src/pure/time.ts","stamp").
 fn("src/pure/wired.ts::function::wired","src/pure/wired.ts","wired").
 fn("src/server/config.ts::function::mode","src/server/config.ts","mode").
@@ -168,6 +169,7 @@ fn_kind("src/core/plugin-loader.ts::function::loadPlugin","function").
 fn_kind("src/pure/helper.ts::function::loadValue","function").
 fn_kind("src/pure/launder.ts::function::launder","function").
 fn_kind("src/pure/math.ts::function::compute","function").
+fn_kind("src/pure/time.ts::arrow_function::<anonymous@59>","arrow_function").
 fn_kind("src/pure/time.ts::function::stamp","function").
 fn_kind("src/pure/wired.ts::function::wired","function").
 fn_kind("src/server/config.ts::function::mode","function").
@@ -180,6 +182,10 @@ fn_param("src/pure/time.ts::function::stamp",0,"type:a3009fc8b78ec784f0fe3d794a0
 fn_param("src/pure/wired.ts::function::wired",0,"type:195f88f8680404ae9582c9c03b9d6465").
 fn_param("src/server/handler.ts::function::handle",0,"type:f2331b4aae7f44eefa2fe40c4a3cb92e").
 fn_param("src/server/handler.ts::function::handle",1,"type:b3f484d711607b5ad711619b9beaf090").
+fn_ref("src/core/entry.ts::refs::src/core/entry.ts::arrow_function::entry","src/core/entry.ts","src/core/entry.ts::arrow_function::entry").
+fn_ref("src/core/leaf.ts::refs::src/core/leaf.ts::arrow_function::leaf","src/core/leaf.ts","src/core/leaf.ts::arrow_function::leaf").
+fn_ref("src/core/mid.ts::refs::src/core/mid.ts::arrow_function::mid","src/core/mid.ts","src/core/mid.ts::arrow_function::mid").
+fn_ref("src/pure/time.ts::function::stamp::refs::src/pure/time.ts::arrow_function::<anonymous@59>","src/pure/time.ts::function::stamp","src/pure/time.ts::arrow_function::<anonymous@59>").
 fn_ref("src/server/wire-clock.ts::refs::src/services/clock.ts::function::now","src/server/wire-clock.ts","src/services/clock.ts::function::now").
 fn_returns("src/core/entry.ts::arrow_function::entry","type:59c1268049bd1f7fb3f622379b2e4ec1").
 fn_returns("src/core/leaf.ts::arrow_function::leaf","type:59c1268049bd1f7fb3f622379b2e4ec1").
@@ -194,6 +200,7 @@ fn_returns("src/server/config.ts::function::mode","type:f2331b4aae7f44eefa2fe40c
 fn_returns("src/server/handler.ts::function::handle","type:930e1f521e07c4ede1de5f8e78c0d6c1").
 fn_returns("src/services/clock.ts::function::now","type:1fe05b06f5bf66e5895ee783cd676780").
 fn_returns("src/services/fetch-data.ts::function::fetchData","type:59c1268049bd1f7fb3f622379b2e4ec1").
+fn_signature_omitted("src/pure/time.ts::arrow_function::<anonymous@59>").
 global_ref("src/pure/time.ts::global::Date","Date","src/pure/time.ts").
 global_ref("src/services/clock.ts::global::Date","Date","src/services/clock.ts").
 global_ref("src/services/fetch-data.ts::global::Promise","Promise","src/services/fetch-data.ts").
@@ -283,16 +290,19 @@ location("src/core/entry.ts::arrow_function::entry","src/core/entry.ts",3,14,3,1
 location("src/core/entry.ts::arrow_function::entry::calls::src/core/mid.ts::arrow_function::mid","src/core/entry.ts",3,28,3,31).
 location("src/core/entry.ts::export-site::30","src/core/entry.ts",3,1,3,34).
 location("src/core/entry.ts::import::./mid","src/core/entry.ts",1,21,1,28).
+location("src/core/entry.ts::refs::src/core/entry.ts::arrow_function::entry","src/core/entry.ts",3,22,3,33).
 location("src/core/leaf.ts","src/core/leaf.ts",1,1,4,1).
 location("src/core/leaf.ts::arrow_function::leaf","src/core/leaf.ts",3,14,3,18).
 location("src/core/leaf.ts::arrow_function::leaf::calls::src/services/fetch-data.ts::function::fetchData","src/core/leaf.ts",3,27,3,36).
 location("src/core/leaf.ts::export-site::53","src/core/leaf.ts",3,1,3,39).
 location("src/core/leaf.ts::import::../services/fetch-data","src/core/leaf.ts",1,27,1,51).
+location("src/core/leaf.ts::refs::src/core/leaf.ts::arrow_function::leaf","src/core/leaf.ts",3,21,3,38).
 location("src/core/mid.ts","src/core/mid.ts",1,1,4,1).
 location("src/core/mid.ts::arrow_function::mid","src/core/mid.ts",3,14,3,17).
 location("src/core/mid.ts::arrow_function::mid::calls::src/core/leaf.ts::arrow_function::leaf","src/core/mid.ts",3,26,3,30).
 location("src/core/mid.ts::export-site::32","src/core/mid.ts",3,1,3,33).
 location("src/core/mid.ts::import::./leaf","src/core/mid.ts",1,22,1,30).
+location("src/core/mid.ts::refs::src/core/mid.ts::arrow_function::mid","src/core/mid.ts",3,20,3,32).
 location("src/core/plugin-loader.ts","src/core/plugin-loader.ts",1,1,5,1).
 location("src/core/plugin-loader.ts::export-site::0","src/core/plugin-loader.ts",1,1,4,2).
 location("src/core/plugin-loader.ts::function::loadPlugin","src/core/plugin-loader.ts",1,23,1,33).
@@ -314,10 +324,12 @@ location("src/pure/math.ts::function::compute::calls::src/pure/helper.ts::functi
 location("src/pure/math.ts::import::./helper","src/pure/math.ts",1,27,1,37).
 location("src/pure/time.ts","src/pure/time.ts",1,1,4,1).
 location("src/pure/time.ts::ambient::clock.now::*","src/pure/time.ts",2,25,2,33).
+location("src/pure/time.ts::arrow_function::<anonymous@59>","src/pure/time.ts",2,19,2,35).
+location("src/pure/time.ts::arrow_function::<anonymous@59>::external::lib::DateConstructor.now","src/pure/time.ts",2,30,2,33).
 location("src/pure/time.ts::export-site::0","src/pure/time.ts",1,1,3,2).
 location("src/pure/time.ts::function::stamp","src/pure/time.ts",1,17,1,22).
 location("src/pure/time.ts::function::stamp::external::lib::Array.map","src/pure/time.ts",2,15,2,18).
-location("src/pure/time.ts::function::stamp::external::lib::DateConstructor.now","src/pure/time.ts",2,30,2,33).
+location("src/pure/time.ts::function::stamp::refs::src/pure/time.ts::arrow_function::<anonymous@59>","src/pure/time.ts",2,19,2,35).
 location("src/pure/time.ts::global::Date","src/pure/time.ts",2,25,2,29).
 location("src/pure/wired.ts","src/pure/wired.ts",1,1,6,1).
 location("src/pure/wired.ts::export-site::38","src/pure/wired.ts",3,1,5,2).
@@ -363,6 +375,7 @@ location("src/ui/broken.ts::parse_error","src/ui/broken.ts",1,23,1,24).
 location("src/ui/label.ts","src/ui/label.ts",1,1,4,1).
 location("src/ui/label.ts::directive::use client","src/ui/label.ts",1,1,1,13).
 location("src/ui/label.ts::export-site::15","src/ui/label.ts",3,1,3,27).
+location("suspension:src/services/fetch-data.ts::suspension::await::37","src/services/fetch-data.ts",2,2,2,26).
 location("type:b3f484d711607b5ad711619b9beaf090","src/server/config.ts",1,13,1,19).
 meta_access("src/server/config.ts::access::import.meta.env","src/server/config.ts","import.meta.env").
 module("src/core/entry.ts").
@@ -407,10 +420,11 @@ site_in_fn("src/core/mid.ts::arrow_function::mid::calls::src/core/leaf.ts::arrow
 site_in_fn("src/pure/helper.ts::function::loadValue::calls::src/services/fetch-data.ts::function::fetchData","src/pure/helper.ts::function::loadValue").
 site_in_fn("src/pure/launder.ts::function::launder::calls_unresolved","src/pure/launder.ts::function::launder").
 site_in_fn("src/pure/math.ts::function::compute::calls::src/pure/helper.ts::function::loadValue","src/pure/math.ts::function::compute").
-site_in_fn("src/pure/time.ts::ambient::clock.now::*","src/pure/time.ts::function::stamp").
+site_in_fn("src/pure/time.ts::ambient::clock.now::*","src/pure/time.ts::arrow_function::<anonymous@59>").
+site_in_fn("src/pure/time.ts::arrow_function::<anonymous@59>::external::lib::DateConstructor.now","src/pure/time.ts::arrow_function::<anonymous@59>").
 site_in_fn("src/pure/time.ts::function::stamp::external::lib::Array.map","src/pure/time.ts::function::stamp").
-site_in_fn("src/pure/time.ts::function::stamp::external::lib::DateConstructor.now","src/pure/time.ts::function::stamp").
-site_in_fn("src/pure/time.ts::global::Date","src/pure/time.ts::function::stamp").
+site_in_fn("src/pure/time.ts::function::stamp::refs::src/pure/time.ts::arrow_function::<anonymous@59>","src/pure/time.ts::function::stamp").
+site_in_fn("src/pure/time.ts::global::Date","src/pure/time.ts::arrow_function::<anonymous@59>").
 site_in_fn("src/pure/wired.ts::function::wired::calls::src/pure/launder.ts::function::launder","src/pure/wired.ts::function::wired").
 site_in_fn("src/server/config.ts::access::import.meta.env","src/server/config.ts::function::mode").
 site_in_fn("src/server/handler.ts::ambient::env.read::*","src/server/handler.ts::function::handle").
@@ -420,6 +434,8 @@ site_in_fn("src/services/clock.ts::function::now::external::lib::DateConstructor
 site_in_fn("src/services/clock.ts::global::Date","src/services/clock.ts::function::now").
 site_in_fn("src/services/fetch-data.ts::function::fetchData::external::lib::PromiseConstructor.resolve","src/services/fetch-data.ts::function::fetchData").
 site_in_fn("src/services/fetch-data.ts::global::Promise","src/services/fetch-data.ts::function::fetchData").
+suspension_in_fn("suspension:src/services/fetch-data.ts::suspension::await::37","src/services/fetch-data.ts::function::fetchData").
+suspension_site("suspension:src/services/fetch-data.ts::suspension::await::37","src/services/fetch-data.ts",/await).
 type_arg("type:46ce1842e7ab1f54f46b2421cd0ab876",0,"type:1fe05b06f5bf66e5895ee783cd676780").
 type_arg("type:59c1268049bd1f7fb3f622379b2e4ec1",0,"type:1fe05b06f5bf66e5895ee783cd676780").
 type_arg("type:930e1f521e07c4ede1de5f8e78c0d6c1",0,"type:57022d9907760d4a8337771c02dd3e58").

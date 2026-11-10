@@ -14,6 +14,12 @@ export type FactValue = string | number | Name;
 
 export type Facts = Record<string, FactValue[][]>;
 
+/** Kinds in `suspension_site`. Pass these strings to `dl.name`. */
+export type SuspensionKind = "await" | "for_await" | "await_using";
+
+/** Reasons in `site_attribution_unsupported`. Pass these strings to `dl.name`. */
+export type SiteAttributionUnsupportedReason = "instance_construction" | "unsupported_context";
+
 export type RowValue = string | number;
 
 export type Row = Record<string, RowValue>;

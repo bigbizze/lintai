@@ -409,11 +409,14 @@ func (e *extractor) matchGlobalRef(node *ast.Node, currentFunction *functionStat
 		}
 	}
 	functionKey := ""
-	if currentFunction != nil {
+	if currentFunction != nil && currentFunction.record != nil {
 		functionKey = currentFunction.record.SemanticKey
 	}
 	baseKey := fmt.Sprintf("%s::global::%s", state.relative, name)
 	semanticKey := withOrdinal(baseKey, nextOrdinal(e.globalRefCount, baseKey))
+	if currentFunction != nil {
+		e.markUnsupported(semanticKey, currentFunction.reason)
+	}
 	start := scanner.GetTokenPosOfNode(node, state.file, false)
 	e.globalRefs = append(e.globalRefs, GlobalRef{
 		EntityID:            "global:" + semanticKey,
@@ -483,7 +486,7 @@ func (e *extractor) recordAmbient(state *ambientFileState, matcher *AmbientMatch
 		sites = []ambientSite{{node: full, write: isWriteTarget(full)}}
 	}
 	functionKey := ""
-	if currentFunction != nil {
+	if currentFunction != nil && currentFunction.record != nil {
 		functionKey = currentFunction.record.SemanticKey
 	}
 	for _, site := range sites {
@@ -493,6 +496,9 @@ func (e *extractor) recordAmbient(state *ambientFileState, matcher *AmbientMatch
 		}
 		baseKey := fmt.Sprintf("%s::ambient::%s.%s::%s", state.relative, matcher.Source, matcher.Capability, keyText)
 		semanticKey := withOrdinal(baseKey, nextOrdinal(e.ambientCount, baseKey))
+		if currentFunction != nil {
+			e.markUnsupported(semanticKey, currentFunction.reason)
+		}
 		start := scanner.GetTokenPosOfNode(site.node, state.file, false)
 		e.ambientUses = append(e.ambientUses, AmbientUse{
 			EntityID:            "ambient:" + semanticKey,

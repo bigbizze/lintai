@@ -3,14 +3,19 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
 
+	"github.com/bigbizze/lintai/backend"
 	"github.com/bigbizze/lintai/backend/typescript"
 	"github.com/bigbizze/lintai/diagnostics"
+	"github.com/bigbizze/lintai/facts"
+	"github.com/bigbizze/lintai/runtime"
 )
 
 func TestRuleErrorPhases(t *testing.T) {
@@ -326,11 +331,16 @@ func TestStructuralTypeRules(t *testing.T) {
 	writeTestFile(t, workspaceRoot, "src/core/result.ts", "export type ActionResult<T> = { ok: true; value: T } | { ok: false; error: string };\n")
 	writeTestFile(t, workspaceRoot, "src/legacy/types.ts", "export type ActionResult<T> = { done: T };\n")
 	writeTestFile(t, workspaceRoot, "src/infra/db.ts", "export class Db { query(): number { return 1; } }\n")
-	writeTestFile(t, workspaceRoot, "src/actions/save.ts", `import type { ActionResult } from "../core/result";
+	const actionSource = `import type { ActionResult } from "../core/result";
 import type { ActionResult as Legacy } from "../legacy/types";
 export async function save(): Promise<ActionResult<number>> { return { ok: true, value: 1 }; }
 export async function legacy(): Promise<Legacy<number>> { return { done: 1 }; }
-`)
+export const wrongDirect = async () => 1;
+export const wrongWrapped = (async () => 2);
+export const wrongChecked = (async () => 3) satisfies () => Promise<number>;
+export default (async () => 4);
+`
+	writeTestFile(t, workspaceRoot, "src/actions/save.ts", actionSource)
 	writeTestFile(t, workspaceRoot, "src/domain/user.ts", `import type { Db } from "../infra/db";
 export interface Hidden { forbidden: Db }
 export function hidden(value: Hidden): void {}
@@ -400,8 +410,16 @@ export default rule("t.awaited").version(1)
 	for _, messages := range byRule {
 		sort.Strings(messages)
 	}
-	if got := byRule["arch.actions-return-action-result"]; len(got) != 1 || got[0] != "legacy must return Promise<ActionResult<T>>, but returns Promise<Legacy<number>>" {
-		t.Fatalf("actions rule: %+v", items)
+	wrappedName := fmt.Sprintf("<anonymous@%d>", strings.Index(actionSource, "async () => 2"))
+	checkedName := fmt.Sprintf("<anonymous@%d>", strings.Index(actionSource, "async () => 3"))
+	defaultName := fmt.Sprintf("<anonymous@%d>", strings.Index(actionSource, "async () => 4"))
+	wantActions := []string{
+		"legacy must return Promise<ActionResult<T>>, but returns Promise<Legacy<number>>", "wrongDirect must return Promise<ActionResult<T>>, but returns Promise<number>",
+		wrappedName + " must return Promise<ActionResult<T>>, but returns Promise<number>", checkedName + " must return Promise<ActionResult<T>>, but returns Promise<number>", defaultName + " must return Promise<ActionResult<T>>, but returns Promise<number>",
+	}
+	sort.Strings(wantActions)
+	if got := byRule["arch.actions-return-action-result"]; !slices.Equal(got, wantActions) {
+		t.Fatalf("actions rule: got %v, want %v", got, wantActions)
 	}
 	// type_contains does not see the Db in a type parameter constraint,
 	// indexed access type, or omitted interface members, so the plain rule
@@ -415,7 +433,8 @@ export default rule("t.awaited").version(1)
 		t.Fatalf("strict domain rule: %v", got)
 	}
 	// fn_returns_awaited unwraps one lib Promise, not a union that has one.
-	want := []string{"Db.query:number", "constrained:void", "hidden:void", "legacy:Legacy<number>", "load:number", "maybe:Promise<number> | undefined", "picked:Db[K]", "plain:number", "save:ActionResult<number>", "sync:number"}
+	want := []string{"Db.query:number", "constrained:void", "hidden:void", "legacy:Legacy<number>", "load:number", "maybe:Promise<number> | undefined", "picked:Db[K]", "plain:number", "save:ActionResult<number>", "sync:number", "wrongDirect:number", wrappedName + ":number", checkedName + ":number", defaultName + ":number"}
+	sort.Strings(want)
 	if got := byRule["t.awaited"]; strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("fn_returns_awaited: got %v, want %v", got, want)
 	}
@@ -504,6 +523,57 @@ export async function ambiguous(value: string | undefined): Promise<ActionResult
 	}
 }
 
+func TestStrictRulesTreatUncertainCalleesAsIndeterminate(t *testing.T) {
+	repoRoot, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	writeTestFile(t, root, "src/pure/values.ts", `let callback = (() => 0);
+export function replace() { callback = () => Date.now(); }
+export function invoke() { return callback(); }
+export function escapeMutable() { return [1].map(callback); }
+export function applyMutable() { return callback.call(undefined); }
+export function inferred(callback = Date.now) { return callback(); }
+export function named(flag: boolean) { return (flag ? function first() { return 0; } : function second() { return 1; })(); }
+export function unnamed(flag: boolean) { return (flag ? () => 0 : () => 1)(); }
+export function literal() { return ((() => 0))(); }
+const stable = (() => 0);
+export function bound() { return (stable as () => number)(); }
+`)
+	writeTestFile(t, root, "lintai-rules/strict.ts", `import { dl, rule } from "@lintai/sdk";
+export default rule("test.strict").version(1)
+  .program(dl`+"`"+`
+    Decl selected(Fn, Name).
+    selected(Fn, Name) :- fn(Fn, _, Name), fn_exported(Fn), Name != "replace".
+    Decl ambient(Fn, Name).
+    ambient(Fn, Name) :- selected(Fn, Name), fn_reaches_ambient_strict(Fn, _).
+    Decl indeterminate(Fn, Name).
+    indeterminate(Fn, Name) :- selected(Fn, Name), fn_reaches_unresolved(Fn).
+  `+"`"+`)
+  .report("ambient", "indeterminate").message((row, ctx) => `+"`${row.Name}:${ctx.assertion_id}`"+`);
+`)
+	items, err := New(typescript.New()).Run(context.Background(), Options{
+		RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: root,
+		RuleGlobs: []string{"lintai-rules/*.ts"}, Files: backend.FileScopeWalk,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, item := range items {
+		if item.RuleID != "test.strict" {
+			t.Fatalf("unexpected diagnostic: %+v", item)
+		}
+		got = append(got, item.Message)
+	}
+	sort.Strings(got)
+	want := []string{"applyMutable:indeterminate", "escapeMutable:indeterminate", "inferred:ambient", "inferred:indeterminate", "invoke:indeterminate", "named:indeterminate", "unnamed:indeterminate"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("strict rule outcomes = %v, want %v", got, want)
+	}
+}
+
 func TestExportedInfrastructureTypePolicyFindsKnexWithoutFlaggingContracts(t *testing.T) {
 	repoRoot, err := filepath.Abs("..")
 	if err != nil {
@@ -566,5 +636,247 @@ export default rule("arch.public-api-infrastructure-types").version(1)
 	want := []string{"ContextThroughRight", "ValidationContext"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("public API policy findings: got %v, want %v", got, want)
+	}
+}
+
+// Exercise the published facts and the prelude on the same ownership boundaries.
+func TestSuspensionOwnershipAndReferencePolicy(t *testing.T) {
+	const source = `function known() {}
+export function total(input = (known(), import.meta.env)) {
+  function nestedAlone() {} function nested() {} const later = nested;
+  [1].map(async () => {
+    known();
+    unknown();
+    const saved = known;
+    Date.now();
+    import.meta.env;
+    await unknown();
+  });
+}
+class Absent {
+  call = known();
+  missing = unknown();
+  clock = Date.now();
+  meta = import.meta.env;
+  value = () => known();
+}
+class Present {
+  field = known();
+  constructor(x: number); constructor(x?: number) {}
+}
+async function make() {
+  class Missing { field = await unknown(); }
+}
+Date.now();
+export function values() { const saved = () => known(); return function returned() { known(); }; }
+export function choose(flag: boolean) {
+  (flag ? () => 0 : () => Date.now())();
+  (((() => known()) as () => void)!)();
+  const bound = ((() => known()) satisfies () => void);
+  (bound as () => void)();
+}
+`
+	root := t.TempDir()
+	writeTestFile(t, root, "src/scorecard/total.ts", source)
+	writeTestFile(t, root, "src/scorecard/only-unsupported.ts", `class Only { value = await unknown(); }`)
+	snapshot, err := typescript.New().BuildSnapshot(context.Background(), root, root, backend.SnapshotOptions{Files: backend.FileScopeWalk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := facts.Validate(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	lines := map[string]int{}
+	for _, fact := range snapshot.Facts {
+		if fact.Relation == "location" && fact.Values[1].String == "src/scorecard/total.ts" {
+			lines[fact.Values[0].String] = int(fact.Values[2].Number)
+		}
+	}
+	find := func(relation string, line int) []facts.Fact {
+		var result []facts.Fact
+		for _, fact := range snapshot.Facts {
+			if fact.Relation == relation && lines[fact.Values[0].String] == line {
+				result = append(result, fact)
+			}
+		}
+		return result
+	}
+	owner := func(site string) string {
+		for _, fact := range snapshot.Facts {
+			if fact.Relation == "site_in_fn" && fact.Values[0].String == site {
+				return fact.Values[1].String
+			}
+		}
+		return ""
+	}
+	unsupported := func(site string) string {
+		for _, fact := range snapshot.Facts {
+			if fact.Relation == "site_attribution_unsupported" && fact.Values[0].String == site {
+				return fact.Values[1].String
+			}
+		}
+		return ""
+	}
+	callback := fmt.Sprintf("src/scorecard/total.ts::arrow_function::<anonymous@%d>", strings.Index(source, "async () =>"))
+	scorecard := "src/scorecard/total.ts::function::total"
+	known := "src/scorecard/total.ts::function::known"
+	constructor := "src/scorecard/total.ts::constructor::Present.constructor"
+	for _, check := range []struct {
+		relation   string
+		line       int
+		fn, reason string
+	}{
+		{"call_edge", 2, scorecard, ""}, {"meta_access", 2, scorecard, ""}, {"fn_ref", 3, scorecard, ""}, {"fn_ref", 4, scorecard, ""},
+		{"call_edge", 5, callback, ""}, {"call_unresolved", 6, callback, ""},
+		{"fn_ref", 7, callback, ""}, {"external_call", 8, callback, ""},
+		{"ambient_use", 8, callback, ""}, {"global_ref", 8, callback, ""},
+		{"meta_access", 9, callback, ""}, {"call_unresolved", 10, callback, ""},
+		{"call_edge", 14, "", "instance_construction"}, {"call_unresolved", 15, "", "instance_construction"},
+		{"external_call", 16, "", "instance_construction"}, {"ambient_use", 16, "", "instance_construction"},
+		{"global_ref", 16, "", "instance_construction"}, {"meta_access", 17, "", "instance_construction"},
+		{"fn_ref", 18, "", "instance_construction"}, {"call_edge", 21, constructor, ""},
+	} {
+		rows := find(check.relation, check.line)
+		if len(rows) != 1 {
+			t.Errorf("%s line %d: got %v", check.relation, check.line, rows)
+			continue
+		}
+		site := rows[0].Values[0].String
+		if got := owner(site); got != check.fn {
+			t.Errorf("%s line %d owner = %q, want %q", check.relation, check.line, got, check.fn)
+		}
+		if got := unsupported(site); got != check.reason {
+			t.Errorf("%s line %d unsupported = %q, want %q", check.relation, check.line, got, check.reason)
+		}
+		if check.relation == "call_edge" || check.relation == "call_unresolved" || check.relation == "external_call" || check.relation == "fn_ref" {
+			if got := rows[0].Values[1].String; got != check.fn {
+				t.Errorf("%s line %d caller = %q, want %q", check.relation, check.line, got, check.fn)
+			}
+		}
+	}
+	if rows := find("call_edge", 5); len(rows) == 1 && rows[0].Values[2].String != known {
+		t.Errorf("wrong callback target: %v", rows)
+	}
+	if rows := find("fn_ref", 7); len(rows) == 1 && rows[0].Values[2].String != known {
+		t.Errorf("wrong referenced function: %v", rows)
+	}
+	if rows := find("fn_ref", 3); len(rows) == 1 && rows[0].Values[2].String != "src/scorecard/total.ts::function::total.nested" {
+		t.Errorf("wrong nested function reference: %v", rows)
+	}
+	var valueTargets []string
+	for _, row := range find("fn_ref", 28) {
+		if got := owner(row.Values[0].String); got != "src/scorecard/total.ts::function::values" {
+			t.Errorf("function value owner = %q: %v", got, row)
+		}
+		valueTargets = append(valueTargets, row.Values[2].String)
+	}
+	slices.Sort(valueTargets)
+	if want := []string{"src/scorecard/total.ts::arrow_function::values.saved", "src/scorecard/total.ts::function_expression::values.returned"}; !slices.Equal(valueTargets, want) {
+		t.Errorf("assigned and returned references = %v, want %v", valueTargets, want)
+	}
+	if rows := find("suspension_site", 10); len(rows) != 1 {
+		t.Errorf("callback suspension: %v", rows)
+	} else {
+		site := rows[0].Values[0].String
+		found := false
+		for _, fact := range snapshot.Facts {
+			if fact.Relation == "suspension_in_fn" && fact.Values[0].String == site && fact.Values[1].String == callback {
+				found = true
+			}
+		}
+		if !found || !strings.HasPrefix(site, "suspension:") {
+			t.Errorf("callback suspension owner or ID: %v", rows)
+		}
+	}
+	if rows := find("suspension_site", 25); len(rows) != 1 {
+		t.Errorf("unsupported suspension: %v", rows)
+	} else if reason := unsupported(rows[0].Values[0].String); reason != "instance_construction" {
+		t.Errorf("unsupported suspension reason = %q", reason)
+	}
+	if rows := find("ambient_use", 27); len(rows) != 1 || owner(rows[0].Values[0].String) != "" || unsupported(rows[0].Values[0].String) != "" {
+		t.Errorf("module ambient use: %v", rows)
+	}
+	choose := "src/scorecard/total.ts::function::choose"
+	for _, check := range []struct {
+		line             int
+		relation, target string
+	}{
+		{30, "call_unresolved", ""},
+		{31, "call_edge", fmt.Sprintf("src/scorecard/total.ts::arrow_function::<anonymous@%d>", strings.Index(source, "() => known()) as"))},
+		{33, "call_edge", fmt.Sprintf("src/scorecard/total.ts::arrow_function::<anonymous@%d>", strings.Index(source, "() => known()) satisfies"))},
+	} {
+		var outcomes []facts.Fact
+		for _, relation := range []string{"call_edge", "external_call", "call_unresolved"} {
+			for _, row := range find(relation, check.line) {
+				if row.Values[1].String == choose {
+					outcomes = append(outcomes, row)
+				}
+			}
+		}
+		if len(outcomes) != 1 || outcomes[0].Relation != check.relation || check.target != "" && outcomes[0].Values[2].String != check.target {
+			t.Errorf("choose line %d outcomes: %v", check.line, outcomes)
+		}
+	}
+	if rows := find("fn_ref", 30); len(rows) != 2 {
+		t.Errorf("conditional function values: %v", rows)
+	}
+	if rows := find("fn_ref", 31); len(rows) != 0 {
+		t.Errorf("direct IIFE was also treated as a function value: %v", rows)
+	}
+	for _, fact := range snapshot.Facts {
+		if fact.Relation == "fn_ref" && strings.HasSuffix(fact.Values[2].String, "::function::total.nestedAlone") {
+			t.Errorf("declaration created a reference: %v", fact)
+		}
+		if fact.Relation == "call_edge" && fact.Values[1].String == scorecard && fact.Values[2].String == callback {
+			t.Errorf("containment created a call: %v", fact)
+		}
+		if fact.Relation == "fn_awaits" && fact.Values[0].String != callback {
+			t.Errorf("await attributed to wrong function: %v", fact)
+		}
+		if fact.Relation == "suspension_at_module" {
+			t.Errorf("callback suspension attributed to module: %v", fact)
+		}
+	}
+	base, err := facts.Store(snapshot.Facts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decls, prelude, err := facts.ParseSchema(snapshot.Schema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := runtime.ProgramOutput{Text: `
+Decl direct(Fn).
+direct(Fn) :- fn_suspends(Fn).
+direct(Fn) :- call_edge(Site, Fn, To), !site_attribution_unknown(Site), direct(To).
+Decl with_refs(Fn).
+with_refs(Fn) :- fn_suspends(Fn).
+with_refs(Fn) :- call_edge(Site, Fn, To), !site_attribution_unknown(Site), with_refs(To).
+with_refs(Fn) :- fn_ref(Site, Fn, To), !site_attribution_unknown(Site), with_refs(To).
+Decl selected(Fn).
+selected(Fn) :- fn(Fn, File, _), fn_exported(Fn), glob(File, "src/scorecard/**").
+Decl call_only(Fn).
+call_only(Fn) :- selected(Fn), direct(Fn).
+Decl follow_refs(Fn).
+follow_refs(Fn) :- selected(Fn), with_refs(Fn).
+Decl module_seen(File).
+module_seen(File) :- module_has_suspension(File).
+Decl bad_owner(Site).
+bad_owner(Site) :- site_attribution_unsupported(Site, _), call_edge(Site, "", _), calls_reach("", _).
+Decl uncertain(Fn).
+uncertain(Fn) :- fn(Fn, _, "choose"), fn_has_unresolved_call(Fn).
+`}
+	violations, perr := evaluateProgram(base, prelude, decls, output, []string{"call_only", "follow_refs", "module_seen", "bad_owner", "uncertain"}, nil, evalOptions{})
+	if perr != nil {
+		t.Fatal(perr)
+	}
+	var got []string
+	for _, item := range violations {
+		got = append(got, item.predicate+":"+item.anchor)
+	}
+	slices.Sort(got)
+	want := []string{"follow_refs:" + scorecard, "module_seen:src/scorecard/only-unsupported.ts", "module_seen:src/scorecard/total.ts", "uncertain:" + choose}
+	if !slices.Equal(got, want) {
+		t.Fatalf("policy rows = %v, want %v", got, want)
 	}
 }
