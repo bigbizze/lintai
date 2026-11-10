@@ -200,6 +200,31 @@ Decl call_unresolved(Site, Caller)
     arg(Caller, "Calling function, module path at module scope, or an empty string when attribution is unsupported.")
   ].
 
+Decl call_declaration(Site, Declaration)
+  descr [
+    extensional(),
+    doc("The checked program selects this concrete signature declaration for the invocation. This evidence is independent of runtime target resolution. Differing program observations may retain multiple declarations with /conflict."),
+    arg(Site, "Existing call_edge, external_call or call_unresolved site SemanticKey, without an EntityID prefix; reuses its location and ownership."),
+    arg(Declaration, "Canonical checked signature declaration entity id.")
+  ].
+
+Decl declaration_member(Declaration, OwnerDecl, Name)
+  descr [
+    extensional(),
+    doc("The signature declaration belongs lexically to this named member of the owner declaration, independently of any call-site receiver. Absence of a row does not establish safety or absence of named member access."),
+    arg(Declaration, "Canonical signature declaration entity id."),
+    arg(OwnerDecl, "Canonical lexical owner declaration entity id."),
+    arg(Name, "Member name.")
+  ].
+
+Decl call_declaration_incomplete(Site, Reason)
+  descr [
+    extensional(),
+    doc("Declaration or member provenance is incomplete for this invocation. Partial concrete declaration evidence may coexist with an incomplete outcome; absence of this marker is not a general proof of type safety."),
+    arg(Site, "Existing call site SemanticKey, without an EntityID prefix; reuses its location and ownership."),
+    arg(Reason, "/unresolved: no usable selected signature; /synthetic: synthesized signature without one concrete declaration; /unsupported: signature or member shape cannot be represented safely; /conflict: checked-program observations disagree about declaration or member evidence.")
+  ].
+
 Decl import_opaque(Site, From)
   descr [
     extensional(),

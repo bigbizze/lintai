@@ -178,6 +178,79 @@ func writeTestFile(t *testing.T, root, relativePath, contents string) string {
 	return path
 }
 
+func TestDeclaredWriterCapabilityPolicy(t *testing.T) {
+	repoRoot, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := filepath.Join(repoRoot, "testdata", "call-provenance")
+	for _, test := range []struct {
+		name          string
+		missingExport bool
+		noWrites      bool
+		wrappedIndex  bool
+	}{
+		{name: "selected export alias"},
+		{name: "wrapped static index", wrappedIndex: true},
+		{name: "missing export alias", missingExport: true},
+		{name: "no forbidden writes", noWrites: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			for _, file := range []string{"contracts.ts", "calls.ts", "tsconfig.json"} {
+				contents, err := os.ReadFile(filepath.Join(fixture, file))
+				if err != nil {
+					t.Fatal(err)
+				}
+				source := string(contents)
+				if test.wrappedIndex && file == "calls.ts" {
+					source = strings.Replace(source, "shared.write()", `shared[(("write" as const) satisfies string)]()`, 1)
+				}
+				if test.missingExport && file == "contracts.ts" {
+					source = strings.Replace(source, "export type { Writer as PublicWriter };", "", 1)
+				}
+				if test.noWrites && file == "calls.ts" {
+					source = strings.ReplaceAll(source, "store.write()", "store.read()")
+				}
+				writeTestFile(t, root, file, source)
+			}
+			items, err := New(typescript.New()).Run(context.Background(), Options{
+				RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages", "client"),
+				WorkspaceRoot: root, RuleGlobs: []string{filepath.Join(fixture, "writer-policy.ts")},
+				Files: backend.FileScopeWalk, Severity: diagnostics.SeverityError,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var got []string
+			for _, item := range items {
+				if item.RuleID != "arch.no-writer-write" || item.DiagnosticKind != diagnostics.KindArchitectureViolation ||
+					item.Severity != diagnostics.SeverityError || item.SourceLocation == nil || item.SourceLocation.File != "calls.ts" {
+					t.Fatalf("unexpected diagnostic: %+v", item)
+				}
+				got = append(got, fmt.Sprintf("%s:%d:%s", item.AssertionID, item.SourceLocation.StartLine, item.Message))
+			}
+			want := []string{
+				"indeterminate:14:Cannot establish Writer.write policy: unsupported",
+				"indeterminate:15:Cannot establish Writer.write policy: synthetic",
+				"indeterminate:16:Cannot establish Writer.write policy: unresolved",
+			}
+			if test.missingExport {
+				want = append(want, "indeterminate:1:Cannot establish Writer.write policy: missing export")
+			} else if !test.noWrites {
+				want = append(want,
+					"forbidden:7:Forbidden member: Writer.write",
+					"forbidden:9:Forbidden member: Writer.write")
+			}
+			slices.Sort(got)
+			slices.Sort(want)
+			if !slices.Equal(got, want) {
+				t.Fatalf("policy diagnostics = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestDlStringsRoundTripThroughMangle(t *testing.T) {
 	repoRoot, err := filepath.Abs("..")
 	if err != nil {

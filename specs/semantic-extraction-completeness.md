@@ -1,6 +1,6 @@
 # Semantic extraction completeness
 
-Status: implementation status is recorded in each feature section. Sections without an implementation status remain proposed; section 7 is deferred until a concrete capability-call rule needs it. No release number is assigned.
+Status: implementation status is recorded in each feature section. Sections without an implementation status remain proposed. Section 7 is implemented in this change and is unavailable in published 0.7.0. No release number is assigned.
 
 ## 1. Purpose and authority
 
@@ -141,16 +141,16 @@ An `async` function with no such syntax does not get `fn_suspends`. These facts 
 
 ## 7. Declared call provenance
 
-The implementation plan and bounded member-association rules are in [declared call provenance implementation](../todo/semantic-call-provenance.md).
+The implementation record and bounded member-association rules are in [declared call provenance implementation](../todo/semantic-call-provenance.md).
 
-This section defines the feature but does not require implementing it before a concrete capability-call rule needs it. If deferred, release documentation MUST identify it as deferred, rather than claim full implementation of this specification.
+Status: implemented in this change, including the [Writer capability policy](../testdata/call-provenance/writer-policy.ts). Focused extractor coverage passed; the engine policy test passed all four variants (two forbidden writes plus three indeterminate calls, wrapped static index, missing public alias, and no forbidden writes). Actual CLI and serve extraction produced the same five diagnostics; CLI exited 1 and serve shutdown exited 0. The full Go suite passed 258 tests, with only expected additive fact golden updates required. The PR records full CI and review results. See the [implementation and measurement record](../todo/semantic-call-provenance.md#verification).
 
 ### 7.1 Relations and meaning
 
 | Relation | Meaning |
 | --- | --- |
 | `call_declaration(Site, Decl)` | Source declaration selected by the checker's resolved call signature. |
-| `declaration_member(Decl, OwnerDecl, Name)` | Named method/property member associated with that signature declaration. |
+| `declaration_member(Decl, OwnerDecl, Name)` | Lexical named method/property member of that signature declaration; the owner is its declaring interface or class. |
 | `call_declaration_incomplete(Site, Reason)` | `/unresolved`, `/synthetic`, `/unsupported`, or `/conflict` prevents an unambiguous declaration result. |
 
 Reuse the existing call-site entity for resolved, external, and unresolved calls. Preserve existing call source/location facts. Do not allocate a disconnected second call site solely for provenance.
@@ -161,11 +161,13 @@ The declaration may be a method signature, an overload, or a function-type signa
 
 Use the checker's resolved signature declaration. Preserve its actual source declaration and selected overload. If a union or intersection produces a synthetic signature without a unique source declaration, emit `/synthetic`; do not choose an arbitrary member. If the checker does select a concrete source declaration, that fact describes its selection only, not every runtime alternative.
 
+Ordinary and optional calls, receiver aliases, static element access and selected overloads retain concrete checker selections. Inherited members retain their actual declaring owner. Inline callable properties and inline callable-object properties can have lexical member associations. Shared callable aliases retain a selected declaration when available, but receive `/unsupported` when a property association cannot be represented; they do not acquire owners from observed receivers. Constructors and tagged templates retain selected signatures without invented member names. A getter returning a callable is never substituted for the callable signature.
+
 Computed property access may have provenance when the checker resolves it. Dynamic or unsupported access MUST NOT be matched by method spelling. No tracing of injected implementations, mutable aliases, or arbitrary assignments is required.
 
 For calls with no resolvable declaration, emit the appropriate incomplete reason. Configuration disagreement retains observed declarations with `/conflict`. A call may have a known declaration and still have an unresolved runtime implementation. Adding provenance MUST NOT remove `call_unresolved` or create `call_edge` unless the existing runtime-target resolution independently supports that edge.
 
-A fixture rule targeting an example interface member `Writer.write` must match declaration origin, owner, and member identity. The fixture must define that interface. A same-named member on an unrelated object must not match.
+A fixture rule targeting an example interface member `Writer.write` must match declaration origin, owner, and member identity. The fixture must define that interface. A same-named member on an unrelated object must not match. Owner selection checks missing or incomplete exports, targets and owners independently of whether any forbidden member is observed. A scope without forbidden writes must not produce owner uncertainty merely for lacking a `write` member row. The positive member join establishes forbidden calls; incomplete or missing call evidence remains a separate indeterminate result.
 
 ## 8. Loaded rule metadata
 
@@ -218,7 +220,7 @@ Required behavioral evidence:
 | Export edge cases | Add focused assertions for declaration merging/type-vs-value distinction and configuration conflict where existing fixtures support them. Verify unresolved star sources remain observable. Avoid a combinatorial suite. |
 | Suspension | One fixture covers nested function ownership, module scope, ordinary await, for-await, await-using disposal, and an async wrapper without suspension syntax. |
 | Metadata | Extend existing rule-list tests to assert loaded metadata and `[]`, and verify that callbacks are not invoked. Reuse existing invalid/duplicate rule tests. |
-| Call provenance, when implemented | A concrete capability rule rejects the intended declared member, permits an unrelated same-named member, and retains runtime unresolved status. Include a synthetic/unresolved signature case. |
+| Call provenance | A concrete capability rule rejects the intended declared member, permits an unrelated same-named member, and retains runtime unresolved status. Include a synthetic/unresolved signature case. |
 
 Run existing relevant Go and package tests; run distribution build/smoke checks when generated assets or packaging are affected. Existing golden changes are allowed only when required by the new facts or specified semantics. Inspect each change; do not regenerate unrelated output blindly.
 
@@ -234,6 +236,6 @@ Investigate unexpected growth, especially repeated expansion of shared types or 
 - Export cycles terminate, and unresolved or conflicting information is observable.
 - Suspension sites identify their syntax and owner, including asynchronous disposal.
 - Rule metadata comes from the existing loader without rule execution.
-- If implemented, call provenance never implies resolution of an injected runtime implementation.
+- Call provenance never implies resolution of an injected runtime implementation.
 - Focused checks pass, applicable existing checks pass, and export-root extraction cost is reported.
 - Any deferred feature is explicitly listed in the implementation/release summary. No claim of full completion is made while a section remains deferred.

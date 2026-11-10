@@ -336,23 +336,28 @@ type TypeRef struct {
 }
 
 type Snapshot struct {
-	Modules                 []Module
-	Functions               []Function
-	ImportEdges             []ImportEdge
-	CallEdges               []CallEdge
-	ExternalCalls           []ExternalCall
-	CallsUnresolved         []CallUnresolved
-	ImportsOpaque           []ImportOpaque
-	FnRefs                  []FnRef
-	SuspensionSites         []SuspensionSite
-	Accesses                []Access
-	UnsupportedAttributions []UnsupportedAttribution
-	TypeRefs                []TypeRef
-	AmbientUses             []AmbientUse
-	GlobalRefs              []GlobalRef
-	escapingCallbacks       []escapingCallback
-	Directives              []ModuleDirective
-	ParseErrors             []ParseError
+	Modules                   []Module
+	Functions                 []Function
+	ImportEdges               []ImportEdge
+	CallEdges                 []CallEdge
+	ExternalCalls             []ExternalCall
+	CallsUnresolved           []CallUnresolved
+	CallDeclarations          []CallDeclarationFact
+	DeclarationMembers        []DeclarationMemberFact
+	CallDeclarationIncomplete []CallDeclarationIncompleteFact
+	ImportsOpaque             []ImportOpaque
+	FnRefs                    []FnRef
+	SuspensionSites           []SuspensionSite
+	Accesses                  []Access
+	UnsupportedAttributions   []UnsupportedAttribution
+	TypeRefs                  []TypeRef
+	AmbientUses               []AmbientUse
+	GlobalRefs                []GlobalRef
+	escapingCallbacks         []escapingCallback
+	// Raw per-program evidence, compared before public facts are flattened.
+	callDeclarationObservations []callDeclarationObservation
+	Directives                  []ModuleDirective
+	ParseErrors                 []ParseError
 	// Types are the type entities that function parameter and return types
 	// refer to, sorted by ID.
 	Types                       []TypeFact
@@ -385,6 +390,7 @@ type configGroup struct {
 }
 
 type extractor struct {
+	callDeclarationObservations []callDeclarationObservation
 	workspaceRoot               string
 	host                        compiler.CompilerHost
 	program                     *compiler.Program
@@ -579,10 +585,14 @@ func BuildSnapshot(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, er
 	finalizeSemanticObservations(merged)
 	if req.TsconfigFiles {
 		keepModuleFiles(merged)
+	}
+	finalizeCallDeclarationObservations(merged)
+	if req.TsconfigFiles {
 		keepRetainedSemantics(merged)
 		keepReachableTypes(merged)
 	}
 	merged.escapingCallbacks = nil
+	merged.callDeclarationObservations = nil
 	merged.ConfigFiles = configs.files()
 	merged.Inputs = append(merged.Inputs, configs.inputs()...)
 	merged.Inputs = append(merged.Inputs, trackedFS.snapshotInputs()...)
@@ -670,6 +680,7 @@ func keepModuleFiles(snap *Snapshot) {
 		}
 		emittedEscapes[call.EntityID] = true
 		snap.CallsUnresolved = append(snap.CallsUnresolved, call)
+		snap.callDeclarationObservations = append(snap.callDeclarationObservations, item.callDeclarationObservation())
 		if item.reason != "" {
 			snap.UnsupportedAttributions = append(snap.UnsupportedAttributions, UnsupportedAttribution{Site: call.SemanticKey, Reason: item.reason})
 		}
@@ -686,8 +697,8 @@ func keepModuleFiles(snap *Snapshot) {
 	}
 }
 
-// Retain declaration endpoints only for surviving exports and configured
-// associations, then retain map endpoints reached from those declarations.
+// Retain declaration endpoints for surviving exports, configured associations,
+// and call provenance, then retain map endpoints reached from those declarations.
 // This runs after conflict detection so every program's observation counts.
 func keepRetainedSemantics(snap *Snapshot) {
 	modules := make(map[string]bool, len(snap.Modules))
@@ -697,6 +708,17 @@ func keepRetainedSemantics(snap *Snapshot) {
 	snap.Exports = slices.DeleteFunc(snap.Exports, func(item ExportFact) bool { return !modules[item.File] })
 	exportTargets := make(map[string]bool)
 	keep := make(map[string]bool)
+	provenanceEndpoints := make(map[string]bool)
+	for _, call := range snap.CallDeclarations {
+		keep[call.Declaration] = true
+		provenanceEndpoints[call.Declaration] = true
+	}
+	for _, member := range snap.DeclarationMembers {
+		keep[member.Declaration] = true
+		keep[member.OwnerDeclaration] = true
+		provenanceEndpoints[member.Declaration] = true
+		provenanceEndpoints[member.OwnerDeclaration] = true
+	}
 	sites := make(map[string]bool)
 	for _, item := range snap.Exports {
 		for _, id := range item.Targets {
@@ -731,7 +753,9 @@ func keepRetainedSemantics(snap *Snapshot) {
 	snap.Declarations = slices.DeleteFunc(snap.Declarations, func(item DeclarationFact) bool { return !keep[item.ID] })
 	for index := range snap.Declarations {
 		item := &snap.Declarations[index]
-		if !exportTargets[item.ID] {
+		// Metadata-only provenance never extracts types. Any types already on
+		// these endpoints were collected independently and must survive.
+		if !exportTargets[item.ID] && !provenanceEndpoints[item.ID] {
 			item.Types = nil
 			item.TypeObservations = nil
 		}
@@ -872,6 +896,7 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 	ex.recordProgramInputs()
 
 	partial := &Snapshot{
+		callDeclarationObservations: ex.callDeclarationObservations,
 		Modules:                     modules,
 		Functions:                   ex.functions,
 		ImportEdges:                 ex.imports,
@@ -1209,6 +1234,7 @@ func (c *configCache) findNearestConfigPath(workspaceRoot string, file string) (
 }
 
 func mergeSnapshot(into *Snapshot, partial *Snapshot) {
+	into.callDeclarationObservations = append(into.callDeclarationObservations, partial.callDeclarationObservations...)
 	into.Modules = mergeByEntityID(into.Modules, partial.Modules, func(item Module) string { return item.EntityID })
 	into.Functions = mergeFunctionSlices(into.Functions, partial.Functions)
 	into.ImportEdges = mergeByEntityID(into.ImportEdges, partial.ImportEdges, func(item ImportEdge) string { return item.EntityID })
@@ -1724,25 +1750,30 @@ func (e *extractor) collectOpaqueImport(node *ast.Node) {
 // collectCall records one fact for a call or new expression: a call edge to
 // a collected function, an external call, or an unresolved call.
 func (e *extractor) collectCall(source callSource, node *ast.Node) {
+	site := e.recordRuntimeCall(source, node)
+	if site != "" {
+		e.collectCallDeclaration(node, site)
+	}
+}
+
+func (e *extractor) recordRuntimeCall(source callSource, node *ast.Node) string {
 	file := ast.GetSourceFileOfNode(node)
 	if file == nil {
-		return
+		return ""
 	}
 	if _, ok := e.primaryFiles[normalizeSlash(file.FileName().AsString())]; !ok {
-		return
+		return ""
 	}
 	target, declaration := e.resolveCallTarget(node)
 	location := e.nodeLocation(file, calleeNameNode(node))
 	workspaceClass := e.constructedWorkspaceClass(node)
 	if workspaceClass != nil && hasInstanceInitializer(workspaceClass) {
-		e.recordUnresolvedCall(source, location)
-		return
+		return e.recordUnresolvedCall(source, location)
 	}
 	if target == nil {
 		callee := e.calleeSymbol(node)
 		if accessorSymbol(callee) {
-			e.recordUnresolvedCall(source, location)
-			return
+			return e.recordUnresolvedCall(source, location)
 		}
 		declarationExternal := declaration != nil && e.isExternalDeclaration(declaration)
 		if workspaceClass != nil && declarationExternal {
@@ -1752,17 +1783,15 @@ func (e *extractor) collectCall(source callSource, node *ast.Node) {
 		if calleeExternal && (declarationExternal || declaration == nil) {
 			if external, ok := e.externalCallFor(source, callee, declaration, location); ok {
 				if e.invokesFunctionValue(node, external) {
-					e.recordUnresolvedCall(source, location)
-					return
+					return e.recordUnresolvedCall(source, location)
 				}
 				e.externalCalls = append(e.externalCalls, external)
 				e.markUnsupported(external.SemanticKey, source.reason)
 				e.collectEscapingCallbacks(source, file, node)
-				return
+				return external.SemanticKey
 			}
 		}
-		e.recordUnresolvedCall(source, location)
-		return
+		return e.recordUnresolvedCall(source, location)
 	}
 	baseKey := fmt.Sprintf("%s::calls::%s", source.siteKey(), target.SemanticKey)
 	semanticKey := withOrdinal(baseKey, nextOrdinal(e.callCount, baseKey))
@@ -1779,6 +1808,7 @@ func (e *extractor) collectCall(source callSource, node *ast.Node) {
 		Range:           location,
 	})
 	e.markUnsupported(semanticKey, source.reason)
+	return semanticKey
 }
 
 // invokesFunctionValue reports f.call(...) or f.apply(...) where f is not a
@@ -1828,7 +1858,7 @@ func (e *extractor) collectEscapingCallbacks(source callSource, file *ast.Source
 			if symbol != nil {
 				if target := e.lookupFunction(symbol); target != nil {
 					if e.certainBindingTarget(symbol) == nil {
-						e.recordUnresolvedCall(source, e.nodeLocation(file, value))
+						e.recordEscapedCallDeclaration(source, e.nodeLocation(file, value))
 					} else {
 						key := fmt.Sprintf("%s::escaping_callback::%d", source.siteKey(), scanner.GetTokenPosOfNode(value, file, false))
 						e.escapingCallbacks = append(e.escapingCallbacks, escapingCallback{
@@ -1848,7 +1878,7 @@ func (e *extractor) collectEscapingCallbacks(source callSource, file *ast.Source
 		if valueType == nil || len(e.checker.GetSignaturesOfType(e.checker.GetNonNullableType(valueType), checker.SignatureKindCall)) == 0 {
 			continue
 		}
-		e.recordUnresolvedCall(source, e.nodeLocation(file, value))
+		e.recordEscapedCallDeclaration(source, e.nodeLocation(file, value))
 	}
 }
 
@@ -1902,7 +1932,7 @@ func (e *extractor) recordFnRef(source callSource, target *Function, location So
 
 // recordUnresolvedCall records a call whose target is not known: a call
 // through a callback, a function-typed value or an any-typed value.
-func (e *extractor) recordUnresolvedCall(source callSource, location SourceLocation) {
+func (e *extractor) recordUnresolvedCall(source callSource, location SourceLocation) string {
 	baseKey := source.siteKey() + "::calls_unresolved"
 	semanticKey := withOrdinal(baseKey, nextOrdinal(e.unresolvedCount, baseKey))
 	e.unresolved = append(e.unresolved, CallUnresolved{
@@ -1914,6 +1944,7 @@ func (e *extractor) recordUnresolvedCall(source callSource, location SourceLocat
 		Range:           location,
 	})
 	e.markUnsupported(semanticKey, source.reason)
+	return semanticKey
 }
 
 // calleeSymbol returns the symbol of the value that a call calls: the
