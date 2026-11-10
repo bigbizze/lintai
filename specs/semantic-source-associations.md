@@ -514,6 +514,29 @@ and an OS time/RSS tool. Measure checked programs and auxiliary programs
 separately; verify identical auxiliary inputs reuse one program per run. Do not
 run arbitrary package builds or add a persistent auxiliary cache.
 
+### Measured cost
+
+On macOS arm64 with Go 1.27.3, one run of
+`scripts/measure-semantic-extraction.py` per case used the same 17-file fixture
+(SHA-256 `f99fc7a4fea0e5b2baa05a5ea330ec64d5abcebb7b54c6d2e59632e134f10ed3`),
+six analyzed files and one checked program. PR2 was the clean `5afab4ef` binary;
+PR3 was built from `5356a5a` with the source-entry symlink fix in the worktree.
+Wall time includes startup and fact rendering; peak RSS is the child's `wait4`
+maximum. Type, declaration and export columns count relation rows.
+
+| Case | All facts | Type rows / entities | Declaration / export rows | Wall | Peak RSS | Checked / auxiliary program time |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| PR2 ordinary | 85 | 4 / 0 | 0 / 0 | 0.044 s | 44.9 MiB | 19 ms / n/a |
+| PR3 ordinary | 176 | 32 / 6 | 12 / 33 | 0.034 s | 46.2 MiB | 16 ms / 0 ms |
+| PR3 association | 187 | 32 / 6 | 15 / 33 | 0.054 s | 64.3 MiB | 16 ms / 18 ms |
+
+The association run applied the configured entry, produced its checked and
+source binding sets and built one auxiliary program. A separate two-entry
+fixture using the same source config applied both entries with one auxiliary
+program. These single observations include startup, filesystem and scheduling
+noise; they are not a benchmark distribution or a prediction for larger
+workspaces. PR2 did not emit the new declaration and export relations.
+
 ## 11. Production coverage and compatibility
 
 The two preflight readiness probes (`pr3_project_reference_probe_test.go` and

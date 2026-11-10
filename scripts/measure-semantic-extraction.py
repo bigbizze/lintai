@@ -131,15 +131,20 @@ def write_fixture(root: Path) -> str:
     return digest.hexdigest()
 
 
-def parse_peak_rss(stderr: str) -> tuple[float | None, str | None]:
-    """Parse /usr/bin/time's macOS or GNU maximum-resident-set-size field."""
-    mac = re.search(r"^\s*(\d+)\s+maximum resident set size\s*$", stderr, re.MULTILINE)
-    if mac:
-        return int(mac.group(1)) / (1024 * 1024), "MiB"
-    gnu = re.search(r"Maximum resident set size \(kbytes\):\s*(\d+)", stderr)
-    if gnu:
-        return int(gnu.group(1)) / 1024, "MiB"
-    return None, None
+def run_measured(command: list[str], env: dict[str, str]) -> tuple[int, str, str, float, int]:
+    """Run one child and collect its own wait4 resource usage."""
+    # Files avoid pipe deadlock while wait4 waits for the complete extraction.
+    with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as stdout, tempfile.TemporaryFile(
+        mode="w+t", encoding="utf-8"
+    ) as stderr:
+        started = time.monotonic()
+        process = subprocess.Popen(command, stdout=stdout, stderr=stderr, env=env)
+        _, status, usage = os.wait4(process.pid, 0)
+        elapsed = time.monotonic() - started
+        process.returncode = os.waitstatus_to_exitcode(status)
+        stdout.seek(0)
+        stderr.seek(0)
+        return process.returncode, stdout.read(), stderr.read(), elapsed, usage.ru_maxrss
 
 
 def main() -> int:
@@ -155,10 +160,8 @@ def main() -> int:
     if not binary.is_file():
         parser.error(f"lintai binary does not exist: {binary}")
 
-    timer = Path("/usr/bin/time")
-    if not timer.exists():
-        parser.error("/usr/bin/time is required to collect peak RSS")
-    timer_args = ["-l"] if platform.system() == "Darwin" else ["-v"]
+    if not hasattr(os, "wait4") or platform.system() not in {"Darwin", "Linux"}:
+        parser.error("this measurement requires wait4 on macOS or Linux")
 
     with tempfile.TemporaryDirectory(prefix="lintai-semantic-cost-") as temporary:
         workspace = Path(temporary) / "workspace"
@@ -177,7 +180,6 @@ def main() -> int:
 
         env = os.environ.copy()
         env["LINTAI_EXTRACT_TIMING"] = "1"
-        full_command = [str(timer), *timer_args, *command]
         print(f"mode: {'association' if args.source_links else 'ordinary'}")
         print(f"command: {shlex.join(command)}")
         print(
@@ -186,28 +188,20 @@ def main() -> int:
         )
         print(f"fixture_sha256: {digest}")
 
-        started = time.monotonic()
-        result = subprocess.run(full_command, capture_output=True, text=True, env=env)
-        elapsed = time.monotonic() - started
-        host_command = (
-            f"python3 scripts/measure-semantic-extraction.py --lintai {shlex.quote(str(binary))}"
-            + (" --source-links" if args.source_links else "")
-        )
-        if result.returncode != 0:
-            print(f"measurement_status: failed; /usr/bin/time exited {result.returncode}")
-            if "sysctl kern.clockrate: Operation not permitted" in result.stderr:
-                print("peak_rss: unavailable; sandbox blocked /usr/bin/time sysctl query")
-            print(f"host_rss_command: {host_command}")
-            if result.stderr:
-                sys.stderr.write(result.stderr)
-            return result.returncode
-        if result.stdout:
+        returncode, stdout, stderr, elapsed, peak_rss = run_measured(command, env)
+        print(f"lintai_exit: {returncode}")
+        if returncode != 0:
+            print("measurement_status: failed; lintai exited unsuccessfully")
+            if stderr:
+                sys.stderr.write(stderr)
+            return returncode
+        relation_counts: dict[str, int] = {}
+        if stdout:
             fact_rows = []
-            for line in result.stdout.splitlines():
+            for line in stdout.splitlines():
                 match = FACT_LINE.match(line)
                 if match:
                     fact_rows.append((match.group(1), line))
-            relation_counts: dict[str, int] = {}
             for relation, _ in fact_rows:
                 relation_counts[relation] = relation_counts.get(relation, 0) + 1
             type_rows = sum(count for relation, count in relation_counts.items() if relation.startswith("type_"))
@@ -230,18 +224,15 @@ def main() -> int:
             else:
                 print("facts: export_relation_rows=0 (not emitted by this revision)")
 
-        rss, rss_unit = parse_peak_rss(result.stderr)
         print(f"elapsed_wall: {elapsed:.3f}s")
-        if rss is None:
-            print("peak_rss: unavailable; /usr/bin/time output had no RSS field")
-            print(f"host_rss_command: {host_command}")
-        else:
-            print(f"peak_rss: {rss:.1f} {rss_unit}")
-        for line in result.stderr.splitlines():
+        rss_bytes = peak_rss if platform.system() == "Darwin" else peak_rss * 1024
+        print(f"peak_rss: {rss_bytes / (1024 * 1024):.1f} MiB (wait4)")
+        for line in stderr.splitlines():
             if "lintai: extract " in line:
                 print(f"extract_timing: {line.strip()}")
+        valid = bool(relation_counts)
         if args.source_links:
-            timing_lines = [line for line in result.stderr.splitlines() if "lintai: extract " in line]
+            timing_lines = [line for line in stderr.splitlines() if "lintai: extract " in line]
             detail = " ".join(timing_lines)
             count = re.search(r"(?:auxiliary|aux)_programs?=(\d+)", detail)
             millis = re.search(r"(?:auxiliary|aux)_program_ms=(\d+)", detail)
@@ -249,6 +240,23 @@ def main() -> int:
                 print(f"auxiliary_programs: count={count.group(1)} time={millis.group(1)}ms")
             else:
                 print("auxiliary_programs: count/time not emitted in LINTAI_EXTRACT_TIMING output")
+            expected = {
+                "source_entry_applied": 1,
+                "source_entry_unapplied": 0,
+                "source_entry_incomplete": 0,
+                "source_binding_attempt": 1,
+                "source_binding": 1,
+                "source_binding_checked_decl": 1,
+                "source_binding_source_decl": 1,
+                "source_binding_incomplete": 0,
+            }
+            print("association_facts: " + " ".join(f"{name}={relation_counts.get(name, 0)}" for name in expected))
+            valid = valid and count is not None and int(count.group(1)) == 1 and millis is not None
+            valid = valid and all(relation_counts.get(name, 0) == expected_count for name, expected_count in expected.items())
+        if not valid:
+            print("measurement_status: failed; fixture did not exercise the expected extraction")
+            return 1
+        print("measurement_status: ok")
 
     return 0
 
