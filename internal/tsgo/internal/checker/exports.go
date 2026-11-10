@@ -322,6 +322,22 @@ func (c *Checker) GetResolvedSymbol(node *ast.Node) *ast.Symbol {
 	return c.getResolvedSymbol(node)
 }
 
+// GetResolvedPropertySymbol returns the property symbol recorded while checking
+// a dot or element access, or nil when no single property was recorded.
+func (c *Checker) GetResolvedPropertySymbol(node *ast.Node) *ast.Symbol {
+	if node == nil || !(ast.IsPropertyAccessExpression(node) || ast.IsElementAccessExpression(node)) {
+		return nil
+	}
+	// Use expression checking so both access kinds retain their normal resolution
+	// and optional-chain handling; do not fall back to identifier name resolution.
+	c.checkExpression(node)
+	symbol := c.getResolvedSymbolOrNil(node)
+	if symbol == c.unknownSymbol {
+		return nil
+	}
+	return symbol
+}
+
 func (c *Checker) GetJsxNamespace(location *ast.Node) string {
 	return c.getJsxNamespace(location)
 }

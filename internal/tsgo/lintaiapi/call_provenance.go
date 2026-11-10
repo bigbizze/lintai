@@ -161,30 +161,21 @@ func (e *extractor) callDeclarationMember(declaration *ast.Node, id string) (*De
 }
 
 // A selected signature shared through an alias does not lexically belong to
-// the observed property. Inspect only that property's declarations, never its
-// receiver or the members of its type. Accessors returning callables are not
+// the observed property. Resolve only that property through the checker and
+// inspect its declarations. Accessors returning callables are not
 // property signature declarations and must not become the callable endpoint.
 func (e *extractor) callUsesUnassociatedProperty(node *ast.Node) bool {
 	callee := ast.SkipOuterExpressions(calleeOf(node), ast.OEKAll)
-	var symbol *ast.Symbol
-	switch {
-	case ast.IsPropertyAccessExpression(callee):
-		symbol = e.checker.GetSymbolAtLocation(callee)
-	case ast.IsElementAccessExpression(callee):
-		argument := callee.AsElementAccessExpression().ArgumentExpression
-		if argument == nil || !(ast.IsStringLiteralLike(argument) || ast.IsNumericLiteral(argument)) {
-			return false
-		}
-		// The checker resolves static element members at their argument node.
-		symbol = e.checker.GetSymbolAtLocation(argument)
-	default:
+	if !ast.IsPropertyAccessExpression(callee) && !ast.IsElementAccessExpression(callee) {
 		return false
 	}
-	if symbol != nil {
-		for _, declaration := range symbol.Declarations() {
-			if declaration.Kind == ast.KindPropertySignature || ast.IsPropertyDeclaration(declaration) {
-				return true
-			}
+	symbol := e.checker.GetResolvedPropertySymbol(callee)
+	if symbol == nil || len(symbol.Declarations()) == 0 {
+		return true // No single checked property establishes the association.
+	}
+	for _, declaration := range symbol.Declarations() {
+		if declaration.Kind == ast.KindPropertySignature || ast.IsPropertyDeclaration(declaration) {
+			return true
 		}
 	}
 	return false

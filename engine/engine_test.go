@@ -188,8 +188,10 @@ func TestDeclaredWriterCapabilityPolicy(t *testing.T) {
 		name          string
 		missingExport bool
 		noWrites      bool
+		wrappedIndex  bool
 	}{
 		{name: "selected export alias"},
+		{name: "wrapped static index", wrappedIndex: true},
 		{name: "missing export alias", missingExport: true},
 		{name: "no forbidden writes", noWrites: true},
 	} {
@@ -201,6 +203,9 @@ func TestDeclaredWriterCapabilityPolicy(t *testing.T) {
 					t.Fatal(err)
 				}
 				source := string(contents)
+				if test.wrappedIndex && file == "calls.ts" {
+					source = strings.Replace(source, "shared.write()", `shared[(("write" as const) satisfies string)]()`, 1)
+				}
 				if test.missingExport && file == "contracts.ts" {
 					source = strings.Replace(source, "export type { Writer as PublicWriter };", "", 1)
 				}

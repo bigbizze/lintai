@@ -25,6 +25,7 @@ interface Inline {
   inline: (((value: number) => void));
   object: { (value: number): void };
   shared: Shared;
+  sharedOther: Shared;
 }
 
 class Getter { get returned(): () => void { return () => {}; } }
@@ -37,7 +38,7 @@ class Overloaded {
 function tag(parts: TemplateStringsArray): string { return parts[0]; }
 function exercise(cap: Capabilities, other: Other, inline: Inline, getter: Getter,
   inherited: Derived, combined: ((x: "both" | "left") => void) | ((x: "both" | "right") => void),
-  unknown: any, free: Shared, overloaded: Overloaded) {
+  unknown: any, free: Shared, overloaded: Overloaded, k: "shared" | "sharedOther") {
   cap.store.read();
   cap.store.write();
   const store = cap.store;
@@ -47,6 +48,7 @@ function exercise(cap: Capabilities, other: Other, inline: Inline, getter: Gette
   inline.object(1);
   inline.shared();
   inline["shared"]();
+  inline[k]();
   (inline.shared satisfies Shared)();
   (inline.shared as Shared)();
   getter.returned();
@@ -116,6 +118,7 @@ function exercise(cap: Capabilities, other: Other, inline: Inline, getter: Gette
 		{call: "inline.object(1)", owner: "Inline", member: "object"},
 		{call: "inline.shared()", reason: "unsupported", selectedSource: "type Shared = () => void;"},
 		{call: `inline["shared"]()`, reason: "unsupported", selectedSource: "type Shared = () => void;"},
+		{call: "inline[k]()", reason: "unsupported", selectedSource: "type Shared = () => void;"},
 		{call: "(inline.shared satisfies Shared)()", reason: "unsupported", selectedSource: "type Shared = () => void;"},
 		{call: "(inline.shared as Shared)()", reason: "unsupported", selectedSource: "type Shared = () => void;"},
 		{call: "getter.returned()"},
@@ -206,12 +209,12 @@ function exercise(cap: Capabilities, other: Other, inline: Inline, getter: Gette
 	}) {
 		t.Fatal("method implementation was not independently collected")
 	}
-	if len(shared) != 4 {
+	if len(shared) != 5 {
 		t.Fatalf("missing shared alias observations: %v", shared)
 	}
 	for _, declaration := range shared {
 		if declaration != shared[0] {
-			t.Fatal("dot, static-element, and wrapped alias calls selected different declarations")
+			t.Fatal("dot, static-element, dynamic-element, and wrapped alias calls selected different declarations")
 		}
 	}
 	for _, write := range writes {

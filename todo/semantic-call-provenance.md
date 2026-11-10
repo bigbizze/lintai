@@ -144,8 +144,8 @@ Complete when the relations survive CLI and serve extraction, the policy disting
 
 ## Verification
 
-- Focused extractor fixtures passed 25 cases, including precise member identity, unsupported/synthetic/unresolved evidence and configuration conflicts.
-- `TestDeclaredWriterCapabilityPolicy` passed all three variants: two forbidden writes plus three indeterminate calls, missing public alias, and no forbidden writes.
+- Focused extractor fixtures passed, including precise member identity, unsupported/synthetic/unresolved evidence and configuration conflicts.
+- `TestDeclaredWriterCapabilityPolicy` passed all four variants: two forbidden writes plus three indeterminate calls, wrapped static index, missing public alias, and no forbidden writes.
 - Actual CLI analysis reported exactly the five expected diagnostics with exit 1. Serve initialization and file diagnostics produced the same five; shutdown exited 0.
 - The core fixture's four baseline runtime-unresolved calls now have four selected declaration rows and three lexical member rows. Runtime facts are unchanged.
 - The full Go suite passed 258 tests. Only expected additive fact golden updates were required. The PR records the full CI and review results.
@@ -156,7 +156,7 @@ These baseline and measured implementation results are single local observations
 
 | Input | Baseline | Measured implementation | Preserved evidence |
 | --- | --- | --- | --- |
-| Representative client, 11 files | 9,269 facts; 0.284 s | 11,722 facts; 0.175 s | Runtime and type facts byte-for-byte identical; 203 type entities unchanged. |
+| Representative client, 11 files | 9,269 facts; 0.284 s | 11,722 facts; 0.179 s | Runtime and type facts byte-for-byte identical; 203 type entities unchanged. |
 | Existing static measurement script | 176 facts; 0.052 s; 46.8 MiB | 176 facts; 0.041 s; 46.8 MiB | Fact count and peak memory unchanged. |
 
 The client result contains 1,227 `call_declaration`, 146 `declaration_member` and 62 `call_declaration_incomplete` rows. Extraction retains only selected endpoints and per-site observations, without an all-pairs closure or recursive member inventory.
