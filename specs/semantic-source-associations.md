@@ -479,11 +479,13 @@ it, so the absent directory itself is the input. Probes are tracked inside the
 workspace root and under any `node_modules` path. Files read by an auxiliary
 program are inputs of the snapshot. The client watches the nearest existing
 directory of each input without its subtree: creating a missing input first
-creates a direct child of that directory, and a later analysis reports the new
-inputs to watch. A recursive watch would cover whole trees, such as the
+creates a direct child of that directory. After each analysis, the client
+recomputes the nearest existing directories even when the input list is unchanged. A recursive watch would cover whole trees, such as the
 filesystem root for a package.json probe above the workspace. Only `serve` mode
-receives input paths; a one-shot client refreshes only when the source-links
-file changes.
+receives input paths. One-shot clients retain their existing source/rule refresh
+behavior and also refresh when the source-links file changes. An input watcher
+failure enters the reported one-shot fallback instead of leaving stale serve
+results marked ready.
 Existing program inputs and tsconfig dependencies remain tracked. Do not persist
 auxiliary programs across runs. Source/build freshness and rules-lock verification
 remain separate.
