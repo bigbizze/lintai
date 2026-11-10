@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { EventEmitter } from "node:events";
+import fs, { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import os from "node:os";
 import path from "node:path";
-import test, { afterEach } from "node:test";
+import test, { afterEach, mock } from "node:test";
 
 import {
 	LintAIClient,
@@ -509,36 +511,59 @@ test("rule file changes invalidate cached diagnostics and the next pass refreshe
 	client.dispose();
 });
 
-test("creation of a missing semantic input invalidates diagnostics and refreshes the source links snapshot", async () => {
+test("missing semantic inputs invalidate diagnostics as their parent directories appear", async () => {
 	const workspaceRoot = mkdtempSync(path.join(os.tmpdir(), "lintai-missing-semantic-input-"));
 	const mapDirectory = path.join(workspaceRoot, "packages/contracts/dist");
 	mkdirSync(mapDirectory, { recursive: true });
+	const sourceDirectory = path.join(workspaceRoot, "missing");
+	const source = path.join(sourceDirectory, "next/source.ts");
+	const inputPaths = [path.join(mapDirectory, "index.d.ts.map"), source];
+	const listeners = new Map<string, (event: "rename" | "change", filename: string | null) => void>();
+	const watchMock = mock.method(fs, "watch", (
+		target: fs.PathLike,
+		_options: unknown,
+		listener: (event: "rename" | "change", filename: string | null) => void,
+	) => {
+		const directory = String(target);
+		listeners.set(directory, listener);
+		return Object.assign(new EventEmitter(), {
+			close() {
+				if (listeners.get(directory) === listener) listeners.delete(directory);
+			},
+		}) as fs.FSWatcher;
+	});
+	syncBuiltinESMExports();
+	// Deliver only direct-child events to the currently bound directory watcher.
+	const changed = (file: string) => listeners.get(path.dirname(file))?.("rename", path.basename(file));
 	const child = createTestProcess();
-	const chunks = [
-		createInitializeResult("arch.old", [
-			path.join(workspaceRoot, "src/app.ts"),
-			path.join(mapDirectory, "index.d.ts.map"),
-		], "src/app.ts"),
+	const snapshot = (id: number, ruleID?: string) =>
 		createFramedResponse({
 			jsonrpc: "2.0",
-			id: 2,
+			id,
 			result: {
 				rulesLoaded: 1,
-				diagnosticCount: 1,
-				snapshotVersion: "snap-new",
-				diagnostics: [
-					{
-						rule_id: "arch.new",
-						assertion_id: "default",
-						message: "new",
-						source_location: { file: "src/app.ts", startLine: 2, startColumn: 1, endLine: 2, endColumn: 2 },
-					},
-				],
+				diagnosticCount: ruleID ? 1 : 0,
+				snapshotVersion: `snap-${id}`,
+				inputPaths,
+				diagnostics: ruleID
+					? [
+							{
+								rule_id: ruleID,
+								assertion_id: "default",
+								message: ruleID,
+								source_location: {
+									file: "src/app.ts",
+									startLine: 2,
+									startColumn: 1,
+									endLine: 2,
+									endColumn: 2,
+								},
+							},
+						]
+					: [],
 			},
-		}),
-	];
-	const listeners = new Map<string, (filename?: string) => void>();
-	const recursive = new Map<string, boolean>();
+		});
+	let analyses = 0;
 	const initializeWrites: Buffer[] = [];
 	child.stdin.on("data", (chunk) => initializeWrites.push(Buffer.from(chunk)));
 	const client = new LintAIClient(
@@ -557,28 +582,129 @@ test("creation of a missing semantic input invalidates diagnostics and refreshes
 		createTestDependencies({
 			spawnServe: () => child,
 			readServeSync: () => {
-				const chunk = chunks.shift();
-				if (!chunk) throw new Error("no response queued");
-				return chunk;
+				analyses++;
+				const ruleID = !existsSync(inputPaths[0])
+					? "arch.missing-map"
+					: !existsSync(source)
+						? "arch.missing-source"
+						: undefined;
+				return snapshot(analyses, ruleID);
 			},
-			watchPath: (target, listener, options) => {
-				listeners.set(target, listener);
-				recursive.set(target, options?.recursive ?? true);
-				return { close() {} };
+			now: () => 0,
+			log: () => undefined,
+		}),
+	);
+	const waitForAnalysis = async (expected: number) => {
+		const deadline = Date.now() + 5_000;
+		while (analyses < expected && Date.now() < deadline) {
+			await new Promise((resolve) => setTimeout(resolve, 25));
+			client.getDiagnostics("src/app.ts");
+		}
+		assert.equal(analyses, expected);
+	};
+	try {
+		assert.equal(client.getDiagnostics("src/app.ts")[0]?.rule_id, "arch.missing-map");
+		const inputWrite = Buffer.concat(initializeWrites).toString("utf8");
+		assert.ok(inputWrite.includes(`"sourceLinks":${JSON.stringify(path.join(workspaceRoot, "source-links.json"))}`));
+		writeFileSync(path.join(workspaceRoot, "unrelated.txt"), "unrelated");
+		changed(path.join(workspaceRoot, "unrelated.txt"));
+		await new Promise((resolve) => setTimeout(resolve, 250));
+		assert.equal(client.getDiagnostics("src/app.ts")[0]?.rule_id, "arch.missing-map");
+		assert.equal(analyses, 1);
+
+		writeFileSync(inputPaths[0], "map");
+		changed(inputPaths[0]);
+		await waitForAnalysis(2);
+		assert.equal(client.getDiagnostics("src/app.ts")[0]?.rule_id, "arch.missing-source");
+
+		mkdirSync(sourceDirectory);
+		changed(sourceDirectory);
+		await waitForAnalysis(3);
+		assert.equal(client.getDiagnostics("src/app.ts")[0]?.rule_id, "arch.missing-source");
+
+		mkdirSync(path.dirname(source));
+		writeFileSync(source, "export const value = 1;");
+		changed(path.dirname(source));
+		changed(source);
+		await waitForAnalysis(4);
+		assert.deepEqual(client.getDiagnostics("src/app.ts"), []);
+	} finally {
+		client.dispose();
+		watchMock.mock.restore();
+		syncBuiltinESMExports();
+		rmSync(workspaceRoot, { recursive: true, force: true });
+	}
+});
+
+test("an asynchronous input watcher failure falls back and reports the problem", async () => {
+	const workspaceRoot = mkdtempSync(path.join(os.tmpdir(), "lintai-input-watch-error-"));
+	const watcher = Object.assign(new EventEmitter(), { close() {} });
+	const watched: Array<[string, boolean | undefined]> = [];
+	const watchMock = mock.method(fs, "watch", (target: fs.PathLike, options: fs.WatchOptions) => {
+		watched.push([String(target), options.recursive]);
+		return watcher as fs.FSWatcher;
+	});
+	syncBuiltinESMExports();
+	const child = createTestProcess();
+	let oneshotCalls = 0;
+	const client = new LintAIClient(
+		resolveBridgeOptions(
+			{ mode: "serve", binary: "/tmp/lintai", repoRoot: workspaceRoot, workspaceRoot },
+			"/repo",
+			cliHost,
+		),
+		createTestDependencies({
+			spawnServe: () => child,
+			readServeSync: () => createInitializeResult("arch.old", [path.join(workspaceRoot, "missing.json")]),
+			spawnSync: () => {
+				oneshotCalls++;
+				return { stdout: "[]", stderr: "", error: undefined, status: 0 };
 			},
 			log: () => undefined,
 		}),
 	);
-	assert.equal(client.getDiagnostics("src/app.ts")[0]?.rule_id, "arch.old");
 	try {
-		const inputWrite = Buffer.concat(initializeWrites).toString("utf8");
-		assert.ok(inputWrite.includes(`"sourceLinks":${JSON.stringify(path.join(workspaceRoot, "source-links.json"))}`));
-		const mapWatcher = listeners.get(mapDirectory);
-		assert.ok(mapWatcher, "the client watches the directory containing the missing map");
-		assert.equal(recursive.get(mapDirectory), false, "input watchers do not watch subtrees");
-		mapWatcher("index.d.ts.map");
-		await new Promise((resolve) => setTimeout(resolve, 250));
-		assert.equal(client.getDiagnostics("src/app.ts")[0]?.rule_id, "arch.new");
+		assert.equal(client.getDiagnostics("src/example.ts")[0]?.rule_id, "arch.old");
+		assert.deepEqual(client.problems(), []);
+		assert.deepEqual(watched, [[workspaceRoot, false]]);
+		const refresh = client.refresh();
+		await new Promise((resolve) => setImmediate(resolve));
+		watcher.emit("error", new Error("watch failed"));
+		await refresh;
+		assert.deepEqual(client.getDiagnostics("src/example.ts"), []);
+		assert.equal(oneshotCalls, 1);
+		assert.match(client.problems().join("\n"), /input watcher unavailable.*watch failed/);
+		assert.deepEqual(client.problems(), []);
+	} finally {
+		client.dispose();
+		watchMock.mock.restore();
+		syncBuiltinESMExports();
+		rmSync(workspaceRoot, { recursive: true, force: true });
+	}
+});
+
+test("an input watcher that fails during initialization falls back without publishing stale diagnostics", () => {
+	const workspaceRoot = mkdtempSync(path.join(os.tmpdir(), "lintai-input-watch-start-"));
+	const child = createTestProcess();
+	const client = new LintAIClient(
+		resolveBridgeOptions(
+			{ mode: "serve", binary: "/tmp/lintai", repoRoot: workspaceRoot, workspaceRoot },
+			"/repo",
+			editorHost,
+		),
+		createTestDependencies({
+			spawnServe: () => child,
+			readServeSync: () => createInitializeResult("arch.old", [path.join(workspaceRoot, "missing.json")]),
+			watchInputPath: () => {
+				throw new Error("watch setup failed");
+			},
+			spawnSync: () => ({ stdout: "[]", stderr: "", error: undefined, status: 0 }),
+			log: () => undefined,
+		}),
+	);
+	try {
+		assert.deepEqual(client.getDiagnostics("src/example.ts"), []);
+		assert.match(client.problems().join("\n"), /input watcher unavailable.*watch setup failed/);
 	} finally {
 		client.dispose();
 		rmSync(workspaceRoot, { recursive: true, force: true });

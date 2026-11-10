@@ -1,6 +1,6 @@
 import { spawn, spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { PassThrough, type Readable, type Writable } from "node:stream";
-import { existsSync, readFileSync, readSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readSync, statSync, watch } from "node:fs";
 import path from "node:path";
 import chokidar from "chokidar";
 import { fileURLToPath } from "node:url";
@@ -113,15 +113,15 @@ type FileWatcher = {
 	close(): void;
 };
 
-// Input watchers set recursive to false. Each one watches the nearest existing
-// directory of an input, and creating a missing input first creates a direct
-// child of that directory.
-type WatchPath = (target: string, onChange: (filename?: string) => void, options?: { recursive: boolean }) => FileWatcher;
-
 type ClientDependencies = {
 	spawnServe: SpawnServe;
 	spawnSync: SpawnSyncLike;
-	watchPath: WatchPath;
+	watchPath: (target: string, onChange: (filename?: string) => void) => FileWatcher;
+	watchInputPath: (
+		target: string,
+		onChange: (filename?: string) => void,
+		onError: (error: Error) => void,
+	) => FileWatcher;
 	readServeSync: (child: ClientProcess, timeoutMs: number) => Buffer;
 	modifiedAt: (file: string) => number | undefined;
 	log: (message: string) => void;
@@ -154,11 +154,10 @@ const defaultDependencies: ClientDependencies = {
 		}
 		return spawnSync(command, args, options);
 	},
-	watchPath(target, onChange, options) {
+	watchPath(target, onChange) {
 		const watcher = chokidar.watch(target, {
 			ignoreInitial: true,
 			persistent: false,
-			...(options?.recursive === false ? { depth: 0 } : {}),
 			awaitWriteFinish: {
 				stabilityThreshold: 100,
 				pollInterval: 25,
@@ -172,6 +171,13 @@ const defaultDependencies: ClientDependencies = {
 				void watcher.close();
 			},
 		};
+	},
+	watchInputPath(target, onChange, onError) {
+		const watcher = watch(target, { persistent: false, recursive: false }, (_event, filename) =>
+			onChange(filename ?? undefined),
+		);
+		watcher.on("error", onError);
+		return watcher;
 	},
 	readServeSync(child, timeoutMs) {
 		const spawner = spawnerFor(child);
@@ -247,7 +253,6 @@ export class LintAIClient {
 	private attachedStdoutListener = false;
 	private readonly ruleWatchers: FileWatcher[] = [];
 	private readonly inputWatchers: FileWatcher[] = [];
-	private watchedInputPaths: string[] = [];
 	private ruleInvalidationTimer: ReturnType<typeof setTimeout> | undefined;
 	private inputInvalidationTimer: ReturnType<typeof setTimeout> | undefined;
 	private pendingRuleInvalidation = false;
@@ -451,7 +456,9 @@ export class LintAIClient {
 			});
 			this.attachStdoutListener();
 			this.setDiagnostics(resultValue.diagnostics, startedAt, resultValue.inputPaths);
-			this.state = this.pendingRuleInvalidation ? "invalidated" : "ready";
+			if (this.state === "starting") {
+				this.state = this.pendingRuleInvalidation ? "invalidated" : "ready";
+			}
 			finishInitialization();
 		} catch (error) {
 			this.handleServeFailure(asError(error));
@@ -637,7 +644,9 @@ export class LintAIClient {
 				return;
 			}
 			this.setDiagnostics(result.diagnostics, startedAt, result.inputPaths);
-			this.state = "ready";
+			if (this.state === "invalidated") {
+				this.state = "ready";
+			}
 		} catch (error) {
 			const child = this.child;
 			this.child = undefined;
@@ -783,45 +792,49 @@ export class LintAIClient {
 		this.diagnosticsByFile = indexed.byFile;
 		this.unlocated = indexed.unlocated;
 		this.analysisFailure = undefined;
-		if (inputPaths) {
-			this.updateInputWatchers(inputPaths);
-		}
+		this.updateInputWatchers(inputPaths ?? []);
 	}
 
 	private updateInputWatchers(inputPaths: string[]): void {
 		const paths = [...new Set([
 			...inputPaths.map((item) => path.resolve(item)),
 			...(this.options.sourceLinks === undefined ? [] : [path.resolve(this.options.sourceLinks)]),
-		])].sort();
-		if (paths.length === this.watchedInputPaths.length && paths.every((item, index) => item === this.watchedInputPaths[index])) {
-			return;
-		}
+		])];
 		for (const watcher of this.inputWatchers) {
 			watcher.close();
 		}
 		this.inputWatchers.length = 0;
-		this.watchedInputPaths = paths;
-		const inputsByDirectory = new Map<string, string[]>();
+		const directories = new Set<string>();
 		for (const input of paths) {
 			const target = nearestExistingDirectory(path.dirname(input));
-			if (!target) continue;
-			inputsByDirectory.set(target, [...(inputsByDirectory.get(target) ?? []), input]);
+			if (target) directories.add(target);
 		}
-		for (const [target, watchedInputs] of inputsByDirectory) {
+		for (const target of directories) {
+			const onError = (error: unknown) => {
+				if (this.state === "disposed") return;
+				this.problemsReported = false;
+				const message = `input watcher unavailable for ${target}: ${asError(error).message}`;
+				if (this.state === "fallback") {
+					this.warnOnce(`lintai ${message}`);
+					this.serveFailure = [this.serveFailure, message].filter(Boolean).join("; ");
+				} else {
+					this.handleServeFailure(new Error(message));
+				}
+			};
 			try {
-				const watcher = this.dependencies.watchPath(target, (filename) => {
-					if (!filename) {
-						this.scheduleInputInvalidation();
-						return;
-					}
-					const changed = path.resolve(target, filename);
-					if (watchedInputs.some((input) => isSameOrAncestor(changed, input))) {
-						this.scheduleInputInvalidation();
-					}
-				}, { recursive: false });
+				const watcher = this.dependencies.watchInputPath(
+					target,
+					(filename) => {
+						const changed = filename && path.resolve(target, filename);
+						if (!changed || !existsSync(target) || paths.some((input) => isSameOrAncestor(changed, input))) {
+							this.scheduleInputInvalidation();
+						}
+					},
+					onError,
+				);
 				this.inputWatchers.push(watcher);
 			} catch (error) {
-				this.warnOnce(`lintai input watcher unavailable for ${target}: ${asError(error).message}`);
+				onError(error);
 			}
 		}
 	}
