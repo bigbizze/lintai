@@ -262,6 +262,8 @@ export class LintAIClient {
 	private readonly ruleWatchers: FileWatcher[] = [];
 	private readonly inputWatchers: FileWatcher[] = [];
 	private inputPaths: string[] = [];
+	private inputPathSet = new Set<string>();
+	private inputDirectories = new Set<string>();
 	private inputWatchGeneration = 0;
 	private inputSignatures = new Map<string, string>();
 	private inputCheckReset: ReturnType<typeof setImmediate> | undefined;
@@ -496,11 +498,20 @@ export class LintAIClient {
 	}
 
 	private getOneshotDiagnostics(file: string): Diagnostic[] {
-		if (!this.oneshotCache) {
-			this.oneshotCache = this.loadOneshotDiagnostics();
-			this.recordInputSignatures();
+		if (!this.oneshotCache && !this.inputRetryReset) {
+			for (let attempt = 0; attempt < 2; attempt++) {
+				const inputsBefore = this.captureInputSignatures();
+				const diagnostics = this.loadOneshotDiagnostics();
+				this.recordInputSignatures();
+				if (this.inputSignaturesMatch(inputsBefore)) {
+					this.oneshotCache = diagnostics;
+					break;
+				}
+				this.analysisFailure = "workspace inputs changed during analysis; retrying on the next lint pass";
+				if (attempt === 1) this.deferInputRetry();
+			}
 		}
-		return this.oneshotCache.byFile.get(file) ?? [];
+		return this.oneshotCache?.byFile.get(file) ?? [];
 	}
 
 	private loadOneshotDiagnostics(): IndexedDiagnostics {
@@ -656,7 +667,7 @@ export class LintAIClient {
 		void this.refresh();
 	}
 
-	private refreshInvalidatedDiagnosticsSync(): void {
+	private refreshInvalidatedDiagnosticsSync(verifyInputs = true): void {
 		if (this.state !== "invalidated" || this.inputRetryReset) {
 			return;
 		}
@@ -674,7 +685,8 @@ export class LintAIClient {
 			}
 			const current = this.setDiagnostics(result.diagnostics, startedAt, inputsBefore, result.inputPaths);
 			if (!current) {
-				this.deferInputRetry();
+				if (verifyInputs) this.refreshInvalidatedDiagnosticsSync(false);
+				else this.deferInputRetry();
 			} else if (this.state === "invalidated") {
 				this.state = "ready";
 			}
@@ -728,7 +740,7 @@ export class LintAIClient {
 				return;
 			}
 			if (!this.setDiagnostics(result.diagnostics, startedAt, inputsBefore, result.inputPaths)) {
-				this.deferInputRetry();
+				this.refreshInvalidatedDiagnosticsSync(false);
 			}
 		} catch (error) {
 			if (targetEpoch !== this.analysisEpoch || this.state !== "ready") {
@@ -833,12 +845,17 @@ export class LintAIClient {
 		this.analysisFailure = undefined;
 		this.updateInputWatchers(inputPaths ?? []);
 		this.recordInputSignatures();
+		if (!this.inputSignaturesMatch(inputsBefore)) {
+			this.invalidateDiagnostics();
+			this.analysisFailure = "workspace inputs changed during analysis; retrying on the next lint pass";
+			return false;
+		}
+		return true;
+	}
+
+	private inputSignaturesMatch(inputsBefore: Map<string, string>): boolean {
 		for (const [input, signature] of this.inputSignatures) {
-			if (inputsBefore.get(input) !== signature) {
-				this.invalidateDiagnostics();
-				this.analysisFailure = "workspace inputs changed during analysis; retrying on the next lint pass";
-				return false;
-			}
+			if (inputsBefore.get(input) !== signature) return false;
 		}
 		return true;
 	}
@@ -886,6 +903,7 @@ export class LintAIClient {
 			...(this.options.sourceLinks === undefined ? [] : [path.resolve(this.options.sourceLinks)]),
 		])];
 		this.inputPaths = paths;
+		this.inputPathSet = new Set(paths);
 		const generation = ++this.inputWatchGeneration;
 		for (const watcher of this.inputWatchers) {
 			watcher.close();
@@ -922,13 +940,12 @@ export class LintAIClient {
 				child = parent;
 			}
 		}
+		this.inputDirectories = new Set(specs.keys());
 		for (const [target, spec] of specs) {
-			const coversCurrentInput = (directory: string) =>
-				this.inputPaths.some((input) => isSameOrAncestor(directory, input));
 			const directoryChanged = (changed?: string) =>
-				(coversCurrentInput(target) && !sameDirectory(spec.identity, directoryIdentity(target))) ||
+				(this.inputDirectories.has(target) && !sameDirectory(spec.identity, directoryIdentity(target))) ||
 				[...spec.children].some(([child, identity]) =>
-					(!changed || changed === child) && coversCurrentInput(child) &&
+					(!changed || changed === child) && this.inputDirectories.has(child) &&
 					!sameDirectory(identity, directoryIdentity(child)),
 				);
 			const onError = (error: unknown) => {
@@ -951,7 +968,7 @@ export class LintAIClient {
 						if (
 							directoryChanged(changed) ||
 							spec.inputs.some((input) =>
-								this.inputPaths.includes(input) && (!changed || isSameOrAncestor(changed, input)),
+								this.inputPathSet.has(input) && (!changed || isSameOrAncestor(changed, input)),
 							)
 						) {
 							this.scheduleInputInvalidation();

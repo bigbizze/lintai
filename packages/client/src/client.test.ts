@@ -572,13 +572,14 @@ test("rule file changes invalidate cached diagnostics and the next pass refreshe
 	}
 });
 
-for (const knownInput of [true, false]) {
-	test(`an input changed after it was read is reanalyzed when ${knownInput ? "already known" : "newly discovered"}`, () => {
+for (const scenario of ["known", "discovered", "saved"]) {
+	test(`analysis verifies ${scenario} inputs before returning diagnostics`, () => {
 		const workspaceRoot = mkdtempSync(path.join(os.tmpdir(), "lintai-input-race-"));
 		const input = path.join(workspaceRoot, "input.json");
 		writeFileSync(input, "before");
 		const child = createTestProcess();
 		let analyses = 0;
+		let modifiedAt: number | undefined;
 		const client = new LintAIClient(
 			resolveBridgeOptions(
 				{
@@ -586,7 +587,7 @@ for (const knownInput of [true, false]) {
 					binary: "/tmp/lintai",
 					repoRoot: workspaceRoot,
 					workspaceRoot,
-					...(knownInput ? { sourceLinks: input } : {}),
+					...(scenario === "known" ? { sourceLinks: input } : {}),
 				},
 				workspaceRoot,
 				editorHost,
@@ -594,18 +595,27 @@ for (const knownInput of [true, false]) {
 			createTestDependencies({
 				spawnServe: () => child,
 				watchInputPath: () => ({ close() {} }),
+				modifiedAt: () => modifiedAt,
+				now: () => 100,
 				readServeSync: () => {
+					analyses++;
+					if (scenario === "saved" && analyses === 1) return createInputResult(analyses, [], "initial");
 					const value = readFileSync(input, "utf8");
-					if (++analyses === 1) writeFileSync(input, "after the read");
+					if (analyses === 1) writeFileSync(input, "after the read");
 					return createInputResult(analyses, [input], value);
 				},
 				log: () => undefined,
 			}),
 		);
 		try {
-			assert.equal(client.getDiagnostics("src/app.ts")[0]?.message, "after the read");
+			if (scenario === "saved") {
+				assert.equal(client.getDiagnostics("src/app.ts")[0]?.message, "initial");
+				modifiedAt = 101;
+			}
+			assert.equal(client.getDiagnostics("src/app.ts")[0]?.message, scenario === "saved" ? "before" : "after the read");
 			for (let index = 0; index < 3; index++) client.getDiagnostics("src/app.ts");
-			assert.equal(analyses, 2);
+			assert.equal(analyses, scenario === "saved" ? 3 : 2);
+			assert.deepEqual(client.problems(), []);
 		} finally {
 			client.dispose();
 			rmSync(workspaceRoot, { recursive: true, force: true });
@@ -644,9 +654,6 @@ test("repeated input changes defer retries until the next synchronous lint pass"
 	try {
 		assert.equal(client.getDiagnostics("src/app.ts")[0]?.message, "initial");
 		modifiedAt = 101;
-		for (let index = 0; index < 3; index++) assert.deepEqual(client.getDiagnostics("src/app.ts"), []);
-		assert.equal(analyses, 2);
-		await new Promise((resolve) => setImmediate(resolve));
 		for (let index = 0; index < 3; index++) assert.deepEqual(client.getDiagnostics("src/app.ts"), []);
 		assert.equal(analyses, 3);
 		assert.ok(client.problems().some((message) => message.includes("inputs changed during analysis")));
@@ -992,6 +999,7 @@ test("oneshot source-links changes follow a replaced directory", (t) => {
 	mkdirSync(directory);
 	writeFileSync(input, "initial");
 	const listeners = new Map<string, (filename?: string) => void>();
+	let analyses = 0;
 	const client = new LintAIClient(
 		resolveBridgeOptions(
 			{ binary: "/tmp/lintai", workspaceRoot, sourceLinks: "config/source-links.json" },
@@ -1007,30 +1015,35 @@ test("oneshot source-links changes follow a replaced directory", (t) => {
 					},
 				};
 			},
-			spawnSync: () => ({
-				stdout: JSON.stringify([
-					{
-						rule_id: "arch.input",
-						assertion_id: "default",
-						message: readFileSync(input, "utf8"),
-						source_location: {
-							file: "src/app.ts",
-							startLine: 1,
-							startColumn: 1,
-							endLine: 1,
-							endColumn: 2,
+			spawnSync: () => {
+				const value = readFileSync(input, "utf8");
+				if (++analyses === 1) writeFileSync(input, "changed during analysis");
+				return {
+					stdout: JSON.stringify([
+						{
+							rule_id: "arch.input",
+							assertion_id: "default",
+							message: value,
+							source_location: {
+								file: "src/app.ts",
+								startLine: 1,
+								startColumn: 1,
+								endLine: 1,
+								endColumn: 2,
+							},
 						},
-					},
-				]),
-				stderr: "",
-				error: undefined,
-				status: 0,
-			}),
+					]),
+					stderr: "",
+					error: undefined,
+					status: 0,
+				};
+			},
 			log: () => undefined,
 		}),
 	);
 	try {
-		assert.equal(client.getDiagnostics("src/app.ts")[0]?.message, "initial");
+		assert.equal(client.getDiagnostics("src/app.ts")[0]?.message, "changed during analysis");
+		assert.equal(analyses, 2);
 		renameSync(directory, path.join(workspaceRoot, "old-config"));
 		mkdirSync(directory);
 		writeFileSync(input, "replacement");
