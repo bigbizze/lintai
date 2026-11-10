@@ -33,6 +33,8 @@ declare const noncallable: number;
 declare class Box { constructor(x: string); }
 declare function tag(parts: TemplateStringsArray): string;
 declare function flowStep(x: string): string | number;
+declare function f(x: string): void;
+f("ok",);
 single(123);
 single("ok");
 single();
@@ -174,6 +176,23 @@ const afterFlow = flowValue;
 				if again := c.GetResolvedSignatureEvidence(calls[call]); again != first {
 					t.Errorf("%s: cached evidence changed: %+v -> %+v", call, first, again)
 				}
+			}
+			// Signature help counts the trailing comma as another argument and
+			// temporarily selects an arity-error fallback for this valid call.
+			// Restoring its signature must also restore its complete evidence.
+			node := calls[`f("ok",)`]
+			if node == nil {
+				t.Fatal("missing signature-help invocation")
+			}
+			before := c.GetResolvedSignatureEvidence(node)
+			if before.Signature == nil || before.Signature.Declaration() == nil || before.Synthetic || before.Recovery {
+				t.Fatalf("expected complete evidence before signature help, got %+v", before)
+			}
+			if sig, candidates := checker.GetResolvedSignatureForSignatureHelp(node, 2, c); sig == nil || len(candidates) != 1 {
+				t.Fatalf("signature help did not resolve the expected candidate: %p, %d candidates", sig, len(candidates))
+			}
+			if after := c.GetResolvedSignatureEvidence(node); after != before {
+				t.Errorf("signature help changed complete evidence: %+v -> %+v", before, after)
 			}
 		})
 	}

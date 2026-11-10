@@ -368,12 +368,17 @@ func GetResolvedSignatureForSignatureHelp(node *ast.Node, argumentCount int, c *
 func (c *Checker) runWithoutResolvedSignatureCaching[T any](node *ast.Node, fn func() T) T {
 	ancestorNode := ast.FindAncestor(node, ast.IsCallLikeOrFunctionLikeExpression)
 	if ancestorNode != nil {
-		cachedResolvedSignatures := make(map[*SignatureLinks]*Signature)
+		type cachedSignature struct {
+			signature *Signature
+			recovery  bool
+		}
+		cachedResolvedSignatures := make(map[*SignatureLinks]cachedSignature)
 		cachedTypes := make(map[*ValueSymbolLinks]*Type)
 		for ancestorNode != nil {
 			signatureLinks := c.signatureLinks.Get(ancestorNode)
-			cachedResolvedSignatures[signatureLinks] = signatureLinks.resolvedSignature
+			cachedResolvedSignatures[signatureLinks] = cachedSignature{signatureLinks.resolvedSignature, signatureLinks.resolvedSignatureRecovery}
 			signatureLinks.resolvedSignature = nil
+			signatureLinks.resolvedSignatureRecovery = false
 			if ast.IsFunctionExpressionOrArrowFunction(ancestorNode) {
 				symbolLinks := c.valueSymbolLinks.Get(c.getSymbolOfDeclaration(ancestorNode))
 				resolvedType := symbolLinks.resolvedType
@@ -383,8 +388,9 @@ func (c *Checker) runWithoutResolvedSignatureCaching[T any](node *ast.Node, fn f
 			ancestorNode = ast.FindAncestor(ancestorNode.Parent, ast.IsCallLikeOrFunctionLikeExpression)
 		}
 		result := fn()
-		for signatureLinks, resolvedSignature := range cachedResolvedSignatures {
-			signatureLinks.resolvedSignature = resolvedSignature
+		for signatureLinks, cached := range cachedResolvedSignatures {
+			signatureLinks.resolvedSignature = cached.signature
+			signatureLinks.resolvedSignatureRecovery = cached.recovery
 		}
 		for symbolLinks, resolvedType := range cachedTypes {
 			symbolLinks.resolvedType = resolvedType
