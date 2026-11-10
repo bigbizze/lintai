@@ -218,6 +218,8 @@ func (e *extractor) recoverDeclarationMap(checked *ast.Node, requested bool, pub
 	start := scanner.GetTokenPosOfNode(checked, checkedFile, false)
 	generatedLine, generatedColumn := scanner.GetECMALineAndUTF16CharacterOfPosition(checkedFile, start)
 	var exact []exactMapSegment
+	var candidateIDs []string
+	var unsupportedAtAnchor bool
 	seenSegments := make(map[exactMapSegment]struct{})
 	for _, mapping := range index.exact[generatedMapAnchor{line: generatedLine, column: generatedColumn}] {
 		if int(mapping.SourceIndex) < 0 || int(mapping.SourceIndex) >= len(index.raw.Sources) {
@@ -250,6 +252,19 @@ func (e *extractor) recoverDeclarationMap(checked *ast.Node, requested bool, pub
 		if _, exists := seenSegments[segment]; !exists {
 			seenSegments[segment] = struct{}{}
 			exact = append(exact, segment)
+			var nodes []*ast.Node
+			collectMappedDeclarationsAt(sourceFile, sourcePos, &nodes, &unsupportedAtAnchor)
+			for _, node := range nodes {
+				if !compatibleMappedDeclaration(checked, node, publicName) || mappedInsideNestedOwner(node, sourceFile, sourcePos) {
+					continue
+				}
+				id, supported := e.addDeclarationEndpoint(node, node.Symbol(), publicName)
+				if id == "" || !supported {
+					continue
+				}
+				candidateIDs = append(candidateIDs, id)
+				e.declarationSourceCandidates = append(e.declarationSourceCandidates, DeclarationSourceFact{CheckedDecl: checkedID, SourceDecl: id, Method: "declaration_map"})
+			}
 		}
 	}
 	if index.decodeError {
@@ -258,6 +273,11 @@ func (e *extractor) recoverDeclarationMap(checked *ast.Node, requested bool, pub
 	}
 	if len(exact) == 0 {
 		e.addMapOutcome(checkedID, "unresolved")
+		return
+	}
+	candidateIDs = sortedUnique(candidateIDs)
+	if len(exact) > 1 || len(candidateIDs) > 1 {
+		e.addMapOutcome(checkedID, "ambiguous")
 		return
 	}
 	if !index.mapperReady {
@@ -284,30 +304,6 @@ func (e *extractor) recoverDeclarationMap(checked *ast.Node, requested bool, pub
 	}
 	if !mapperAnchorValid {
 		e.addMapOutcome(checkedID, "unresolved")
-		return
-	}
-	var candidateIDs []string
-	var unsupportedAtAnchor bool
-	for _, segment := range exact {
-		source := e.mapFile(tspath.RootedFilePathFromAbsolute(segment.sourcePath))
-		sourceFile := source.sourceFile()
-		var nodes []*ast.Node
-		collectMappedDeclarationsAt(sourceFile, segment.sourcePos, &nodes, &unsupportedAtAnchor)
-		for _, node := range nodes {
-			if !compatibleMappedDeclaration(checked, node, publicName) || mappedInsideNestedOwner(node, sourceFile, segment.sourcePos) {
-				continue
-			}
-			id, supported := e.addDeclarationEndpoint(node, node.Symbol(), publicName)
-			if id == "" || !supported {
-				continue
-			}
-			candidateIDs = append(candidateIDs, id)
-			e.declarationSourceCandidates = append(e.declarationSourceCandidates, DeclarationSourceFact{CheckedDecl: checkedID, SourceDecl: id, Method: "declaration_map"})
-		}
-	}
-	candidateIDs = sortedUnique(candidateIDs)
-	if len(exact) > 1 || len(candidateIDs) > 1 {
-		e.addMapOutcome(checkedID, "ambiguous")
 		return
 	}
 	if len(candidateIDs) != 1 {

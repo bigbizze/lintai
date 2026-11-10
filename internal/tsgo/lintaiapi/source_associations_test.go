@@ -570,6 +570,9 @@ func TestSourceLinksRejectInvalidConfiguration(t *testing.T) {
 		{name: "unsupported version", json: `{"version":2,"entries":[]}`},
 		{name: "unknown field", json: `{"version":1,"entries":[],"extra":true}`},
 		{name: "workspace escape", json: `{"version":1,"entries":[{"checkedEntry":"../outside.d.ts","sourceEntry":"src/index.ts"}]}`},
+		{name: "null source config", json: `{"version":1,"entries":[{"checkedEntry":"dist/index.d.ts","sourceEntry":"src/index.ts","sourceTsconfig":null}]}`},
+		{name: "non-string source config", json: `{"version":1,"entries":[{"checkedEntry":"dist/index.d.ts","sourceEntry":"src/index.ts","sourceTsconfig":1}]}`},
+		{name: "empty source config", json: `{"version":1,"entries":[{"checkedEntry":"dist/index.d.ts","sourceEntry":"src/index.ts","sourceTsconfig":""}]}`},
 		{name: "missing source config", json: `{"version":1,"entries":[{"checkedEntry":"dist/index.d.ts","sourceEntry":"src/index.ts","sourceTsconfig":"missing.json"}]}`},
 		{name: "contradictory entries", json: `{"version":1,"entries":[{"checkedEntry":"dist/index.d.ts","sourceEntry":"src/one.ts"},{"checkedEntry":"dist/index.d.ts","sourceEntry":"src/two.ts"}]}`},
 	}

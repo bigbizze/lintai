@@ -9,6 +9,25 @@ import (
 	"testing"
 )
 
+func TestConflictSourceBindingsWithMaps(t *testing.T) {
+	bindings := []SourceBindingFact{
+		{CheckedDeclarations: []string{"a", "b"}, SourceDeclarations: []string{"one", "two"}},
+		{CheckedDeclarations: []string{"a"}, SourceDeclarations: []string{"other"}, Incomplete: []string{"unresolved"}},
+		{CheckedDeclarations: []string{"a"}},
+		{CheckedDeclarations: []string{"unlinked"}, SourceDeclarations: []string{"other"}},
+	}
+	links := []DeclarationSourceFact{
+		{CheckedDecl: "a", SourceDecl: "one"},
+		{CheckedDecl: "b", SourceDecl: "two"},
+		{CheckedDecl: "a", SourceDecl: "two"},
+		{CheckedDecl: "unrelated", SourceDecl: "other"},
+	}
+	got := conflictSourceBindingsWithMaps(bindings, links)
+	if len(got[0].Incomplete) != 0 || !slices.Equal(got[1].Incomplete, []string{AssociationConflict, "unresolved"}) || len(got[2].Incomplete) != 0 || len(got[3].Incomplete) != 0 {
+		t.Fatalf("unexpected binding conflicts: %+v", got)
+	}
+}
+
 func TestSemanticExportsKeepCheckerBindingsAndContributionProvenance(t *testing.T) {
 	snapshot := buildTestSnapshot(t, map[string]string{
 		"src/base.ts": `export interface Token { value: string }
@@ -640,6 +659,117 @@ func TestTypeOnlyStarsPropagateThroughCycles(t *testing.T) {
 		if valueFound != (file == "src/mixed.ts") {
 			t.Fatalf("wrong value accessibility at %s: %t", file, valueFound)
 		}
+	}
+}
+
+func TestMissingNamedReexportKeepsItsSite(t *testing.T) {
+	snapshot := buildTestSnapshot(t, map[string]string{
+		"src/base.ts":  `export const present = 1;`,
+		"src/index.ts": `export { absent as missing, present as found, type Other as typeMissing } from "./base";`,
+	})
+	for _, space := range []string{SpaceType, SpaceValue} {
+		missing := semanticExport(t, snapshot, "src/index.ts", "missing", space)
+		if len(missing.Targets) != 0 || !slices.Equal(missing.Incomplete, []string{AssociationUnresolved}) ||
+			len(missing.Via) != 1 || len(missing.Reexports) != 1 || missing.Reexports[0].Module != "src/base.ts" ||
+			missing.Reexports[0].SourceName != "absent" || missing.Reexports[0].Space != space || missing.Location.File != "src/index.ts" {
+			t.Errorf("missing named re-export lost provenance: %+v", missing)
+		}
+		if !slices.ContainsFunc(snapshot.ImportEdges, func(edge ImportEdge) bool {
+			return edge.FromPath == "src/index.ts" && edge.Specifier == "./base" &&
+				len(missing.Via) == 1 && edge.SemanticKey == missing.Via[0] && edge.Range == missing.Location
+		}) {
+			t.Errorf("missing named re-export did not retain its statement location: %+v", missing)
+		}
+	}
+	typeMissing := semanticExport(t, snapshot, "src/index.ts", "typeMissing", SpaceType)
+	if len(typeMissing.Via) != 1 || len(typeMissing.Reexports) != 1 || typeMissing.Reexports[0].SourceName != "Other" ||
+		!slices.Equal(typeMissing.Incomplete, []string{AssociationUnresolved}) {
+		t.Errorf("missing type-only re-export lost provenance: %+v", typeMissing)
+	}
+	if _, found := findSemanticExport(snapshot, "src/index.ts", "typeMissing", SpaceValue); found {
+		t.Error("missing type-only re-export invented a value binding")
+	}
+	found := semanticExport(t, snapshot, "src/index.ts", "found", SpaceValue)
+	if len(found.Targets) != 1 || len(found.Via) != 1 || len(found.Reexports) != 1 || found.Reexports[0].SourceName != "present" {
+		t.Errorf("resolved sibling lost provenance: %+v", found)
+	}
+}
+
+func TestExportEqualsNamespaceDoesNotInventMembers(t *testing.T) {
+	snapshot := buildTestSnapshot(t, map[string]string{
+		"src/api.d.ts": `declare namespace api { export const run: () => void; export interface Nested {} }
+export = api;
+export interface Independent { value: string }`,
+		"src/assignment.ts": `namespace api { export const run = () => 1; export interface Nested {} export interface Independent {} }
+export = api;
+export interface Independent { value: string }`,
+		"src/independent.ts": `export namespace api { export const run = 1; } export const other = 2;`,
+	})
+	for _, file := range []string{"src/api.d.ts", "src/assignment.ts"} {
+		semanticExport(t, snapshot, file, "export=", SpaceValue)
+		for _, name := range []string{"run", "Nested"} {
+			for _, space := range []string{SpaceType, SpaceValue} {
+				if item, found := findSemanticExport(snapshot, file, name, space); found {
+					t.Errorf("export = invented namespace member: %+v", item)
+				}
+			}
+		}
+	}
+	semanticExport(t, snapshot, "src/api.d.ts", "Independent", SpaceType)
+	independent := semanticExport(t, snapshot, "src/assignment.ts", "Independent", SpaceType)
+	if len(independent.Targets) != 1 || semanticDeclaration(t, snapshot, independent.Targets[0]).Location.StartLine != 3 {
+		t.Errorf("independent declaration was replaced by a namespace member: %+v", independent)
+	}
+	semanticExport(t, snapshot, "src/independent.ts", "api", SpaceValue)
+	semanticExport(t, snapshot, "src/independent.ts", "other", SpaceValue)
+}
+
+func TestStarReexportProvenanceRespectsSourceSpace(t *testing.T) {
+	snapshot := buildTestSnapshot(t, map[string]string{
+		"src/base.ts":  `export class Widget {}`,
+		"src/types.ts": `export type { Widget } from "./base";`,
+		"src/index.ts": `export * from "./base"; export * from "./types"; export type * from "./base";`,
+	})
+	value := semanticExport(t, snapshot, "src/index.ts", "Widget", SpaceValue)
+	if len(value.Targets) != 1 || len(value.Via) != 1 || len(value.Reexports) != 1 || value.Reexports[0].Module != "src/base.ts" {
+		t.Errorf("value binding has type-only provenance: %+v", value)
+	}
+	typeExport := semanticExport(t, snapshot, "src/index.ts", "Widget", SpaceType)
+	if len(typeExport.Targets) != 1 || len(typeExport.Via) != 3 || len(typeExport.Reexports) != 3 ||
+		!slices.ContainsFunc(typeExport.Reexports, func(edge ExportReexportFact) bool { return edge.Module == "src/base.ts" }) ||
+		!slices.ContainsFunc(typeExport.Reexports, func(edge ExportReexportFact) bool { return edge.Module == "src/types.ts" }) {
+		t.Errorf("type binding lost a contributing path: %+v", typeExport)
+	}
+}
+
+func TestDeclarationFunctionRequiresDirectCorrespondence(t *testing.T) {
+	snapshot := buildTestSnapshot(t, map[string]string{
+		"src/index.ts": `export function parse(input: string): string;
+export function parse(input: number): number;
+export function parse(input: string | number): string | number { return input; }
+export namespace parse { export const version = 1; }
+export const callback = () => 1;`,
+	})
+	item := semanticExport(t, snapshot, "src/index.ts", "parse", SpaceValue)
+	if len(item.Targets) != 4 {
+		t.Fatalf("expected overloads, implementation and namespace: %+v", item)
+	}
+	linked := 0
+	for _, id := range item.Targets {
+		declaration := semanticDeclaration(t, snapshot, id)
+		if declaration.Function != "" {
+			linked++
+			if declaration.Kind != "function" || declaration.Location.StartLine != 3 {
+				t.Errorf("non-implementation declaration linked to function: %+v", declaration)
+			}
+		}
+	}
+	if linked != 1 {
+		t.Errorf("expected one direct function correspondence, got %d", linked)
+	}
+	callback := semanticExport(t, snapshot, "src/index.ts", "callback", SpaceValue)
+	if len(callback.Targets) != 1 || semanticDeclaration(t, snapshot, callback.Targets[0]).Function == "" {
+		t.Errorf("direct function-valued variable lost its correspondence: %+v", callback)
 	}
 }
 

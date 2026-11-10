@@ -61,7 +61,7 @@ func (fs *resolutionInputFS) tracked(value string) bool {
 	if tspath.IsUrl(value) || strings.HasPrefix(value, "^/") || value == "" {
 		return false
 	}
-	return isWithinRoot(fs.workspaceRoot, value) || strings.Contains(value, "/node_modules/")
+	return isWithinRoot(fs.workspaceRoot, value) || strings.HasSuffix(value, "/node_modules") || strings.Contains(value, "/node_modules/")
 }
 
 func (fs *resolutionInputFS) record(value string) {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -313,6 +314,88 @@ func TestDeclarationMapReverseAnchorRejectsDifferentGeneratedDeclaration(t *test
 	rejected := semanticDeclaration(t, snapshot, snapshot.DeclarationSourceOutcomes[0].CheckedDecl)
 	if checked.Location.StartLine != 1 || rejected.Location.StartLine != 2 {
 		t.Fatalf("unexpected round-trip endpoints: accepted=%+v rejected=%+v", checked, rejected)
+	}
+	if !slices.ContainsFunc(snapshot.DeclarationSourceCandidates, func(candidate DeclarationSourceFact) bool {
+		return candidate.CheckedDecl == rejected.ID && candidate.SourceDecl == snapshot.DeclarationSources[0].SourceDecl
+	}) {
+		t.Fatalf("non-round-tripping declaration lost its compatible candidate: %+v", snapshot.DeclarationSourceCandidates)
+	}
+}
+
+func TestDeclarationMapPreservesExactSegmentEvidence(t *testing.T) {
+	tests := []struct {
+		name, generated, mappings, outcome string
+		missingFirst                       bool
+		wantCandidates                     int
+	}{
+		{
+			name:      "ambiguous despite failed reverse mapping",
+			generated: "export declare function load(x: string): void;\nexport declare function load(x: number): void;\n//# sourceMappingURL=index.d.ts.map\n",
+			mappings:  "AAAA;AAAA,ACAA", outcome: "ambiguous", wantCandidates: 2,
+		},
+		{
+			name:      "later missing source keeps earlier candidate",
+			generated: "export declare function load(): void;\n//# sourceMappingURL=index.d.ts.map\n",
+			mappings:  "AAAA,ACAA", outcome: "unavailable_source", wantCandidates: 1,
+		},
+		{
+			name:      "first missing source wins before later candidate",
+			generated: "export declare function load(): void;\n//# sourceMappingURL=index.d.ts.map\n",
+			mappings:  "AAAA,ACAA", outcome: "unavailable_source", missingFirst: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			sources := []string{"../source/first.ts", "../source/second.ts"}
+			files := map[string]string{
+				"src/app.ts":       `export { load } from "../dist";`,
+				"dist/index.d.ts":  test.generated,
+				"source/first.ts":  "export function load() {}\n",
+				"source/second.ts": "export function load() {}\n",
+			}
+			if test.outcome == "unavailable_source" {
+				if test.missingFirst {
+					delete(files, "source/first.ts")
+				} else {
+					delete(files, "source/second.ts")
+				}
+			}
+			contents, err := json.Marshal(map[string]any{"version": 3, "file": "index.d.ts", "sources": sources, "names": []string{}, "mappings": test.mappings})
+			if err != nil {
+				t.Fatal(err)
+			}
+			files["dist/index.d.ts.map"] = string(contents)
+			writeWorkspace(t, root, files)
+			snapshot, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{WorkspaceRoot: root, Files: []string{filepath.Join(root, "src/app.ts")}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var outcome *DeclarationSourceOutcomeFact
+			for i := range snapshot.DeclarationSourceOutcomes {
+				if snapshot.DeclarationSourceOutcomes[i].Outcome == test.outcome {
+					outcome = &snapshot.DeclarationSourceOutcomes[i]
+					break
+				}
+			}
+			if outcome == nil {
+				t.Fatalf("expected %s outcome: %+v", test.outcome, snapshot.DeclarationSourceOutcomes)
+			}
+			candidates := 0
+			for _, item := range snapshot.DeclarationSourceCandidates {
+				if item.CheckedDecl == outcome.CheckedDecl {
+					candidates++
+				}
+			}
+			if candidates != test.wantCandidates {
+				t.Fatalf("outcome %s retained %d candidates, want %d: %+v", test.outcome, candidates, test.wantCandidates, snapshot.DeclarationSourceCandidates)
+			}
+			for _, item := range snapshot.DeclarationSources {
+				if item.CheckedDecl == outcome.CheckedDecl {
+					t.Fatalf("outcome also has an accepted link: %+v", item)
+				}
+			}
+		})
 	}
 }
 
