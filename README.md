@@ -1,137 +1,138 @@
 # LintAI
 
-Deterministic architectural policy enforcement for TypeScript repositories.
+LintAI lets you write and enforce rules about how your TypeScript code is allowed to use the rest of your codebase.
 
-LintAI lets you write rules like "components must not import domain code", "pure functions must not transitively call effectful code", or "API actions must return `Promise<ActionResult<T>>`", then run those rules from a CLI or surface them inside ESLint or oxlint.
+TypeScript can tell you whether a function accepts the value you passed to it. It usually cannot tell you whether that function belongs in this part of your application.
 
-## What and caveats
+For example, a calculation might call a helper that calls another helper that reads the current time. Every call can be valid TypeScript, while the calculation now produces different answers depending on when it runs. A rule that only looks for `Date.now()` in the calculation's file will miss it.
 
-LintAI is a whole-workspace architecture engine:
+LintAI lets you write a rule that follows those calls and reports the dependency where it matters.
 
-- it builds a semantic snapshot of your TypeScript workspace in Go
-- it converts the snapshot into base relations (facts) such as `fn`, `import_edge`, `call_edge`, `ambient_use`, `type_named` and `module_export`
-- each rule is a Datalog program, in the [Mangle](https://codeberg.org/TauCeti/mangle-go) dialect, that derives violation rows from those facts
-- it reports file-scoped diagnostics that can be consumed by the CLI, ESLint or oxlint
+The same idea applies to other rules a team might otherwise keep in a document or an `AGENTS.md` file:
 
-It is meant for architectural invariants, not style rules.
+- Shared contracts must not expose database or server framework types, including through re-exports.
+- Code in one layer must not import code from a forbidden layer.
+- Calculations must not depend on the clock, random numbers, environment variables or network calls through helpers.
+- Code given a read/write interface may read from it, but must not call its declared write operation.
 
-Current caveats:
+Humans and AI agents both make changes that look reasonable in one file but break assumptions elsewhere. Writing those assumptions down helps. Making them executable gives you a check you can run on every change.
 
-- only the TypeScript backend ships today
-- npm distribution currently targets Linux and macOS on `x64` and `arm64`
-- the npm packages need Node 22 or later
-- the project is usable, but still early
+LintAI runs from the command line, in CI, or through ESLint and oxlint. It does not use an AI model to decide whether code passes. You write the rules; it checks the facts it can extract from the code.
 
-## Why and caveats
+## What it can check
 
-LintAI exists because local lint rules are usually too shallow for the failures teams actually care about:
+LintAI uses the TypeScript compiler to collect imports, functions, calls, exports and types across a workspace. Rules can combine those facts and follow relationships across files.
 
-- AI agents import the wrong layer, call the wrong abstraction, or bypass approved entry points
-- humans under time pressure do the same thing
-- ESLint can see one file at a time, but many architecture constraints are transitive or cross-package
+### Calls through helpers
 
-LintAI fills that gap with Datalog over repository-level semantic facts. Recursion gives transitive reachability, negation gives "must import" and "must not reach" rules, and joins give layer tables.
+Suppose a price calculation calls `getDiscount()`, which calls `isPromotionActive()`, which reads `Date.now()`.
 
-Current caveats:
+A lintai rule can report that the calculation depends on the clock even though the calculation never mentions `Date`. The [purity examples](docs/examples.md) show how to follow calls, include function values such as callbacks, and report calls whose targets cannot be resolved.
 
-- it does not replace tests, the type checker, or runtime validation
-- types are structural facts keyed by the declarations that the checker actually read: `fn_returns(Fn, Type)` gives a type entity, and `type_named`, `type_arg`, `type_member` and the other `type_*` relations describe it. Members of classes, interfaces and enums are not expanded, and these types receive `type_incomplete(Type, /members_omitted)`. Conditional, mapped and indexed access types are `/other` with display text only. `type_contains` does not look into these types, into type parameter constraints or into the signatures of object types; `type_reaches_incomplete` reports represented types that are incomplete, including ordinary library `Promise` and `Array` interfaces. A rule may accept a specific opaque library type while still checking its represented type arguments; see the [narrow policy example](docs/examples.md#15-domain-signatures-do-not-mention-infrastructure-types). `any`, `unknown` and other unmarked types are not thereby known to be safe
-- calls to functions outside the workspace are in `external_call`, but lintai does not analyze code inside `node_modules`
-- lintai is a deterministic gate against cooperative but careless authors, not a security boundary against an adversary with write access to the repository and its CI. See [docs/trust.md](docs/trust.md).
+Following a function reference is a conservative policy: passing a callback means the code depends on that function, but does not prove it will run.
 
-## How and caveats
+### Types exposed by a package
 
-A rule runs in these phases:
+A shared package might re-export a type from another file, which re-exports it from somewhere else. A rule can start at the package's public entry point, follow those exports, and check the represented type structure for forbidden declarations.
 
-1. `setup()` runs in Node and can inspect the workspace.
-2. `facts()` and `program()` run inside a restricted Goja runtime. They return extra facts and the Datalog program text.
-3. Go parses the program together with the built-in prelude, then evaluates it over the base facts with mangle-go.
-4. Every row of each predicate named in `.report()` becomes one diagnostic.
-5. `message()` runs in the restricted runtime to format each diagnostic.
+That lets you check whether shared contracts expose a database type without banning every use of that type elsewhere. Types are identified by their declarations, not just by names such as `Result` or `Client`.
 
-The TypeScript snapshot is built in Go by a copy of the TypeScript 7 compiler that is compiled into the `lintai` binary, at the version in `internal/tsgo/VERSION` (now 7.1.0-beta). The extractor, `internal/tsgo/lintaiapi`, calls the compiler's parser and checker in the same process. No Node process, `tsc` executable or `typescript` npm package takes part in extraction. The ESLint and oxlint plugins can keep a persistent `lintai serve` process alive for editor use, while the CLI runs one-shot analysis.
+When generated declarations are involved, lintai keeps what the compiler checked. Declaration maps and configured source links can add evidence about the original source without silently replacing the checked type.
 
-The snapshot also records what each module exports. For each public name it gives the declarations behind the name and the re-export steps that brought it there, so a rule can start at a package entry such as `packages/common/src/index.ts` and check every type that the package makes public, even when a name passes through `export *` and a rename in other files. When lintai cannot see something completely, for example an `export *` from a module that does not resolve, it adds an incomplete fact, so a strict rule can report that it cannot decide instead of passing.
+### Which interface operation a call uses
 
-Workspace packages are often imported through their build output, such as `packages/contracts/dist/index.d.ts`. lintai does not guess the matching `src/` file. It lets TypeScript decide: configured project `references` let the checker redirect generated declarations to referenced source unless `disableSourceOfProjectReferenceRedirect` is enabled. When the checker still reads a generated `.d.ts` file, lintai can link its declarations back to source through a declaration map or a `--source-links` file, and it records that link as extra evidence without replacing what the checker saw. See [Exports and declarations](docs/api.md#exports-and-declarations) and [Source resolution order](docs/api.md#source-resolution-order).
+Consider these declarations:
 
-Current caveats:
-
-- `setup()` output must be JSON-serializable plain data
-- setup-only Node built-ins should be loaded inside `setup()` with `require(...)`; keep top-level rule-module imports pure-phase-safe
-- `program()`, `facts()` and `message()` are pure-phase code; ambient APIs like `process`, `fetch`, `setTimeout`, `Date.now`, and `Math.random` are not available
-- editor refresh is intentionally asymmetric:
-  - source-file edits refresh in the background, and a saved file is linted with a fresh analysis
-  - rule-file edits invalidate the cache and force a fresh analysis on the next lint pass
-- lintai reads saved files, not unsaved editor text. A file with unsaved changes shows one message that asks you to save it.
-- the types that rules see are the view of lintai's own TypeScript 7 compiler. They can differ from the view of the TypeScript version that your repository builds with.
-- TypeScript 7 rejects some compiler options that TypeScript 5 projects still use, for example `baseUrl`, `moduleResolution: "node"` and `target: "es5"`. lintai analyzes such a `tsconfig.json` with those options changed: `baseUrl` becomes absolute `paths`, a removed `moduleResolution` becomes the TypeScript 7 default, and other removed options are dropped. The CLI prints one line to stderr for each changed `tsconfig.json` (Go API users set `typescript.Backend.Log`), and each change is a `config_adjusted` fact.
-
-## Install and caveats
-
-See [docs/install.md](docs/install.md) for the full matrix. The shortest usable setup is:
-
-```sh
-pnpm add -D @lintai/cli @lintai/sdk @lintai/eslint-plugin eslint
-```
-
-If you use `config` schemas with Zod, also install:
-
-```sh
-pnpm add -D zod
-```
-
-If your repository uses `pnpm` 10+, allow the `esbuild` install step:
-
-```json
-{
-  "pnpm": {
-    "onlyBuiltDependencies": ["esbuild"]
-  }
+```ts
+interface Reader {
+  read(): string;
 }
+
+interface Writer {
+  write(value: string): void;
+}
+
+interface Logger {
+  write(message: string): void;
+}
+
+declare const store: Reader & Writer;
+declare const logger: Logger;
+
+store.read();          // A read-only policy allows this.
+store.write("value"); // It rejects the declared Writer.write operation.
+logger.write("hello"); // This is a different declaration, despite the same name.
 ```
 
-Important caveats:
+A rule can match the member declaration selected by the compiler. It does not need to ban every method named `write`, or reject every use of a value whose type includes `Writer`.
 
-- npm-installed binaries are packaged for Linux and macOS only
-- Node `22+` is required by the plugins and the packaged helper scripts
-- you do not need Go to use the npm packages, but you do need Go to build LintAI from source
+This tells you which declared operation the call uses. It does **not** establish which implementation runs at runtime. See the [working Writer policy](testdata/call-provenance/writer-policy.ts) and its [example and expected results](docs/examples.md#18-forbid-a-declared-capability-member).
 
-## Quick Start and caveats
+**Branch status:** declared call provenance is implemented on this branch but is not included in the published 0.7.0 packages. To try that feature before release, [build from source](docs/install.md#build-from-source-and-caveats).
 
-Create a rule file:
+## Where it fits
+
+Keep your type checker, tests and existing linters. LintAI is useful when a rule needs relationships across files, declarations or call chains.
+
+For formatting, unused variables, or a simple banned import, an existing linter rule is usually enough. Custom ESLint rules can also use type information. LintAI provides a shared set of workspace facts so each rule does not have to implement its own compiler traversal and cross-file analysis.
+
+Rules are TypeScript files containing small [Datalog](https://codeberg.org/TauCeti/mangle-go) queries. Datalog lets a rule say which combinations of facts constitute a violation, including recursive relationships such as “calls something that eventually reads the clock.” You will need to learn some of that syntax to write rules; the example below is a starting point.
+
+## Try it
+
+The npm packages require Node 22 or later and support Linux and macOS on x64 and arm64. You do not need Go to use them.
+
+```sh
+pnpm add -D @lintai/cli @lintai/sdk
+```
+
+With pnpm 10 or later, allow the `esbuild` install step as described in the [installation guide](docs/install.md#pnpm-caveat).
+
+Create this file:
 
 ```ts
 // lintai-rules/no-service-imports.ts
 import { dl, rule } from "@lintai/sdk";
 
 export default rule("arch.no-service-imports")
-	.version(1)
-	.program(dl`
-		Decl violation(Imp, From, To).
-		violation(Imp, From, To) :-
-			import_edge(Imp, From, To, _), import_internal(Imp),
-			glob(From, "src/pure/**"), glob(To, "src/services/**").
-	`)
-	.report("violation")
-	.message((row) => `Pure module ${row.From} must not import ${row.To}`);
+  .version(1)
+  .program(dl`
+    Decl violation(Imp, From, To).
+    violation(Imp, From, To) :-
+      import_edge(Imp, From, To, _), import_internal(Imp),
+      glob(From, "src/pure/**"), glob(To, "src/services/**").
+  `)
+  .report("violation")
+  .message((row) => `Pure module ${row.From} must not import ${row.To}`);
 ```
 
-See the facts that the rule can match:
+This rule reports an import when its source is under `src/pure/` and its destination is under `src/services/`. `Imp` identifies the import so the diagnostic points to it. `From` and `To` are file paths; `_` ignores a field this rule does not need. The conditions after `:-` must all hold for a violation to be reported.
+
+Run it:
+
+```sh
+pnpm exec lintai --workspace-root . --rules 'lintai-rules/**/*.ts'
+```
+
+An error violation gives exit code 1, so the same command can run in CI. A rule execution failure also gives a nonzero exit code. Start with a small rule and deliberately break it to confirm that it reports what you expect.
+
+To inspect the import facts behind this example:
 
 ```sh
 pnpm exec lintai facts --workspace-root . --relation import_edge --relation import_internal
 ```
 
-Run it from the CLI:
+`lintai schema` lists the available facts and built-in queries. The [examples](docs/examples.md) cover call chains, public types, suspension syntax, required imports and more.
+
+## Use it in your editor
+
+For ESLint, install the plugin:
 
 ```sh
-pnpm exec lintai \
-  --workspace-root . \
-  --rules 'lintai-rules/**/*.ts'
+pnpm add -D @lintai/eslint-plugin eslint
 ```
 
-Wire it into ESLint. Each lintai rule becomes its own ESLint rule, `lintai/<rule-id>`, with its own level, per-file overrides and disable comments:
+Then add it to your flat config:
 
 ```js
 // eslint.config.mjs
@@ -140,150 +141,48 @@ import { createLintaiPlugin } from "@lintai/eslint-plugin";
 const lintai = createLintaiPlugin({ rules: ["lintai-rules/**/*.ts"] });
 
 export default [
-	{
-		files: ["src/**/*.ts", "src/**/*.tsx"],
-		...lintai.configs.all,
-		rules: {
-			...lintai.configs.all.rules,
-			"lintai/arch.legacy-imports": "warn",
-		},
-	},
-	{
-		files: ["src/legacy/**"],
-		rules: { "lintai/arch.legacy-imports": "off" },
-	},
+  {
+    files: ["src/**/*.ts", "src/**/*.tsx"],
+    ...lintai.configs.all,
+  },
 ];
 ```
 
-`configs.all` turns on every lintai rule and `lintai/analysis` at `"error"`. `lintai/analysis` reports rule errors and analysis problems, whatever level a rule has, so keep it at `"error"`. A lintai rule that is not in the config does not run.
+Each rule gets its own name, such as `lintai/arch.no-service-imports`, so you can set its severity and use ordinary ESLint overrides and disable comments. Keep `lintai/analysis` enabled: it reports analysis and rule execution failures.
 
-Or wire it into oxlint, without ESLint:
+There is also an [oxlint plugin](docs/api.md#oxlint-plugin-reference-and-caveats). Both integrations can reuse a running lintai process in editor sessions. They read saved files, so save a file before expecting updated results. Restart the linter after adding a rule file or changing a rule ID.
 
-```sh
-pnpm add -D @lintai/cli @lintai/sdk @lintai/oxlint-plugin oxlint
-```
+## What a passing result means
 
-oxlint loads JS plugins from a module path, so create the plugin in a local file:
+A passing result means the enabled rules found no reportable violations in the evidence they checked. It is not a general proof that the program is correct.
 
-```js
-// lintai.oxlint.mjs
-import { createLintaiPlugin } from "@lintai/oxlint-plugin";
+Some calls cannot be resolved. Some type structures are not expanded. Different compiler configurations can disagree. LintAI exposes incomplete, missing or conflicting evidence where supported, and strict rules must explicitly report those cases instead of treating missing facts as approval. The [rule examples](docs/examples.md) show both violations and cases where a policy cannot be established.
 
-export default createLintaiPlugin({
-	workspaceRoot: import.meta.dirname,
-	rules: ["lintai-rules/**/*.ts"],
-});
-```
+A few boundaries matter when choosing a policy:
 
-```ts
-// oxlint.config.ts
-import { defineConfig } from "oxlint";
-import lintai from "./lintai.oxlint.mjs";
+- A declared call target does not prove the runtime implementation, authorization or validation behavior.
+- Suspension facts describe `await`, `for await` and `await using` syntax. They do not prove that code is synchronous or find every promise-returning operation.
+- LintAI does not analyze implementations inside `node_modules`.
+- Extraction uses a bundled TypeScript 7 compiler. Its view can differ from your project's TypeScript version; see [compiler compatibility](docs/install.md).
+- Repository rules are checks for contributors, not protection against someone who can change both the code and its enforcement. See the [trust model](docs/trust.md).
 
-export default defineConfig({
-	jsPlugins: ["./lintai.oxlint.mjs"],
-	rules: { ...lintai.configs.all.rules, "lintai/arch.legacy-imports": "warn" },
-});
-```
+## Adopt one rule at a time
 
-In `.oxlintrc.json`, name `"./lintai.oxlint.mjs"` in `jsPlugins` and list each `lintai/<rule-id>` and `lintai/analysis` by hand.
+You do not need to fix every existing violation before adopting a rule. Run your normal lintai command with `--suppress-all` to record existing error violations in `lintai-suppressions.json`, then commit that file. Later runs can report new violations while you work through the existing ones.
 
-The rule list is read when the linter loads the plugin. After you add a rule file or change a rule id, restart the linter or the editor's language server. oxlint documents JS plugins as alpha and outside semver, so a later oxlint can break the plugin until lintai is updated. See [Oxlint plugin reference](docs/api.md#oxlint-plugin-reference-and-caveats).
+After fixing violations, use `--prune-suppressions` to remove stale entries. Review changes to the suppression file as you would changes to a rule. See [bulk suppressions](specs/bulk-suppressions.md) for details.
 
-Useful caveats:
+## Further reading
 
-- rule globs are resolved relative to `workspaceRoot`
-- plain `eslint` and `oxlint` CLI usage defaults to one-shot analysis
-- long-lived editor sessions and `oxlint --lsp` default to persistent `serve` mode
-- `lintai schema` prints every base relation and the prelude
-- the CLI exits with 0 (clean or only warnings), 1 (error violations), 2 (usage or configuration error) or 3 (a rule could not run)
+- [Installation](docs/install.md): package setup, platform support and building from source.
+- [Rule examples](docs/examples.md): practical policies and their limits.
+- [API reference](docs/api.md): facts, rule configuration, CLI options and linter integrations.
+- [Go API](docs/go-api.md): embedding lintai and adding backends.
+- [Trust model](docs/trust.md): rule execution and enforcement boundaries.
 
-## API and caveats
+## Contributing
 
-The full reference lives in [docs/api.md](docs/api.md). Highlights:
-
-- rule builder:
-  - `rule(id).version(n).setup(fn).facts(fn).program(p).report(...preds).expectNonEmpty(...preds).message(fn)`
-- `dl` tagged template: interpolates strings, numbers, `dl.name("x")` (the name constant `/x`) and other `dl` fragments, with correct escaping
-- base relations: `module`, `fn`, `fn_*`, `import_edge`, `import_*`, `import_opaque`, `call_edge`, `call_unresolved`, `fn_ref`, `external_call`, `type_ref`, `type_ref_target`, `type_kind`, `type_named`, `type_arg`, `type_member`, `type_literal`, `type_param_name`, `type_prop`, `type_prop_optional`, `type_prop_readonly`, `type_sig_param`, `type_sig_param_optional`, `type_sig_param_rest`, `type_sig_returns`, `type_display`, `type_origin_kind`, `type_arg_optional`, `type_arg_rest`, `type_readonly`, `type_incomplete`, `declaration`, `declaration_*`, `module_export`, `export_*`, `module_exports_incomplete`, `fn_signature_conflict`, `suspension_site`, `suspension_in_fn`, `suspension_at_module`, `site_attribution_unsupported`, `source_entry`, `source_entry_*`, `source_binding`, `source_binding_*`, `meta_access`, `ambient_source`, `ambient_use`, `ambient_key`, `ambient_dynamic`, `ambient_write`, `global_ref`, `module_directive`, `module_parse_error`, `site_in_fn`, `location`
-- prelude: `glob`, `import_runtime`, `export_from`, `module_imports`, `imports_reach`, `calls_reach`, `fn_suspends`, `module_has_suspension`, `site_attribution_unknown`, `fn_uses_ambient`, `fn_reaches_ambient`, `module_uses_ambient`, `module_reaches_ambient`, `fn_calls_package`, `module_calls_package`, `type_child`, `type_contains`, `type_reaches_incomplete`, `type_is_promise`, `fn_returns_awaited`
-- strict mode: `calls_or_refs_reach`, `fn_reaches_ambient_strict` and `fn_reaches_unresolved` also follow function values. `fn_has_unresolved_call` and `module_has_unresolved_call` report calls that lintai cannot resolve.
-- ambient sources: `clock` (`Date.now`, `new Date()`, `performance.now`), `env` (`process.env`), `random` (`Math.random`, `crypto.randomUUID` and other `crypto` random functions), `crypto` (`crypto.subtle`), `network` (`fetch`), `timer` (`setTimeout`, `setInterval`, `setImmediate`, `queueMicrotask`) and `process` (`process.cwd`, `process.argv`)
-- CLI: `lintai schema`, `lintai facts`, `lintai lock`, `lintai rules`, `--explain`, `--fact-limit`, `--source-links <file>`, `--severity <rule-id>=error|warning|off`, `--rules-lock`, `--setup-sandbox auto|on|off`
-- optional `config` export:
-  - `export const config = z.object({...})`
-
-Important caveats:
-
-- a rule id must match `^[a-z0-9][a-z0-9._/-]*$`, and each rule file needs its own id
-- `--severity` sets rule levels for the CLI; under ESLint or oxlint, set the level of `lintai/<rule-id>` in the linter config
-- the first argument of a reported predicate is its anchor; it must be an entity id with a `location` fact
-- `type_display` is the text that TypeScript 7 prints; use it in messages, and match types with `type_named` and the other structural relations
-- TypeScript flattens nested unions, so `ActionResult<number> | null` has the members of `ActionResult<number>` and no `type_named` row for `ActionResult`
-- `type_contains` does not find every type in a signature; `type_incomplete` marks types whose facts leave out structure, and `type_reaches_incomplete` finds them. Class, interface and enum members are omitted and marked `/members_omitted`; default library `Promise` and `Array` interfaces also make strict completeness checks report a result. An unmarked type such as `any` or `unknown` is not proved safe
-- when two tsconfig files compile one function with different signatures, `fn_param` and `fn_returns` hold the rows from both, and `fn_signature_conflict(Fn)` marks the function. Before treating the rows as one complete signature, also guard against `fn_signature_omitted(Fn)` and `fn_signature_unresolved(Fn)`.
-- `type_is_promise` and `fn_returns_awaited` match only the lib `Promise`, and remove exactly one level of it
-- a rule cannot redefine base or prelude predicates
-- `glob` and `!glob` need both arguments bound by earlier premises
-- `--explain` works only with `--json`
-
-### Oxlint plugin reference
-
-`@lintai/oxlint-plugin` and `@lintai/eslint-plugin` export `createLintaiPlugin(options)`. It creates one rule `lintai/<rule-id>` for each lintai rule, `lintai/analysis`, and the authoring rules (`lintai/no-ambient-in-pure-phase`, `lintai/no-top-level-node-imports`, `lintai/require-rule-shape`), with `configs.all` and `configs.authoring`. Both plugins take the same options. See [docs/api.md](docs/api.md#linter-rules). It runs `oneshot` under the `oxlint` CLI and `serve` under `oxlint --lsp`, and an explicit `mode` option always wins. It needs Node 22 or later and oxlint 1.90.0 or later. oxlint documents JS plugins as alpha and outside semver, so a later oxlint can break the plugin until lintai is updated. See [docs/api.md](docs/api.md#oxlint-plugin-reference-and-caveats).
-
-The Go engine, backend contract, generic fact model, diagnostics, runtime,
-bundling helpers, and JSON-RPC server are also public packages. See
-[docs/go-api.md](docs/go-api.md) for backend composition and package entry
-points.
-
-## Examples and caveats
-
-More examples live in [docs/examples.md](docs/examples.md). They cover:
-
-- transitive purity rules
-- layer tables supplied through `.facts()`
-- required imports with negation
-- ambient-source rules for the clock and the environment
-- `import.meta` access, directives, library calls and unresolved imports
-- `--explain` output
-- testing rules with planted violations
-- ESLint integration
-- strict purity rules that also follow function values and report unresolved calls
-- a package capability table
-- type rules: a server action must return `Promise<ActionResult<T>>`, and domain signatures must not contain infrastructure types, with a strict variant that reports types lintai cannot inspect
-- a public API rule: the exports of a shared package must not expose types from infrastructure packages, with separate results for exports that lintai cannot fully inspect
-
-Important caveat:
-
-- example rules are intentionally narrow and deterministic; treat them as templates, not as a promise that LintAI already models every possible language feature
-
-## Grandfathering existing violations
-
-Run `lintai --suppress-all` to record known error violations in `lintai-suppressions.json`, or use repeatable `--suppress-rule <id>` flags. Commit the file. Subsequent runs suppress those findings while reporting new entities. After fixing findings, run `lintai --prune-suppressions`; stale entries otherwise fail with exit 2 when no violations remain.
-
-Use suppressions for known violations to fix later. Keep policy exception lists in rule configuration or a `.facts()` ratchet rule. Review suppression changes and regenerate the rules lock to cover approved allowances. See [bulk suppressions](specs/bulk-suppressions.md) for matching, scope and trust details.
-
-## Repository layout and caveats
-
-- `cmd/lintai/` — Go CLI entry point
-- `engine/`, `backend/`, `facts/`, `diagnostics/`, `runtime/`, `bundle/`, `server/`, `jsonrpc/` — public Go API
-- `internal/` — private workspace, ambient-source, and canonicalization support
-- `internal/tsgo/` — the copied TypeScript 7 compiler (`internal/`, generated by `scripts/sync-tsgo.sh`) and lintai's extractor (`lintaiapi/`)
-- `packages/sdk/` — `@lintai/sdk`
-- `packages/client/` — `@lintai/client`: the lintai process client and the helper scripts that bundle and run rules, shared by both linter plugins
-- `packages/eslint-plugin/` — `@lintai/eslint-plugin`
-- `packages/oxlint-plugin/` — `@lintai/oxlint-plugin`
-- `packages/authoring-rules/` — authoring lint rules re-exported by both linter plugins
-- `packages/lintai/` — `@lintai/cli`
-- `specs/` — v1 and draft v2 design documents
-
-Repository caveat:
-
-- the specs are useful design context, but the shipped behavior should be taken from the code and the docs in this README and `docs/`
-
-## Contributing and caveats
-
-To work on LintAI itself:
+Source builds require Go 1.27.3 or later and pnpm.
 
 ```sh
 pnpm install
@@ -292,15 +191,6 @@ pnpm build
 go test ./...
 ```
 
-For packaging smoke tests:
+For packaging smoke tests, run `pnpm build:dist` followed by `pnpm smoke:npm`.
 
-```sh
-pnpm build:dist
-pnpm smoke:npm
-```
-
-Contributor caveats:
-
-- the npm launcher package is `@lintai/cli`, but the executable is still `lintai`
-- source builds need stock Go 1.27.3 or later and pnpm only. The TypeScript compiler is copied into `internal/tsgo/internal/`; see `docs/upgrading-typescript.md` to move it to a new TypeScript version
-- publishing requires npm auth and the `@lintai` scope
+The CLI lives in `cmd/lintai/`, TypeScript extraction in `internal/tsgo/lintaiapi/`, and the SDK and linter integrations in `packages/`. The TypeScript compiler is included in the repository; see [upgrading TypeScript](docs/upgrading-typescript.md) for how it is maintained.
