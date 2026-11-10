@@ -110,6 +110,9 @@ func (b *Backend) buildAnalysisSnapshot(ctx context.Context, repoRoot, workspace
 		CallEdges:                   callEdges,
 		ExternalCalls:               convertExternalCalls(extracted.ExternalCalls),
 		CallsUnresolved:             convertCallsUnresolved(extracted.CallsUnresolved),
+		CallDeclarations:            convertCallDeclarations(extracted.CallDeclarations),
+		DeclarationMembers:          convertDeclarationMembers(extracted.DeclarationMembers),
+		CallDeclarationIncomplete:   convertCallDeclarationIncomplete(extracted.CallDeclarationIncomplete),
 		ImportsOpaque:               convertImportsOpaque(extracted.ImportsOpaque),
 		FnRefs:                      convertFnRefs(extracted.FnRefs),
 		SuspensionSites:             convertSuspensionSites(extracted.SuspensionSites),
@@ -368,6 +371,30 @@ func convertCallEdges(items []lintaiapi.CallEdge) []analysis.CallEdge {
 			ToPath:          item.ToPath,
 			Range:           convertLocation(item.Range),
 		})
+	}
+	return result
+}
+
+func convertCallDeclarations(items []lintaiapi.CallDeclarationFact) []analysis.CallDeclaration {
+	result := make([]analysis.CallDeclaration, 0, len(items))
+	for _, item := range items {
+		result = append(result, analysis.CallDeclaration{Site: item.Site, Declaration: item.Declaration})
+	}
+	return result
+}
+
+func convertDeclarationMembers(items []lintaiapi.DeclarationMemberFact) []analysis.DeclarationMember {
+	result := make([]analysis.DeclarationMember, 0, len(items))
+	for _, item := range items {
+		result = append(result, analysis.DeclarationMember{Declaration: item.Declaration, OwnerDeclaration: item.OwnerDeclaration, Name: item.Name})
+	}
+	return result
+}
+
+func convertCallDeclarationIncomplete(items []lintaiapi.CallDeclarationIncompleteFact) []analysis.CallDeclarationIncomplete {
+	result := make([]analysis.CallDeclarationIncomplete, 0, len(items))
+	for _, item := range items {
+		result = append(result, analysis.CallDeclarationIncomplete{Site: item.Site, Reason: item.Reason})
 	}
 	return result
 }

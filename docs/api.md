@@ -157,6 +157,9 @@ Conventions:
 | `import_symbol_type_only(Imp, Name)` | `import { type X }`. |
 | `call_edge(Call, Caller, Callee)` | A call to a collected function. The callee is the declaration that the type checker resolves for the call. `Caller` is the module path for a call at module scope. A call through a function-typed value (a callback parameter, or a property of a record of functions) has no row; it is a `call_unresolved` row. |
 | `external_call(Call, Caller, Module, Name)` | A call to a declaration outside the workspace sources. `Module` is `"lib"`, a package name, a `declare module` name or a `.d.ts` path. `Name` is the qualified name, for example `"JSON.parse"` or `"Set.add"`. |
+| `call_declaration(Site, Decl)` | The concrete signature declaration TypeScript selects for this invocation. Uses the existing runtime call site's id. |
+| `declaration_member(Decl, OwnerDecl, Name)` | The signature belongs to this named member of this interface or class declaration. |
+| `call_declaration_incomplete(Site, Reason)` | Declaration or member evidence is incomplete: `/unresolved`, `/synthetic`, `/unsupported` or `/conflict`. Concrete declaration evidence may also be present. |
 | `call_unresolved(Site, Caller)` | A call that lintai cannot follow. These are rows: a call, `new` or tagged template whose target is not a retained workspace function or an external declaration, including a function in a file excluded by the file scope (other examples include callbacks, function-typed values, element-access callees such as `table["k"]()`, and `any`-typed callees); `f.call(...)` and `f.apply(...)` when `f` is not a collected function; a function value that is not a collected function, passed as an argument to an external call, for example `[1].map(read)` with a parameter `read` (the row is at the argument); and `new` of a workspace class without a constructor whose instance fields have initializers that can run code. Every call site has exactly one of `call_edge`, `external_call` and `call_unresolved`. `new` of a workspace class without a represented constructor is also unresolved when no target can be established. |
 | `import_opaque(Site, From)` | An `import()` or `require()` whose specifier is not a string literal, for example `import(name)` or ``import(`./${name}`)``. It has no `import_edge` row. A template literal without substitutions is a string literal and gives a normal `import_edge`. |
 | `fn_ref(Ref, From, To)` | A collected function used as a value, for example passed, stored, returned or used as a property value. In `[1].map(() => Date.now())`, the surrounding owner has a reference to the arrow. A nested named declaration alone creates no reference. `From` is the surrounding function, the module path at module scope, or an empty string when attribution is unsupported. Import and export specifiers are not references. |
@@ -200,6 +203,35 @@ Caveats:
 - an unresolved import is not internal, so `To` is the specifier. Check `import_unresolved` when a rule depends on `import_internal`.
 - `export default function () {}` and `export default () => ...` are functions named `default`.
 - `app.get("/", () => load())` gives the arrow function its own identity. The arrow owns the call to `load`; a static block instead uses the surrounding class-evaluation owner. For an unsupported owner, `Caller` or `From` is an empty string and the site has `site_attribution_unsupported`.
+
+### Declared members at call sites
+
+Implemented in this change; unavailable in published 0.7.0. The [capability policy](../testdata/call-provenance/writer-policy.ts) uses these facts to distinguish forbidden members from incomplete evidence.
+
+TypeScript can know which declared member a call uses even when lintai cannot know which implementation runs. For example:
+
+```ts
+interface Reader { read(): void; }
+interface Writer { write(): void; }
+function use(store: Reader & Writer) {
+  store.read();
+  store.write();
+}
+```
+
+The first call selects `Reader.read`; the second selects `Writer.write`. Both can remain `call_unresolved`. That runtime fact does not mean declaration evidence is missing. `const saved = store; saved.write()` can select the same `Writer.write` declaration without finding the implementation behind `store`.
+
+To ban a public member, select its owner with `module_export` and `export_target`, then join `call_declaration` to `declaration_member`. Export aliases still lead to the same owner. A forbidden finding requires a positive member row; an unrelated `Other.write` does not match just because its name is `write`. Owner selection does not require an observed forbidden member. Anonymous call signatures can be complete without a member row.
+
+Ordinary and optional calls, receiver aliases, static element access and selected overloads retain the concrete signature chosen by the checker. Method owners are their declaring interfaces or classes, including the base declaration for an inherited method. Inline function-type properties and inline callable-object properties retain their signature identity and lexical owner. Shared callable aliases do not acquire owners from their uses. Constructors and tagged templates retain concrete selected signatures without an invented member name. A getter returning a callable is not the declaration of that callable. Dynamic access is never matched by spelling.
+
+`/unresolved` means no usable signature declaration was selected, including an `any` call or checker recovery. `/synthetic` means the checker combined signatures without one concrete declaration. `/unsupported` means the signature or member association cannot be represented safely. For example, a shared callable type alias does not belong to each interface property that uses it. `/conflict` means checked programs disagree. Retain and check these markers even when a declaration row exists. The selected declaration may be an overload, an inline callable property's signature, or a declaration outside the analyzed files; it does not identify a runtime implementation.
+
+For property calls, the selected signature's lexical member must be a declaration of the checker-resolved property. An anonymous signature without a lexical member must be declared within that property. A signature borrowed from another member remains incomplete even if it is nested inside the property's implementation. One matching declaration suffices when intersected properties supply multiple overloads. This check applies uniformly to properties, accessors, constructor parameter properties, and object-literal assignments.
+
+Referenced declarations and owners retain identity, origin and location without becoming new export or type-extraction roots. Across checked programs, differing selections or completeness produce `/conflict`; known rows and incomplete reasons remain visible. Escaped callback values represented by `call_unresolved` are not invocations and receive `/unsupported`. Runtime relations (`call_edge`, `external_call`, `call_unresolved` and `fn_ref`) remain independent of this evidence.
+
+Rules must also check missing declaration rows and incomplete or missing owner/export selection. No forbidden match is not enough to establish the policy while required evidence is missing. See [the executable capability example](examples.md#18-forbid-a-declared-capability-member) for separate forbidden and indeterminate results. These facts do not prove that an unknown runtime value is safe.
 
 ### Suspension sites and owners
 

@@ -274,6 +274,33 @@ func (c *Checker) GetResolvedSignature(node *ast.Node) *Signature {
 	return c.getResolvedSignature(node, nil, CheckModeNormal)
 }
 
+// ResolvedSignatureEvidence describes the checker's selection for one invocation.
+// A non-nil Signature or declaration alone does not establish a concrete selection:
+// any/unknown signatures can lack declarations, and composites can retain one.
+// Synthetic and Recovery are independent; an overload-failure combination is both.
+type ResolvedSignatureEvidence struct {
+	Signature *Signature
+	Synthetic bool
+	Recovery  bool
+}
+
+// GetResolvedSignatureEvidence resolves a call-like expression using the same path
+// as GetResolvedSignature. Recovery means overload selection failed and the checker
+// returned a fallback candidate; it is not a general indication of compiler errors.
+// Synthetic means a combination of signatures, including through instantiation or
+// optional-call target chains. Missing/any signatures are not combinations.
+func (c *Checker) GetResolvedSignatureEvidence(node *ast.Node) ResolvedSignatureEvidence {
+	signature, recovery := c.getResolvedSignatureWithRecovery(node, nil, CheckModeNormal)
+	evidence := ResolvedSignatureEvidence{Signature: signature, Recovery: recovery}
+	for target := signature; target != nil; target = target.Target() {
+		if target.getComposite() != nil || target.flags&SignatureFlagsIsSignatureCandidateForOverloadFailure != 0 {
+			evidence.Synthetic = true
+			break
+		}
+	}
+	return evidence
+}
+
 // Return the type of the given property in the given type, or nil if no such property exists
 func (c *Checker) GetTypeOfPropertyOfType(t *Type, name string) *Type {
 	return c.getTypeOfPropertyOfType(t, name)
@@ -293,6 +320,22 @@ func (c *Checker) GetIndexSignaturesAtLocation(node *ast.Node) []*ast.Node {
 
 func (c *Checker) GetResolvedSymbol(node *ast.Node) *ast.Symbol {
 	return c.getResolvedSymbol(node)
+}
+
+// GetResolvedPropertySymbol returns the property symbol recorded while checking
+// a dot or element access, or nil when no single property was recorded.
+func (c *Checker) GetResolvedPropertySymbol(node *ast.Node) *ast.Symbol {
+	if node == nil || !(ast.IsPropertyAccessExpression(node) || ast.IsElementAccessExpression(node)) {
+		return nil
+	}
+	// Use expression checking so both access kinds retain their normal resolution
+	// and optional-chain handling; do not fall back to identifier name resolution.
+	c.checkExpression(node)
+	symbol := c.getResolvedSymbolOrNil(node)
+	if symbol == c.unknownSymbol {
+		return nil
+	}
+	return symbol
 }
 
 func (c *Checker) GetJsxNamespace(location *ast.Node) string {

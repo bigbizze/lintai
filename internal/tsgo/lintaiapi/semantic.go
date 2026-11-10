@@ -1195,7 +1195,7 @@ func declarationKind(node *ast.Node) (string, bool) {
 			return "property", true
 		}
 		return node.Kind.String(), false
-	case ast.KindFunctionDeclaration:
+	case ast.KindFunctionDeclaration, ast.KindFunctionExpression, ast.KindArrowFunction:
 		return "function", true
 	case ast.KindVariableDeclaration, ast.KindBindingElement:
 		return "variable", true
@@ -1203,7 +1203,7 @@ func declarationKind(node *ast.Node) (string, bool) {
 		return "type_alias", true
 	case ast.KindInterfaceDeclaration:
 		return "interface", true
-	case ast.KindClassDeclaration:
+	case ast.KindClassDeclaration, ast.KindClassExpression:
 		return "class", true
 	case ast.KindEnumDeclaration:
 		return "enum", true
@@ -1219,7 +1219,7 @@ func declarationKind(node *ast.Node) (string, bool) {
 		return "property", true
 	case ast.KindExportAssignment:
 		return "export_expression", true
-	case ast.KindCallSignature, ast.KindConstructSignature, ast.KindIndexSignature, ast.KindMethodSignature, ast.KindFunctionType, ast.KindConstructorType:
+	case ast.KindConstructor, ast.KindCallSignature, ast.KindConstructSignature, ast.KindIndexSignature, ast.KindMethodSignature, ast.KindFunctionType, ast.KindConstructorType:
 		return "signature", true
 	default:
 		return node.Kind.String(), false

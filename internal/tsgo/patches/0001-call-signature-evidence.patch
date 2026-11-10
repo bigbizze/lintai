@@ -1,0 +1,180 @@
+# Lintai needs to distinguish a concrete selected signature from a synthetic
+# combination or an overload-error fallback. The upstream public API exposes
+# the signature declaration but not these invocation-specific states.
+# Keep signature selection unchanged and expose the missing evidence.
+
+--- a/checker/checker.go
++++ b/checker/checker.go
+@@ -8609,14 +8609,22 @@
+  * @return a signature of the call-like expression or undefined if one can't be found
+  */
+ func (c *Checker) getResolvedSignature(node *ast.Node, candidatesOutArray *[]*Signature, checkMode CheckMode) *Signature {
++	signature, _ := c.getResolvedSignatureWithRecovery(node, candidatesOutArray, checkMode)
++	return signature
++}
++
++// Keep invocation recovery paired with the selected signature, including when flow
++// analysis returns a temporary result that must not replace the cached pair.
++func (c *Checker) getResolvedSignatureWithRecovery(node *ast.Node, candidatesOutArray *[]*Signature, checkMode CheckMode) (*Signature, bool) {
+ 	links := c.signatureLinks.Get(node)
+ 	// If getResolvedSignature has already been called, we will have cached the resolvedSignature.
+ 	// However, it is possible that either candidatesOutArray was not passed in the first time,
+ 	// or that a different candidatesOutArray was passed in. Therefore, we need to redo the work
+ 	// to correctly fill the candidatesOutArray.
+ 	cached := links.resolvedSignature
++	cachedRecovery := links.resolvedSignatureRecovery
+ 	if cached != nil && cached != c.resolvingSignature && candidatesOutArray == nil {
+-		return cached
++		return cached, cachedRecovery
+ 	}
+ 	saveResolutionStart := c.resolutionStart
+ 	if cached == nil {
+@@ -8629,7 +8637,9 @@
+ 		c.resolutionStart = len(c.typeResolutions)
+ 	}
+ 	links.resolvedSignature = c.resolvingSignature
++	links.resolvedSignatureRecovery = false
+ 	result := c.resolveSignature(node, candidatesOutArray, checkMode)
++	recovery := links.resolvedSignatureRecovery
+ 	c.resolutionStart = saveResolutionStart
+ 	// When CheckMode.SkipGenericFunctions is set we use resolvingSignature to indicate that call
+ 	// resolution should be deferred.
+@@ -8641,17 +8651,20 @@
+ 		// In such a case we ignore the local result and reuse the correct one that was cached.
+ 		if links.resolvedSignature != c.resolvingSignature {
+ 			result = links.resolvedSignature
++			recovery = links.resolvedSignatureRecovery
+ 		}
+ 		// If signature resolution originated in control flow type analysis (for example to compute the
+ 		// assigned type in a flow assignment) we don't cache the result as it may be based on temporary
+ 		// types from the control flow analysis.
+ 		if len(c.flowLoopStack) == 0 {
+ 			links.resolvedSignature = result
++			links.resolvedSignatureRecovery = recovery
+ 		} else {
+ 			links.resolvedSignature = cached
+-		}
+-	}
+-	return result
++			links.resolvedSignatureRecovery = cachedRecovery
++		}
++	}
++	return result, recovery
+ }
+ 
+ func (c *Checker) resolveSignature(node *ast.Node, candidatesOutArray *[]*Signature, checkMode CheckMode) *Signature {
+@@ -9155,7 +9168,9 @@
+ 	// don't hit this issue because they only observe this result after it's had a chance to
+ 	// be cached, but the error reporting code below executes before getResolvedSignature sets
+ 	// resolvedSignature.
+-	c.signatureLinks.Get(node).resolvedSignature = result
++	links := c.signatureLinks.Get(node)
++	links.resolvedSignature = result
++	links.resolvedSignatureRecovery = true
+ 	// No signatures were applicable. Now report errors based on the last applicable signature with
+ 	// no arguments excluded from assignability checks.
+ 	// If candidate is undefined, it means that no candidates had a suitable arity. In that case,
+@@ -30112,7 +30127,9 @@
+ 		}
+ 		links := c.signatureLinks.Get(iife)
+ 		cached := links.resolvedSignature
++		cachedRecovery := links.resolvedSignatureRecovery
+ 		links.resolvedSignature = c.anySignature
++		links.resolvedSignatureRecovery = false
+ 		var t *Type
+ 		switch {
+ 		case indexOfParameter < len(args):
+@@ -30123,6 +30140,7 @@
+ 			t = c.undefinedWideningType
+ 		}
+ 		links.resolvedSignature = cached
++		links.resolvedSignatureRecovery = cachedRecovery
+ 		return t
+ 	}
+ 	contextualSignature := c.getContextualSignature(fn)
+--- a/checker/exports.go
++++ b/checker/exports.go
+@@ -272,6 +272,33 @@
+ 	return c.getResolvedSignature(node, nil, CheckModeNormal)
+ }
+ 
++// ResolvedSignatureEvidence describes the checker's selection for one invocation.
++// A non-nil Signature or declaration alone does not establish a concrete selection:
++// any/unknown signatures can lack declarations, and composites can retain one.
++// Synthetic and Recovery are independent; an overload-failure combination is both.
++type ResolvedSignatureEvidence struct {
++	Signature *Signature
++	Synthetic bool
++	Recovery  bool
++}
++
++// GetResolvedSignatureEvidence resolves a call-like expression using the same path
++// as GetResolvedSignature. Recovery means overload selection failed and the checker
++// returned a fallback candidate; it is not a general indication of compiler errors.
++// Synthetic means a combination of signatures, including through instantiation or
++// optional-call target chains. Missing/any signatures are not combinations.
++func (c *Checker) GetResolvedSignatureEvidence(node *ast.Node) ResolvedSignatureEvidence {
++	signature, recovery := c.getResolvedSignatureWithRecovery(node, nil, CheckModeNormal)
++	evidence := ResolvedSignatureEvidence{Signature: signature, Recovery: recovery}
++	for target := signature; target != nil; target = target.Target() {
++		if target.getComposite() != nil || target.flags&SignatureFlagsIsSignatureCandidateForOverloadFailure != 0 {
++			evidence.Synthetic = true
++			break
++		}
++	}
++	return evidence
++}
++
+ // Return the type of the given property in the given type, or nil if no such property exists
+ func (c *Checker) GetTypeOfPropertyOfType(t *Type, name string) *Type {
+ 	return c.getTypeOfPropertyOfType(t, name)
+--- a/checker/types.go
++++ b/checker/types.go
+@@ -496,9 +496,10 @@
+ // Signature specific links
+ 
+ type SignatureLinks struct {
+-	resolvedSignature  *Signature // Cached signature of signature node or call expression
+-	effectsSignature   *Signature // Signature with possible control flow effects
+-	decoratorSignature *Signature // Signature for decorator as if invoked by the runtime
++	resolvedSignature         *Signature // Cached signature of signature node or call expression
++	resolvedSignatureRecovery bool       // Invocation-specific overload fallback; same lifetime as resolvedSignature
++	effectsSignature          *Signature // Signature with possible control flow effects
++	decoratorSignature        *Signature // Signature for decorator as if invoked by the runtime
+ }
+ 
+ type TypeFlags uint32
+--- a/checker/services.go
++++ b/checker/services.go
+@@ -366,12 +366,17 @@
+ func (c *Checker) runWithoutResolvedSignatureCaching[T any](node *ast.Node, fn func() T) T {
+ 	ancestorNode := ast.FindAncestor(node, ast.IsCallLikeOrFunctionLikeExpression)
+ 	if ancestorNode != nil {
+-		cachedResolvedSignatures := make(map[*SignatureLinks]*Signature)
++		type cachedSignature struct {
++			signature *Signature
++			recovery  bool
++		}
++		cachedResolvedSignatures := make(map[*SignatureLinks]cachedSignature)
+ 		cachedTypes := make(map[*ValueSymbolLinks]*Type)
+ 		for ancestorNode != nil {
+ 			signatureLinks := c.signatureLinks.Get(ancestorNode)
+-			cachedResolvedSignatures[signatureLinks] = signatureLinks.resolvedSignature
++			cachedResolvedSignatures[signatureLinks] = cachedSignature{signatureLinks.resolvedSignature, signatureLinks.resolvedSignatureRecovery}
+ 			signatureLinks.resolvedSignature = nil
++			signatureLinks.resolvedSignatureRecovery = false
+ 			if ast.IsFunctionExpressionOrArrowFunction(ancestorNode) {
+ 				symbolLinks := c.valueSymbolLinks.Get(c.getSymbolOfDeclaration(ancestorNode))
+ 				resolvedType := symbolLinks.resolvedType
+@@ -381,8 +386,9 @@
+ 			ancestorNode = ast.FindAncestor(ancestorNode.Parent, ast.IsCallLikeOrFunctionLikeExpression)
+ 		}
+ 		result := fn()
+-		for signatureLinks, resolvedSignature := range cachedResolvedSignatures {
+-			signatureLinks.resolvedSignature = resolvedSignature
++		for signatureLinks, cached := range cachedResolvedSignatures {
++			signatureLinks.resolvedSignature = cached.signature
++			signatureLinks.resolvedSignatureRecovery = cached.recovery
+ 		}
+ 		for symbolLinks, resolvedType := range cachedTypes {
+ 			symbolLinks.resolvedType = resolvedType

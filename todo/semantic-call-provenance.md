@@ -1,6 +1,6 @@
 # Declared call provenance implementation
 
-Status: proposed; not implemented in 0.7.0.
+Status: implemented in this change; unavailable in published 0.7.0. The detailed requirements below remain authoritative. Full CI and final review remain to follow.
 
 This specification implements section 7 of [semantic extraction completeness](../specs/semantic-extraction-completeness.md#7-declared-call-provenance). It uses the declaration identity contract in [semantic source associations](../specs/semantic-source-associations.md#2-entity-identity-and-locations). It adds evidence about the declaration selected by the checker, not evidence about which runtime implementation executes.
 
@@ -98,7 +98,7 @@ Provenance must not remove `call_unresolved`, add `call_edge`, change `external_
 
 When combining programs, preserve each observation's selected declaration, member evidence, and completeness before unioning facts. Compare observations only for programs that actually analyzed that site. Retain observed declarations and reasons; mark disagreement `/conflict`. A program that did not analyze the file is not an empty observation. An incomplete observation must not be hidden by another program's complete result. Do not mutate a declaration's lexical member relationship to reconcile differing call-site observations.
 
-Existing call-site IDs can depend on runtime classification or target. Correlate program observations internally by canonical source file, invocation token offset, and invocation kind, not just by the emitted site ID. If the same invocation has different emitted IDs across programs, keep those IDs and attach `/conflict` to each affected site. Keep each selected declaration attached to its own observed site; do not invent cross-program declaration/site pairs.
+Existing call-site IDs can depend on runtime classification or target. Correlate program observations internally by canonical source file, invocation token offset, invocation end offset, and AST node kind, not just by the emitted site ID. If the same invocation has different emitted IDs across programs, keep those IDs and attach `/conflict` to each affected site. Keep each selected declaration attached to its own observed site; do not invent cross-program declaration/site pairs.
 
 ## 6. Rule author contract
 
@@ -109,7 +109,7 @@ The implementation must include one executable example with two outcomes:
 - A forbidden selected member: report the call site linked to the chosen owner and `write` member.
 - Missing or conflicting evidence within the rule's selected scope: report that the policy cannot be established.
 
-The example must not treat every `call_unresolved` as a failure of declaration provenance: the intended capability calls remain runtime-unresolved even when provenance is complete. Conversely, the absence of a forbidden-member match must not silently establish compliance when provenance is incomplete. Incomplete export/owner selection must also remain visible to the rule.
+The example must not treat every `call_unresolved` as a failure of declaration provenance: the intended capability calls remain runtime-unresolved even when provenance is complete. Conversely, the absence of a forbidden-member match must not silently establish compliance when provenance is incomplete. Incomplete export/owner selection must also remain visible to the rule. Owner selection must not require observed `write` member evidence; the positive member join is required to establish a forbidden call, not to accept the selected owner.
 
 The example's complete fixture should reject the direct and receiver-aliased write calls, permit the read and unrelated same-named call, and report unsupported/synthetic cases separately from forbidden writes.
 
@@ -128,6 +128,8 @@ One observation is needed per call site per analyzed program, plus distinct refe
 
 ## 8. Focused verification and completion
 
+`TestDeclaredWriterCapabilityPolicy` in `engine/engine_test.go` must use the actual fixture rule. Required results are two forbidden writes and three indeterminate calls (shared alias `/unsupported`, union `/synthetic`, `any` `/unresolved`). Removing the public export alias must report missing selection instead of silently accepting the writes. A variant with no forbidden writes must produce no false owner uncertainty. CLI and serve must reuse this fixture and preserve the same diagnostic results. Verification results are recorded below.
+
 Use the examples in this specification as the seed for one small extractor fixture and one rule-level test. Avoid a new test framework or a broad equivalence suite. Extend existing fixture tables for closely related cases:
 
 1. Direct read/write, receiver alias, and unrelated same-named member. Assert declaration/owner identity, call locations, and unchanged runtime-unresolved status. The policy reports exactly the two writes.
@@ -139,3 +141,22 @@ Check that the core fixture fails for missing provenance on 0.7.0 and passes wit
 Run `go test ./...`, the package tests after building, and the existing npm and oxlint smoke checks. Use the existing extraction measurement script on a representative workspace to record time and fact-count changes; no new benchmark infrastructure is required.
 
 Complete when the relations survive CLI and serve extraction, the policy distinguishes the intended calls while preserving unresolved runtime status, incomplete evidence is explicit, existing checks pass, and API/follow-up documentation accurately marks this feature as implemented.
+
+## Verification
+
+- Focused extractor fixtures passed, including precise member identity, unsupported/synthetic/unresolved evidence and configuration conflicts.
+- `TestDeclaredWriterCapabilityPolicy` passed all four variants: two forbidden writes plus three indeterminate calls, wrapped static index, missing public alias, and no forbidden writes.
+- Actual CLI analysis reported exactly the five expected diagnostics with exit 1. Serve initialization and file diagnostics produced the same five; shutdown exited 0.
+- The core fixture's four baseline runtime-unresolved calls now have four selected declaration rows and three lexical member rows. Runtime facts are unchanged.
+- The full Go suite passed 258 tests. Only expected additive fact golden updates were required. The PR records the full CI and review results.
+
+## Measured cost
+
+These baseline and measured implementation results are single local observations, not a speedup claim or benchmark guarantee. The PR records verification of the final commit.
+
+| Input | Baseline | Measured implementation | Preserved evidence |
+| --- | --- | --- | --- |
+| Representative client, 11 files | 9,269 facts; 0.284 s | 11,722 facts; 0.179 s | Runtime and type facts byte-for-byte identical; 203 type entities unchanged. |
+| Existing static measurement script | 176 facts; 0.052 s; 46.8 MiB | 176 facts; 0.041 s; 46.8 MiB | Fact count and peak memory unchanged. |
+
+The client result contains 1,227 `call_declaration`, 146 `declaration_member` and 62 `call_declaration_incomplete` rows. Extraction retains only selected endpoints and per-site observations, without an all-pairs closure or recursive member inventory.
