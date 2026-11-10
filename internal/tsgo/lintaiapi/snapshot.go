@@ -354,8 +354,10 @@ type Snapshot struct {
 	AmbientUses               []AmbientUse
 	GlobalRefs                []GlobalRef
 	escapingCallbacks         []escapingCallback
-	Directives                []ModuleDirective
-	ParseErrors               []ParseError
+	// Per-program evidence; the merge/finalization task owns reconciliation.
+	callDeclarationObservations []callDeclarationObservation
+	Directives                  []ModuleDirective
+	ParseErrors                 []ParseError
 	// Types are the type entities that function parameter and return types
 	// refer to, sorted by ID.
 	Types                       []TypeFact
@@ -388,6 +390,7 @@ type configGroup struct {
 }
 
 type extractor struct {
+	callDeclarationObservations []callDeclarationObservation
 	workspaceRoot               string
 	host                        compiler.CompilerHost
 	program                     *compiler.Program
@@ -875,6 +878,7 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 	ex.recordProgramInputs()
 
 	partial := &Snapshot{
+		callDeclarationObservations: ex.callDeclarationObservations,
 		Modules:                     modules,
 		Functions:                   ex.functions,
 		ImportEdges:                 ex.imports,
@@ -1727,25 +1731,30 @@ func (e *extractor) collectOpaqueImport(node *ast.Node) {
 // collectCall records one fact for a call or new expression: a call edge to
 // a collected function, an external call, or an unresolved call.
 func (e *extractor) collectCall(source callSource, node *ast.Node) {
+	site := e.recordRuntimeCall(source, node)
+	if site != "" {
+		e.collectCallDeclaration(node, site)
+	}
+}
+
+func (e *extractor) recordRuntimeCall(source callSource, node *ast.Node) string {
 	file := ast.GetSourceFileOfNode(node)
 	if file == nil {
-		return
+		return ""
 	}
 	if _, ok := e.primaryFiles[normalizeSlash(file.FileName().AsString())]; !ok {
-		return
+		return ""
 	}
 	target, declaration := e.resolveCallTarget(node)
 	location := e.nodeLocation(file, calleeNameNode(node))
 	workspaceClass := e.constructedWorkspaceClass(node)
 	if workspaceClass != nil && hasInstanceInitializer(workspaceClass) {
-		e.recordUnresolvedCall(source, location)
-		return
+		return e.recordUnresolvedCall(source, location)
 	}
 	if target == nil {
 		callee := e.calleeSymbol(node)
 		if accessorSymbol(callee) {
-			e.recordUnresolvedCall(source, location)
-			return
+			return e.recordUnresolvedCall(source, location)
 		}
 		declarationExternal := declaration != nil && e.isExternalDeclaration(declaration)
 		if workspaceClass != nil && declarationExternal {
@@ -1755,17 +1764,15 @@ func (e *extractor) collectCall(source callSource, node *ast.Node) {
 		if calleeExternal && (declarationExternal || declaration == nil) {
 			if external, ok := e.externalCallFor(source, callee, declaration, location); ok {
 				if e.invokesFunctionValue(node, external) {
-					e.recordUnresolvedCall(source, location)
-					return
+					return e.recordUnresolvedCall(source, location)
 				}
 				e.externalCalls = append(e.externalCalls, external)
 				e.markUnsupported(external.SemanticKey, source.reason)
 				e.collectEscapingCallbacks(source, file, node)
-				return
+				return external.SemanticKey
 			}
 		}
-		e.recordUnresolvedCall(source, location)
-		return
+		return e.recordUnresolvedCall(source, location)
 	}
 	baseKey := fmt.Sprintf("%s::calls::%s", source.siteKey(), target.SemanticKey)
 	semanticKey := withOrdinal(baseKey, nextOrdinal(e.callCount, baseKey))
@@ -1782,6 +1789,7 @@ func (e *extractor) collectCall(source callSource, node *ast.Node) {
 		Range:           location,
 	})
 	e.markUnsupported(semanticKey, source.reason)
+	return semanticKey
 }
 
 // invokesFunctionValue reports f.call(...) or f.apply(...) where f is not a
@@ -1831,7 +1839,7 @@ func (e *extractor) collectEscapingCallbacks(source callSource, file *ast.Source
 			if symbol != nil {
 				if target := e.lookupFunction(symbol); target != nil {
 					if e.certainBindingTarget(symbol) == nil {
-						e.recordUnresolvedCall(source, e.nodeLocation(file, value))
+						e.recordEscapedCallDeclaration(source, e.nodeLocation(file, value))
 					} else {
 						key := fmt.Sprintf("%s::escaping_callback::%d", source.siteKey(), scanner.GetTokenPosOfNode(value, file, false))
 						e.escapingCallbacks = append(e.escapingCallbacks, escapingCallback{
@@ -1851,7 +1859,7 @@ func (e *extractor) collectEscapingCallbacks(source callSource, file *ast.Source
 		if valueType == nil || len(e.checker.GetSignaturesOfType(e.checker.GetNonNullableType(valueType), checker.SignatureKindCall)) == 0 {
 			continue
 		}
-		e.recordUnresolvedCall(source, e.nodeLocation(file, value))
+		e.recordEscapedCallDeclaration(source, e.nodeLocation(file, value))
 	}
 }
 
@@ -1905,7 +1913,7 @@ func (e *extractor) recordFnRef(source callSource, target *Function, location So
 
 // recordUnresolvedCall records a call whose target is not known: a call
 // through a callback, a function-typed value or an any-typed value.
-func (e *extractor) recordUnresolvedCall(source callSource, location SourceLocation) {
+func (e *extractor) recordUnresolvedCall(source callSource, location SourceLocation) string {
 	baseKey := source.siteKey() + "::calls_unresolved"
 	semanticKey := withOrdinal(baseKey, nextOrdinal(e.unresolvedCount, baseKey))
 	e.unresolved = append(e.unresolved, CallUnresolved{
@@ -1917,6 +1925,7 @@ func (e *extractor) recordUnresolvedCall(source callSource, location SourceLocat
 		Range:           location,
 	})
 	e.markUnsupported(semanticKey, source.reason)
+	return semanticKey
 }
 
 // calleeSymbol returns the symbol of the value that a call calls: the
