@@ -207,8 +207,17 @@ export default rule(` + strconvQuote(id) + `).version(1).program(dl` + "`Decl v(
 		"lintai-rules/zeta.ts":     ruleSource("arch.zeta"),
 		"lintai-rules/alpha.ts":    ruleSource("arch.alpha"),
 		"lintai-rules/nested/b.ts": ruleSource("arch/nested.b"),
-		"lintai-rules/dup-one.ts":  ruleSource("arch.dup"),
-		"lintai-rules/dup-two.ts":  ruleSource("arch.dup"),
+		"lintai-rules/metadata.ts": `import { rule } from "@lintai/sdk";
+export default rule("arch.metadata").version(7)
+	.setup(() => { throw new Error("setup callback ran"); })
+	.facts(() => { throw new Error("facts callback ran"); })
+	.program(() => { throw new Error("program callback ran"); })
+	.report("reported_b", "reported_a")
+	.expectNonEmpty("expected_b", "expected_a")
+	.message(() => { throw new Error("message callback ran"); });
+`,
+		"lintai-rules/dup-one.ts": ruleSource("arch.dup"),
+		"lintai-rules/dup-two.ts": ruleSource("arch.dup"),
 		"lintai-rules/dup-setup.ts": `import { dl, rule } from "@lintai/sdk";
 export default rule("arch.dup-setup").version(1).setup(() => { throw new Error("setup failed"); }).program(dl` + "`Decl v(F). v(F) :- module(F), glob(F, \"src/**\").`" + `).report("v").message(() => "x");
 `,
@@ -234,7 +243,13 @@ export default rule("arch.dup-setup").version(1).setup(() => { throw new Error("
 		t.Fatalf("exit code %d, want %d: %v", code, exitClean, err)
 	}
 	var list struct {
-		Rules  []struct{ ID, Path string }          `json:"rules"`
+		Rules []struct {
+			ID             string   `json:"id"`
+			Path           string   `json:"path"`
+			Version        int      `json:"version"`
+			Report         []string `json:"report"`
+			ExpectNonEmpty []string `json:"expectNonEmpty"`
+		} `json:"rules"`
 		Errors []struct{ Path, ID, Message string } `json:"errors"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &list); err != nil {
@@ -243,9 +258,20 @@ export default rule("arch.dup-setup").version(1).setup(() => { throw new Error("
 	gotRules := make([]string, 0, len(list.Rules))
 	for _, item := range list.Rules {
 		gotRules = append(gotRules, item.ID+" "+item.Path)
+		if item.Report == nil || item.ExpectNonEmpty == nil {
+			t.Errorf("%s metadata arrays must be JSON arrays, got report=%v expectNonEmpty=%v", item.ID, item.Report, item.ExpectNonEmpty)
+		}
+		if item.ID == "arch.metadata" {
+			if item.Version != 7 || !slices.Equal(item.Report, []string{"reported_b", "reported_a"}) || !slices.Equal(item.ExpectNonEmpty, []string{"expected_b", "expected_a"}) {
+				t.Errorf("loaded metadata differs: got version=%d report=%q expectNonEmpty=%q", item.Version, item.Report, item.ExpectNonEmpty)
+			}
+		} else if item.Version != 1 || !slices.Equal(item.Report, []string{"v"}) || len(item.ExpectNonEmpty) != 0 {
+			t.Errorf("default metadata differs for %s: got version=%d report=%q expectNonEmpty=%q", item.ID, item.Version, item.Report, item.ExpectNonEmpty)
+		}
 	}
 	wantRules := []string{
 		"arch.alpha lintai-rules/alpha.ts",
+		"arch.metadata lintai-rules/metadata.ts",
 		"arch.zeta lintai-rules/zeta.ts",
 		"arch/nested.b lintai-rules/nested/b.ts",
 	}
@@ -269,6 +295,15 @@ export default rule("arch.dup-setup").version(1).setup(() => { throw new Error("
 		if got.Path != want.path || got.ID != want.id || !strings.Contains(got.Message, want.message) {
 			t.Errorf("error %d: got %+v, want path %s, id %q and a message with %q", index, got, want.path, want.id, want.message)
 		}
+	}
+
+	stdout.Reset()
+	err = run(context.Background(), []string{"rules", "--repo-root", repoRoot, "--workspace-root", workspace, "--rules", "lintai-rules/alpha.ts,lintai-rules/metadata.ts"}, &stdout)
+	if code := exitCode(err, io.Discard); code != exitClean {
+		t.Fatalf("text listing exit code %d, want %d: %v", code, exitClean, err)
+	}
+	if got, want := stdout.String(), "arch.alpha lintai-rules/alpha.ts\narch.metadata lintai-rules/metadata.ts\n"; got != want {
+		t.Fatalf("text listing:\ngot  %q\nwant %q", got, want)
 	}
 
 	stdout.Reset()
