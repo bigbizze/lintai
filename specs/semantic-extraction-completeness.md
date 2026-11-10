@@ -30,6 +30,8 @@ Use the existing extractor, snapshot, analysis model, fact builder, schema, and 
 
 ## 4. Type opacity
 
+Status: implemented.
+
 ### 4.1 Representation
 
 Extend `type_incomplete(Type, Reason)` with `/members_omitted`. Emit it whenever class, interface, or enum structure is represented by identity/type arguments while its members are deliberately not inspected. This includes named aliases that take an early return in `structureShape`, generic instantiations, and library types.

@@ -332,6 +332,8 @@ export async function save(): Promise<ActionResult<number>> { return { ok: true,
 export async function legacy(): Promise<Legacy<number>> { return { done: 1 }; }
 `)
 	writeTestFile(t, workspaceRoot, "src/domain/user.ts", `import type { Db } from "../infra/db";
+export interface Hidden { forbidden: Db }
+export function hidden(value: Hidden): void {}
 export function load(input: { db: Db[] }): number { return input.db.length; }
 export function sync(): number { return 1; }
 export const plain = (): number => 1;
@@ -412,17 +414,19 @@ export default rule("t.awaited").version(1)
 	if got := byRule["arch.actions-return-action-result"]; len(got) != 1 || got[0] != "legacy returns Promise<Legacy<number>>" {
 		t.Fatalf("actions rule: %+v", items)
 	}
-	// type_contains does not see the Db in a type parameter constraint or
-	// in an indexed access type, so the plain rule passes them. The strict
-	// rule fails closed on both.
+	// type_contains does not see the Db in a type parameter constraint,
+	// indexed access type, or omitted interface members, so the plain rule
+	// reports only load. The strict rule catches the interface omission and
+	// ordinary Promise/Array library interfaces as well as the two existing
+	// incomplete type forms.
 	if got := byRule["arch.domain-signatures"]; len(got) != 1 || got[0] != "load" {
 		t.Fatalf("domain rule: %+v", items)
 	}
-	if got := byRule["arch.domain-signatures-strict"]; strings.Join(got, ",") != "constrained,picked" {
+	if got := byRule["arch.domain-signatures-strict"]; strings.Join(got, ",") != "constrained,hidden,load,maybe,picked" {
 		t.Fatalf("strict domain rule: %v", got)
 	}
 	// fn_returns_awaited unwraps one lib Promise, not a union that has one.
-	want := []string{"Db.query:number", "constrained:void", "legacy:Legacy<number>", "load:number", "maybe:Promise<number> | undefined", "picked:Db[K]", "plain:number", "save:ActionResult<number>", "sync:number"}
+	want := []string{"Db.query:number", "constrained:void", "hidden:void", "legacy:Legacy<number>", "load:number", "maybe:Promise<number> | undefined", "picked:Db[K]", "plain:number", "save:ActionResult<number>", "sync:number"}
 	if got := byRule["t.awaited"]; strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("fn_returns_awaited: got %v, want %v", got, want)
 	}

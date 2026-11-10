@@ -520,6 +520,61 @@ export function indexed(x: { [key: string]: Db }): void {}
 	}
 }
 
+func TestTypeFactsMembersOmitted(t *testing.T) {
+	snap := buildTestSnapshot(t, map[string]string{
+		"src/opaque.ts": `export interface Hidden<T> { forbidden: T }
+export interface Empty {}
+export type HiddenAlias<T> = Hidden<T>;
+export class Box<T> { forbidden: T; }
+export enum Mode { Hidden, Visible }
+export function direct(value: Hidden<string>): void {}
+export function alias(value: HiddenAlias<number>): void {}
+export function boxed(value: Box<boolean>): void {}
+export function mode(value: Mode): void {}
+export function emptyInterface(value: Empty): void {}
+export function emptyObject(value: {}): void {}
+export function library(value: Promise<Hidden<string>[]>): void {}
+`,
+	})
+	x := newTypeIndex(t, snap)
+	isMembersOmitted := func(item TypeFact) bool {
+		return slices.Contains(item.Incomplete, IncompleteMembersOmitted)
+	}
+
+	direct := x.param("direct", 0)
+	if direct.Name != "Hidden" || !isMembersOmitted(direct) || len(direct.Props) != 0 || len(direct.Args) != 1 || x.get(direct.Args[0]).Kind != TypeKindString {
+		t.Fatalf("generic interface instantiation %+v", direct)
+	}
+	alias := x.param("alias", 0)
+	if alias.Name != "HiddenAlias" || !isMembersOmitted(alias) || len(alias.Props) != 0 || len(alias.Args) != 1 || x.get(alias.Args[0]).Kind != TypeKindNumber {
+		t.Fatalf("generic alias early return %+v", alias)
+	}
+	if boxed := x.param("boxed", 0); !isMembersOmitted(boxed) {
+		t.Fatalf("class opacity: %+v", boxed)
+	}
+	if mode := x.param("mode", 0); mode.Name != "Mode" || !isMembersOmitted(mode) {
+		t.Fatalf("enum members omitted: %+v", mode)
+	}
+	if empty := x.param("emptyInterface", 0); empty.Name != "Empty" || !isMembersOmitted(empty) {
+		t.Fatalf("uninspected empty interface %+v", empty)
+	}
+	if empty := x.param("emptyObject", 0); empty.Named || isMembersOmitted(empty) {
+		t.Fatalf("inspected anonymous empty object %+v", empty)
+	}
+
+	promise := x.param("library", 0)
+	if promise.Origin != "lib" || promise.Name != "Promise" || !isMembersOmitted(promise) || len(promise.Args) != 1 {
+		t.Fatalf("library Promise opacity %+v", promise)
+	}
+	array := x.get(promise.Args[0])
+	if array.Origin != "lib" || array.Name != "Array" || !isMembersOmitted(array) || len(array.Args) != 1 {
+		t.Fatalf("library Array opacity %+v", array)
+	}
+	if hidden := x.get(array.Args[0]); hidden.Name != "Hidden" || !isMembersOmitted(hidden) {
+		t.Fatalf("represented library wrapper argument %+v", hidden)
+	}
+}
+
 // Optional and rest tuple elements and signature parameters were in the
 // key only in 0.6.0, with no relation that a rule could read.
 func TestTypeFactsMarks(t *testing.T) {

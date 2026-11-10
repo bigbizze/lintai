@@ -40,7 +40,7 @@ This is a breaking change to `fn_param` and `fn_returns`: their last argument be
 
 Start from every parameter type and return type of every collected function. Emit those types and, recursively, every type that the relations in section 5 point to. Deduplicate by id: a type's facts are emitted once per snapshot no matter how many functions mention it.
 
-Classes, interfaces and enums are emitted by name and type arguments only. Their members are not expanded. This bounds the fact count: a function returning `Promise<User>` emits `Promise<User>`, `User` and nothing inside `User`.
+Classes, interfaces and enums are emitted by name and type arguments only. Their members are not expanded, and each such named type gets `type_incomplete(Type, /members_omitted)`. This bounds the fact count: a function returning `Promise<User>` emits `Promise<User>`, `User`, nothing inside `User`, and omission markers for `Promise` and for `User` if it is a class, interface or enum.
 
 ### 4.2 Classifying a type
 
@@ -134,8 +134,9 @@ A named type whose origin is a workspace source path gets a `location` row at it
 | `/signatures` | an anonymous `/object` with a call, construct or index signature, whose signatures have no rows |
 | `/constraint` | a type parameter with a constraint, which is not emitted |
 | `/conflict` | config groups give different structure for the id (4.8) |
+| `/members_omitted` | a named class, interface or enum whose members are not inspected; this also applies to generic instantiations, aliases taking an early return, and library types |
 
-Members of classes, interfaces and enums are out of scope (section 10) and are not marked: a rule cannot inspect them, with or without the marker. So `type_reaches_incomplete` does not fail closed on a class or interface whose members contain a type. Marking every class and interface would mark every `Promise` and `Array`.
+Class, interface and enum member expansion remains out of scope (section 10), but the named type is marked because its members were not inspected. `type_reaches_incomplete` can therefore fail closed on a signature that reaches the type, while `type_contains` still cannot see its member types. Default library interfaces such as `Promise` and `Array` are marked too, so strict completeness rules report ordinary wrappers unless their own policy accepts those opaque leaves.
 
 ### 4.8 Config groups
 
@@ -155,7 +156,7 @@ A function that is compiled in two groups has one entity, and its `fn_param` and
 | origin kind | key, `type_origin_kind` |
 | type alias name and arguments | key, `type_named`, `type_arg`, when the checker keeps the alias |
 
-Not represented: members of classes, interfaces and enums; call, construct and index signatures of an `/object` (in the key, marked `/signatures`); type parameter constraints (marked `/constraint`) and defaults; the structure of `/other` types (marked `/unsupported`); parameter names.
+Not represented: members of classes, interfaces and enums (marked `/members_omitted`); call, construct and index signatures of an `/object` (in the key, marked `/signatures`); type parameter constraints (marked `/constraint`) and defaults; the structure of `/other` types (marked `/unsupported`); parameter names.
 
 Erased by the checker, so lintai cannot report them: an alias of a primitive or of another named type (`type UserId = string` is `/string`, `type Handle = Db` is `Db`), a union nested in a union (the members are flattened), and `undefined` in optional properties, elements and parameters (removed before the type is keyed).
 
@@ -377,7 +378,7 @@ Decl type_reaches_incomplete(Type)
     arg(Type, "Type entity id.")
   ].
 type_reaches_incomplete(T) :- type_incomplete(T, _).
-type_reaches_incomplete(T) :- type_contains(T, I), type_incomplete(I, _).
+type_reaches_incomplete(T) :- type_child(T, C), type_reaches_incomplete(C).
 
 Decl type_is_promise(Type)
   descr [
@@ -459,7 +460,7 @@ Extend the existing extraction timing so that the time spent building type facts
 
 ## 10. Out of scope
 
-- Members of classes and interfaces. A later release can add `type_member_of(Type, Name, MemberType)` for named types if rules need it; it multiplies the fact count, so it needs its own measurement.
+- Expansion of class, interface and enum members. Their omission is marked with `/members_omitted`; a later release can add `type_member_of(Type, Name, MemberType)` if rules need member identities, with a separate measurement for its fact-count impact.
 - Structure of conditional, mapped, indexed access and template literal types.
 - Signatures of overloaded function types (more than one call signature).
 - Assignability ("does this return type satisfy `ActionResult<T>`"). The checker can answer it, but not for all pairs up front. If it is wanted, it is a rule-declared query evaluated in Go, which needs a separate design.

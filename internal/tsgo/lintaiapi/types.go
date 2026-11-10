@@ -43,11 +43,12 @@ const (
 
 // Reasons of type_incomplete.
 const (
-	IncompleteTruncated   = "truncated"
-	IncompleteUnsupported = "unsupported"
-	IncompleteSignatures  = "signatures"
-	IncompleteConstraint  = "constraint"
-	IncompleteConflict    = "conflict"
+	IncompleteTruncated      = "truncated"
+	IncompleteUnsupported    = "unsupported"
+	IncompleteSignatures     = "signatures"
+	IncompleteConstraint     = "constraint"
+	IncompleteConflict       = "conflict"
+	IncompleteMembersOmitted = "members_omitted"
 )
 
 // Marks of a tuple element or a signature parameter.
@@ -245,6 +246,10 @@ func (e *extractor) newTypeFact(t *checker.Type, id string, display string) *Typ
 	if e.isTruncated(t) {
 		fact.Kind = TypeKindOther
 		fact.Incomplete = []string{IncompleteTruncated}
+		if slices.Contains(shape.incomplete, IncompleteMembersOmitted) {
+			fact.Incomplete = append(fact.Incomplete, IncompleteMembersOmitted)
+			slices.Sort(fact.Incomplete)
+		}
 		return fact
 	}
 	fact.Kind = shape.kind
@@ -252,6 +257,8 @@ func (e *extractor) newTypeFact(t *checker.Type, id string, display string) *Typ
 	fact.ParamName = shape.paramName
 	fact.Readonly = shape.readonly
 	fact.Incomplete = slices.Clone(shape.incomplete)
+	slices.Sort(fact.Incomplete)
+	fact.Incomplete = slices.Compact(fact.Incomplete)
 	for _, arg := range shape.args {
 		fact.Args = append(fact.Args, e.typeID(arg))
 	}
@@ -607,7 +614,9 @@ func (e *extractor) structureShape(shape *typeShape, t *checker.Type) {
 		shape.kind = TypeKindObject
 		if !shape.named && !e.nameShape(shape, symbol) {
 			e.setOther(shape, t)
+			return
 		}
+		shape.incomplete = append(shape.incomplete, IncompleteMembersOmitted)
 	case flags&checker.TypeFlagsUnion != 0:
 		shape.kind = TypeKindUnion
 		shape.members = e.unionMembers(t.Types())
@@ -643,6 +652,7 @@ func (e *extractor) structureShape(shape *typeShape, t *checker.Type) {
 	case flags&checker.TypeFlagsObject != 0 && isClassOrInterface(t):
 		shape.kind = TypeKindObject
 		if shape.named {
+			shape.incomplete = append(shape.incomplete, IncompleteMembersOmitted)
 			return
 		}
 		target := t
@@ -653,6 +663,7 @@ func (e *extractor) structureShape(shape *typeShape, t *checker.Type) {
 			e.setOther(shape, t)
 			return
 		}
+		shape.incomplete = append(shape.incomplete, IncompleteMembersOmitted)
 		if objectFlags&checker.ObjectFlagsReference != 0 {
 			args := e.checker.GetTypeArguments(t)
 			if declared := len(target.AsInterfaceType().TypeParameters()); len(args) > declared {
