@@ -75,9 +75,9 @@ func (e *extractor) collectCallDeclaration(node *ast.Node, site string) {
 		observation.Incomplete = []string{"unsupported"}
 		return
 	}
-	member, unsupported := e.callDeclarationMember(declaration, id)
+	member, lexicalMember, unsupported := e.callDeclarationMember(declaration, id)
 	observation.Member = member
-	if unsupported || member == nil && e.callUsesUnassociatedProperty(node) {
+	if unsupported || e.callUsesUnassociatedProperty(node, declaration, lexicalMember) {
 		observation.Incomplete = []string{"unsupported"}
 	}
 }
@@ -116,7 +116,7 @@ func (e *extractor) addCallDeclarationMetadata(node *ast.Node) (string, bool) {
 	return id, supported
 }
 
-func (e *extractor) callDeclarationMember(declaration *ast.Node, id string) (*DeclarationMemberFact, bool) {
+func (e *extractor) callDeclarationMember(declaration *ast.Node, id string) (*DeclarationMemberFact, *ast.Node, bool) {
 	member := declaration
 	switch declaration.Kind {
 	case ast.KindMethodDeclaration, ast.KindMethodSignature:
@@ -128,43 +128,41 @@ func (e *extractor) callDeclarationMember(declaration *ast.Node, id string) (*De
 		}
 		member = member.Parent
 		if member == nil || !(member.Kind == ast.KindPropertySignature || ast.IsPropertyDeclaration(member)) {
-			return nil, false // Anonymous signature, alias, or returned callable.
+			return nil, nil, false // Anonymous signature, alias, or returned callable.
 		}
 	case ast.KindCallSignature:
 		literal := declaration.Parent
 		if literal == nil || !ast.IsTypeLiteralNode(literal) {
-			return nil, false // An anonymous signature directly on an interface.
+			return nil, nil, false // An anonymous signature directly on an interface.
 		}
 		for literal.Parent != nil && ast.IsParenthesizedTypeNode(literal.Parent) {
 			literal = literal.Parent
 		}
 		member = literal.Parent
 		if member == nil || !(member.Kind == ast.KindPropertySignature || ast.IsPropertyDeclaration(member)) {
-			return nil, false
+			return nil, nil, false
 		}
 	default:
-		return nil, false
+		return nil, nil, false
 	}
 	owner := member.Parent
 	if owner == nil || !(ast.IsInterfaceDeclaration(owner) || ast.IsClassLike(owner)) || member.Name() == nil {
-		return nil, true
+		return nil, member, true
 	}
 	name, ok := ast.TryGetTextOfPropertyName(member.Name())
 	if !ok {
-		return nil, true
+		return nil, member, true
 	}
 	ownerID, supported := e.addCallDeclarationMetadata(owner)
 	if ownerID == "" || !supported {
-		return nil, true
+		return nil, member, true
 	}
-	return &DeclarationMemberFact{Declaration: id, OwnerDeclaration: ownerID, Name: name}, false
+	return &DeclarationMemberFact{Declaration: id, OwnerDeclaration: ownerID, Name: name}, member, false
 }
 
-// A selected signature shared through an alias does not lexically belong to
-// the observed property. Resolve only that property through the checker and
-// inspect its declarations. Accessors returning callables are not
-// property signature declarations and must not become the callable endpoint.
-func (e *extractor) callUsesUnassociatedProperty(node *ast.Node) bool {
+// The selected signature must belong to a declaration of the resolved property.
+// One matching declaration suffices when an intersection supplies overloads.
+func (e *extractor) callUsesUnassociatedProperty(node, signature, lexicalMember *ast.Node) bool {
 	callee := ast.SkipOuterExpressions(calleeOf(node), ast.OEKAll)
 	if !ast.IsPropertyAccessExpression(callee) && !ast.IsElementAccessExpression(callee) {
 		return false
@@ -173,12 +171,15 @@ func (e *extractor) callUsesUnassociatedProperty(node *ast.Node) bool {
 	if symbol == nil || len(symbol.Declarations()) == 0 {
 		return true // No single checked property establishes the association.
 	}
-	for _, declaration := range symbol.Declarations() {
-		if declaration.Kind == ast.KindPropertySignature || ast.IsPropertyDeclaration(declaration) {
-			return true
+	if lexicalMember != nil {
+		return !slices.Contains(symbol.Declarations(), lexicalMember)
+	}
+	for ancestor := signature; ancestor != nil; ancestor = ancestor.Parent {
+		if slices.Contains(symbol.Declarations(), ancestor) {
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 func escapedCallDeclarationObservation(site string) callDeclarationObservation {

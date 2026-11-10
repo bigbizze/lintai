@@ -19,6 +19,17 @@ func TestCallDeclarationObservationsBeforeMerge(t *testing.T) {
 interface Writer { write(): void }
 interface Other { write(): void }
 interface Derived extends Writer {}
+interface Reused { write: Writer["write"] }
+class ParameterWriter { constructor(public write: Writer["write"]) {} }
+declare class GetterWriter { get write(): Writer["write"]; }
+class NestedGetter {
+  get write() {
+    class NestedWriter { write(): void {} }
+    return new NestedWriter().write;
+  }
+}
+interface StringCall { invoke: (value: string) => void }
+interface NumberCall { invoke: (value: number) => void }
 interface Capabilities { store: Reader & Writer }
 type Shared = () => void;
 interface Inline {
@@ -38,7 +49,9 @@ class Overloaded {
 function tag(parts: TemplateStringsArray): string { return parts[0]; }
 function exercise(cap: Capabilities, other: Other, inline: Inline, getter: Getter,
   inherited: Derived, combined: ((x: "both" | "left") => void) | ((x: "both" | "right") => void),
-  unknown: any, free: Shared, overloaded: Overloaded, k: "shared" | "sharedOther") {
+  unknown: any, free: Shared, overloaded: Overloaded, k: "shared" | "sharedOther", reused: Reused,
+  parameter: ParameterWriter, getterWriter: GetterWriter, intersected: StringCall & NumberCall,
+  nestedGetter: NestedGetter) {
   cap.store.read();
   cap.store.write();
   const store = cap.store;
@@ -51,6 +64,15 @@ function exercise(cap: Capabilities, other: Other, inline: Inline, getter: Gette
   inline[k]();
   (inline.shared satisfies Shared)();
   (inline.shared as Shared)();
+  reused.write();
+  const object = { write: free, free };
+  object.write();
+  object.free();
+  parameter.write();
+  getterWriter.write();
+  nestedGetter.write();
+  intersected.invoke("text");
+  intersected["invoke"](1);
   getter.returned();
   inherited.write();
   cap.store?.write();
@@ -121,6 +143,14 @@ function exercise(cap: Capabilities, other: Other, inline: Inline, getter: Gette
 		{call: "inline[k]()", reason: "unsupported", selectedSource: "type Shared = () => void;"},
 		{call: "(inline.shared satisfies Shared)()", reason: "unsupported", selectedSource: "type Shared = () => void;"},
 		{call: "(inline.shared as Shared)()", reason: "unsupported", selectedSource: "type Shared = () => void;"},
+		{call: "reused.write()", owner: "Writer", member: "write", reason: "unsupported"},
+		{call: "parameter.write()", owner: "Writer", member: "write", reason: "unsupported"},
+		{call: "getterWriter.write()", owner: "Writer", member: "write", reason: "unsupported"},
+		{call: "nestedGetter.write()", owner: "NestedWriter", member: "write", reason: "unsupported"},
+		{call: `intersected.invoke("text")`, owner: "StringCall", member: "invoke"},
+		{call: `intersected["invoke"](1)`, owner: "NumberCall", member: "invoke"},
+		{call: "object.write()", reason: "unsupported", selectedSource: "type Shared = () => void;"},
+		{call: "object.free()", reason: "unsupported", selectedSource: "type Shared = () => void;"},
 		{call: "getter.returned()"},
 		{call: "inherited.write()", owner: "Writer", member: "write"},
 		{call: "cap.store?.write()", owner: "Writer", member: "write"},
@@ -209,7 +239,7 @@ function exercise(cap: Capabilities, other: Other, inline: Inline, getter: Gette
 	}) {
 		t.Fatal("method implementation was not independently collected")
 	}
-	if len(shared) != 5 {
+	if len(shared) != 7 {
 		t.Fatalf("missing shared alias observations: %v", shared)
 	}
 	for _, declaration := range shared {

@@ -185,15 +185,17 @@ func TestDeclaredWriterCapabilityPolicy(t *testing.T) {
 	}
 	fixture := filepath.Join(repoRoot, "testdata", "call-provenance")
 	for _, test := range []struct {
-		name          string
-		missingExport bool
-		noWrites      bool
-		wrappedIndex  bool
+		name            string
+		missingExport   bool
+		noWrites        bool
+		wrappedIndex    bool
+		reusedSignature bool
 	}{
 		{name: "selected export alias"},
 		{name: "wrapped static index", wrappedIndex: true},
 		{name: "missing export alias", missingExport: true},
 		{name: "no forbidden writes", noWrites: true},
+		{name: "property reuses another member", reusedSignature: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root := t.TempDir()
@@ -203,6 +205,9 @@ func TestDeclaredWriterCapabilityPolicy(t *testing.T) {
 					t.Fatal(err)
 				}
 				source := string(contents)
+				if test.reusedSignature && file == "contracts.ts" {
+					source = "interface Base { write(): void }\n" + strings.Replace(source, "export interface Writer {\n\twrite(): void;", "export interface Writer {\n\twrite: Base[\"write\"];", 1)
+				}
 				if test.wrappedIndex && file == "calls.ts" {
 					source = strings.Replace(source, "shared.write()", `shared[(("write" as const) satisfies string)]()`, 1)
 				}
@@ -237,6 +242,10 @@ func TestDeclaredWriterCapabilityPolicy(t *testing.T) {
 			}
 			if test.missingExport {
 				want = append(want, "indeterminate:1:Cannot establish Writer.write policy: missing export")
+			} else if test.reusedSignature {
+				want = append(want,
+					"indeterminate:7:Cannot establish Writer.write policy: unsupported",
+					"indeterminate:9:Cannot establish Writer.write policy: unsupported")
 			} else if !test.noWrites {
 				want = append(want,
 					"forbidden:7:Forbidden member: Writer.write",
