@@ -1,6 +1,6 @@
 # Semantic extraction completeness
 
-Status: Section 8 (loaded rule metadata) is implemented. Sections 4–6 remain proposed; section 7 is deferred until a concrete capability-call rule needs it. No release number is assigned.
+Status: implementation status is recorded in each feature section. Sections without an implementation status remain proposed; section 7 is deferred until a concrete capability-call rule needs it. No release number is assigned.
 
 ## 1. Purpose and authority
 
@@ -161,7 +161,7 @@ A fixture rule targeting an example interface member `Writer.write` must match d
 
 ## 8. Loaded rule metadata
 
-Status: implemented in PR1 for loaded rule metadata only.
+Status: implemented.
 
 Extend the existing `lintai rules --json` output. Each valid rule has:
 

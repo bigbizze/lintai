@@ -221,11 +221,13 @@ export default rule("arch.metadata").version(7)
 		"lintai-rules/dup-setup.ts": `import { dl, rule } from "@lintai/sdk";
 export default rule("arch.dup-setup").version(1).setup(() => { throw new Error("setup failed"); }).program(dl` + "`Decl v(F). v(F) :- module(F), glob(F, \"src/**\").`" + `).report("v").message(() => "x");
 `,
-		"lintai-rules/dup-setup-ok.ts": ruleSource("arch.dup-setup"),
-		"lintai-rules/bad-id.ts":       "export default { id: \"Arch.Bad\", versionValue: 1 };\n",
-		"lintai-rules/no-program.ts":   "export default { id: \"arch.no-program\", versionValue: 1 };\n",
-		"lintai-rules/broken.ts":       "export default rule(\n",
-		"lintai-rules/helper.ts":       "export const shared = 1;\n",
+		"lintai-rules/dup-setup-ok.ts":       ruleSource("arch.dup-setup"),
+		"lintai-rules/bad-id.ts":             "export default { id: \"Arch.Bad\", versionValue: 1 };\n",
+		"lintai-rules/no-program.ts":         "export default { id: \"arch.no-program\", versionValue: 1 };\n",
+		"lintai-rules/broken.ts":             "export default rule(\n",
+		"lintai-rules/helper.ts":             "export const shared = 1;\n",
+		"lintai-rules/no-version.ts":         strings.Replace(ruleSource("arch.no-version"), ".version(1)", "", 1),
+		"lintai-rules/fractional-version.ts": strings.Replace(ruleSource("arch.fractional-version"), ".version(1)", ".version(1.75)", 1),
 	}
 	for name, text := range files {
 		path := filepath.Join(workspace, filepath.FromSlash(name))
@@ -285,7 +287,9 @@ export default rule("arch.dup-setup").version(1).setup(() => { throw new Error("
 		{"lintai-rules/dup-setup-ok.ts", "arch.dup-setup", `rule id "arch.dup-setup" is used by more than one rule file`},
 		{"lintai-rules/dup-setup.ts", "arch.dup-setup", `rule id "arch.dup-setup" is used by more than one rule file`},
 		{"lintai-rules/dup-two.ts", "arch.dup", `rule id "arch.dup" is used by more than one rule file`},
+		{"lintai-rules/fractional-version.ts", "arch.fractional-version", "must call .version(n) with a positive integer"},
 		{"lintai-rules/no-program.ts", "arch.no-program", "rule is missing program()"},
+		{"lintai-rules/no-version.ts", "arch.no-version", "must call .version(n) with a positive integer"},
 	}
 	if len(list.Errors) != len(wantErrors) {
 		t.Fatalf("errors: got %+v", list.Errors)

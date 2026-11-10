@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"math"
 	"regexp"
 
 	"github.com/dop251/goja"
@@ -110,6 +111,14 @@ func LoadPureBundle(code string) (*LoadedRule, error) {
 		return nil, fmt.Errorf("pure bundle did not initialize LintAIPureModule")
 	}
 	ruleObject := moduleValue.ToObject(vm).Get("rule").ToObject(vm)
+	versionValue := ruleObject.Get("versionValue")
+	if !goja.IsNumber(versionValue) {
+		return nil, fmt.Errorf("rule %s must call .version(n) with a positive integer", ruleObject.Get("id"))
+	}
+	version := versionValue.ToFloat()
+	if math.IsNaN(version) || version < 1 || version > 9007199254740991 || math.Trunc(version) != version {
+		return nil, fmt.Errorf("rule %s must call .version(n) with a positive integer", ruleObject.Get("id"))
+	}
 	programValue := ruleObject.Get("programValue")
 	if programValue == nil || goja.IsUndefined(programValue) || goja.IsNull(programValue) {
 		return nil, fmt.Errorf("rule is missing program()")
@@ -141,7 +150,7 @@ func LoadPureBundle(code string) (*LoadedRule, error) {
 	return &LoadedRule{
 		runtime:        vm,
 		id:             ruleObject.Get("id").String(),
-		version:        int(ruleObject.Get("versionValue").ToInteger()),
+		version:        int(version),
 		programValue:   programValue,
 		factsFn:        factsFn,
 		messageFn:      messageFn,
