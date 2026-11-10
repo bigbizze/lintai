@@ -141,6 +141,8 @@ An `async` function with no such syntax does not get `fn_suspends`. These facts 
 
 ## 7. Declared call provenance
 
+The implementation plan and bounded member-association rules are in [declared call provenance implementation](../todo/semantic-call-provenance.md).
+
 This section defines the feature but does not require implementing it before a concrete capability-call rule needs it. If deferred, release documentation MUST identify it as deferred, rather than claim full implementation of this specification.
 
 ### 7.1 Relations and meaning
