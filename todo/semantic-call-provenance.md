@@ -148,11 +148,11 @@ Complete when the relations survive CLI and serve extraction, the policy disting
 - `TestDeclaredWriterCapabilityPolicy` passed all three variants: two forbidden writes plus three indeterminate calls, missing public alias, and no forbidden writes.
 - Actual CLI analysis reported exactly the five expected diagnostics with exit 1. Serve initialization and file diagnostics produced the same five; shutdown exited 0.
 - The core fixture's four baseline runtime-unresolved calls now have four selected declaration rows and three lexical member rows. Runtime facts are unchanged.
-- The full Go suite passed 258 tests. Only expected additive fact golden updates were required. This does not establish completion of full CI or final review.
+- The full Go suite passed 258 tests. Only expected additive fact golden updates were required. The PR records the full CI and review results.
 
 ## Measured cost
 
-These baseline and measured implementation results are single local observations, not a speedup claim or benchmark guarantee. Final verification remains pending.
+These baseline and measured implementation results are single local observations, not a speedup claim or benchmark guarantee. The PR records verification of the final commit.
 
 | Input | Baseline | Measured implementation | Preserved evidence |
 | --- | --- | --- | --- |

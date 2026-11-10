@@ -143,7 +143,7 @@ An `async` function with no such syntax does not get `fn_suspends`. These facts 
 
 The implementation record and bounded member-association rules are in [declared call provenance implementation](../todo/semantic-call-provenance.md).
 
-Status: implemented in this change, including the [Writer capability policy](../testdata/call-provenance/writer-policy.ts). Focused extractor coverage passed 25 cases; the engine policy test passed all three variants (two forbidden writes plus three indeterminate calls, missing public alias, and no forbidden writes). Actual CLI and serve extraction produced the same five diagnostics; CLI exited 1 and serve shutdown exited 0. The full Go suite passed 258 tests, with only expected additive fact golden updates required. Full CI and final review remain to follow. See the [implementation and measurement record](../todo/semantic-call-provenance.md#verification).
+Status: implemented in this change, including the [Writer capability policy](../testdata/call-provenance/writer-policy.ts). Focused extractor coverage passed 25 cases; the engine policy test passed all three variants (two forbidden writes plus three indeterminate calls, missing public alias, and no forbidden writes). Actual CLI and serve extraction produced the same five diagnostics; CLI exited 1 and serve shutdown exited 0. The full Go suite passed 258 tests, with only expected additive fact golden updates required. The PR records full CI and review results. See the [implementation and measurement record](../todo/semantic-call-provenance.md#verification).
 
 ### 7.1 Relations and meaning
 
