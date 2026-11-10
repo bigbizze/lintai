@@ -185,6 +185,20 @@ type CallUnresolved struct {
 	Range           diagnostics.SourceLocation
 }
 
+// CallDeclaration uses the existing call site's SemanticKey as Site.
+type CallDeclaration struct {
+	Site, Declaration string
+}
+
+type DeclarationMember struct {
+	Declaration, OwnerDeclaration, Name string
+}
+
+// CallDeclarationIncomplete uses the existing call site's SemanticKey as Site.
+type CallDeclarationIncomplete struct {
+	Site, Reason string
+}
+
 // ImportOpaque is an import() or require() with a computed specifier.
 type ImportOpaque struct {
 	EntityID    string
@@ -277,6 +291,9 @@ type Snapshot struct {
 	CallEdges                   []CallEdge
 	ExternalCalls               []ExternalCall
 	CallsUnresolved             []CallUnresolved
+	CallDeclarations            []CallDeclaration
+	DeclarationMembers          []DeclarationMember
+	CallDeclarationIncomplete   []CallDeclarationIncomplete
 	ImportsOpaque               []ImportOpaque
 	FnRefs                      []FnRef
 	SuspensionSites             []SuspensionSite

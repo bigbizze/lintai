@@ -336,23 +336,26 @@ type TypeRef struct {
 }
 
 type Snapshot struct {
-	Modules                 []Module
-	Functions               []Function
-	ImportEdges             []ImportEdge
-	CallEdges               []CallEdge
-	ExternalCalls           []ExternalCall
-	CallsUnresolved         []CallUnresolved
-	ImportsOpaque           []ImportOpaque
-	FnRefs                  []FnRef
-	SuspensionSites         []SuspensionSite
-	Accesses                []Access
-	UnsupportedAttributions []UnsupportedAttribution
-	TypeRefs                []TypeRef
-	AmbientUses             []AmbientUse
-	GlobalRefs              []GlobalRef
-	escapingCallbacks       []escapingCallback
-	Directives              []ModuleDirective
-	ParseErrors             []ParseError
+	Modules                   []Module
+	Functions                 []Function
+	ImportEdges               []ImportEdge
+	CallEdges                 []CallEdge
+	ExternalCalls             []ExternalCall
+	CallsUnresolved           []CallUnresolved
+	CallDeclarations          []CallDeclarationFact
+	DeclarationMembers        []DeclarationMemberFact
+	CallDeclarationIncomplete []CallDeclarationIncompleteFact
+	ImportsOpaque             []ImportOpaque
+	FnRefs                    []FnRef
+	SuspensionSites           []SuspensionSite
+	Accesses                  []Access
+	UnsupportedAttributions   []UnsupportedAttribution
+	TypeRefs                  []TypeRef
+	AmbientUses               []AmbientUse
+	GlobalRefs                []GlobalRef
+	escapingCallbacks         []escapingCallback
+	Directives                []ModuleDirective
+	ParseErrors               []ParseError
 	// Types are the type entities that function parameter and return types
 	// refer to, sorted by ID.
 	Types                       []TypeFact

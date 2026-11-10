@@ -158,6 +158,19 @@ func factsFromAnalysis(snapshot *analysis.Snapshot) ([]facts.Fact, error) {
 		}
 		b.location(call.SemanticKey, call.Range)
 	}
+	for _, item := range snapshot.CallDeclarations {
+		b.add("call_declaration", str(item.Site), str(item.Declaration))
+	}
+	for _, item := range snapshot.DeclarationMembers {
+		b.add("declaration_member", str(item.Declaration), str(item.OwnerDeclaration), str(item.Name))
+	}
+	for _, item := range snapshot.CallDeclarationIncomplete {
+		reason, err := name(item.Reason)
+		if err != nil {
+			return nil, err
+		}
+		b.add("call_declaration_incomplete", str(item.Site), reason)
+	}
 	for _, item := range snapshot.ImportsOpaque {
 		b.add("import_opaque", str(item.SemanticKey), str(item.FromPath))
 		b.location(item.SemanticKey, item.Range)
