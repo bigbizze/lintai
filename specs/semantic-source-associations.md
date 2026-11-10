@@ -1,14 +1,14 @@
-# PR3 semantic source association contract
+# Semantic source association contract
 
-Status: implemented in PR3. This file settles the PR3 schema and behavior and
+Status: implemented. This file defines the export and source-association schema and behavior and
 records the clarifications made during implementation (sections 5, 6, 7 and 9).
-It does not specify PR4 or PR5. It supersedes provisional PR3 schema choices in
-`pr3-pr4.md` and `pr3-pr4-preparation.md` where those choices were left open.
+It expands section 5 of [semantic extraction completeness](semantic-extraction-completeness.md#5-export-and-declaration-inventory).
+Suspension ownership and broader syntax facts are specified separately.
 Section 11 lists the production tests that replaced the preflight probes.
 
 ## 1. Boundary and two-stage source model
 
-PR3 adds checker-visible public exports, declaration endpoints and optional
+This feature adds checker-visible public exports, declaration endpoints and optional
 relationships from generated declarations to source. It does not prove execution,
 runtime identity, authorization, effects, or freshness of generated output.
 
@@ -507,14 +507,13 @@ Existing program inputs and tsconfig dependencies remain tracked. Do not persist
 auxiliary programs across runs. Source/build freshness and rules-lock verification
 remain separate.
 
-## 10. PR3 acceptance fixture and performance plan
+## 10. Acceptance fixture and performance plan
 
-Use a small synthetic public API fixture grounded in the proposed shared-contract
-policy: a `common` entry re-exports a `ValidationContext` type through two modules;
+Use a small synthetic public API fixture: a `common` entry re-exports a `ValidationContext` type through two modules;
 the type has a represented `db: Knex` property whose type originates in the
 `knex` package. A rule seeded at the public `module_export` must find the root and
 follow represented type children to the banned package-origin type. Also include
-an inspectable `{ eventVersionId: number }` data contract and an `@echo/grpc`
+an inspectable `{ eventVersionId: number }` data contract and an `@example/protocol`
 message contract; those are not violations merely because they are database-shaped
 or gRPC-derived. The policy is about infrastructure handles such as `Knex`,
 `express` request/response types and `@grpc/grpc-js` service types.
@@ -525,9 +524,9 @@ package-origin types; do not materialize all-pairs type reachability. Check the
 root type itself as well as descendants. Incompleteness/opacity and conflicts are
 uncertainty, never evidence that an export is safe. This is an acceptance fixture
 for exports, declaration roots, package-instance identity and uncertainty; it
-does not require private Echo source or expand the extraction contract.
+does not require any external repository or expand the extraction contract.
 
-The PR3 fixture suite also covers direct source, project-reference source with no
+The fixture suite also covers direct source, project-reference source with no
 output, redirect disable, mapped exact/nearby/ambiguous declarations, missing and
 malformed maps, unavailable source, unsupported `sourcesContent`, overloaded
 binding membership sets, renamed re-exports in one statement, unmatched config
@@ -537,7 +536,7 @@ input invalidation.
 For cost, keep a deterministic generated workspace fixture in the repository
 (fixed module/declaration counts and file contents). Record command, Go/compiler
 revision, input counts, elapsed time, peak RSS, total/type/declaration/export fact
-counts and auxiliary-program count/time. Compare pre-PR3 and PR3 on the same
+counts and auxiliary-program count/time. Compare before and after this feature on the same
 fixture. Run the existing timing instrumentation with `LINTAI_EXTRACT_TIMING=1`
 and an OS time/RSS tool. Measure checked programs and auxiliary programs
 separately; verify identical auxiliary inputs reuse one program per run. Do not
@@ -548,16 +547,16 @@ run arbitrary package builds or add a persistent auxiliary cache.
 On macOS arm64 with Go 1.27.3, one run of
 `scripts/measure-semantic-extraction.py` per case used the same 17-file fixture
 (SHA-256 `f99fc7a4fea0e5b2baa05a5ea330ec64d5abcebb7b54c6d2e59632e134f10ed3`),
-six analyzed files and one checked program. PR2 was the clean `5afab4ef` binary;
-PR3 was built from `5356a5a` with the source-entry symlink fix in the worktree.
+six analyzed files and one checked program. The baseline was the clean `5afab4ef` binary;
+the export build used `5356a5a` with the source-entry symlink fix in the worktree.
 Wall time includes startup and fact rendering; peak RSS is the child's `wait4`
 maximum. Type, declaration and export columns count relation rows.
 
 | Case | All facts | Type rows / entities | Declaration / export rows | Wall | Peak RSS | Checked / auxiliary program time |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| PR2 ordinary | 85 | 4 / 0 | 0 / 0 | 0.044 s | 44.9 MiB | 19 ms / n/a |
-| PR3 ordinary | 176 | 32 / 6 | 12 / 33 | 0.034 s | 46.2 MiB | 16 ms / 0 ms |
-| PR3 association | 187 | 32 / 6 | 15 / 33 | 0.054 s | 64.3 MiB | 16 ms / 18 ms |
+| Baseline ordinary | 85 | 4 / 0 | 0 / 0 | 0.044 s | 44.9 MiB | 19 ms / n/a |
+| Export ordinary | 176 | 32 / 6 | 12 / 33 | 0.034 s | 46.2 MiB | 16 ms / 0 ms |
+| Export association | 187 | 32 / 6 | 15 / 33 | 0.054 s | 64.3 MiB | 16 ms / 18 ms |
 
 The association run applied the configured entry, produced its checked and
 source binding sets and built one auxiliary program. A separate two-entry
@@ -627,7 +626,7 @@ Compatibility notes:
 8. Add the compact fixture suite, export/type acceptance policy, regression checks,
    and the planned performance comparison. Update status and API documentation.
 
-Keep PR4 suspension ownership and PR5 broader syntax facts out of this sequence.
+Keep suspension ownership and broader syntax facts out of this sequence.
 
 
 ### Declaration-map scaling after the review fixes
