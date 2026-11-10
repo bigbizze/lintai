@@ -414,7 +414,7 @@ export default rule("t.awaited").version(1)
 	checkedName := fmt.Sprintf("<anonymous@%d>", strings.Index(actionSource, "async () => 3"))
 	defaultName := fmt.Sprintf("<anonymous@%d>", strings.Index(actionSource, "async () => 4"))
 	wantActions := []string{
-		"legacy must return Promise<ActionResult<T>>, but returns Promise<Legacy<number>", "wrongDirect must return Promise<ActionResult<T>>, but returns Promise<number>",
+		"legacy must return Promise<ActionResult<T>>, but returns Promise<Legacy<number>>", "wrongDirect must return Promise<ActionResult<T>>, but returns Promise<number>",
 		wrappedName + " must return Promise<ActionResult<T>>, but returns Promise<number>", checkedName + " must return Promise<ActionResult<T>>, but returns Promise<number>", defaultName + " must return Promise<ActionResult<T>>, but returns Promise<number>",
 	}
 	sort.Strings(wantActions)
