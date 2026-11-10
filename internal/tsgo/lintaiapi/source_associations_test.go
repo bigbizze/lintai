@@ -15,7 +15,64 @@ import (
 	"github.com/bigbizze/lintai/internal/tsgo/internal/core"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/sourcemap"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/tspath"
+	"github.com/bigbizze/lintai/internal/tsgo/internal/vfs/osvfs"
 )
+
+func TestSourceEntryUsesCompilerResolutionForSymlinkedWorkspace(t *testing.T) {
+	for _, preserve := range []bool{false, true} {
+		t.Run(fmt.Sprintf("preserveSymlinks=%t", preserve), func(t *testing.T) {
+			root, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeWorkspace(t, root, map[string]string{
+				"tsconfig.json":                                 fmt.Sprintf(`{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","preserveSymlinks":%t},"include":["src/**/*.ts"]}`, preserve),
+				"packages/checked/tsconfig.json":                `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler"},"include":["src/**/*.ts"]}`,
+				"packages/checked/src/index.ts":                 `export interface Widget { value: string }`,
+				"node_modules/@fixture/checked/package.json":    `{"name":"@fixture/checked","types":"dist/index.d.ts"}`,
+				"node_modules/@fixture/checked/dist/index.d.ts": `export interface Widget { value: string }`,
+				"node_modules/@fixture/unused/dist/index.d.ts":  `export interface Widget { value: string }`,
+				"src/app.ts": `export type { Widget } from "@fixture/checked";`,
+				"source-links.json": `{"version":1,"entries":[
+					{"checkedEntry":"node_modules/@fixture/checked/dist/index.d.ts","sourceEntry":"packages/checked/src/index.ts","sourceTsconfig":"packages/checked/tsconfig.json"},
+					{"checkedEntry":"node_modules/@fixture/unused/dist/index.d.ts","sourceEntry":"packages/checked/src/index.ts"}
+				]}`,
+			})
+			alias := filepath.Join(t.TempDir(), "workspace")
+			if err := os.Symlink(root, alias); err != nil {
+				t.Skipf("symlinks are unavailable: %v", err)
+			}
+			snapshot, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{
+				WorkspaceRoot: alias,
+				Files:         []string{filepath.Join(alias, "src/app.ts")},
+				SourceLinks:   "source-links.json",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, entry := range snapshot.SourceEntries {
+				wantApplied := entry.CheckedEntry == "node_modules/@fixture/checked/dist/index.d.ts"
+				if entry.Applied != wantApplied || len(entry.Incomplete) != 0 {
+					t.Fatalf("source entry outcome: %+v", entry)
+				}
+			}
+			if len(snapshot.SourceEntries) != 2 || len(snapshot.SourceBindings) != 1 {
+				t.Fatalf("unexpected entries or binding attempts: %+v, %+v", snapshot.SourceEntries, snapshot.SourceBindings)
+			}
+			binding := snapshot.SourceBindings[0]
+			wantFile := "node_modules/@fixture/checked/dist/index.d.ts"
+			if !preserve {
+				absolute := tspath.RootedPathFromAbsolute(filepath.ToSlash(filepath.Join(root, wantFile)))
+				wantFile = osvfs.FS().CaseSensitivity().PathKey(absolute).AsString()
+			}
+			public := semanticExport(t, snapshot, "src/app.ts", "Widget", SpaceType)
+			if binding.CheckedFile != wantFile || binding.SourceFile != "packages/checked/src/index.ts" || binding.Method != "source_entry" ||
+				len(binding.Incomplete) != 0 || len(binding.SourceDeclarations) != 1 || !slices.Equal(binding.CheckedDeclarations, public.Targets) {
+				t.Fatalf("binding did not retain the compiler's checked declaration and source endpoint: %+v, export=%+v", binding, public)
+			}
+		})
+	}
+}
 
 func TestSourceEntryKeepsCheckedTypesAndRecordsOverloadMembershipSets(t *testing.T) {
 	root := t.TempDir()

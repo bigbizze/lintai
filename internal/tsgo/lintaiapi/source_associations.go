@@ -202,8 +202,8 @@ func configIncludesFile(config *parsedConfig, file string, caseSensitivity tspat
 
 func (e *extractor) applyConfiguredSourceEntries(entries []configuredSourceEntry, auxiliary *auxiliarySourcePrograms) error {
 	for _, entry := range entries {
-		checked := e.program.GetSourceFile(tspath.RootedFilePathFromAbsolute(entry.CheckedPath))
-		if checked == nil || e.canonicalFileIdentity(checked.FileName().AsString()) != e.canonicalFileIdentity(entry.CheckedPath) {
+		checked := e.checkedSourceFile(entry.CheckedPath)
+		if checked == nil {
 			continue
 		}
 		e.sourceEntryFacts = append(e.sourceEntryFacts, SourceEntryFact{
@@ -268,6 +268,49 @@ func (e *extractor) applyConfiguredSourceEntries(entries []configuredSourceEntry
 		}
 	}
 	return nil
+}
+
+// checkedSourceFile follows only the aliases recorded by this program's module
+// and type-reference resolutions. The source file's own compiler path remains
+// its identity, and a project-reference redirect is not the checked entry.
+func (e *extractor) checkedSourceFile(path string) *ast.SourceFile {
+	want := e.program.PathKeyForFileName(tspath.RootedFilePathFromAbsolute(path))
+	if file := e.program.GetSourceFileByPath(want); file != nil && file.PathKey() == want {
+		return file
+	}
+	var matched *ast.SourceFile
+	conflict := false
+	match := func(original tspath.RootedFilePath, resolved tspath.PathKey) {
+		if original == "" || e.program.PathKeyForFileName(original) != want {
+			return
+		}
+		file := e.program.GetSourceFileByPath(resolved)
+		if file == nil || file.PathKey() != resolved {
+			return
+		}
+		if matched != nil && matched.PathKey() != file.PathKey() {
+			conflict = true
+		}
+		matched = file
+	}
+	for _, resolutions := range e.program.GetResolvedModules() {
+		for _, resolution := range resolutions {
+			if resolution.IsResolved() {
+				match(resolution.OriginalPath, resolution.ResolvedPath)
+			}
+		}
+	}
+	for _, resolutions := range e.program.GetResolvedTypeReferenceDirectives() {
+		for _, resolution := range resolutions {
+			if resolution != nil && resolution.IsResolved() {
+				match(resolution.OriginalPath, resolution.ResolvedPath)
+			}
+		}
+	}
+	if conflict {
+		return nil
+	}
+	return matched
 }
 
 // bindingDeclarationEndpoints records the declarations of one exported binding
