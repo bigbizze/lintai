@@ -647,6 +647,8 @@ reaches_disallowed_incomplete(T) :- type_child(T, Child), reaches_disallowed_inc
 
 Use `reaches_disallowed_incomplete(T)` in the violation rule in place of `type_reaches_incomplete(T)`. This ignores only `/members_omitted` on the two named library leaves. If `Promise<Hidden>` reaches an unaccepted opaque `Hidden` type, that marker still propagates through the `Promise` type argument to the signature. The policy does not mark `any`, `unknown`, unconstrained parameters, or unknown runtime values as safe; those need separate rule-specific handling when they matter.
 
+This exception trusts all omitted members of those interfaces, including members added by workspace or dependency augmentations. An augmented `Promise<T>` can retain its library identity while gaining a forbidden member that this policy does not inspect. Keep its `/members_omitted` marker as a disallowed seed if that trust is unsuitable; matching the library origin does not prove that its declarations are unmodified.
+
 Caveats:
 
 - `type_contains` does not look into the call, construct or index signatures of an anonymous object type, so `{ [k: string]: Db }` is not reported by the first rule. The type has `type_incomplete(T, /signatures)`, so the strict variant reports it.
