@@ -430,7 +430,7 @@ export const [first, , ...rest] = [1, 2, 3];`,
 		}
 		*site = item.Via[0]
 		if !slices.ContainsFunc(snapshot.SourceBindings, func(binding SourceBindingFact) bool {
-			return binding.Name == name && binding.Method == "source_entry" && len(binding.CheckedDeclarations) == 1 &&
+			return binding.Name == name && len(binding.CheckedDeclarations) == 1 &&
 				slices.Equal(binding.SourceDeclarations, item.Targets) && len(binding.Incomplete) == 0
 		}) {
 			t.Fatalf("%s did not match the checked and source binding: %+v", name, snapshot.SourceBindings)
@@ -470,7 +470,7 @@ func TestArbitraryExportNamesRemainDistinctFromStarSyntax(t *testing.T) {
 			t.Fatalf("star export lost literal name %q: %+v", name, through)
 		}
 		if !slices.ContainsFunc(snapshot.SourceBindings, func(binding SourceBindingFact) bool {
-			return binding.Name == name && binding.Method == "source_entry" && slices.Equal(binding.SourceDeclarations, base.Targets) && len(binding.Incomplete) == 0
+			return binding.Name == name && slices.Equal(binding.SourceDeclarations, base.Targets) && len(binding.Incomplete) == 0
 		}) {
 			t.Fatalf("literal name %q was not matched by source association: %+v", name, snapshot.SourceBindings)
 		}
@@ -529,7 +529,7 @@ func TestSourceAssociationKeepsStaticCommonJSBinding(t *testing.T) {
 		t.Fatalf("static CommonJS association lost its binding: %+v", snapshot.SourceBindings)
 	}
 	binding := snapshot.SourceBindings[0]
-	if binding.Name != "answer" || binding.Method != "source_entry" || len(binding.CheckedDeclarations) != 1 ||
+	if binding.Name != "answer" || len(binding.CheckedDeclarations) != 1 ||
 		!slices.Equal(binding.SourceDeclarations, public.Targets) || len(binding.Incomplete) != 0 {
 		t.Fatalf("static CommonJS association lost checked/source evidence: %+v", binding)
 	}
@@ -569,7 +569,7 @@ func TestTypeOnlyValueBindingsKeepTheirValueDeclarations(t *testing.T) {
 			t.Fatalf("type-only %s became a value-accessible export", name)
 		}
 		if !slices.ContainsFunc(snapshot.SourceBindings, func(binding SourceBindingFact) bool {
-			return binding.Name == name && binding.Space == SpaceType && binding.Method == "source_entry" &&
+			return binding.Name == name && binding.Space == SpaceType &&
 				len(binding.CheckedDeclarations) == 1 && slices.Equal(binding.SourceDeclarations, item.Targets) && len(binding.Incomplete) == 0
 		}) {
 			t.Fatalf("type-only %s lost checked/source membership: %+v", name, snapshot.SourceBindings)

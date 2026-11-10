@@ -290,8 +290,6 @@ func (e *extractor) applyConfiguredSourceEntries(entries []configuredSourceEntry
 					if item.CheckedComplete {
 						item.SourceFile = sourceProgram.ex.canonicalFileIdentity(sourceProgram.file.FileName().AsString())
 						item.SourceFiles = []string{item.SourceFile}
-						item.SourceName = binding.name
-						item.Method = "source_entry"
 					}
 				}
 				item.Incomplete = append(item.Incomplete, sourceReasons...)

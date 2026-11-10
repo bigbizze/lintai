@@ -105,8 +105,6 @@ type SourceBinding struct {
 	Name                string
 	Space               string
 	SourceFile          string
-	SourceName          string
-	Method              string
 	CheckedDeclarations []string
 	SourceDeclarations  []string
 	Incomplete          []string

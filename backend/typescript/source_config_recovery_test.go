@@ -95,7 +95,7 @@ func TestSourceConfigInputsInvalidateFailedAssociation(t *testing.T) {
 					t.Fatalf("missing repaired %s binding: %+v", space, after.SourceBindings)
 				}
 				binding := after.SourceBindings[afterIndex]
-				if binding.SourceFile != "contracts/src/index.ts" || binding.Method != "source_entry" || len(binding.Incomplete) != 0 ||
+				if binding.SourceFile != "contracts/src/index.ts" || len(binding.Incomplete) != 0 ||
 					len(binding.SourceDeclarations) != 1 || !slices.Equal(binding.CheckedDeclarations, before.SourceBindings[beforeIndex].CheckedDeclarations) || binding.SourceDeclarations[0] == binding.CheckedDeclarations[0] {
 					t.Fatalf("repair did not preserve checked evidence and recover the %s source association: %+v", space, binding)
 				}

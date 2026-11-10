@@ -1426,8 +1426,6 @@ func mergeSourceBindingObservations(items []SourceBindingFact) []SourceBindingFa
 		current.Incomplete = sortedUnique(append(current.Incomplete, item.Incomplete...))
 		if current.SourceFile == "" {
 			current.SourceFile = item.SourceFile
-			current.SourceName = item.SourceName
-			current.Method = item.Method
 		}
 		byID[item.ID] = current
 	}
@@ -1447,8 +1445,6 @@ func mergeSourceBindingObservations(items []SourceBindingFact) []SourceBindingFa
 		if len(item.SourceFiles) > 1 {
 			item.Incomplete = sortedUnique(append(item.Incomplete, AssociationConflict))
 			item.SourceFile = ""
-			item.SourceName = ""
-			item.Method = ""
 		} else if len(item.SourceFiles) == 1 {
 			item.SourceFile = item.SourceFiles[0]
 		}

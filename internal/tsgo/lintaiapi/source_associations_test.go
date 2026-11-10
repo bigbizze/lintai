@@ -66,7 +66,7 @@ func TestSourceEntryUsesCompilerResolutionForSymlinkedWorkspace(t *testing.T) {
 				wantFile = osvfs.FS().CaseSensitivity().PathKey(absolute).AsString()
 			}
 			public := semanticExport(t, snapshot, "src/app.ts", "Widget", SpaceType)
-			if binding.CheckedFile != wantFile || binding.SourceFile != "packages/checked/src/index.ts" || binding.Method != "source_entry" ||
+			if binding.CheckedFile != wantFile || binding.SourceFile != "packages/checked/src/index.ts" ||
 				len(binding.Incomplete) != 0 || len(binding.SourceDeclarations) != 1 || !slices.Equal(binding.CheckedDeclarations, public.Targets) {
 				t.Fatalf("binding did not retain the compiler's checked declaration and source endpoint: %+v, export=%+v", binding, public)
 			}
@@ -122,7 +122,7 @@ func TestExportEqualsExpressionKeepsTypeRootAndConfiguredBinding(t *testing.T) {
 		t.Fatalf("export assignment binding was not matched: %+v", snapshot.SourceBindings)
 	}
 	binding := snapshot.SourceBindings[0]
-	if binding.Name != "export=" || binding.Space != SpaceValue || binding.Method != "source_entry" ||
+	if binding.Name != "export=" || binding.Space != SpaceValue ||
 		!binding.CheckedComplete || !binding.SourceComplete || len(binding.Incomplete) != 0 ||
 		len(binding.CheckedDeclarations) != 1 || !slices.Equal(binding.SourceDeclarations, public.Targets) {
 		t.Fatalf("export assignment binding did not retain its checked and source endpoints: %+v", binding)
@@ -166,7 +166,7 @@ export const result = parse("value");`,
 			break
 		}
 	}
-	if parse == nil || parse.SourceFile != "packages/contracts/src/index.ts" || parse.SourceName != "parse" || parse.Method != "source_entry" {
+	if parse == nil || parse.SourceFile != "packages/contracts/src/index.ts" {
 		t.Fatalf("configured parse binding: %+v", parse)
 	}
 	if len(parse.CheckedDeclarations) != 2 || len(parse.SourceDeclarations) != 3 {

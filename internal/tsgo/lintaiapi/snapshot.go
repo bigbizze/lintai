@@ -174,8 +174,6 @@ type SourceBindingFact struct {
 	Space               string
 	SourceFile          string
 	SourceFiles         []string
-	SourceName          string
-	Method              string
 	CheckedDeclarations []string
 	SourceDeclarations  []string
 	CheckedComplete     bool

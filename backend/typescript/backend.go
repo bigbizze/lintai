@@ -287,7 +287,7 @@ func convertSourceBindings(items []lintaiapi.SourceBindingFact) []analysis.Sourc
 	for _, item := range items {
 		result = append(result, analysis.SourceBinding{
 			ID: item.ID, Entry: item.Entry, CheckedFile: item.CheckedFile, Name: item.Name, Space: item.Space,
-			SourceFile: item.SourceFile, SourceName: item.SourceName, Method: item.Method,
+			SourceFile:          item.SourceFile,
 			CheckedDeclarations: append([]string(nil), item.CheckedDeclarations...),
 			SourceDeclarations:  append([]string(nil), item.SourceDeclarations...),
 			Incomplete:          append([]string(nil), item.Incomplete...),

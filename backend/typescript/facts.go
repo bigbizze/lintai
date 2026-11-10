@@ -278,11 +278,7 @@ func factsFromAnalysis(snapshot *analysis.Snapshot) ([]facts.Fact, error) {
 		}
 		b.add("source_binding_attempt", id, str(item.Entry), str(item.CheckedFile), str(item.Name), space)
 		if item.SourceFile != "" {
-			method, err := name(item.Method)
-			if err != nil {
-				return nil, err
-			}
-			b.add("source_binding", id, str(item.SourceFile), str(item.SourceName), space, method)
+			b.add("source_binding", id, str(item.SourceFile), str(item.Name), space, facts.Name("source_entry"))
 		}
 		for _, declaration := range item.CheckedDeclarations {
 			b.add("source_binding_checked_decl", id, str(declaration))
