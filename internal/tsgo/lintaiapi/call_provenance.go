@@ -132,7 +132,7 @@ func (e *extractor) callDeclarationMember(declaration *ast.Node, id string) (*De
 			member = member.Parent
 		}
 		member = member.Parent
-		if member == nil || !(ast.IsPropertySignature(member) || ast.IsPropertyDeclaration(member)) {
+		if member == nil || !(member.Kind == ast.KindPropertySignature || ast.IsPropertyDeclaration(member)) {
 			return nil, false // Anonymous signature, alias, or returned callable.
 		}
 	case ast.KindCallSignature:
@@ -144,7 +144,7 @@ func (e *extractor) callDeclarationMember(declaration *ast.Node, id string) (*De
 			literal = literal.Parent
 		}
 		member = literal.Parent
-		if member == nil || !(ast.IsPropertySignature(member) || ast.IsPropertyDeclaration(member)) {
+		if member == nil || !(member.Kind == ast.KindPropertySignature || ast.IsPropertyDeclaration(member)) {
 			return nil, false
 		}
 	default:
@@ -177,7 +177,7 @@ func (e *extractor) callUsesUnassociatedProperty(node *ast.Node) bool {
 	symbol := e.checker.GetSymbolAtLocation(callee)
 	if symbol != nil {
 		for _, declaration := range symbol.Declarations() {
-			if ast.IsPropertySignature(declaration) || ast.IsPropertyDeclaration(declaration) {
+			if declaration.Kind == ast.KindPropertySignature || ast.IsPropertyDeclaration(declaration) {
 				return true
 			}
 		}
