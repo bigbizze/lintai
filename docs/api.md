@@ -378,7 +378,7 @@ lintai rules [--workspace-root <dir>] [--repo-root <dir>] [--rules <globs>] [--j
 lintai serve
 ```
 
-`lintai rules` bundles and loads the rules to read validated metadata. It does not run `setup()`, `facts()`, `program()` or `message()`, build a workspace snapshot or evaluate rules. Rule module initialization still occurs under the existing listing model and can perform work. Without `--json` it prints one concise `<id> <path>` line for each rule, and the errors on stderr. With `--json` it is the machine-readable metadata interface and prints:
+`lintai rules` lists the rules and the settings each one declares. It loads each rule file, so code at the top level of that file still runs. It does not call `setup()`, `facts()`, `program()` or `message()`, analyze the workspace, or check for violations. Without `--json`, it prints one `<id> <path>` line per rule and sends errors to stderr. With `--json`, it prints:
 
 ```json
 {
@@ -396,7 +396,9 @@ lintai serve
 }
 ```
 
-`version`, `report` and `expectNonEmpty` come from the loaded rule. The arrays are always present, including an empty `expectNonEmpty`, and preserve the declaration order from the rule. `rules` is sorted by id, then by path. Paths are relative to the workspace root. A rule file that does not bundle or load, has an invalid id, is not a complete rule (no `program()`, `report()` or `message()`), or has the same id as another rule file is in `errors` and not in `rules`. An error has `id` when the id is valid and known, as for a duplicate id or an incomplete rule. These errors do not change the exit code: it is 0, so that a linter plugin can still create the other rules. Exit code 2 has its usual meaning, for example a glob that matches no file. Metadata states what a rule declares; it does not establish that its predicates are reachable, its premises are correctly scoped, or that it catches a real violation.
+`version`, `report` and `expectNonEmpty` come from the loaded rule. The arrays are always present, including an empty `expectNonEmpty`, and preserve the declaration order from the rule. `rules` is sorted by id, then by path. Paths are relative to the workspace root.
+
+A rule file that does not bundle or load, has an invalid id, is not a complete rule (no `program()`, `report()` or `message()`), or has the same id as another rule file is in `errors` and not in `rules`. An error has `id` when the id is valid and known, as for a duplicate id or an incomplete rule. These errors do not change the exit code: it is 0, so that a linter plugin can still create the other rules. Exit code 2 has its usual meaning, for example a glob that matches no file. Listing a rule does not test it. The output tells you what the rule declares, but not whether it checks the intended files or can find a violation.
 
 Flags for analysis:
 
