@@ -534,18 +534,25 @@ import { dl, rule } from "@lintai/sdk";
 export default rule("arch.actions-return-action-result")
 	.version(1)
 	.program(dl`
-		Decl violation(Fn, Name, Returned).
+		Decl violation(Fn, Name, Returned, Reason).
 		Decl returns_action_result(Fn).
 		returns_action_result(Fn) :-
-			fn_returns_awaited(Fn, R),
+			fn_returns_awaited(Fn, R), !fn_signature_conflict(Fn),
 			type_named(R, "src/core/result.ts", "ActionResult").
-		violation(Fn, Name, Returned) :-
+		violation(Fn, Name, Returned, "wrong") :-
 			fn(Fn, File, Name), fn_exported(Fn), glob(File, "src/actions/**"),
-			fn_async(Fn), !returns_action_result(Fn),
+			fn_async(Fn), !fn_signature_conflict(Fn), !returns_action_result(Fn),
 			fn_returns(Fn, T), type_display(T, Returned).
+		violation(Fn, Name, "", "conflict") :-
+			fn(Fn, File, Name), fn_exported(Fn), glob(File, "src/actions/**"),
+			fn_async(Fn), fn_signature_conflict(Fn).
 	`)
 	.report("violation")
-	.message((row) => `${row.Name} must return Promise<ActionResult<T>>, but returns ${row.Returned}`);
+	.message((row) =>
+		row.Reason === "conflict"
+			? `${row.Name} has conflicting checked signatures; cannot determine whether its return type is allowed`
+			: `${row.Name} must return Promise<ActionResult<T>>, but returns ${row.Returned}`,
+	);
 ```
 
 Planted violation:
@@ -559,6 +566,8 @@ export async function save(): Promise<ActionResult<number>> {
 ```
 
 The rule reports `save`. Its return type is written `Promise<ActionResult<number>>`, but `ActionResult` is declared in `src/legacy/types.ts`, so `type_named` has a different `Origin`. `fn_returns_awaited` removes one level of `Promise` from the return type. If TypeScript infers the return type, the rule accepts the function only when the returned value already has the type `ActionResult`. An inferred object literal type, such as `Promise<{ ok: boolean; value: number }>`, has no `ActionResult` name, so the rule reports it.
+
+The same function can be checked by more than one TypeScript configuration. If the checked signatures disagree, `fn_returns` contains observations from those configurations. Even if one return type matches `ActionResult`, the rule reports that the result is uncertain. A signature conflict can also come from different parameter types, so it does not necessarily mean the return types differ.
 
 Caveats:
 

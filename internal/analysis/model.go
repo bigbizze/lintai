@@ -20,8 +20,6 @@ type Function struct {
 	IsExported            bool
 	IsAsync               bool
 	ParameterCount        int
-	ReturnType            string
-	ParameterTypes        []string
 	SignatureObservations []FunctionSignatureObservation
 	SignatureConflict     bool
 	Range                 diagnostics.SourceLocation
@@ -31,9 +29,7 @@ type Function struct {
 
 type FunctionSignatureObservation struct {
 	ParameterTypes []string
-	ParameterMarks []string
 	ReturnType     string
-	Complete       bool
 }
 
 type Declaration struct {
@@ -288,7 +284,6 @@ type Snapshot struct {
 	Declarations                []Declaration
 	Exports                     []Export
 	ModuleExportsIncomplete     []ModuleExportsIncomplete
-	FnSignatureConflicts        []string
 	ExportSites                 []ExportSite
 	DeclarationSourceCandidates []DeclarationSource
 	DeclarationSources          []DeclarationSource

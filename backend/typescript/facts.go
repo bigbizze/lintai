@@ -45,25 +45,14 @@ func factsFromAnalysis(snapshot *analysis.Snapshot) ([]facts.Fact, error) {
 		if fn.ContainsAwait {
 			b.add("fn_awaits", id)
 		}
-		if len(fn.SignatureObservations) == 0 {
-			for index, typeID := range fn.ParameterTypes {
+		for _, observation := range fn.SignatureObservations {
+			for index, typeID := range observation.ParameterTypes {
 				if typeID != "" {
 					b.add("fn_param", id, facts.Number(int64(index)), str(typeID))
 				}
 			}
-			if fn.ReturnType != "" {
-				b.add("fn_returns", id, str(fn.ReturnType))
-			}
-		} else {
-			for _, observation := range fn.SignatureObservations {
-				for index, typeID := range observation.ParameterTypes {
-					if typeID != "" {
-						b.add("fn_param", id, facts.Number(int64(index)), str(typeID))
-					}
-				}
-				if observation.ReturnType != "" {
-					b.add("fn_returns", id, str(observation.ReturnType))
-				}
+			if observation.ReturnType != "" {
+				b.add("fn_returns", id, str(observation.ReturnType))
 			}
 		}
 		if fn.SignatureConflict {

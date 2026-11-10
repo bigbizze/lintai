@@ -128,7 +128,6 @@ func (b *Backend) buildAnalysisSnapshot(ctx context.Context, repoRoot, workspace
 		Declarations:                convertDeclarations(extracted.Declarations),
 		Exports:                     convertExports(extracted.Exports),
 		ModuleExportsIncomplete:     convertModuleExportsIncomplete(extracted.ModuleExportsIncomplete),
-		FnSignatureConflicts:        append([]string(nil), extracted.FnSignatureConflicts...),
 		ExportSites:                 convertExportSites(extracted.ExportSites),
 		DeclarationSourceCandidates: convertDeclarationSources(extracted.DeclarationSourceCandidates),
 		DeclarationSources:          convertDeclarationSources(extracted.DeclarationSources),
@@ -184,8 +183,6 @@ func convertFunctions(items []lintaiapi.Function) []analysis.Function {
 			ParameterCount:        item.ParameterCount,
 			SignatureObservations: convertSignatureObservations(item.SignatureObservations),
 			SignatureConflict:     item.SignatureConflict,
-			ReturnType:            item.ReturnType,
-			ParameterTypes:        append([]string(nil), item.ParameterTypes...),
 			Range:                 convertLocation(item.Range),
 			BodyStart:             item.BodyStart,
 			BodyEnd:               item.BodyEnd,
@@ -199,9 +196,7 @@ func convertSignatureObservations(items []lintaiapi.FunctionSignatureObservation
 	for _, item := range items {
 		result = append(result, analysis.FunctionSignatureObservation{
 			ParameterTypes: append([]string(nil), item.ParameterTypes...),
-			ParameterMarks: append([]string(nil), item.ParameterMarks...),
 			ReturnType:     item.ReturnType,
-			Complete:       item.Complete,
 		})
 	}
 	return result
