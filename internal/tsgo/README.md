@@ -6,7 +6,7 @@ This directory holds the TypeScript 7 compiler code that lintai uses to extract 
 - `lintaiapi/` is lintai's extractor. It calls the compiler's parser and checker in the same process and returns the snapshot that `backend/typescript` converts into facts. lintai owns and edits this package. It started as the `lintaiapi` package of the `bigbizze/typescript-go` fork, which lintai no longer uses.
 - `VERSION` names the `microsoft/TypeScript` commit, its date, and the npm `typescript` version built from it.
 - `LICENSE.txt` and `NOTICE.txt` are the license and third-party notices of `microsoft/TypeScript` at that commit. The copied code is under the Apache License 2.0.
-- `patches/` would hold changes to the copied code that `lintaiapi` cannot avoid. The sync script applies them after it copies. There are none now.
+- `patches/` holds changes to the copied code that `lintaiapi` cannot avoid. The sync script applies patches in filename order after copying upstream files, before rewriting imports and adding generated headers. `0001-call-signature-evidence.patch` adds invocation-specific selected-signature evidence without changing signature selection. Patch paths are relative to upstream `tsc/internal/` (for example, `checker/exports.go`).
 
 Go's rules for `internal/` directories mean that only `lintaiapi` can import the compiler packages, and only lintai can import `lintaiapi`. Go consumers use `backend/typescript`.
 
