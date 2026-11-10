@@ -8,7 +8,7 @@ jobs:
   verify:
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubicloud-standard-2-ubuntu-2404, macos-latest]
         node: ["22", "24"]
     runs-on: ${{ matrix.os }}
     steps:
@@ -38,7 +38,7 @@ jobs:
         run: go test ./...
 
       - name: TypeScript compiler copy matches sync script
-        if: matrix.os == 'ubuntu-latest' && matrix.node == '24'
+        if: matrix.os == 'ubicloud-standard-2-ubuntu-2404' && matrix.node == '24'
         run: |
           scripts/sync-tsgo.sh "$(sed -n 's/^commit: //p' internal/tsgo/VERSION)"
           git status --porcelain
