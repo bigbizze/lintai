@@ -1,29 +1,15 @@
 # Isolated declaration builds and source links
 
-Status: design-only future work. This document does not specify a
+Status: build execution is design-only future work. This document does not specify a
 runtime build runner, a final build configuration schema, or new source-link
 facts.
 
 ## Starting point
 
-The following source-resolution and association sequence is proposed. Its detailed
-contract remains to be specified before implementation; it is not implemented or
-required by the current [export inventory specification](semantic-extraction-completeness.md#5-export-and-declaration-inventory):
-
-1. Use source when normal TypeScript resolution reaches it.
-2. Use TypeScript project-reference source redirects where configured, respecting
-   `disableSourceOfProjectReferenceRedirect` and without requiring built output.
-   Do not infer project references from workspace membership alone.
-3. For generated declarations that remain in use, use existing declaration maps
-   only when their mapping anchors and source declarations validate.
-4. Use an explicit configured source-entry association when those mechanisms
-   cannot establish a relationship.
-
-The first two steps determine what the checker reads. Maps and configured
-associations add optional source evidence; they do not replace checked types or
-declaration identity. A failed optional association must leave known declaration
-facts usable. The configured fallback associates exported bindings and their
-declaration sets; it does not guess source paths or pair overloads one by one.
+The implemented [PR3 source-association contract](https://github.com/bigbizze/lintai/pull/18)
+defines normal resolution, project-reference redirects, declaration-map and
+configured source-entry evidence, and snapshot invalidation for association
+inputs.
 
 Optional build execution is separate future work. It could produce fresh
 declarations and maps for a repository whose normal build is needed to expose its
@@ -45,10 +31,8 @@ Capture does not, by itself, prove which source declaration produced a particula
 that a source association is correct. A usable, validated declaration map can
 provide declaration-association evidence, but does not prove the source and
 generated files came from the same build. Missing, malformed, unavailable,
-unsupported, or ambiguous maps must remain distinguishable. If maps cannot
-establish a link, an explicit configured binding fallback could apply once its
-contract is specified; matching names alone are not proof of freshness or one-to-one
-declaration identity.
+unsupported, or ambiguous maps must remain distinguishable. Matching names alone
+are not proof of freshness or one-to-one declaration identity.
 
 ## Isolation and permissions
 
@@ -92,8 +76,7 @@ platform, and declared network-provided inputs. If a command can read undeclared
 files, environment values, or mutable external data, a cache hit cannot be
 assumed correct. Any eventual cache must be bounded and have a clear eviction
 policy. Cache invalidation must also notice inputs that were missing and later
-appear. Source-link support will also need snapshot invalidation for changes to
-its configuration, maps, and source files; that contract remains to be specified.
+appear.
 
 ## Decisions before implementation
 
@@ -106,12 +89,9 @@ its configuration, maps, and source files; that contract remains to be specified
   available to a build.
 - How paths, symlinks, multiple package instances, generated source, and
   conflicting project configurations are handled across platforms.
-- What evidence is accepted for each source link, including missing or ambiguous
-  maps and the proposed configured binding fallback.
 - Whether measured warm-run savings justify bounded caching, and which inputs
   can be captured well enough to make a cache hit correct.
 
 These decisions should be made from an adopting repository and measured builds.
-Do not invent final source-link schemas or a general build framework in this
-design document. The source-link specification must define map/configuration
-outcomes for unavailable evidence; build output must not be described as source provenance.
+Do not invent a general build framework in this design document. Build output
+must not be described as source provenance.
