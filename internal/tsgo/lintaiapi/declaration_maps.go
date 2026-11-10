@@ -96,7 +96,7 @@ func (e *extractor) recoverDeclarationMap(checked *ast.Node, requested bool, pub
 		}
 		return
 	}
-	e.inputs = append(e.inputs, SnapshotInput{Path: normalizeSlash(mapPath), Exists: true})
+	e.inputs = append(e.inputs, SnapshotInput{Path: normalizeSlash(mapPath), Exists: true, OptionalMap: true})
 	mapRooted := tspath.RootedFilePathFromAbsolute(mapPath)
 	mapText, ok := e.host.FS().ReadFile(mapRooted)
 	if !ok {
@@ -209,7 +209,7 @@ func (e *extractor) recoverDeclarationMap(checked *ast.Node, requested bool, pub
 		var nodes []*ast.Node
 		collectDeclarationsAt(sourceFile.AsNode(), sourceFile, segment.sourcePos, &nodes, &unsupportedAtAnchor)
 		for _, node := range nodes {
-			if !compatibleMappedDeclaration(checked, node, publicName) {
+			if !compatibleMappedDeclaration(checked, node, publicName) || mappedInsideNestedOwner(node, sourceFile, segment.sourcePos) {
 				continue
 			}
 			id, supported := e.addDeclarationEndpoint(node, node.Symbol(), publicName)
@@ -351,10 +351,28 @@ func declarationOwnerContext(node *ast.Node) []string {
 		case ast.KindClassDeclaration, ast.KindInterfaceDeclaration, ast.KindModuleDeclaration, ast.KindEnumDeclaration:
 			name := declarationTextName(parent)
 			result = append(result, parent.Kind.String()+":"+name)
+		default:
+			if ast.IsFunctionLike(parent) {
+				result = append(result, parent.Kind.String()+":"+declarationTextName(parent))
+			} else if parent.Kind == ast.KindBlock && (parent.Parent == nil || !ast.IsFunctionLike(parent.Parent)) {
+				result = append(result, parent.Kind.String())
+			}
 		}
 	}
 	slices.Reverse(result)
 	return result
+}
+
+func mappedInsideNestedOwner(node *ast.Node, file *ast.SourceFile, position int) bool {
+	return node.ForEachChild(func(child *ast.Node) bool {
+		if scanner.GetTokenPosOfNode(child, file, false) > position || position >= child.End() {
+			return false
+		}
+		if ast.IsFunctionLike(child) || child.Kind == ast.KindClassDeclaration || child.Kind == ast.KindModuleDeclaration {
+			return true
+		}
+		return mappedInsideNestedOwner(child, file, position)
+	})
 }
 
 func (e *extractor) addMapOutcome(checkedDecl, outcome string) {

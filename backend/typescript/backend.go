@@ -92,7 +92,15 @@ func (b *Backend) buildAnalysisSnapshot(ctx context.Context, repoRoot, workspace
 	for _, input := range extracted.Inputs {
 		inputPaths = append(inputPaths, input.Path)
 	}
-	version, err := snapshotVersionWithInputs(workspaceRoot, slices.Concat(files, extracted.ConfigFiles), extracted.Inputs)
+	versionFiles := slices.Concat(files, extracted.ConfigFiles)
+	if options.SourceLinks != "" {
+		links := options.SourceLinks
+		if !filepath.IsAbs(links) {
+			links = filepath.Join(workspaceRoot, links)
+		}
+		versionFiles = append(versionFiles, links)
+	}
+	version, err := snapshotVersionWithInputs(workspaceRoot, versionFiles, extracted.Inputs)
 	if err != nil {
 		return nil, err
 	}
@@ -208,7 +216,7 @@ func convertDeclarations(items []lintaiapi.DeclarationFact) []analysis.Declarati
 		}
 		result = append(result, analysis.Declaration{
 			ID: item.ID, Name: item.Name, Kind: item.Kind, OriginKind: item.OriginKind, Origin: item.Origin,
-			Types: types, TypeObservations: convertDeclarationTypeObservations(item.TypeObservations),
+			Types:    types,
 			Function: item.Function, Incomplete: append([]string(nil), item.Incomplete...), Range: convertLocation(item.Location),
 		})
 	}
@@ -248,18 +256,6 @@ func convertExportSites(items []lintaiapi.ExportSiteFact) []analysis.ExportSite 
 	result := make([]analysis.ExportSite, 0, len(items))
 	for _, item := range items {
 		result = append(result, analysis.ExportSite{ID: item.ID, Range: convertLocation(item.Location)})
-	}
-	return result
-}
-
-func convertDeclarationTypeObservations(items [][]lintaiapi.DeclarationType) [][]analysis.DeclarationType {
-	result := make([][]analysis.DeclarationType, 0, len(items))
-	for _, observation := range items {
-		converted := make([]analysis.DeclarationType, 0, len(observation))
-		for _, item := range observation {
-			converted = append(converted, analysis.DeclarationType{Space: item.Space, Type: item.Type})
-		}
-		result = append(result, converted)
 	}
 	return result
 }
@@ -556,15 +552,19 @@ func snapshotVersion(root string, files []string) (string, error) {
 }
 
 func snapshotVersionWithInputs(root string, files []string, inputs []lintaiapi.SnapshotInput) (string, error) {
-	byPath := make(map[string]bool, len(files)+len(inputs))
+	byPath := make(map[string]lintaiapi.SnapshotInput, len(files)+len(inputs))
+	required := make(map[string]bool, len(files))
 	for _, file := range files {
-		byPath[filepath.Clean(file)] = true
+		path := filepath.Clean(file)
+		byPath[path] = lintaiapi.SnapshotInput{Path: path, Exists: true}
+		required[path] = true
 	}
 	for _, input := range inputs {
 		path := filepath.Clean(input.Path)
-		if input.Exists || !byPath[path] {
-			byPath[path] = input.Exists
-		}
+		current := byPath[path]
+		current.Exists = current.Exists || input.Exists
+		current.OptionalMap = current.OptionalMap || input.OptionalMap
+		byPath[path] = current
 	}
 	paths := make([]string, 0, len(byPath))
 	for file := range byPath {
@@ -579,14 +579,18 @@ func snapshotVersionWithInputs(root string, files []string, inputs []lintaiapi.S
 		}
 		hash.Write([]byte(relative))
 		hash.Write([]byte{0})
-		if !byPath[file] {
+		if !byPath[file].Exists {
 			hash.Write([]byte{0})
 			hash.Write([]byte{0})
 			continue
 		}
 		source, err := workspace.ReadFile(file)
 		if err != nil {
-			return "", err
+			if required[file] || !byPath[file].OptionalMap {
+				return "", err
+			}
+			hash.Write([]byte{2, 0})
+			continue
 		}
 		hash.Write([]byte{1})
 		hash.Write([]byte(source))

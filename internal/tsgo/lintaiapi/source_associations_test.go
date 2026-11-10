@@ -96,6 +96,7 @@ export const result = parse("value");`,
 		WorkspaceRoot: root,
 		Files:         []string{filepath.Join(root, "src/app.ts")},
 		SourceLinks:   "source-links.json",
+		TsconfigFiles: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -322,13 +323,20 @@ func TestDeclarationMapRejectsNearbyUnrelatedAndAmbiguousAnchors(t *testing.T) {
 			wantCandidates: 1,
 		},
 		{
-			name:           "ambiguous nested declaration anchor",
+			name:           "nested declaration anchor",
 			generated:      "export declare function load(): void;\n//# sourceMappingURL=index.d.ts.map\n",
 			mapAt:          "export",
 			source:         "export function load() { function load() {} }\n",
 			mappingTargets: []int{strings.LastIndex("export function load() { function load() {} }\n", "function load")},
-			wantOutcome:    "ambiguous",
-			wantCandidates: 2,
+			wantOutcome:    "unresolved",
+		},
+		{
+			name:           "same name under unrelated function",
+			generated:      "export declare function load(): void;\n//# sourceMappingURL=index.d.ts.map\n",
+			mapAt:          "export",
+			source:         "function owner() { function load() {} }\n",
+			mappingTargets: []int{strings.Index("function owner() { function load() {} }\n", "function load")},
+			wantOutcome:    "unresolved",
 		},
 	}
 	for _, test := range tests {
@@ -594,4 +602,144 @@ func writeStartDeclarationMap(t *testing.T, generatedPath, sourcePath string) st
 		t.Fatal(err)
 	}
 	return mapPath
+}
+
+func TestTypeOnlyReexportsPreserveExportAndSourceBindingSpaces(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspace(t, root, map[string]string{
+		"tsconfig.json":       `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler"},"include":["src/**/*.ts"]}`,
+		"checked/base.d.ts":   `export declare class Widget { value: string }`,
+		"checked/index.d.ts":  `export type * from "./base";`,
+		"checked/value.d.ts":  `export declare class Widget { value: string }`,
+		"src/base.ts":         `export class Widget { value = "x" }`,
+		"src/middle.ts":       `export type { Widget } from "./base";`,
+		"src/root.ts":         `export * from "./middle";`,
+		"src/direct.ts":       `export type * from "./base";`,
+		"src/unrestricted.ts": `export * from "./base";`,
+		"src/combined.ts":     `export * from "./unrestricted"; export type * from "./base";`,
+		"src/alias-first.ts":  `export * from "./middle"; export * from "./base";`,
+		"src/namespace.ts":    `export type * as api from "./base";`,
+		"src/top.ts":          `export { Widget } from "./root";`,
+		"src/app.ts":          `export type { Widget } from "../checked"; import { Widget as ValueWidget } from "../checked/value"; export const instance: ValueWidget | undefined = undefined;`,
+		"source-links.json":   `{"version":1,"entries":[{"checkedEntry":"checked/index.d.ts","sourceEntry":"src/direct.ts"},{"checkedEntry":"checked/value.d.ts","sourceEntry":"src/direct.ts"}]}`,
+	})
+	files := []string{filepath.Join(root, "src/app.ts"), filepath.Join(root, "src/root.ts"), filepath.Join(root, "src/direct.ts"), filepath.Join(root, "src/middle.ts"), filepath.Join(root, "src/base.ts"), filepath.Join(root, "src/unrestricted.ts"), filepath.Join(root, "src/combined.ts"), filepath.Join(root, "src/top.ts"), filepath.Join(root, "src/namespace.ts"), filepath.Join(root, "src/alias-first.ts")}
+	snapshot, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{WorkspaceRoot: root, Files: files, SourceLinks: "source-links.json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, file := range []string{"src/middle.ts", "src/root.ts", "src/direct.ts", "src/top.ts", "src/alias-first.ts"} {
+		if _, found := findSemanticExport(snapshot, file, "Widget", SpaceValue); found {
+			t.Fatalf("%s falsely exports a value", file)
+		}
+		semanticExport(t, snapshot, file, "Widget", SpaceType)
+	}
+	semanticExport(t, snapshot, "src/combined.ts", "Widget", SpaceValue)
+	if _, found := findSemanticExport(snapshot, "src/namespace.ts", "api", SpaceValue); found {
+		t.Fatal("type-only namespace falsely exported a value")
+	}
+	if ns := semanticExport(t, snapshot, "src/namespace.ts", "api", SpaceType); len(ns.Targets) != 1 || len(ns.Incomplete) != 0 {
+		t.Fatalf("type-only namespace lost its checked endpoint: %+v", ns)
+	}
+	if len(snapshot.SourceBindings) != 3 {
+		t.Fatalf("unexpected checked bindings: %+v", snapshot.SourceBindings)
+	}
+	for _, binding := range snapshot.SourceBindings {
+		if binding.Space == SpaceValue {
+			if binding.CheckedFile != "checked/value.d.ts" || len(binding.SourceDeclarations) != 0 || !slices.Contains(binding.Incomplete, AssociationUnresolved) {
+				t.Fatalf("type-only source falsely supplied a value: %+v", binding)
+			}
+		} else if binding.Space != SpaceType || len(binding.Incomplete) != 0 || len(binding.SourceDeclarations) != 1 {
+			t.Fatalf("type-only checked/source binding is incomplete: %+v", binding)
+		}
+	}
+}
+
+func TestSourceEntriesUseResolvedCheckedIdentity(t *testing.T) {
+	for _, preserve := range []bool{false, true} {
+		for _, sameSource := range []bool{false, true} {
+			t.Run(fmt.Sprintf("preserve=%t/sameSource=%t", preserve, sameSource), func(t *testing.T) {
+				root := t.TempDir()
+				writeWorkspace(t, root, map[string]string{
+					"tsconfig.json":               fmt.Sprintf(`{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","preserveSymlinks":%t},"include":["src/**/*.ts"]}`, preserve),
+					"packages/checked/index.d.ts": `export declare const value: number;`,
+					"src/a.ts":                    `export const value = 1;`,
+					"src/b.ts":                    `export const value = 2;`,
+					"src/app.ts":                  `import { value as a } from "one"; import { value as b } from "two"; export const sum = a + b;`,
+				})
+				for _, name := range []string{"one", "two"} {
+					alias := filepath.Join(root, "node_modules", name)
+					if err := os.MkdirAll(filepath.Dir(alias), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Symlink(filepath.Join(root, "packages/checked"), alias); err != nil {
+						t.Skipf("symlinks unavailable: %v", err)
+					}
+				}
+				other := "src/b.ts"
+				if sameSource {
+					other = "src/a.ts"
+				}
+				writeWorkspace(t, root, map[string]string{"source-links.json": fmt.Sprintf(`{"version":1,"entries":[{"checkedEntry":"node_modules/one/index.d.ts","sourceEntry":"src/a.ts"},{"checkedEntry":"node_modules/two/index.d.ts","sourceEntry":%q}]}`, other)})
+				snapshot, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{WorkspaceRoot: root, Files: []string{filepath.Join(root, "src/app.ts")}, SourceLinks: "source-links.json"})
+				if !preserve && !sameSource {
+					if err == nil || !strings.Contains(err.Error(), "contradictory entries") {
+						t.Fatalf("same resolved file accepted conflicting entries: %v", err)
+					}
+					return
+				}
+				if err != nil {
+					t.Fatal(err)
+				}
+				want := 2
+				if !preserve {
+					want = 1
+				}
+				if len(snapshot.SourceEntries) != want || len(snapshot.SourceBindings) != want {
+					t.Fatalf("compiler identities were merged or duplicated: entries=%+v bindings=%+v", snapshot.SourceEntries, snapshot.SourceBindings)
+				}
+				for _, entry := range snapshot.SourceEntries {
+					if !entry.Applied {
+						t.Fatalf("entry unexpectedly unapplied: %+v", entry)
+					}
+				}
+			})
+		}
+	}
+	t.Run("mixed program symlink options", func(t *testing.T) {
+		root := t.TempDir()
+		app := `import { value as a } from "one"; import { value as b } from "two"; export const sum = a + b;`
+		writeWorkspace(t, root, map[string]string{
+			"a/tsconfig.json": `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","preserveSymlinks":false},"files":["app.ts"]}`,
+			"b/tsconfig.json": `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","preserveSymlinks":true},"files":["app.ts"]}`,
+			"a/app.ts":        app, "b/app.ts": app,
+			"packages/checked/index.d.ts": `export declare const value: number;`,
+			"source/index.ts":             `export const value = 1;`,
+			"source-links.json":           `{"version":1,"entries":[{"checkedEntry":"node_modules/one/index.d.ts","sourceEntry":"source/index.ts"},{"checkedEntry":"node_modules/two/index.d.ts","sourceEntry":"source/index.ts"}]}`,
+		})
+		for _, name := range []string{"one", "two"} {
+			alias := filepath.Join(root, "node_modules", name)
+			if err := os.MkdirAll(filepath.Dir(alias), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join(root, "packages/checked"), alias); err != nil {
+				t.Skipf("symlinks unavailable: %v", err)
+			}
+		}
+		snapshot, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{WorkspaceRoot: root, Files: []string{filepath.Join(root, "a/app.ts"), filepath.Join(root, "b/app.ts")}, SourceLinks: "source-links.json"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		files := make(map[string]bool)
+		declarations := make(map[string]bool)
+		for _, binding := range snapshot.SourceBindings {
+			files[binding.CheckedFile] = true
+			for _, id := range binding.CheckedDeclarations {
+				declarations[id] = true
+			}
+		}
+		if len(snapshot.SourceEntries) != 2 || len(snapshot.SourceBindings) != 3 || len(files) != 3 || len(declarations) != 3 {
+			t.Fatalf("a shared resolved file collapsed preserved instances: entries=%+v bindings=%+v", snapshot.SourceEntries, snapshot.SourceBindings)
+		}
+	})
 }

@@ -965,11 +965,6 @@ func keepReachableTypes(snap *Snapshot) {
 		for _, value := range declaration.Types {
 			visit(value.Type)
 		}
-		for _, observation := range declaration.TypeObservations {
-			for _, value := range observation {
-				visit(value.Type)
-			}
-		}
 	}
 	snap.Types = slices.DeleteFunc(snap.Types, func(item TypeFact) bool {
 		_, ok := reached[item.ID]

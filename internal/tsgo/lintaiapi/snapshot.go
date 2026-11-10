@@ -185,8 +185,9 @@ type SourceBindingFact struct {
 }
 
 type SnapshotInput struct {
-	Path   string
-	Exists bool
+	Path        string
+	Exists      bool
+	OptionalMap bool
 }
 
 type ExportSiteFact struct {
@@ -417,7 +418,7 @@ type extractor struct {
 	endpointOnly                bool
 	declarationNodes            map[string]*ast.Node
 	mapAttempted                map[string]struct{}
-	retainedExportRoots         map[string]struct{}
+	moduleExportIndex           map[*ast.SourceFile]map[string]*ast.Symbol
 }
 
 type functionMeta struct {
@@ -486,16 +487,11 @@ func BuildSnapshot(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, er
 	configs := newConfigCache(host)
 	auxiliary := newAuxiliarySourcePrograms(ctx, host, workspaceRoot, configs, timing)
 	defer auxiliary.close()
+	entryResolutions := newSourceEntryResolutions()
 	configStarted := time.Now()
 	groups, err := discoverConfigGroups(workspaceRoot, files, configs)
 	if err != nil {
 		return nil, err
-	}
-	retainedExportRoots := make(map[string]struct{})
-	for _, group := range groups {
-		for _, file := range group.PrimaryFiles {
-			retainedExportRoots[file] = struct{}{}
-		}
 	}
 	timing.config = time.Since(configStarted)
 	merged := &Snapshot{}
@@ -507,7 +503,7 @@ func BuildSnapshot(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, er
 	}
 	missing := make(map[string]struct{})
 	for _, group := range groups {
-		partial, groupMissing, err := buildSnapshotForGroup(ctx, host, workspaceRoot, files, group, retainedExportRoots, req.AmbientMatchers, sourceEntries, configs, auxiliary, timing)
+		partial, groupMissing, err := buildSnapshotForGroup(ctx, host, workspaceRoot, files, group, req.AmbientMatchers, sourceEntries, configs, auxiliary, entryResolutions, timing)
 		if err != nil {
 			return nil, err
 		}
@@ -525,7 +521,7 @@ func BuildSnapshot(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, er
 			fallbackFiles = append(fallbackFiles, file)
 		}
 		slices.Sort(fallbackFiles)
-		partial, _, err := buildSnapshotForGroup(ctx, host, workspaceRoot, files, configGroup{PrimaryFiles: fallbackFiles}, retainedExportRoots, req.AmbientMatchers, sourceEntries, configs, auxiliary, timing)
+		partial, _, err := buildSnapshotForGroup(ctx, host, workspaceRoot, files, configGroup{PrimaryFiles: fallbackFiles}, req.AmbientMatchers, sourceEntries, configs, auxiliary, entryResolutions, timing)
 		if err != nil {
 			return nil, err
 		}
@@ -534,9 +530,21 @@ func BuildSnapshot(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, er
 	for _, entry := range sourceEntries {
 		merged.SourceEntries = append(merged.SourceEntries, SourceEntryFact{ID: entry.ID, CheckedEntry: entry.CheckedEntry, SourceEntry: entry.SourceEntry, Tsconfig: entry.SourceConfig})
 	}
+	entryResolutions.canonicalize(merged, sourceEntries)
+	if req.TsconfigFiles {
+		modules := make(map[string]bool, len(merged.Modules))
+		for _, module := range merged.Modules {
+			modules[module.Path] = true
+		}
+		for index := range merged.ModuleExportObservations {
+			item := &merged.ModuleExportObservations[index]
+			item.Retained = item.Retained && modules[item.File]
+		}
+	}
 	finalizeSemanticObservations(merged)
 	if req.TsconfigFiles {
 		keepModuleFiles(merged)
+		keepRetainedSemantics(merged)
 		keepReachableTypes(merged)
 	}
 	merged.ConfigFiles = configs.files()
@@ -573,6 +581,10 @@ func keepModuleFiles(snap *Snapshot) {
 	for _, item := range snap.Functions {
 		functions[item.SemanticKey] = struct{}{}
 	}
+	snap.FnSignatureConflicts = slices.DeleteFunc(snap.FnSignatureConflicts, func(id string) bool {
+		_, ok := functions[id]
+		return !ok
+	})
 	for index := range snap.Declarations {
 		if snap.Declarations[index].Function == "" {
 			continue
@@ -583,7 +595,60 @@ func keepModuleFiles(snap *Snapshot) {
 	}
 }
 
-func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, workspaceRoot string, requestedFiles []string, group configGroup, retainedExportRoots map[string]struct{}, ambientMatchers []AmbientMatcher, sourceEntries []configuredSourceEntry, configs *configCache, auxiliary *auxiliarySourcePrograms, timing *extractTiming) (*Snapshot, []string, error) {
+// Retain declaration endpoints only for surviving exports and configured
+// associations, then retain map endpoints reached from those declarations.
+// This runs after conflict detection so every program's observation counts.
+func keepRetainedSemantics(snap *Snapshot) {
+	modules := make(map[string]bool, len(snap.Modules))
+	for _, module := range snap.Modules {
+		modules[module.Path] = true
+	}
+	snap.Exports = slices.DeleteFunc(snap.Exports, func(item ExportFact) bool { return !modules[item.File] })
+	exportTargets := make(map[string]bool)
+	keep := make(map[string]bool)
+	sites := make(map[string]bool)
+	for _, item := range snap.Exports {
+		for _, id := range item.Targets {
+			exportTargets[id] = true
+			keep[id] = true
+		}
+		for _, id := range item.Via {
+			sites[id] = true
+		}
+	}
+	for _, binding := range snap.SourceBindings {
+		for _, id := range binding.CheckedDeclarations {
+			keep[id] = true
+		}
+		for _, id := range binding.SourceDeclarations {
+			keep[id] = true
+		}
+	}
+	for _, item := range snap.DeclarationSourceCandidates {
+		if keep[item.CheckedDecl] {
+			keep[item.SourceDecl] = true
+		}
+	}
+	for _, item := range snap.DeclarationSources {
+		if keep[item.CheckedDecl] {
+			keep[item.SourceDecl] = true
+		}
+	}
+	snap.DeclarationSourceCandidates = slices.DeleteFunc(snap.DeclarationSourceCandidates, func(item DeclarationSourceFact) bool { return !keep[item.CheckedDecl] })
+	snap.DeclarationSources = slices.DeleteFunc(snap.DeclarationSources, func(item DeclarationSourceFact) bool { return !keep[item.CheckedDecl] })
+	snap.DeclarationSourceOutcomes = slices.DeleteFunc(snap.DeclarationSourceOutcomes, func(item DeclarationSourceOutcomeFact) bool { return !keep[item.CheckedDecl] })
+	snap.Declarations = slices.DeleteFunc(snap.Declarations, func(item DeclarationFact) bool { return !keep[item.ID] })
+	for index := range snap.Declarations {
+		item := &snap.Declarations[index]
+		if !exportTargets[item.ID] {
+			item.Types = nil
+			item.TypeObservations = nil
+		}
+	}
+	snap.ExportSites = slices.DeleteFunc(snap.ExportSites, func(item ExportSiteFact) bool { return !sites[item.ID] })
+}
+
+func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, workspaceRoot string, requestedFiles []string, group configGroup, ambientMatchers []AmbientMatcher, sourceEntries []configuredSourceEntry, configs *configCache, auxiliary *auxiliarySourcePrograms, resolutions *sourceEntryResolutions, timing *extractTiming) (*Snapshot, []string, error) {
 	programStarted := time.Now()
 	timing.programs++
 	config := group.Config
@@ -616,42 +681,41 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 	defer func() { timing.walk += time.Since(walkStarted) }()
 
 	ex := &extractor{
-		workspaceRoot:       workspaceRoot,
-		host:                host,
-		program:             program,
-		resolver:            resolver,
-		checker:             typeChecker,
-		requestedFiles:      make(map[string]struct{}, len(requestedFiles)),
-		primaryFiles:        make(map[string]struct{}, len(group.PrimaryFiles)),
-		filesByPath:         make(map[string]*ast.SourceFile, len(requestedFiles)),
-		functionNodes:       make(map[*ast.Node]*Function),
-		functionKeys:        make(map[string]*Function),
-		functionSyms:        make(map[*ast.Symbol]*Function),
-		importSiteByNode:    make(map[*ast.Node]string),
-		declarations:        make(map[string]*DeclarationFact),
-		exports:             make(map[string]*ExportFact),
-		functionCount:       make(map[string]int),
-		importCount:         make(map[string]int),
-		callCount:           make(map[string]int),
-		externalCount:       make(map[string]int),
-		unresolvedCount:     make(map[string]int),
-		opaqueCount:         make(map[string]int),
-		refCount:            make(map[string]int),
-		typeRefCount:        make(map[string]int),
-		ambientCount:        make(map[string]int),
-		globalRefCount:      make(map[string]int),
-		ambientDone:         make(map[*ast.Node]struct{}),
-		globalSyms:          make(map[string]*ast.Symbol),
-		ambient:             newAmbientIndex(ambientMatchers),
-		typeFacts:           make(map[string]*TypeFact),
-		typeIDs:             make(map[*checker.Type]string),
-		typeKeys:            make(map[typeKeyAt]typeKeyResult),
-		typeFactSeen:        make(map[*checker.Type]struct{}),
-		typeShapes:          make(map[*checker.Type]*typeShape),
-		typeTruncated:       make(map[*checker.Type]struct{}),
-		timing:              timing,
-		sourceEntries:       sourceEntries,
-		retainedExportRoots: retainedExportRoots,
+		workspaceRoot:    workspaceRoot,
+		host:             host,
+		program:          program,
+		resolver:         resolver,
+		checker:          typeChecker,
+		requestedFiles:   make(map[string]struct{}, len(requestedFiles)),
+		primaryFiles:     make(map[string]struct{}, len(group.PrimaryFiles)),
+		filesByPath:      make(map[string]*ast.SourceFile, len(requestedFiles)),
+		functionNodes:    make(map[*ast.Node]*Function),
+		functionKeys:     make(map[string]*Function),
+		functionSyms:     make(map[*ast.Symbol]*Function),
+		importSiteByNode: make(map[*ast.Node]string),
+		declarations:     make(map[string]*DeclarationFact),
+		exports:          make(map[string]*ExportFact),
+		functionCount:    make(map[string]int),
+		importCount:      make(map[string]int),
+		callCount:        make(map[string]int),
+		externalCount:    make(map[string]int),
+		unresolvedCount:  make(map[string]int),
+		opaqueCount:      make(map[string]int),
+		refCount:         make(map[string]int),
+		typeRefCount:     make(map[string]int),
+		ambientCount:     make(map[string]int),
+		globalRefCount:   make(map[string]int),
+		ambientDone:      make(map[*ast.Node]struct{}),
+		globalSyms:       make(map[string]*ast.Symbol),
+		ambient:          newAmbientIndex(ambientMatchers),
+		typeFacts:        make(map[string]*TypeFact),
+		typeIDs:          make(map[*checker.Type]string),
+		typeKeys:         make(map[typeKeyAt]typeKeyResult),
+		typeFactSeen:     make(map[*checker.Type]struct{}),
+		typeShapes:       make(map[*checker.Type]*typeShape),
+		typeTruncated:    make(map[*checker.Type]struct{}),
+		timing:           timing,
+		sourceEntries:    sourceEntries,
 	}
 	for _, file := range requestedFiles {
 		ex.requestedFiles[file] = struct{}{}
@@ -704,15 +768,12 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 	}
 	ex.ambientFile = nil
 	for _, file := range requestedFiles {
-		if _, retained := retainedExportRoots[file]; !retained {
-			continue
-		}
 		if sourceFile := ex.filesByPath[file]; sourceFile != nil {
 			ex.collectSemanticExports(sourceFile)
 		}
 	}
 	if len(sourceEntries) > 0 {
-		if err := ex.applyConfiguredSourceEntries(sourceEntries, auxiliary); err != nil {
+		if err := ex.applyConfiguredSourceEntries(sourceEntries, auxiliary, resolutions); err != nil {
 			return nil, nil, err
 		}
 	}

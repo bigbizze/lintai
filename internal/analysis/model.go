@@ -37,16 +37,15 @@ type FunctionSignatureObservation struct {
 }
 
 type Declaration struct {
-	ID               string
-	Name             string
-	Kind             string
-	OriginKind       string
-	Origin           string
-	Types            []DeclarationType
-	TypeObservations [][]DeclarationType
-	Function         string
-	Incomplete       []string
-	Range            diagnostics.SourceLocation
+	ID         string
+	Name       string
+	Kind       string
+	OriginKind string
+	Origin     string
+	Types      []DeclarationType
+	Function   string
+	Incomplete []string
+	Range      diagnostics.SourceLocation
 }
 
 type DeclarationType struct {

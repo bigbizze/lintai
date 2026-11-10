@@ -332,9 +332,9 @@ Caveats:
   "violation(\"src/pure/helper.ts::function::loadValue\",\"loadValue\")",
   "fn(\"src/pure/helper.ts::function::loadValue\",\"src/pure/helper.ts\",\"loadValue\")",
   "glob(\"src/pure/helper.ts\",\"src/pure/**\")",
-  "call_edge(\"src/pure/helper.ts::function::loadValue::calls::src/services/fetchData.ts::function::fetchData\",\"src/pure/helper.ts::function::loadValue\",\"src/services/fetchData.ts::function::fetchData\")",
-  "reaches_await(\"src/services/fetchData.ts::function::fetchData\")",
-  "fn_awaits(\"src/services/fetchData.ts::function::fetchData\")"
+  "call_edge(\"src/pure/helper.ts::function::loadValue::calls::src/services/fetch-data.ts::function::fetchData\",\"src/pure/helper.ts::function::loadValue\",\"src/services/fetch-data.ts::function::fetchData\")",
+  "reaches_await(\"src/services/fetch-data.ts::function::fetchData\")",
+  "fn_awaits(\"src/services/fetch-data.ts::function::fetchData\")"
 ]
 ```
 

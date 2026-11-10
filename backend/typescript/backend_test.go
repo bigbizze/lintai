@@ -505,3 +505,46 @@ func writeWorkspaceFile(t *testing.T, root, relativePath, contents string) strin
 	}
 	return path
 }
+
+func TestUnreadableOptionalMapKeepsCheckedFactsAndChangesVersionWhenReadable(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "tsconfig.json", `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler"},"include":["src/**/*.ts"]}`)
+	writeWorkspaceFile(t, root, "dist/index.d.ts", "export declare const value: number;\n//# sourceMappingURL=index.d.ts.map\n")
+	writeWorkspaceFile(t, root, "src/app.ts", `export { value } from "../dist";`)
+	mapPath := writeWorkspaceFile(t, root, "dist/index.d.ts.map", `{"version":3,"file":"index.d.ts","sources":[],"mappings":""}`)
+	if err := os.Chmod(mapPath, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(mapPath, 0o600) })
+	if _, err := os.ReadFile(mapPath); err == nil {
+		t.Skip("current user can read mode-000 files")
+	}
+	options := backend.SnapshotOptions{Files: backend.FileScopeTsconfig}
+	unreadable, err := New().buildAnalysisSnapshot(context.Background(), root, root, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(unreadable.DeclarationSourceOutcomes, func(item analysis.DeclarationSourceOutcome) bool { return item.Outcome == "unavailable_map" }) ||
+		!slices.ContainsFunc(unreadable.Exports, func(item analysis.Export) bool { return item.Name == "value" && len(item.Targets) == 1 }) || !slices.Contains(unreadable.InputPaths, mapPath) {
+		t.Fatalf("unreadable optional map lost checked facts, outcome or input: %+v", unreadable)
+	}
+	if err := os.Chmod(mapPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	readable, err := New().buildAnalysisSnapshot(context.Background(), root, root, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unreadable.Version == readable.Version {
+		t.Fatal("making the map readable did not change the snapshot version")
+	}
+	linksPath := writeWorkspaceFile(t, root, "source-links.json", `{}`)
+	if err := os.Chmod(linksPath, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(linksPath, 0o600) })
+	options.SourceLinks = "source-links.json"
+	if _, err := New().buildAnalysisSnapshot(context.Background(), root, root, options); err == nil || !strings.Contains(err.Error(), "invalid --source-links") {
+		t.Fatalf("unreadable requested configuration was not an error: %v", err)
+	}
+}

@@ -163,7 +163,7 @@ func (e *extractor) collectSemanticExports(file *ast.SourceFile) {
 			continue
 		}
 		resolved := e.checker.SkipAlias(exported)
-		spaces := exportSpaces(resolved)
+		spaces := e.effectiveBindingSpaces(file, exported)
 		var targetIDs []string
 		if resolved != nil {
 			for _, declaration := range resolved.Declarations() {
@@ -172,9 +172,6 @@ func (e *extractor) collectSemanticExports(file *ast.SourceFile) {
 		}
 		targetIDs = sortedUnique(targetIDs)
 		items := e.exportContributionsForBinding(file, name, targetIDs, contributions)
-		if len(items) > 0 && slices.ContainsFunc(items, func(item syntaxExportContribution) bool { return item.typeOnly }) && !slices.ContainsFunc(items, func(item syntaxExportContribution) bool { return !item.typeOnly }) {
-			spaces = []string{SpaceType}
-		}
 		if len(spaces) == 0 {
 			spaces = []string{SpaceValue}
 		}
@@ -182,13 +179,21 @@ func (e *extractor) collectSemanticExports(file *ast.SourceFile) {
 			binding := name + "\x00" + space
 			bindings = append(bindings, binding)
 			seenBindings[binding] = struct{}{}
-			complete := resolved != nil && len(resolved.Declarations()) > 0
+			declarations := declarationsInSpace(resolved, space)
+			complete := resolved != nil && len(declarations) > 0
 			reasons := []string(nil)
-			if resolved != nil {
-				for _, declaration := range resolved.Declarations() {
+			var spaceTargets []string
+			ambiguous := e.starBindingAmbiguous(file, name)
+			spaceItems := items
+			if ambiguous {
+				complete = false
+				reasons = append(reasons, AssociationConflict)
+				spaceItems = e.exportContributionsForBinding(file, name, nil, contributions)
+			} else if resolved != nil {
+				for _, declaration := range declarations {
 					id, supported := e.addDeclaration(declaration, resolved, name, space)
 					if id != "" {
-						targetIDs = append(targetIDs, id)
+						spaceTargets = append(spaceTargets, id)
 					}
 					if !supported {
 						complete = false
@@ -200,13 +205,13 @@ func (e *extractor) collectSemanticExports(file *ast.SourceFile) {
 					}
 				}
 			}
-			targetIDs = sortedUnique(targetIDs)
+			spaceTargets = sortedUnique(spaceTargets)
 			if !complete {
 				if len(reasons) == 0 {
 					reasons = append(reasons, AssociationUnresolved)
 				}
 			}
-			e.addExport(moduleIdentity, moduleFile, name, space, targetIDs, complete, reasons, items)
+			e.addExport(moduleIdentity, moduleFile, name, space, spaceTargets, complete, reasons, spaceItems)
 		}
 	}
 
@@ -289,9 +294,10 @@ func (e *extractor) collectSemanticExports(file *ast.SourceFile) {
 }
 
 func (e *extractor) exportContributionsForBinding(file *ast.SourceFile, name string, targetIDs []string, contributions map[string][]syntaxExportContribution) []syntaxExportContribution {
-	items := make([]syntaxExportContribution, 0, len(contributions[name])+len(contributions["*"]))
-	items = append(items, contributions[name]...)
-	items = append(items, contributions["*"]...)
+	items := contributions[name]
+	if len(items) == 0 {
+		items = contributions["*"]
+	}
 	result := make([]syntaxExportContribution, 0, len(items))
 	for _, item := range items {
 		if item.publicName != "*" && item.publicName != name {
@@ -331,10 +337,7 @@ func (e *extractor) contributionDeclarations(file *ast.SourceFile, item syntaxEx
 		if moduleFile == nil || moduleFile.Symbol == nil {
 			return nil
 		}
-		for _, exported := range e.checker.GetExportsOfModule(moduleFile.Symbol) {
-			if exported == nil || exported.Name() != sourceName {
-				continue
-			}
+		if exported := e.exportedSymbol(moduleFile, sourceName); exported != nil {
 			resolved := e.checker.SkipAlias(exported)
 			if resolved == nil {
 				return nil
@@ -384,11 +387,9 @@ func (e *extractor) exportContributionSpaces(item syntaxExportContribution) []st
 		if item.module != "" {
 			moduleFile := e.sourceFileByIdentity(item.module)
 			if moduleFile != nil && moduleFile.Symbol != nil {
-				for _, exported := range e.checker.GetExportsOfModule(moduleFile.Symbol) {
-					if exported != nil && exported.Name() == item.sourceName {
-						if spaces := exportSpaces(e.checker.SkipAlias(exported)); len(spaces) > 0 {
-							return spaces
-						}
+				if exported := e.exportedSymbol(moduleFile, item.sourceName); exported != nil {
+					if spaces := e.effectiveBindingSpaces(moduleFile, exported); len(spaces) > 0 {
+						return spaces
 					}
 				}
 			}
@@ -626,6 +627,9 @@ func (e *extractor) addExport(moduleIdentity string, file string, name string, s
 		if item.typeOnly && space != SpaceType {
 			continue
 		}
+		if !item.reexport && !declarationContributesSpace(item.sourceNode, space) {
+			continue
+		}
 		fact.Via = append(fact.Via, item.site)
 		if item.reexport && item.module != "" {
 			fact.Reexports = append(fact.Reexports, ExportReexportFact{Site: item.site, Module: item.module, SourceName: item.sourceName, Space: space})
@@ -734,6 +738,218 @@ func exportSpaces(symbol *ast.Symbol) []string {
 		spaces = append(spaces, SpaceValue)
 	}
 	return spaces
+}
+
+// exportedSymbol indexes each module once per extractor. Besides avoiding a
+// repeated checker inventory, this lets both exports and source bindings use
+// the same effective-space rules through re-export chains.
+func (e *extractor) exportedSymbol(file *ast.SourceFile, name string) *ast.Symbol {
+	if file == nil || file.Symbol == nil {
+		return nil
+	}
+	if e.moduleExportIndex == nil {
+		e.moduleExportIndex = make(map[*ast.SourceFile]map[string]*ast.Symbol)
+	}
+	index, ok := e.moduleExportIndex[file]
+	if !ok {
+		index = make(map[string]*ast.Symbol)
+		for _, symbol := range e.checker.GetExportsOfModule(file.Symbol) {
+			if symbol != nil {
+				index[symbol.Name()] = symbol
+			}
+		}
+		e.moduleExportIndex[file] = index
+	}
+	return index[name]
+}
+
+func (e *extractor) effectiveBindingSpaces(file *ast.SourceFile, exported *ast.Symbol) []string {
+	if exported == nil {
+		return nil
+	}
+	spaces := exportSpaces(e.checker.SkipAlias(exported))
+	if len(spaces) == 0 {
+		spaces = exportSpaces(exported)
+	}
+	if restricted, _ := e.bindingIsTypeOnly(file, exported.Name(), exported, make(map[*ast.SourceFile]bool)); restricted {
+		return []string{SpaceType}
+	}
+	return spaces
+}
+
+func (e *extractor) bindingIsTypeOnly(file *ast.SourceFile, name string, symbol *ast.Symbol, visiting map[*ast.SourceFile]bool) (bool, bool) {
+	seen := make(map[*ast.Symbol]bool)
+	for current := symbol; current != nil && current.Flags()&ast.SymbolFlagsAlias != 0 && !seen[current]; {
+		seen[current] = true
+		if e.checker.GetTypeOnlyAliasDeclaration(current) != nil {
+			return true, true
+		}
+		current = e.checker.GetImmediateAliasedSymbol(current)
+	}
+	if file == nil || file.Symbol == nil || file.Symbol.Exports()[name] != nil {
+		return false, true
+	}
+	if visiting[file] {
+		return false, false
+	}
+	visiting[file] = true
+	defer delete(visiting, file)
+	found, unrestricted := false, false
+	e.forEachStarBinding(file, name, func(star *ast.Node, source *ast.SourceFile, exported *ast.Symbol) bool {
+		restricted, known := e.bindingIsTypeOnly(source, name, exported, visiting)
+		if !known {
+			return true
+		}
+		found = true
+		if !star.IsTypeOnly() && !restricted {
+			unrestricted = true
+			return false
+		}
+		return true
+	})
+	return found && !unrestricted, found
+}
+
+func (e *extractor) forEachStarBinding(file *ast.SourceFile, name string, visit func(*ast.Node, *ast.SourceFile, *ast.Symbol) bool) {
+	if file == nil || file.Symbol == nil || name == "default" || name == "export=" {
+		return
+	}
+	stars := file.Symbol.Exports()[ast.InternalSymbolNameExportStar]
+	if stars == nil {
+		return
+	}
+	for _, star := range stars.Declarations() {
+		if star.ModuleSpecifier() == nil {
+			continue
+		}
+		resolved := e.resolveModuleSpecifier(file, star.ModuleSpecifier())
+		if resolved == nil || !resolved.IsResolved() {
+			continue
+		}
+		source := e.program.GetSourceFile(resolved.ResolvedFileName)
+		if exported := e.exportedSymbol(source, name); exported != nil && !visit(star, source, exported) {
+			return
+		}
+	}
+}
+
+func (e *extractor) starBindingAmbiguous(file *ast.SourceFile, name string) bool {
+	return e.starBindingAmbiguousFrom(file, name, make(map[bindingVisit]bool))
+}
+
+type bindingVisit struct {
+	file *ast.SourceFile
+	name string
+}
+
+func (e *extractor) starBindingAmbiguousFrom(file *ast.SourceFile, name string, visiting map[bindingVisit]bool) bool {
+	if file == nil || file.Symbol == nil {
+		return false
+	}
+	key := bindingVisit{file, name}
+	if visiting[key] {
+		return false
+	}
+	visiting[key] = true
+	defer delete(visiting, key)
+	if explicit := file.Symbol.Exports()[name]; explicit != nil {
+		seen := make(map[*ast.Symbol]bool)
+		for current := explicit; current != nil && current.Flags()&ast.SymbolFlagsAlias != 0 && !seen[current]; current = e.checker.GetImmediateAliasedSymbol(current) {
+			seen[current] = true
+			for _, declaration := range current.Declarations() {
+				if declaration == nil || declaration.Name() == nil || declaration.Kind != ast.KindExportSpecifier && declaration.Kind != ast.KindImportSpecifier {
+					continue
+				}
+				sourceName := declaration.Name().Text()
+				if declaration.Kind == ast.KindExportSpecifier && declaration.AsExportSpecifier().PropertyName != nil {
+					sourceName = declaration.AsExportSpecifier().PropertyName.Text()
+				} else if declaration.Kind == ast.KindImportSpecifier && declaration.AsImportSpecifier().PropertyName != nil {
+					sourceName = declaration.AsImportSpecifier().PropertyName.Text()
+				}
+				owner := declaration.Parent
+				for owner != nil && owner.Kind != ast.KindExportDeclaration && owner.Kind != ast.KindImportDeclaration && owner.Kind != ast.KindSourceFile {
+					owner = owner.Parent
+				}
+				if owner == nil || owner.Kind == ast.KindSourceFile || owner.ModuleSpecifier() == nil {
+					continue
+				}
+				origin := ast.GetSourceFileOfNode(owner)
+				resolved := e.resolveModuleSpecifier(origin, owner.ModuleSpecifier())
+				if resolved != nil && resolved.IsResolved() && e.starBindingAmbiguousFrom(e.program.GetSourceFile(resolved.ResolvedFileName), sourceName, visiting) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	var first []string
+	ambiguous := false
+	e.forEachStarBinding(file, name, func(_ *ast.Node, source *ast.SourceFile, exported *ast.Symbol) bool {
+		if e.starBindingAmbiguousFrom(source, name, visiting) {
+			ambiguous = true
+			return false
+		}
+		resolved := e.checker.SkipAlias(exported)
+		if resolved == nil {
+			return true
+		}
+		// The checker reports a star collision for distinct symbols even when
+		// one is type-only and the other has a value meaning.
+		ids := e.declarationIDs(resolved.Declarations())
+		if len(ids) == 0 {
+			return true
+		}
+		if first == nil {
+			first = ids
+		} else if !slices.Equal(first, ids) {
+			ambiguous = true
+			return false
+		}
+		return true
+	})
+	return ambiguous
+}
+
+func declarationsInSpace(symbol *ast.Symbol, space string) []*ast.Node {
+	if symbol == nil {
+		return nil
+	}
+	var result []*ast.Node
+	for _, node := range symbol.Declarations() {
+		if node == nil {
+			continue
+		}
+		switch node.Kind {
+		case ast.KindModuleDeclaration, ast.KindSourceFile, ast.KindNamespaceExport:
+			// Namespace-only bindings can be imported with `export type * as`.
+			// A namespace merged with a class is not the class's type declaration.
+			if space == SpaceType && symbol.Flags()&ast.SymbolFlagsType != 0 {
+				continue
+			}
+		default:
+			if !declarationContributesSpace(node, space) {
+				continue
+			}
+		}
+		result = append(result, node)
+	}
+	return result
+}
+
+func declarationContributesSpace(node *ast.Node, space string) bool {
+	if node == nil {
+		return true
+	}
+	switch node.Kind {
+	case ast.KindInterfaceDeclaration, ast.KindTypeAliasDeclaration, ast.KindJSTypeAliasDeclaration:
+		return space == SpaceType
+	case ast.KindVariableDeclaration, ast.KindBindingElement, ast.KindFunctionDeclaration,
+		ast.KindModuleDeclaration, ast.KindSourceFile, ast.KindNamespaceExport,
+		ast.KindMethodDeclaration, ast.KindPropertyDeclaration, ast.KindPropertySignature, ast.KindExportAssignment:
+		return space == SpaceValue
+	default:
+		return true
+	}
 }
 
 func declarationKind(node *ast.Node) (string, bool) {
@@ -866,17 +1082,17 @@ func finalizeSemanticObservations(snapshot *Snapshot) {
 }
 
 func uniqueSnapshotInputs(items []SnapshotInput) []SnapshotInput {
-	byPath := make(map[string]bool, len(items))
+	byPath := make(map[string]SnapshotInput, len(items))
 	for _, item := range items {
-		if exists, ok := byPath[item.Path]; !ok || item.Exists {
-			byPath[item.Path] = item.Exists
-		} else if exists && !item.Exists {
-			byPath[item.Path] = true
-		}
+		current := byPath[item.Path]
+		current.Path = item.Path
+		current.Exists = current.Exists || item.Exists
+		current.OptionalMap = current.OptionalMap || item.OptionalMap
+		byPath[item.Path] = current
 	}
 	result := make([]SnapshotInput, 0, len(byPath))
-	for path, exists := range byPath {
-		result = append(result, SnapshotInput{Path: path, Exists: exists})
+	for _, item := range byPath {
+		result = append(result, item)
 	}
 	slices.SortFunc(result, func(left, right SnapshotInput) int { return strings.Compare(left.Path, right.Path) })
 	return result

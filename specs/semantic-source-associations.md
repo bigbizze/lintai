@@ -54,7 +54,9 @@ qualified name, or a declaration's descriptive origin as identity.
 - `canonical-file-identity` is the compiler's canonical path key for the actual
   checked `SourceFile` after its normal resolution and redirection behavior. Use
   the filesystem's case-sensitivity rules and the compiler's `preserveSymlinks`
-  behavior; do not independently call `realpath` or guess a source path.
+  behavior; do not independently call `realpath` or guess a source path. A
+  mixed-case path can therefore have different IDs on filesystems with
+  different case-sensitivity rules.
 - Render files under the explicit workspace root as slash-separated workspace
   relative paths. Render files outside it using the compiler's normalized rooted
   path. Paths are identity inputs, not user-facing origin labels.
@@ -67,8 +69,9 @@ qualified name, or a declaration's descriptive origin as identity.
   semantic distinctions, including class instance versus constructor value type.
 
 Expected equality: imports that TypeScript redirects to the same actual source
-declaration share an identity. Expected inequality: declarations in different
-resolved files or package instances differ, including two copies of one package
+declaration share an identity, including package copies the compiler deduplicates.
+Expected inequality: declarations in different resolved files or package instances
+that the compiler keeps distinct differ, including two copies of one package
 version. A declaration-map or configured association never equates a `.d.ts`
 declaration with its source declaration. A declaration moving in a file may change
 its ID.
@@ -161,6 +164,9 @@ primitive aliases; and `export =`.
 TypeScript defines star behavior: exclude `default`, honor explicit overrides,
 ambiguity and cycles, and do not invent ambiguous targets. Preserve every explicit
 known export row even if its target cannot resolve, with `export_incomplete`.
+Competing star targets produce `/conflict` without a coherent target, including
+when the ambiguous binding is re-exported; an explicit local or named override
+still takes precedence.
 An unresolved star source cannot supply enumerable names: keep its unresolved
 import fact and emit `module_exports_incomplete(File, /unresolved)`. Propagate
 star-source incompleteness through direct star dependencies, terminating on cycles.
@@ -362,7 +368,9 @@ Rules for loading and applying entries:
   fields and invalid types.
 - Unreadable/malformed JSON, unsupported version, missing required fields,
   invalid paths, or contradictory entries for one canonical checked path are
-  configuration errors. Deduplicate identical canonical entries.
+  configuration errors. Deduplicate identical canonical entries after checked
+  program resolution, retaining distinct bindings when compiler options resolve
+  the same spellings to different checked instances.
 - A valid entry whose checked file is not used by any checked program is
   `source_entry_unapplied`; it does not fail ordinary extraction. A matching
   checked endpoint with missing source/config/export preserves checked facts and
@@ -459,6 +467,8 @@ Every association input participates in the existing snapshot refresh path:
   association.
 
 Hash canonical input path, presence/absence and content into snapshot versioning.
+Represent an unreadable optional declaration map with its own input state; a
+requested configuration file that cannot be read remains an error.
 Include the absolute normalized `sourceLinks` option in effective client identity.
 Track missing map/source/config candidates so creation invalidates the snapshot;
 watch the missing path and, when necessary, its nearest existing parent directory.

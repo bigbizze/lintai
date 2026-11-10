@@ -200,11 +200,14 @@ func configIncludesFile(config *parsedConfig, file string, caseSensitivity tspat
 	return false
 }
 
-func (e *extractor) applyConfiguredSourceEntries(entries []configuredSourceEntry, auxiliary *auxiliarySourcePrograms) error {
+func (e *extractor) applyConfiguredSourceEntries(entries []configuredSourceEntry, auxiliary *auxiliarySourcePrograms, resolutions *sourceEntryResolutions) error {
 	for _, entry := range entries {
 		checked := e.checkedSourceFile(entry.CheckedPath)
 		if checked == nil {
 			continue
+		}
+		if err := resolutions.record(e.canonicalFileIdentity(checked.FileName().AsString()), entry); err != nil {
+			return err
 		}
 		e.sourceEntryFacts = append(e.sourceEntryFacts, SourceEntryFact{
 			ID: entry.ID, CheckedEntry: entry.CheckedEntry, SourceEntry: entry.SourceEntry, Tsconfig: entry.SourceConfig, Applied: true,
@@ -219,6 +222,12 @@ func (e *extractor) applyConfiguredSourceEntries(entries []configuredSourceEntry
 			e.inputs = append(e.inputs, sourceProgram.ex.inputs...)
 			for _, reason := range sourceProgram.ex.exportInventoryIncomplete(sourceProgram.file) {
 				e.sourceEntryFacts = append(e.sourceEntryFacts, SourceEntryFact{ID: entry.ID, Incomplete: []string{reason}})
+			}
+		}
+		sourceBindings := make(map[bindingKey]moduleBinding)
+		if sourceOutcome == "" {
+			for _, binding := range sourceProgram.ex.moduleBindings(sourceProgram.file) {
+				sourceBindings[bindingKey{binding.name, binding.space}] = binding
 			}
 		}
 		bindings := e.moduleBindings(checked)
@@ -241,7 +250,7 @@ func (e *extractor) applyConfiguredSourceEntries(entries []configuredSourceEntry
 			if sourceOutcome != "" {
 				item.Incomplete = append(item.Incomplete, sourceOutcome)
 				e.sourceEntryFacts = append(e.sourceEntryFacts, SourceEntryFact{ID: entry.ID, Incomplete: []string{sourceOutcome}})
-			} else if sourceBinding, found := sourceProgram.ex.findModuleBinding(sourceProgram.file, binding.name, binding.space); !found {
+			} else if sourceBinding, found := sourceBindings[bindingKey{binding.name, binding.space}]; !found {
 				item.Incomplete = append(item.Incomplete, AssociationUnresolved)
 				e.sourceEntryFacts = append(e.sourceEntryFacts, SourceEntryFact{ID: entry.ID, Incomplete: []string{AssociationUnresolved}})
 			} else {
@@ -250,10 +259,12 @@ func (e *extractor) applyConfiguredSourceEntries(entries []configuredSourceEntry
 				item.SourceComplete = len(sourceReasons) == 0
 				if item.SourceComplete {
 					item.SourceObservations = [][]string{item.SourceDeclarations}
-					item.SourceFile = sourceProgram.ex.canonicalFileIdentity(sourceProgram.file.FileName().AsString())
-					item.SourceFiles = []string{item.SourceFile}
-					item.SourceName = binding.name
-					item.Method = "source_entry"
+					if item.CheckedComplete {
+						item.SourceFile = sourceProgram.ex.canonicalFileIdentity(sourceProgram.file.FileName().AsString())
+						item.SourceFiles = []string{item.SourceFile}
+						item.SourceName = binding.name
+						item.Method = "source_entry"
+					}
 				}
 				item.Incomplete = append(item.Incomplete, sourceReasons...)
 			}
@@ -319,7 +330,11 @@ func (e *extractor) checkedSourceFile(path string) *ast.SourceFile {
 func bindingDeclarationEndpoints(e *extractor, binding moduleBinding) ([]string, []string) {
 	var ids, reasons []string
 	if !binding.complete {
-		reasons = append(reasons, AssociationUnresolved)
+		if binding.ambiguous {
+			reasons = append(reasons, AssociationConflict)
+		} else {
+			reasons = append(reasons, AssociationUnresolved)
+		}
 	}
 	for _, declaration := range binding.declarations {
 		id, supported := e.addDeclarationEndpoint(declaration, binding.symbol, binding.name)
@@ -356,7 +371,10 @@ type moduleBinding struct {
 	symbol       *ast.Symbol
 	declarations []*ast.Node
 	complete     bool
+	ambiguous    bool
 }
+
+type bindingKey struct{ name, space string }
 
 func (e *extractor) moduleBindings(file *ast.SourceFile) []moduleBinding {
 	if e.checker == nil || file == nil || file.Symbol == nil {
@@ -370,24 +388,19 @@ func (e *extractor) moduleBindings(file *ast.SourceFile) []moduleBinding {
 			continue
 		}
 		symbol := e.checker.SkipAlias(exported)
-		spaces := exportSpaces(symbol)
-		if len(spaces) == 0 {
-			spaces = exportSpaces(exported)
-		}
-		if exportSymbolIsTypeOnly(exported) {
-			spaces = []string{SpaceType}
-		}
+		spaces := e.effectiveBindingSpaces(file, exported)
 		if len(spaces) == 0 {
 			spaces = []string{SpaceValue}
 		}
 		for _, space := range spaces {
-			var declarations []*ast.Node
-			if symbol != nil {
-				declarations = symbol.Declarations()
+			declarations := declarationsInSpace(symbol, space)
+			ambiguous := e.starBindingAmbiguous(file, exported.Name())
+			if ambiguous {
+				declarations = nil
 			}
 			result = append(result, moduleBinding{
 				name: exported.Name(), space: space, symbol: symbol,
-				declarations: declarations, complete: symbol != nil && len(declarations) > 0,
+				declarations: declarations, complete: symbol != nil && len(declarations) > 0, ambiguous: ambiguous,
 			})
 		}
 	}
@@ -407,38 +420,6 @@ func (e *extractor) moduleBindings(file *ast.SourceFile) []moduleBinding {
 		}
 	}
 	return result
-}
-
-func (e *extractor) findModuleBinding(file *ast.SourceFile, name, space string) (moduleBinding, bool) {
-	for _, binding := range e.moduleBindings(file) {
-		if binding.name == name && binding.space == space {
-			return binding, true
-		}
-	}
-	return moduleBinding{}, false
-}
-
-func exportSymbolIsTypeOnly(symbol *ast.Symbol) bool {
-	if symbol == nil {
-		return false
-	}
-	seenAlias := false
-	typeOnly := false
-	for _, declaration := range symbol.Declarations() {
-		if declaration == nil {
-			continue
-		}
-		switch declaration.Kind {
-		case ast.KindExportSpecifier, ast.KindExportDeclaration, ast.KindNamespaceExport,
-			ast.KindImportSpecifier, ast.KindImportClause, ast.KindNamespaceImport, ast.KindImportEqualsDeclaration:
-			seenAlias = true
-			if !ast.IsTypeOnlyImportOrExportDeclaration(declaration) {
-				return false
-			}
-			typeOnly = true
-		}
-	}
-	return seenAlias && typeOnly
 }
 
 func (e *extractor) addDeclarationEndpoint(node *ast.Node, symbol *ast.Symbol, publicName string) (string, bool) {

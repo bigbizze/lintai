@@ -24,6 +24,65 @@ type configuredSourceEntry struct {
 	ConfigPath   string
 }
 
+// Entries may be spelled through different aliases. Equivalence is learned
+// from each checked program, not from filesystem realpaths outside it.
+type sourceEntryResolutions struct {
+	byChecked map[string]configuredSourceEntry
+	byEntry   map[string]map[string]bool
+}
+
+func newSourceEntryResolutions() *sourceEntryResolutions {
+	return &sourceEntryResolutions{byChecked: make(map[string]configuredSourceEntry), byEntry: make(map[string]map[string]bool)}
+}
+
+func (r *sourceEntryResolutions) record(identity string, entry configuredSourceEntry) error {
+	previous, found := r.byChecked[identity]
+	if found && (previous.SourceEntry != entry.SourceEntry || previous.SourceConfig != entry.SourceConfig) {
+		return fmt.Errorf("invalid --source-links: contradictory entries for resolved checkedEntry %q", identity)
+	}
+	if !found || entry.ID < previous.ID {
+		r.byChecked[identity] = entry
+	}
+	if r.byEntry[entry.ID] == nil {
+		r.byEntry[entry.ID] = make(map[string]bool)
+	}
+	r.byEntry[entry.ID][identity] = true
+	return nil
+}
+
+func (r *sourceEntryResolutions) canonicalize(snapshot *Snapshot, entries []configuredSourceEntry) {
+	byID := make(map[string]configuredSourceEntry, len(entries))
+	for _, entry := range entries {
+		byID[entry.ID] = entry
+	}
+	var facts []SourceEntryFact
+	for _, item := range snapshot.SourceEntries {
+		representatives := make(map[string]bool)
+		for identity := range r.byEntry[item.ID] {
+			representatives[r.byChecked[identity].ID] = true
+		}
+		if len(representatives) == 0 {
+			representatives[item.ID] = true
+		}
+		for id := range representatives {
+			fact := item
+			fact.ID = id
+			if entry, ok := byID[id]; ok {
+				fact.CheckedEntry, fact.SourceEntry, fact.Tsconfig = entry.CheckedEntry, entry.SourceEntry, entry.SourceConfig
+			}
+			facts = append(facts, fact)
+		}
+	}
+	snapshot.SourceEntries = facts
+	for index := range snapshot.SourceBindings {
+		item := &snapshot.SourceBindings[index]
+		if entry, ok := r.byChecked[item.CheckedFile]; ok {
+			item.Entry = entry.ID
+		}
+		item.ID = sourceBindingID(item.Entry, item.CheckedFile, item.Name, item.Space)
+	}
+}
+
 type sourceLinksDocument struct {
 	Version int                        `json:"version"`
 	Entries []sourceLinksDocumentEntry `json:"entries"`
