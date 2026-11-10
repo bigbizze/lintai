@@ -104,7 +104,8 @@ Other reusable packages are:
 
 `SnapshotOptions.Excludes` contains doublestar globs relative to the workspace
 root. `SnapshotOptions.Files` selects `backend.FileScopeTsconfig` (the default)
-or `backend.FileScopeWalk`.
+or `backend.FileScopeWalk`. `SnapshotOptions.SourceLinks` is the path of an
+optional source-links JSON file; see "Source links and input paths".
 
 `engine.Options` has two fields for rule integrity (see `docs/trust.md`):
 
@@ -124,3 +125,31 @@ workspace-relative.
 
 The CLI remains in `cmd/lintai`; its flags and exit codes are documented in
 `docs/api.md`.
+
+## Source links and input paths
+
+When a workspace package is imported through generated `.d.ts` files, a source-links file can tell lintai which source entry belongs to each checked entry. The option has the same meaning on every surface:
+
+| Surface | Field |
+| --- | --- |
+| CLI | `--source-links` |
+| Go backend snapshot | `backend.SnapshotOptions.SourceLinks` |
+| Go engine | `engine.Options.SourceLinks` |
+| Server initialize JSON | `sourceLinks` |
+| TypeScript client and linter plugins | `LintaiOptions.sourceLinks` |
+
+```go
+result, err := engine.New(typescript.New()).Analyze(ctx, engine.Options{
+	RepoRoot:      repoRoot,
+	AssetRoot:     assetRoot,
+	WorkspaceRoot: workspaceRoot,
+	RuleGlobs:     []string{"lintai-rules/**/*.ts"},
+	SourceLinks:   "lintai-source-links.json",
+})
+```
+
+A relative path is resolved from the workspace root, and an empty string means that there is no file. The TypeScript backend reads and checks the file each time it builds a snapshot. If the file is broken, `BuildSnapshot` and `Engine.Analyze` return an error whose message starts with `invalid --source-links:`, and the server turns that error into an invalid-params response. The file format is under "Source links" in the [CLI reference](api.md#cli-reference-and-caveats). The facts are in [Source associations](api.md#source-associations), and the order in which lintai looks for source is in [Source resolution order](api.md#source-resolution-order).
+
+Source links create a new problem for long-running clients. The facts now depend on files that are not analyzed modules, such as a declaration map, and on files that do not exist yet. If someone later builds the package and a `.d.ts.map` file appears, the facts can change even though no source file changed. To handle this, the snapshot reports these extra files. `facts.Snapshot.InputPaths` lists the source-links file, the declaration maps, the exact map paths that lintai tried and did not find, the checked and source entry files, the auxiliary tsconfig files and the files they extend or reference, and the resolution candidates. The TypeScript backend also hashes the path, the presence and the content of each of these files into `Snapshot.Version`, so the version changes when one of them changes. `engine.Result.InputPaths` and the server's `AnalysisResult.inputPaths` pass the list on. In `serve` mode the TypeScript client watches each path, or the nearest existing parent directory when the path does not exist yet, and drops its diagnostics when one of them changes.
+
+A custom backend can leave `InputPaths` empty. If its facts depend on files other than the analyzed modules, list those files there and include their state in `Version`, so that clients know when to refresh.

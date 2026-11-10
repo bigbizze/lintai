@@ -674,3 +674,90 @@ reaches_target(Fn) :- call_edge(_, Fn, Callee), reaches_target(Callee).
 ```
 
 The backward relation has at most one row for each node and target, because it never stores the pairs that do not lead to a target. The second form also includes `Fn` when `Fn` is a target. To exclude that case, require one edge first, as in section 1: `call_edge(_, Fn, Callee), reaches_target(Callee)`. Use a closure only when the rule reports both ends of the pair. The prelude predicates `fn_reaches_ambient`, `fn_reaches_ambient_strict`, `fn_reaches_unresolved`, `module_reaches_ambient` and `type_reaches_incomplete` use the backward form.
+
+## 17. Public API types do not expose infrastructure types
+
+Suppose a shared package, `packages/common`, is used by both server code and browser code. Its public types should describe data, not server machinery. If one of its exported types has a property of type `Knex`, every consumer of the package has to know about a database client, and the shared contract is tied to one server library. The same is true for an Express request or a `@grpc/grpc-js` service error. Types that only look like database rows, or message types from your own gRPC contract package, are fine.
+
+A per-file linter has trouble with this, because the problem is usually spread over several files. The bad type is declared in one module, renamed in a second and re-exported with `export *` from the package entry. This rule starts from the public names of the entry module, follows `export_target` to the real declarations, and then walks the represented parts of each declared type. It walks backward from the banned types, as in section 16, so it never builds all pairs of types.
+
+```ts
+// lintai-rules/common-public-types.ts
+import { dl, rule } from "@lintai/sdk";
+
+export default rule("arch.common-public-types-no-infra")
+	.version(1)
+	.facts(() => ({
+		public_entry: [["packages/common/src/index.ts"]],
+		banned_package: [["knex"], ["express"], ["express-serve-static-core"], ["@grpc/grpc-js"]],
+	}))
+	.program(dl`
+		Decl public_entry(File) descr [extensional()].
+		Decl banned_package(Pkg) descr [extensional()].
+
+		Decl public_export(Export, Name).
+		public_export(E, Name) :- public_entry(File), module_export(E, File, Name, _).
+
+		Decl public_type(Export, Type).
+		public_type(E, T) :- public_export(E, _), export_target(E, D), declaration_type(D, _, T).
+
+		Decl banned_type(Type).
+		banned_type(T) :- type_named(T, Pkg, _), type_origin_kind(T, /package), banned_package(Pkg).
+
+		Decl reaches_banned(Type).
+		reaches_banned(T) :- banned_type(T).
+		reaches_banned(T) :- type_child(T, Child), reaches_banned(Child).
+
+		Decl violation(Export, Name).
+		violation(E, Name) :- public_export(E, Name), public_type(E, T), reaches_banned(T).
+
+		Decl uncertain(Export).
+		uncertain(E) :- public_type(E, T), type_reaches_incomplete(T).
+		uncertain(E) :- public_export(E, _), export_incomplete(E, _).
+		uncertain(E) :- public_export(E, _), export_target(E, D), declaration_incomplete(D, _).
+
+		Decl indeterminate(Export, Name).
+		indeterminate(E, Name) :- public_export(E, Name), uncertain(E), !violation(E, Name).
+
+		Decl inventory_incomplete(File, Reason).
+		inventory_incomplete(File, Reason) :- public_entry(File), module_exports_incomplete(File, Reason).
+	`)
+	.report("violation", "indeterminate", "inventory_incomplete")
+	.message((row, ctx) => {
+		if (ctx.assertion_id === "violation") {
+			return `Public export ${row.Name} exposes a type from an infrastructure package`;
+		}
+		if (ctx.assertion_id === "indeterminate") {
+			return `lintai cannot fully inspect public export ${row.Name}`;
+		}
+		return `The export list of ${row.File} is incomplete: ${row.Reason}`;
+	});
+```
+
+The rule reports three kinds of result, and they mean different things. `violation` is a finding that lintai can show: a path from a public export to a banned package type. `indeterminate` means that lintai could not see the whole type, or that the export or declaration is unresolved, unsupported or conflicting, so the rule cannot decide either way. `inventory_incomplete` means that lintai could not list every public name of the entry, for example because an `export *` source does not resolve. Keeping these apart matters, because an export that lintai cannot inspect is not the same as a safe export.
+
+Planted cases:
+
+```ts
+// packages/common/src/context.ts
+import type { Knex } from "knex";
+export type ValidationContext = { db: Knex; eventVersionId: number };
+
+// packages/common/src/validation.ts
+export type { ValidationContext as CheckContext } from "./context";
+
+// packages/common/src/index.ts
+export * from "./validation";
+export type EventRef = { eventVersionId: number };
+export interface StationEvent { id: number }
+```
+
+The rule reports two results. `CheckContext` is a violation: the name reaches the entry through `export *` and a renamed re-export, `export_target` leads to the `ValidationContext` declaration in `context.ts`, and its `db` property is `Knex`, whose `type_named` origin is the package `"knex"`. `StationEvent` is indeterminate: it is an interface, so lintai does not expand its members and marks it `/members_omitted`, and the rule does not pretend that it is safe. `EventRef` gives nothing, because its structure is fully represented and contains no banned type. `Knex` is itself an interface with `/members_omitted`, so `CheckContext` is also uncertain, and `!violation(E, Name)` keeps it to one result.
+
+The rule classifies types by package origin, not by type id. Two installed copies of `knex` have different type ids but both have the origin `"knex"`, so the rule matches both. A workspace type that happens to be called `Knex` is not a package type and does not match.
+
+Expect more indeterminate results than violations at first. `Promise<T>`, `T[]` and other library interfaces are also marked `/members_omitted`, so `export function load(): Promise<EventRef>` is indeterminate. To accept those wrappers while still checking their type arguments, use the narrower helpers from section 15 in place of `type_reaches_incomplete`. In the other direction, `any`, `unknown` and an unconstrained type parameter carry no marker, so `{ db: any }` gives no result even though nothing proves it safe. Handle them in a separate rule if they matter to you.
+
+`--severity` and linter levels apply to a whole rule, not to one predicate. To keep violations as errors and make uncertainty a warning, move `indeterminate` and `inventory_incomplete` into a second rule file, and share the Datalog through a `dl` fragment in a helper module, that is, a file with no default export.
+
+The rule reads the source entry as an analyzed module. If other packages import the build output, check the source entry anyway: a source association links declarations, but it does not bring the types of an auxiliary source program into the snapshot. Finally, these facts are the checker's view of the declared types. They do not prove what values exist at runtime.
