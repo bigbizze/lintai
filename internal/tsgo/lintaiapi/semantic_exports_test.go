@@ -9,6 +9,25 @@ import (
 	"testing"
 )
 
+func TestConflictSourceBindingsWithMaps(t *testing.T) {
+	bindings := []SourceBindingFact{
+		{CheckedDeclarations: []string{"a", "b"}, SourceDeclarations: []string{"one", "two"}},
+		{CheckedDeclarations: []string{"a"}, SourceDeclarations: []string{"other"}, Incomplete: []string{"unresolved"}},
+		{CheckedDeclarations: []string{"a"}},
+		{CheckedDeclarations: []string{"unlinked"}, SourceDeclarations: []string{"other"}},
+	}
+	links := []DeclarationSourceFact{
+		{CheckedDecl: "a", SourceDecl: "one"},
+		{CheckedDecl: "b", SourceDecl: "two"},
+		{CheckedDecl: "a", SourceDecl: "two"},
+		{CheckedDecl: "unrelated", SourceDecl: "other"},
+	}
+	got := conflictSourceBindingsWithMaps(bindings, links)
+	if len(got[0].Incomplete) != 0 || !slices.Equal(got[1].Incomplete, []string{AssociationConflict, "unresolved"}) || len(got[2].Incomplete) != 0 || len(got[3].Incomplete) != 0 {
+		t.Fatalf("unexpected binding conflicts: %+v", got)
+	}
+}
+
 func TestSemanticExportsKeepCheckerBindingsAndContributionProvenance(t *testing.T) {
 	snapshot := buildTestSnapshot(t, map[string]string{
 		"src/base.ts": `export interface Token { value: string }

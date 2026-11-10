@@ -89,9 +89,9 @@ type sourceLinksDocument struct {
 }
 
 type sourceLinksDocumentEntry struct {
-	CheckedEntry   string `json:"checkedEntry"`
-	SourceEntry    string `json:"sourceEntry"`
-	SourceTsconfig string `json:"sourceTsconfig,omitempty"`
+	CheckedEntry   string          `json:"checkedEntry"`
+	SourceEntry    string          `json:"sourceEntry"`
+	SourceTsconfig json.RawMessage `json:"sourceTsconfig,omitempty"`
 }
 
 func readSourceLinks(workspaceRoot, option string, caseSensitivity tspath.CaseSensitivity) ([]configuredSourceEntry, string, error) {
@@ -142,8 +142,15 @@ func readSourceLinks(workspaceRoot, option string, caseSensitivity tspath.CaseSe
 			return nil, "", fmt.Errorf("invalid --source-links: entries[%d].sourceEntry: %w", index, err)
 		}
 		config, configPath := "", ""
-		if raw.SourceTsconfig != "" {
-			config, configPath, _, err = canonicalEntryPath(workspaceRoot, rootKey, raw.SourceTsconfig, caseSensitivity)
+		if raw.SourceTsconfig != nil {
+			var selector string
+			if bytes.Equal(bytes.TrimSpace(raw.SourceTsconfig), []byte("null")) {
+				return nil, "", fmt.Errorf("invalid --source-links: entries[%d].sourceTsconfig must be a string", index)
+			}
+			if err := json.Unmarshal(raw.SourceTsconfig, &selector); err != nil {
+				return nil, "", fmt.Errorf("invalid --source-links: entries[%d].sourceTsconfig must be a string: %w", index, err)
+			}
+			config, configPath, _, err = canonicalEntryPath(workspaceRoot, rootKey, selector, caseSensitivity)
 			if err != nil {
 				return nil, "", fmt.Errorf("invalid --source-links: entries[%d].sourceTsconfig: %w", index, err)
 			}

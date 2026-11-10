@@ -1458,14 +1458,27 @@ func mergeSourceBindingObservations(items []SourceBindingFact) []SourceBindingFa
 // link leaves its observed source declaration set. A failed attempt observed
 // no source set, so there is nothing to compare.
 func conflictSourceBindingsWithMaps(bindings []SourceBindingFact, links []DeclarationSourceFact) []SourceBindingFact {
+	byChecked := make(map[string][]string, len(links))
+	for _, link := range links {
+		byChecked[link.CheckedDecl] = append(byChecked[link.CheckedDecl], link.SourceDecl)
+	}
 	for index := range bindings {
 		if len(bindings[index].SourceDeclarations) == 0 {
 			continue
 		}
-		for _, link := range links {
-			if !slices.Contains(bindings[index].CheckedDeclarations, link.CheckedDecl) || slices.Contains(bindings[index].SourceDeclarations, link.SourceDecl) {
-				continue
+		conflict := false
+		for _, checked := range bindings[index].CheckedDeclarations {
+			for _, source := range byChecked[checked] {
+				if !slices.Contains(bindings[index].SourceDeclarations, source) {
+					conflict = true
+					break
+				}
 			}
+			if conflict {
+				break
+			}
+		}
+		if conflict {
 			bindings[index].Incomplete = sortedUnique(append(bindings[index].Incomplete, AssociationConflict))
 		}
 	}
