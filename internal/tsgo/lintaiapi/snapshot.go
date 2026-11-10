@@ -1740,7 +1740,7 @@ func (e *extractor) collectCall(source callSource, node *ast.Node) {
 	}
 	if target == nil {
 		callee := e.calleeSymbol(node)
-		if callee != nil && callee.Flags()&ast.SymbolFlagsAccessor != 0 {
+		if accessorSymbol(callee) {
 			e.recordUnresolvedCall(source, location)
 			return
 		}
@@ -2156,6 +2156,12 @@ func mutableFunctionBinding(symbol *ast.Symbol) bool {
 	return false
 }
 
+func accessorSymbol(symbol *ast.Symbol) bool {
+	return symbol != nil && (symbol.Flags()&ast.SymbolFlagsAccessor != 0 || slices.ContainsFunc(symbol.Declarations(), func(declaration *ast.Node) bool {
+		return ast.IsGetAccessorDeclaration(declaration) || ast.IsSetAccessorDeclaration(declaration)
+	}))
+}
+
 func (e *extractor) certainBindingTarget(symbol *ast.Symbol) *Function {
 	if symbol == nil {
 		return nil
@@ -2163,7 +2169,7 @@ func (e *extractor) certainBindingTarget(symbol *ast.Symbol) *Function {
 	if symbol.Flags()&ast.SymbolFlagsAlias != 0 {
 		symbol = e.checker.SkipAlias(symbol)
 	}
-	if symbol == nil || symbol.Flags()&ast.SymbolFlagsAccessor != 0 || mutableFunctionBinding(symbol) {
+	if symbol == nil || accessorSymbol(symbol) || mutableFunctionBinding(symbol) {
 		return nil
 	}
 	return e.lookupFunction(symbol)

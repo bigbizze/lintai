@@ -212,7 +212,7 @@ class Worker {
 }
 const worker = new Worker();
 const external = new External();
-export function invoke() {
+export function invoke(mixed: Worker | { run(): void }) {
   box.run();
   box.callback();
   new box.maker();
@@ -221,6 +221,7 @@ export function invoke() {
   worker.method();
   external.run();
   external.method();
+  mixed.run();
 }
 `,
 	})
@@ -246,6 +247,7 @@ export function invoke() {
 		"22: call Worker.method",
 		"23: unresolved",
 		"24: external pkg External.method",
+		"25: unresolved",
 	}
 	if !slices.Equal(calls, want) {
 		t.Fatalf("call outcomes differ:\ngot:\n%s\nwant:\n%s", strings.Join(calls, "\n"), strings.Join(want, "\n"))
