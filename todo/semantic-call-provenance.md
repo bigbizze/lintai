@@ -98,7 +98,7 @@ Provenance must not remove `call_unresolved`, add `call_edge`, change `external_
 
 When combining programs, preserve each observation's selected declaration, member evidence, and completeness before unioning facts. Compare observations only for programs that actually analyzed that site. Retain observed declarations and reasons; mark disagreement `/conflict`. A program that did not analyze the file is not an empty observation. An incomplete observation must not be hidden by another program's complete result. Do not mutate a declaration's lexical member relationship to reconcile differing call-site observations.
 
-Existing call-site IDs can depend on runtime classification or target. Correlate program observations internally by canonical source file, invocation token offset, and invocation kind, not just by the emitted site ID. If the same invocation has different emitted IDs across programs, keep those IDs and attach `/conflict` to each affected site. Keep each selected declaration attached to its own observed site; do not invent cross-program declaration/site pairs.
+Existing call-site IDs can depend on runtime classification or target. Correlate program observations internally by canonical source file, invocation token offset, invocation end offset, and AST node kind, not just by the emitted site ID. If the same invocation has different emitted IDs across programs, keep those IDs and attach `/conflict` to each affected site. Keep each selected declaration attached to its own observed site; do not invent cross-program declaration/site pairs.
 
 ## 6. Rule author contract
 
@@ -156,7 +156,7 @@ These baseline and measured implementation results are single local observations
 
 | Input | Baseline | Measured implementation | Preserved evidence |
 | --- | --- | --- | --- |
-| Representative client, 11 files | 9,269 facts; 0.284 s | 11,783 facts; 0.242 s | Runtime and type facts byte-for-byte identical; 203 type entities unchanged. |
+| Representative client, 11 files | 9,269 facts; 0.284 s | 11,722 facts; 0.175 s | Runtime and type facts byte-for-byte identical; 203 type entities unchanged. |
 | Existing static measurement script | 176 facts; 0.052 s; 46.8 MiB | 176 facts; 0.041 s; 46.8 MiB | Fact count and peak memory unchanged. |
 
-The client result contains 1,227 `call_declaration`, 146 `declaration_member` and 123 `call_declaration_incomplete` rows. Extraction retains only selected endpoints and per-site observations, without an all-pairs closure or recursive member inventory.
+The client result contains 1,227 `call_declaration`, 146 `declaration_member` and 62 `call_declaration_incomplete` rows. Extraction retains only selected endpoints and per-site observations, without an all-pairs closure or recursive member inventory.

@@ -42,13 +42,8 @@ type callDeclarationObservation struct {
 
 func (e *extractor) collectCallDeclaration(node *ast.Node, site string) {
 	file := ast.GetSourceFileOfNode(node)
-	kind := "call"
-	if ast.IsNewExpression(node) {
-		kind = "new"
-	} else if ast.IsTaggedTemplateExpression(node) {
-		kind = "tagged_template"
-	}
-	key, _ := json.Marshal([]any{"invocation-v1", e.canonicalFileIdentity(file.FileName().AsString()), scanner.GetTokenPosOfNode(node, file, false), kind})
+	// End offsets distinguish nested invocations that share a start token.
+	key, _ := json.Marshal([]any{e.canonicalFileIdentity(file.FileName().AsString()), scanner.GetTokenPosOfNode(node, file, false), node.End(), node.Kind})
 	observation := callDeclarationObservation{InvocationKey: string(key), Site: site}
 	defer func() {
 		e.callDeclarationObservations = append(e.callDeclarationObservations, observation)
@@ -171,10 +166,20 @@ func (e *extractor) callDeclarationMember(declaration *ast.Node, id string) (*De
 // property signature declarations and must not become the callable endpoint.
 func (e *extractor) callUsesUnassociatedProperty(node *ast.Node) bool {
 	callee := ast.SkipOuterExpressions(calleeOf(node), ast.OEKAll)
-	if !ast.IsPropertyAccessExpression(callee) && !ast.IsElementAccessExpression(callee) {
+	var symbol *ast.Symbol
+	switch {
+	case ast.IsPropertyAccessExpression(callee):
+		symbol = e.checker.GetSymbolAtLocation(callee)
+	case ast.IsElementAccessExpression(callee):
+		argument := callee.AsElementAccessExpression().ArgumentExpression
+		if argument == nil || !(ast.IsStringLiteralLike(argument) || ast.IsNumericLiteral(argument)) {
+			return false
+		}
+		// The checker resolves static element members at their argument node.
+		symbol = e.checker.GetSymbolAtLocation(argument)
+	default:
 		return false
 	}
-	symbol := e.checker.GetSymbolAtLocation(callee)
 	if symbol != nil {
 		for _, declaration := range symbol.Declarations() {
 			if declaration.Kind == ast.KindPropertySignature || ast.IsPropertyDeclaration(declaration) {

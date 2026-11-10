@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bigbizze/lintai/internal/tsgo/internal/ast"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/bundled"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/compiler"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/vfs/osvfs"
@@ -45,6 +46,7 @@ function exercise(cap: Capabilities, other: Other, inline: Inline, getter: Gette
   inline.inline(1);
   inline.object(1);
   inline.shared();
+  inline["shared"]();
   (inline.shared satisfies Shared)();
   (inline.shared as Shared)();
   getter.returned();
@@ -98,10 +100,12 @@ function exercise(cap: Capabilities, other: Other, inline: Inline, getter: Gette
 		runtimeLocations[call.SemanticKey] = call.Range
 	}
 	var writes []string
+	var shared []string
 	var overloads []callDeclarationObservation
 	for _, test := range []struct {
 		call, owner, member, reason string
-		kind, selectedSource        string
+		kind                        ast.Kind
+		selectedSource              string
 		runtimeFlexible             bool
 	}{
 		{call: "cap.store.read()", owner: "Reader", member: "read"},
@@ -111,6 +115,7 @@ function exercise(cap: Capabilities, other: Other, inline: Inline, getter: Gette
 		{call: "inline.inline(1)", owner: "Inline", member: "inline"},
 		{call: "inline.object(1)", owner: "Inline", member: "object"},
 		{call: "inline.shared()", reason: "unsupported", selectedSource: "type Shared = () => void;"},
+		{call: `inline["shared"]()`, reason: "unsupported", selectedSource: "type Shared = () => void;"},
 		{call: "(inline.shared satisfies Shared)()", reason: "unsupported", selectedSource: "type Shared = () => void;"},
 		{call: "(inline.shared as Shared)()", reason: "unsupported", selectedSource: "type Shared = () => void;"},
 		{call: "getter.returned()"},
@@ -122,8 +127,8 @@ function exercise(cap: Capabilities, other: Other, inline: Inline, getter: Gette
 		{call: "free()"},
 		{call: `overloaded.choose("text")`, owner: "Overloaded", member: "choose", selectedSource: "choose(value: string): string;", runtimeFlexible: true},
 		{call: "overloaded.choose(1)", owner: "Overloaded", member: "choose", selectedSource: "choose(value: number): number;", runtimeFlexible: true},
-		{call: "new Overloaded()", kind: "new", selectedSource: "constructor() {}", runtimeFlexible: true},
-		{call: "tag`hello`", kind: "tagged_template", selectedSource: "function tag(parts: TemplateStringsArray): string", runtimeFlexible: true},
+		{call: "new Overloaded()", kind: ast.KindNewExpression, selectedSource: "constructor() {}", runtimeFlexible: true},
+		{call: "tag`hello`", kind: ast.KindTaggedTemplateExpression, selectedSource: "function tag(parts: TemplateStringsArray): string", runtimeFlexible: true},
 	} {
 		t.Run(test.call, func(t *testing.T) {
 			offset := strings.Index(source, "  "+test.call) + 2
@@ -131,10 +136,10 @@ function exercise(cap: Capabilities, other: Other, inline: Inline, getter: Gette
 				t.Fatal("fixture call not found")
 			}
 			kind := test.kind
-			if kind == "" {
-				kind = "call"
+			if kind == ast.KindUnknown {
+				kind = ast.KindCallExpression
 			}
-			key, _ := json.Marshal([]any{"invocation-v1", "src/calls.ts", offset, kind})
+			key, _ := json.Marshal([]any{"src/calls.ts", offset, offset + len(test.call), kind})
 			observation, ok := observations[string(key)]
 			if !ok {
 				t.Fatalf("missing observation for %s", key)
@@ -164,6 +169,9 @@ function exercise(cap: Capabilities, other: Other, inline: Inline, getter: Gette
 				if selectedOffset < 0 || declaration.Location.File != "src/calls.ts" || declaration.Location.StartLine != strings.Count(source[:selectedOffset], "\n")+1 {
 					t.Fatalf("selected wrong source declaration for %s: %+v", test.call, declaration)
 				}
+			}
+			if test.selectedSource == "type Shared = () => void;" {
+				shared = append(shared, observation.Declaration)
 			}
 			if test.owner == "Overloaded" {
 				if declaration.Function != "" || len(declaration.FunctionObservations) != 0 {
@@ -198,6 +206,14 @@ function exercise(cap: Capabilities, other: Other, inline: Inline, getter: Gette
 	}) {
 		t.Fatal("method implementation was not independently collected")
 	}
+	if len(shared) != 4 {
+		t.Fatalf("missing shared alias observations: %v", shared)
+	}
+	for _, declaration := range shared {
+		if declaration != shared[0] {
+			t.Fatal("dot, static-element, and wrapped alias calls selected different declarations")
+		}
+	}
 	for _, write := range writes {
 		if write != writes[0] {
 			t.Fatal("direct, aliased, inherited, optional, and static-element writes selected different declarations")
@@ -215,6 +231,12 @@ uncertain();
 task();
 stable();
 Math.abs(-1);
+declare function make(): () => void;
+declare function fluent(): { next(): void };
+function partition() {
+make()();
+fluent().next();
+}
 const values: number[] = [];
 values.map(task);
 function escaped(first: (n: number) => number, second: (n: number) => number) {
@@ -271,8 +293,11 @@ export function task(): number { return 2; }`,
 	}
 	observationAt := func(partial *Snapshot, call string) callDeclarationObservation {
 		t.Helper()
-		offset := strings.Index(source, call)
-		key, _ := json.Marshal([]any{"invocation-v1", "shared/calls.ts", offset, "call"})
+		offset := strings.Index(source, "\n"+call) + 1
+		if offset == 0 {
+			t.Fatalf("fixture call not found: %s", call)
+		}
+		key, _ := json.Marshal([]any{"shared/calls.ts", offset, offset + len(call), ast.KindCallExpression})
 		for _, observation := range partial.callDeclarationObservations {
 			if observation.InvocationKey == string(key) {
 				return observation
@@ -380,6 +405,25 @@ export function task(): number { return 2; }`,
 			}
 		})
 	}
+	t.Run("nested and fluent invocation partition", func(t *testing.T) {
+		keys := make(map[string]bool)
+		for _, call := range []string{"make()", "make()()", "fluent()", "fluent().next()"} {
+			red := observationAt(partials[0], call)
+			blue := observationAt(partials[1], call)
+			if keys[red.InvocationKey] || red.InvocationKey != blue.InvocationKey {
+				t.Fatalf("invocations collided or lost cross-program correlation: red=%+v blue=%+v", red, blue)
+			}
+			keys[red.InvocationKey] = true
+			for _, observation := range []callDeclarationObservation{red, blue} {
+				if observation.Declaration == "" || !slices.Contains(merged.CallDeclarations, CallDeclarationFact{Site: observation.Site, Declaration: observation.Declaration}) {
+					t.Fatalf("lost invocation's own declaration/site pair: %+v", observation)
+				}
+				if slices.Contains(merged.CallDeclarationIncomplete, CallDeclarationIncompleteFact{Site: observation.Site, Reason: "conflict"}) {
+					t.Fatalf("false nested/fluent invocation conflict: %+v", observation)
+				}
+			}
+		}
+	})
 	// Both ordinary escaped parameters and the callback whose collected target
 	// was filtered out remain unsupported, without conflicts between values.
 	escapes := 0
