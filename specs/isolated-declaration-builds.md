@@ -6,7 +6,7 @@ facts.
 
 ## Starting point
 
-The implemented [PR3 source-association contract](https://github.com/bigbizze/lintai/pull/18)
+The implemented [source-association contract](semantic-source-associations.md)
 defines normal resolution, project-reference redirects, declaration-map and
 configured source-entry evidence, and snapshot invalidation for association
 inputs.

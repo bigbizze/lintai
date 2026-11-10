@@ -270,9 +270,10 @@ Likely checks include:
 ## 21. Isolated declaration builds and source links
 
 This design-only follow-up considers optional isolated build execution and its
-relationship to source links. It proposes source-first resolution,
-project-reference redirects, validated declaration maps, and an explicit
-configured binding fallback whose detailed contract remains to be specified. See
+relationship to the implemented [source-association contract](semantic-source-associations.md).
+That contract covers source-first resolution, project-reference redirects,
+validated declaration maps, and an explicit configured binding fallback. Only
+the optional build runner remains future work. See
 [`isolated-declaration-builds.md`](isolated-declaration-builds.md). A future
 build runner must keep captured output distinct from evidence of source
 provenance.
