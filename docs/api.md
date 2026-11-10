@@ -1,5 +1,9 @@
 # API and Caveats
 
+## Declared call provenance (0.8.0)
+
+Rules can identify the checked signature and lexical contract member at a call site through `call_declaration` and `declaration_member`. `call_declaration_incomplete` exposes unresolved, synthetic, unsupported, or conflicting evidence. These facts preserve existing runtime call classifications: a known declared member can still have an unresolved runtime implementation. The included Writer policy distinguishes forbidden writes from cases it cannot decide, including properties that borrow another member's signature.
+
 ## Semantic extraction and rule inspection (0.7.0)
 
 This release adds public export and declaration inventories, checked-to-source declaration associations, explicit type-opacity facts, and suspension sites for `await`, `for await`, and module-scope suspension. Shared lexical ownership keeps call, reference, and suspension facts attached to the correct function or module. Rule listings expose validated versions, reported predicates, and `expectNonEmpty` declarations.
@@ -206,7 +210,7 @@ Caveats:
 
 ### Declared members at call sites
 
-Implemented in this change; unavailable in published 0.7.0. The [capability policy](../testdata/call-provenance/writer-policy.ts) uses these facts to distinguish forbidden members from incomplete evidence.
+Available starting with 0.8.0. The [capability policy](../testdata/call-provenance/writer-policy.ts) uses these facts to distinguish forbidden members from incomplete evidence.
 
 TypeScript can know which declared member a call uses even when lintai cannot know which implementation runs. For example:
 

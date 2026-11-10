@@ -1,6 +1,6 @@
 # Semantic extraction completeness
 
-Status: implementation status is recorded in each feature section. Sections without an implementation status remain proposed. Section 7 is implemented in this change and is unavailable in published 0.7.0. No release number is assigned.
+Status: implementation status is recorded in each feature section. Sections without an implementation status remain proposed. Section 7 is implemented in 0.8.0.
 
 ## 1. Purpose and authority
 
@@ -143,7 +143,7 @@ An `async` function with no such syntax does not get `fn_suspends`. These facts 
 
 The implementation record and bounded member-association rules are in [declared call provenance implementation](../todo/semantic-call-provenance.md).
 
-Status: implemented in this change, including the [Writer capability policy](../testdata/call-provenance/writer-policy.ts). Focused extractor coverage passed; the engine policy test passed all four variants (two forbidden writes plus three indeterminate calls, wrapped static index, missing public alias, and no forbidden writes). Actual CLI and serve extraction produced the same five diagnostics; CLI exited 1 and serve shutdown exited 0. The full Go suite passed 258 tests, with only expected additive fact golden updates required. The PR records full CI and review results. See the [implementation and measurement record](../todo/semantic-call-provenance.md#verification).
+Status: implemented in 0.8.0, including the [Writer capability policy](../testdata/call-provenance/writer-policy.ts). Focused extractor and policy coverage passed, including borrowed-member signatures and selected intersection overloads. Actual CLI and serve extraction produced the same five diagnostics for the standard example. Full Go tests, CI, and final review passed before merge. See the [implementation and measurement record](../todo/semantic-call-provenance.md#verification).
 
 ### 7.1 Relations and meaning
 

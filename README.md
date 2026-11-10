@@ -68,7 +68,7 @@ A rule can match the member declaration selected by the compiler. It does not ne
 
 This tells you which declared operation the call uses. It does **not** establish which implementation runs at runtime. See the [working Writer policy](testdata/call-provenance/writer-policy.ts) and its [example and expected results](docs/examples.md#18-forbid-a-declared-capability-member).
 
-**Branch status:** declared call provenance is implemented on this branch but is not included in the published 0.7.0 packages. To try that feature before release, [build from source](docs/install.md#build-from-source-and-caveats).
+Declared call provenance requires lintai 0.8.0 or later. See the [API reference](docs/api.md#declared-members-at-call-sites) for supported forms and incomplete evidence.
 
 ## Where it fits
 

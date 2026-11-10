@@ -1,6 +1,6 @@
 # Declared call provenance implementation
 
-Status: implemented in this change; unavailable in published 0.7.0. The detailed requirements below remain authoritative. Full CI and final review remain to follow.
+Status: implemented in 0.8.0. The detailed requirements below remain authoritative. Final review and CI passed before merge.
 
 This specification implements section 7 of [semantic extraction completeness](../specs/semantic-extraction-completeness.md#7-declared-call-provenance). It uses the declaration identity contract in [semantic source associations](../specs/semantic-source-associations.md#2-entity-identity-and-locations). It adds evidence about the declaration selected by the checker, not evidence about which runtime implementation executes.
 
@@ -145,10 +145,10 @@ Complete when the relations survive CLI and serve extraction, the policy disting
 ## Verification
 
 - Focused extractor fixtures passed, including precise member identity, unsupported/synthetic/unresolved evidence and configuration conflicts.
-- `TestDeclaredWriterCapabilityPolicy` passed all four variants: two forbidden writes plus three indeterminate calls, wrapped static index, missing public alias, and no forbidden writes.
+- `TestDeclaredWriterCapabilityPolicy` passed the standard five-diagnostic example, wrapped static index, missing public alias, no forbidden writes, and borrowed-member signature variants.
 - Actual CLI analysis reported exactly the five expected diagnostics with exit 1. Serve initialization and file diagnostics produced the same five; shutdown exited 0.
 - The core fixture's four baseline runtime-unresolved calls now have four selected declaration rows and three lexical member rows. Runtime facts are unchanged.
-- The full Go suite passed 258 tests. Only expected additive fact golden updates were required. The PR records the full CI and review results.
+- The full Go suite passed after the review fixes. Only the feature's expected additive fact golden updates were required; the review fixes did not change goldens.
 
 ## Measured cost
 
