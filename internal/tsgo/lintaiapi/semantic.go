@@ -166,7 +166,7 @@ func (e *extractor) checkedBindings(file *ast.SourceFile) checkedBindingInventor
 		}
 	}
 
-	exports := e.checker.GetExportsOfModule(file.Symbol)
+	exports := e.checkerExports(file)
 	slices.SortFunc(exports, func(left, right *ast.Symbol) int { return strings.Compare(left.Name(), right.Name()) })
 	seen := make(map[bindingKey]bool)
 	var bindings []moduleBinding
@@ -347,12 +347,12 @@ func (e *extractor) collectSemanticExports(file *ast.SourceFile) {
 		if binding.symbol != nil {
 			targetIDs = e.declarationIDs(binding.symbol.Declarations())
 		}
-		items := e.exportContributionsForBinding(file, binding.name, targetIDs, inventory.contributions, inventory.stars)
+		items := e.exportContributionsForBinding(file, binding.name, binding.space, targetIDs, inventory.contributions, inventory.stars)
 		complete := binding.complete
 		var reasons, targets []string
 		if binding.ambiguous {
 			reasons = append(reasons, AssociationConflict)
-			items = e.exportContributionsForBinding(file, binding.name, nil, inventory.contributions, inventory.stars)
+			items = e.exportContributionsForBinding(file, binding.name, binding.space, nil, inventory.contributions, inventory.stars)
 		} else {
 			for _, declaration := range binding.declarations {
 				id, supported := e.addDeclaration(declaration, binding.symbol, binding.name, binding.declarationSpace)
@@ -381,7 +381,7 @@ func (e *extractor) collectSemanticExports(file *ast.SourceFile) {
 	})
 }
 
-func (e *extractor) exportContributionsForBinding(file *ast.SourceFile, name string, targetIDs []string, contributions map[string][]syntaxExportContribution, stars []syntaxExportContribution) []syntaxExportContribution {
+func (e *extractor) exportContributionsForBinding(file *ast.SourceFile, name, space string, targetIDs []string, contributions map[string][]syntaxExportContribution, stars []syntaxExportContribution) []syntaxExportContribution {
 	items := contributions[name]
 	if len(items) == 0 {
 		items = stars
@@ -403,11 +403,24 @@ func (e *extractor) exportContributionsForBinding(file *ast.SourceFile, name str
 			result = append(result, item)
 			continue
 		}
+		if item.star {
+			if source := e.sourceFileByIdentity(item.module); source != nil {
+				if exported := e.exportedSymbol(source, name); exported != nil {
+					spaces := e.effectiveBindingSpaces(source, exported)
+					if len(spaces) == 0 {
+						spaces = []string{SpaceValue}
+					}
+					if !slices.Contains(spaces, space) {
+						continue
+					}
+				}
+			}
+		}
 		candidateIDs := e.contributionDeclarations(file, item, name)
 		if len(targetIDs) > 0 && len(candidateIDs) > 0 && !slices.Equal(sortedUnique(candidateIDs), targetIDs) {
 			continue
 		}
-		if item.reexport && item.module != "" && len(candidateIDs) == 0 {
+		if item.reexport && item.module != "" && len(candidateIDs) == 0 && (item.star || len(targetIDs) > 0) {
 			continue
 		}
 		result = append(result, item)
@@ -690,7 +703,11 @@ func (e *extractor) addDeclaration(node *ast.Node, symbol *ast.Symbol, publicNam
 		return id, false
 	}
 	e.addDeclarationType(fact, space, e.emitFunctionType(typeValue, node))
-	if function := e.lookupFunction(node); function != nil {
+	function := e.functionNodes[node]
+	if function == nil {
+		function = e.functionKeys[nodeKey(node)]
+	}
+	if function != nil {
 		fact.FunctionObservations = append(fact.FunctionObservations, function.SemanticKey)
 		fact.Function = function.SemanticKey
 		if slices.ContainsFunc(function.SignatureObservations, func(item FunctionSignatureObservation) bool { return !item.Complete }) {
@@ -849,6 +866,20 @@ func exportSpaces(symbol *ast.Symbol) []string {
 	return spaces
 }
 
+func (e *extractor) checkerExports(file *ast.SourceFile) []*ast.Symbol {
+	exports := e.checker.GetExportsOfModule(file.Symbol)
+	if file.Symbol.Exports()[ast.InternalSymbolNameExportEquals] == nil {
+		return exports
+	}
+	filtered := exports[:0]
+	for _, symbol := range exports {
+		if symbol != nil && file.Symbol.Exports()[symbol.Name()] != nil {
+			filtered = append(filtered, symbol)
+		}
+	}
+	return filtered
+}
+
 // exportedSymbol indexes each module once per extractor. Besides avoiding a
 // repeated checker inventory, this lets both exports and source bindings use
 // the same effective-space rules through re-export chains.
@@ -862,7 +893,7 @@ func (e *extractor) exportedSymbol(file *ast.SourceFile, name string) *ast.Symbo
 	index, ok := e.moduleExportIndex[file]
 	if !ok {
 		index = make(map[string]*ast.Symbol)
-		for _, symbol := range e.checker.GetExportsOfModule(file.Symbol) {
+		for _, symbol := range e.checkerExports(file) {
 			if symbol != nil {
 				index[symbol.Name()] = symbol
 			}
