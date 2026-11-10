@@ -417,6 +417,7 @@ type extractor struct {
 	inputs                      []SnapshotInput
 	declarationNodes            map[string]*ast.Node
 	mapAttempted                map[string]struct{}
+	declarationMaps             *declarationMapCache
 	moduleExportIndex           map[*ast.SourceFile]map[string]*ast.Symbol
 	semanticBindingCache        *semanticBindingCache
 }
