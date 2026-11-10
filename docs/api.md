@@ -36,17 +36,17 @@ export const config = z.object({ pureDir: z.string().default("src/pure") });
 export default rule("arch.pure-no-effects")
 	.version(1)
 	.program(({ env }) => dl`
-		Decl reaches_await(Fn).
-		reaches_await(Fn) :- fn_awaits(Fn).
-		reaches_await(Fn) :- call_edge(_, Fn, Callee), reaches_await(Callee).
+		Decl reaches_suspension(Fn).
+		reaches_suspension(Fn) :- fn_suspends(Fn).
+		reaches_suspension(Fn) :- call_edge(Site, Fn, Callee), !site_attribution_unknown(Site), reaches_suspension(Callee).
 
 		Decl violation(Fn, Name).
 		violation(Fn, Name) :-
 			fn(Fn, File, Name), glob(File, ${`${env.pureDir}/**`}),
-			call_edge(_, Fn, Callee), reaches_await(Callee).
+			call_edge(Site, Fn, Callee), !site_attribution_unknown(Site), reaches_suspension(Callee).
 	`)
 	.report("violation")
-	.message((row) => `Pure function ${row.Name} transitively calls effectful code`);
+	.message((row) => `Pure function ${row.Name} calls code with suspension syntax`);
 ```
 
 ### Builder methods
@@ -130,10 +130,16 @@ Conventions:
 | `fn(Fn, File, Name)` | A collected function. `Name` is the display name (`Container.local`). |
 | `fn_kind(Fn, Kind)` | `"function"`, `"function_expression"`, `"arrow_function"`, `"method"`, `"constructor"`, `"get_accessor"` or `"set_accessor"`. |
 | `fn_container(Fn, Container)` | The container name, when it is not empty. |
-| `fn_exported(Fn)`, `fn_async(Fn)`, `fn_awaits(Fn)` | Exported, has the `async` modifier, contains `await`. |
+| `fn_exported(Fn)`, `fn_async(Fn)`, `fn_awaits(Fn)` | Exported, has the `async` modifier, or owns an ordinary `await` expression. `fn_awaits` does not include `for await` or `await using`. |
 | `fn_param(Fn, Index, Type)` | One row per parameter. `Index` starts at 0. `Type` is a type entity id. When tsconfig files see different signatures, the rows are the union of all of them. See [Observations across tsconfig files](#observations-across-tsconfig-files). |
 | `fn_returns(Fn, Type)` | The return type, as a type entity id. The rows are a union in the same way as `fn_param`. |
 | `fn_signature_conflict(Fn)` | Complete signatures of `Fn` from different tsconfig files disagree. Do not combine its `fn_param` and `fn_returns` rows as one signature. |
+| `fn_signature_omitted(Fn)` | This anonymous function has an identity for ownership, but its signature was deliberately skipped. |
+| `fn_signature_unresolved(Fn)` | Signature collection was attempted, but a signature or required type was missing. Some parameter or return rows may still be present. This can coexist with `fn_signature_conflict`. |
+| `suspension_site(Site, File, Kind)` | One site for `/await`, `/for_await` or `/await_using`. |
+| `suspension_in_fn(Site, Fn)` | The site belongs to `Fn`. |
+| `suspension_at_module(Site)` | The site belongs to module evaluation. |
+| `site_attribution_unsupported(Site, Reason)` | The owner could not be represented: `/instance_construction` or `/unsupported_context`. |
 | `import_edge(Imp, From, To, Specifier)` | One row per module reference with a string specifier: `import`, `export ... from`, `import()`, `require()`, `import x = require()` and `typeof import()`. `To` is the workspace-relative path when `import_internal` is set, otherwise the specifier. |
 | `import_form(Imp, Form)` | `/static`, `/reexport`, `/dynamic`, `/require`, `/import_equals` or `/import_type`. Every import has one row. |
 | `import_internal(Imp)` | The import resolves to a workspace file that is not in `node_modules`. |
@@ -145,9 +151,9 @@ Conventions:
 | `import_symbol_type_only(Imp, Name)` | `import { type X }`. |
 | `call_edge(Call, Caller, Callee)` | A call to a collected function. The callee is the declaration that the type checker resolves for the call. `Caller` is the module path for a call at module scope. A call through a function-typed value (a callback parameter, or a property of a record of functions) has no row; it is a `call_unresolved` row. |
 | `external_call(Call, Caller, Module, Name)` | A call to a declaration outside the workspace sources. `Module` is `"lib"`, a package name, a `declare module` name or a `.d.ts` path. `Name` is the qualified name, for example `"JSON.parse"` or `"Set.add"`. |
-| `call_unresolved(Site, Caller)` | A call that lintai cannot follow. These are rows: a call, `new` or tagged template whose target the checker does not resolve to a collected workspace function or an external declaration (a callback, a function-typed value, an element-access callee such as `table["k"]()`, an optional call through such a value, an `any`-typed callee); `f.call(...)` and `f.apply(...)` when `f` is not a collected function; a function value that is not a collected function, passed as an argument to an external call, for example `[1].map(read)` with a parameter `read` (the row is at the argument); and `new` of a workspace class without a constructor whose instance fields have initializers that can run code. Every call site has exactly one of `call_edge`, `external_call` and `call_unresolved`. `new` of a workspace class without a constructor and without such fields runs no function and has no row. |
+| `call_unresolved(Site, Caller)` | A call that lintai cannot follow. These are rows: a call, `new` or tagged template whose target the checker does not resolve to a collected workspace function or an external declaration (a callback, a function-typed value, an element-access callee such as `table["k"]()`, an optional call through such a value, an `any`-typed callee); `f.call(...)` and `f.apply(...)` when `f` is not a collected function; a function value that is not a collected function, passed as an argument to an external call, for example `[1].map(read)` with a parameter `read` (the row is at the argument); and `new` of a workspace class without a constructor whose instance fields have initializers that can run code. Every call site has exactly one of `call_edge`, `external_call` and `call_unresolved`. `new` of a workspace class without a represented constructor is also unresolved when no target can be established. |
 | `import_opaque(Site, From)` | An `import()` or `require()` whose specifier is not a string literal, for example `import(name)` or ``import(`./${name}`)``. It has no `import_edge` row. A template literal without substitutions is a string literal and gives a normal `import_edge`. |
-| `fn_ref(Ref, From, To)` | A reference to a collected function as a value, outside the callee of a call: an argument, a stored value, a return value or a property value. An inline arrow function, function expression or object literal method that is passed as a value is a reference from the function that contains it, so `[1].map(() => Date.now())` connects the caller to the arrow function. `From` is the containing function, or the module path at module scope. Import and export specifiers are not references. |
+| `fn_ref(Ref, From, To)` | A function used as a value, for example passed, stored, returned or used as a property value. In `[1].map(() => Date.now())`, the surrounding owner has a reference to the arrow. A nested named declaration alone creates no reference. `From` is the surrounding function, the module path at module scope, or an empty string when attribution is unsupported. Import and export specifiers are not references. |
 | `type_ref(Ref, File, Name)` | A type reference. |
 | `type_ref_target(Ref, TargetFile)` | The declaring file, when it is inside the workspace. |
 | `type_kind(Type, Kind)` | The structure of a type. Every type entity has one row. `Kind` is `/any`, `/unknown`, `/never`, `/void`, `/undefined`, `/null`, `/string`, `/number`, `/bigint`, `/boolean`, `/symbol`, `/object_keyword`, `/literal`, `/type_param`, `/union`, `/intersection`, `/tuple`, `/function`, `/object` or `/other`. |
@@ -179,15 +185,25 @@ Conventions:
 | `module_directive(Dir, File, Text)` | A prologue directive, for example `"use client"`. |
 | `module_parse_error(Err, File, Message)` | The first syntax error of a file. The other facts of that file can be incomplete. |
 | `config_adjusted(Config, Option, Action)` | lintai changed a compiler option that TypeScript 7 rejects before it loaded the tsconfig `Config`. `Action` is `/removed`, `/rewritten` (`baseUrl` and `paths` become absolute `paths`) or `/replaced` (a removed `moduleResolution` becomes the TypeScript 7 default). The analysis uses the adjusted configuration, which can differ from the project's own build. |
-| `site_in_fn(Site, Fn)` | The innermost collected function that contains a call, external-call, unresolved-call, function-reference, ambient-use, global-ref or meta-access site. A site inside an anonymous callback belongs to the nearest enclosing collected function. Module-scope sites have no row. |
+| `site_in_fn(Site, Fn)` | The lexical function owner of a call, external-call, unresolved-call, function-reference, ambient-use, global-ref or meta-access site. A callback owns its own sites. Module and unsupported sites have no row. |
 | `location(Entity, File, StartLine, StartCol, EndLine, EndCol)` | The source range of every entity id. |
 
 Caveats:
 
-- `call_edge` follows only calls that the type checker resolves to one declaration. Dependency injection through records of functions or callback parameters hides the call, so `calls_reach` does not see it. These calls are `call_unresolved` rows, and the function that is passed in is a `fn_ref` row where it is passed. A strict rule uses `calls_or_refs_reach` and `fn_reaches_unresolved` to fail closed. See example 12 in [examples.md](examples.md).
+- `call_edge` follows only calls that the type checker resolves to one declaration. Calls through records of functions or callback parameters can be `call_unresolved` rows. A passed function can have a `fn_ref` row where it is passed. `calls_or_refs_reach` and `fn_reaches_unresolved` help a rule review these paths, but they do not resolve every function value or prove that it runs. See example 12 in [examples.md](examples.md).
 - an unresolved import is not internal, so `To` is the specifier. Check `import_unresolved` when a rule depends on `import_internal`.
 - `export default function () {}` and `export default () => ...` are functions named `default`.
-- a call inside an anonymous function at module scope, for example `app.get("/", () => load())` or a class `static` block, has the module path as `Caller`, even when the function runs later.
+- `app.get("/", () => load())` gives the arrow function its own identity. The arrow owns the call to `load`; a static block instead uses the surrounding class-evaluation owner. For an unsupported owner, `Caller` or `From` is an empty string and the site has `site_attribution_unsupported`.
+
+### Suspension sites and owners
+
+For `await using resource = await acquire()`, lintai records two sites: one `/await_using` for the declaration list and one `/await` for the expression. A list with several resources still has one `/await_using` site. A `for await` statement has one `/for_await` site, in addition to any other sites inside it. Locations cover the await expression, the loop, or the declaration list respectively. IDs use the workspace-relative file, kind and first-token offset, so moving a site changes its ID.
+
+A callback owns the sites in its body. Its enclosing function gets a `fn_ref` when the callback is passed, returned, assigned or used as a property value; that reference does not prove a call. A nested named declaration alone creates no reference. Parameter defaults belong to the function. Computed names, decorators, class heritage, static initializers and static blocks belong to the surrounding class or object evaluation. An instance field initializer belongs to its class's source constructor when it has a body. Without one, the site is marked `/instance_construction` instead of being assigned to the module or an outer function.
+
+Each suspension site has exactly one owner classification: function, module, or unsupported. `module_has_suspension` includes all three, so a check for module initialization also needs `suspension_at_module`. An `async` modifier or a returned promise alone creates no site. These facts describe syntax, not execution or runtime scheduling. Parser diagnostics do not establish that the rest of a file was semantically validated.
+
+Anonymous ownership-only functions use positional IDs such as `src/file.ts::arrow_function::<anonymous@42>`. Their signatures are omitted and do not add type roots. A collected `function done(): void {}` has no parameters, a `/void` return type, and neither signature marker. Rules that need a complete signature should guard against `fn_signature_omitted`, `fn_signature_unresolved` and `fn_signature_conflict`; an `/other` type with `type_incomplete` is still a collected type.
 
 ### Types
 
@@ -307,7 +323,7 @@ In a monorepo, more than one tsconfig file can compile the same file, each with 
 
 To make this visible, lintai keeps the complete answer from each checked program and compares the answers before it writes the facts. When complete answers differ, it adds a marker: `fn_signature_conflict(Fn)` when the full signatures differ, `export_incomplete(Export, /conflict)` when export targets differ, `declaration_incomplete(Decl, /conflict)` when declared types differ, and `source_binding_incomplete(Assoc, /conflict)` when source declaration sets differ. `type_incomplete(Type, /conflict)` still marks one type id with different structure. Overloads are separate declarations, so they are not a conflict. A program that did not see the entity, or saw only part of it, does not count as a complete empty answer, and its incomplete reason stays in the facts.
 
-So a rule that needs one consistent answer must exclude these markers. Use `!fn_signature_conflict(Fn)` before you combine parameters and a return type, and `!export_incomplete(Export, /conflict)` before you rely on one export target. A strict rule should report unresolved, unsupported and conflicting subjects as undecided, because leaving them out quietly is not the same as proving that a problem is absent. Known rows can still produce findings. The guard works on one entity at a time, so it does not prove that a join across different entities used answers from the same program. And the absence of a conflict does not mean that lintai saw every member of a type.
+So a rule that needs one consistent answer must exclude these markers. Use `!fn_signature_conflict(Fn)`, `!fn_signature_omitted(Fn)` and `!fn_signature_unresolved(Fn)` before you combine parameters and a return type, and `!export_incomplete(Export, /conflict)` before you rely on one export target. A strict rule should report unresolved, unsupported and conflicting subjects as undecided, because leaving them out quietly is not the same as proving that a problem is absent. Known rows can still produce findings. The guard works on one entity at a time, so it does not prove that a join across different entities used answers from the same program. And the absence of a conflict does not mean that lintai saw every member of a type.
 
 ### Source resolution order
 
@@ -390,11 +406,14 @@ The prelude is loaded before every rule program. A rule cannot redefine a prelud
 | `module_imports(From, To)` | `From` has a runtime import of `To`. |
 | `imports_reach(From, To)` | Transitive closure of `module_imports`. It stores every connected pair, O(nodes²) rows on a large graph. To check only whether a file reaches a target, use `module_reaches_ambient` or propagate backward from the target (example 16 in [examples.md](examples.md)). |
 | `calls_reach(Caller, Callee)` | Transitive closure of `call_edge`. It stores every connected pair, O(nodes²) rows on a large graph. To check only whether a function reaches a target, use `fn_reaches_ambient` or propagate backward from the target. |
+| `fn_suspends(Fn)` | `Fn` owns at least one suspension site of any of the three kinds. |
+| `module_has_suspension(File)` | The file contains a site at any scope, including unsupported sites. This alone does not mean module initialization suspends. |
+| `site_attribution_unknown(Site)` | The site has an unsupported attribution. Use `!site_attribution_unknown(Site)` after binding `Site` to exclude those sites. |
 | `fn_uses_ambient(Fn, Source)` | `Fn` contains a use of `Source`. |
 | `fn_reaches_ambient(Fn, Source)` | `Fn` uses `Source` directly or through a call chain. |
 | `module_uses_ambient(File, Source)` | `File` contains a use of `Source` at any scope. |
 | `module_reaches_ambient(File, Source)` | `File` uses `Source` directly or through runtime imports. |
-| `calls_or_refs_reach(From, To)` | Transitive closure over `call_edge` and `fn_ref` together. A function that refers to another function as a value is treated as if it called it. This is more than the code can reach, never less, for the calls that lintai sees. It stores every connected pair, O(nodes²) rows on a large graph. To check only whether a function reaches a target, use `fn_reaches_ambient_strict` or `fn_reaches_unresolved`, or propagate backward from the target. |
+| `calls_or_refs_reach(From, To)` | Transitive closure over `call_edge` and `fn_ref` together. This includes a function value even if the program never calls it. It does not resolve every call through a function value. It stores every connected pair, O(nodes²) rows on a large graph. To check only whether a function reaches a target, use `fn_reaches_ambient_strict` or `fn_reaches_unresolved`, or propagate backward from the target. |
 | `fn_has_unresolved_call(Fn)` | `Fn` directly contains a `call_unresolved` site. |
 | `module_has_unresolved_call(File)` | `File` contains a `call_unresolved` site at any scope. |
 | `fn_reaches_unresolved(Fn)` | `Fn` contains an unresolved call, directly or through `call_edge` and `fn_ref` steps. A strict rule treats this as leaving the analyzed code. |

@@ -87,6 +87,7 @@ func (b *Backend) buildAnalysisSnapshot(ctx context.Context, repoRoot, workspace
 	if err != nil {
 		return nil, err
 	}
+	assignAccessOwners(accesses, extracted.NodeOwners)
 
 	inputPaths := make([]string, 0, len(extracted.Inputs))
 	for _, input := range extracted.Inputs {
@@ -117,6 +118,8 @@ func (b *Backend) buildAnalysisSnapshot(ctx context.Context, repoRoot, workspace
 		CallsUnresolved:             convertCallsUnresolved(extracted.CallsUnresolved),
 		ImportsOpaque:               convertImportsOpaque(extracted.ImportsOpaque),
 		FnRefs:                      convertFnRefs(extracted.FnRefs),
+		SuspensionSites:             convertSuspensionSites(extracted.SuspensionSites),
+		UnsupportedAttributions:     convertUnsupportedAttributions(extracted.UnsupportedAttributions),
 		TypeRefs:                    typeRefs,
 		Accesses:                    accesses,
 		AmbientSources:              convertAmbientSources(sources),
@@ -177,16 +180,31 @@ func convertFunctions(items []lintaiapi.Function) []analysis.Function {
 			Kind:                  item.Kind,
 			FilePath:              item.FilePath,
 			ContainerName:         item.ContainerName,
-			ContainsAwait:         item.ContainsAwait,
 			IsExported:            item.IsExported,
 			IsAsync:               item.IsAsync,
 			ParameterCount:        item.ParameterCount,
 			SignatureObservations: convertSignatureObservations(item.SignatureObservations),
 			SignatureConflict:     item.SignatureConflict,
+			SignatureOmitted:      item.SignatureOmitted,
+			SignatureUnresolved:   item.SignatureUnresolved,
 			Range:                 convertLocation(item.Range),
-			BodyStart:             item.BodyStart,
-			BodyEnd:               item.BodyEnd,
 		})
+	}
+	return result
+}
+
+func convertSuspensionSites(items []lintaiapi.SuspensionSite) []analysis.SuspensionSite {
+	result := make([]analysis.SuspensionSite, 0, len(items))
+	for _, item := range items {
+		result = append(result, analysis.SuspensionSite{EntityID: item.EntityID, SemanticKey: item.SemanticKey, FilePath: item.FilePath, Kind: item.Kind, FunctionSemanticKey: item.FunctionSemanticKey, UnsupportedReason: item.UnsupportedReason, AtModule: item.AtModule, Range: convertLocation(item.Range)})
+	}
+	return result
+}
+
+func convertUnsupportedAttributions(items []lintaiapi.UnsupportedAttribution) []analysis.UnsupportedAttribution {
+	result := make([]analysis.UnsupportedAttribution, 0, len(items))
+	for _, item := range items {
+		result = append(result, analysis.UnsupportedAttribution{Site: item.Site, Reason: item.Reason})
 	}
 	return result
 }

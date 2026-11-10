@@ -3,7 +3,9 @@ package typescript
 import (
 	_ "embed"
 	"fmt"
+	"maps"
 	"math"
+	"slices"
 
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/facts"
@@ -42,8 +44,11 @@ func factsFromAnalysis(snapshot *analysis.Snapshot) ([]facts.Fact, error) {
 		if fn.IsAsync {
 			b.add("fn_async", id)
 		}
-		if fn.ContainsAwait {
-			b.add("fn_awaits", id)
+		if fn.SignatureOmitted {
+			b.add("fn_signature_omitted", id)
+		}
+		if fn.SignatureUnresolved {
+			b.add("fn_signature_unresolved", id)
 		}
 		for _, observation := range fn.SignatureObservations {
 			for index, typeID := range observation.ParameterTypes {
@@ -59,6 +64,34 @@ func factsFromAnalysis(snapshot *analysis.Snapshot) ([]facts.Fact, error) {
 			b.add("fn_signature_conflict", id)
 		}
 		b.location(fn.SemanticKey, fn.Range)
+	}
+	awaitFns := make(map[string]struct{})
+	for _, site := range snapshot.SuspensionSites {
+		id := str(site.EntityID)
+		kind, err := name(site.Kind)
+		if err != nil {
+			return nil, err
+		}
+		b.add("suspension_site", id, str(site.FilePath), kind)
+		if site.FunctionSemanticKey != "" {
+			b.add("suspension_in_fn", id, str(site.FunctionSemanticKey))
+			if site.Kind == "await" {
+				awaitFns[site.FunctionSemanticKey] = struct{}{}
+			}
+		} else if site.AtModule {
+			b.add("suspension_at_module", id)
+		}
+		b.location(site.EntityID, site.Range)
+	}
+	for _, fn := range slices.Sorted(maps.Keys(awaitFns)) {
+		b.add("fn_awaits", str(fn))
+	}
+	for _, item := range snapshot.UnsupportedAttributions {
+		reason, err := name(item.Reason)
+		if err != nil {
+			return nil, err
+		}
+		b.add("site_attribution_unsupported", str(item.Site), reason)
 	}
 	for _, edge := range snapshot.ImportEdges {
 		id := str(edge.SemanticKey)
@@ -98,7 +131,7 @@ func factsFromAnalysis(snapshot *analysis.Snapshot) ([]facts.Fact, error) {
 	for _, edge := range snapshot.CallEdges {
 		id := str(edge.SemanticKey)
 		b.add("call_edge", id, str(edge.FromSemanticKey), str(edge.ToSemanticKey))
-		if !edge.FromModule {
+		if !edge.FromModule && edge.FromSemanticKey != "" {
 			b.add("site_in_fn", id, str(edge.FromSemanticKey))
 		}
 		b.location(edge.SemanticKey, edge.Range)
@@ -106,7 +139,7 @@ func factsFromAnalysis(snapshot *analysis.Snapshot) ([]facts.Fact, error) {
 	for _, call := range snapshot.ExternalCalls {
 		id := str(call.SemanticKey)
 		b.add("external_call", id, str(call.FromSemanticKey), str(call.Module), str(call.Name))
-		if !call.FromModule {
+		if !call.FromModule && call.FromSemanticKey != "" {
 			b.add("site_in_fn", id, str(call.FromSemanticKey))
 		}
 		b.location(call.SemanticKey, call.Range)
@@ -114,7 +147,7 @@ func factsFromAnalysis(snapshot *analysis.Snapshot) ([]facts.Fact, error) {
 	for _, call := range snapshot.CallsUnresolved {
 		id := str(call.SemanticKey)
 		b.add("call_unresolved", id, str(call.FromSemanticKey))
-		if !call.FromModule {
+		if !call.FromModule && call.FromSemanticKey != "" {
 			b.add("site_in_fn", id, str(call.FromSemanticKey))
 		}
 		b.location(call.SemanticKey, call.Range)
@@ -126,7 +159,7 @@ func factsFromAnalysis(snapshot *analysis.Snapshot) ([]facts.Fact, error) {
 	for _, ref := range snapshot.FnRefs {
 		id := str(ref.SemanticKey)
 		b.add("fn_ref", id, str(ref.FromSemanticKey), str(ref.ToSemanticKey))
-		if !ref.FromModule {
+		if !ref.FromModule && ref.FromSemanticKey != "" {
 			b.add("site_in_fn", id, str(ref.FromSemanticKey))
 		}
 		b.location(ref.SemanticKey, ref.Range)
@@ -297,12 +330,18 @@ func factsFromAnalysis(snapshot *analysis.Snapshot) ([]facts.Fact, error) {
 	for _, item := range snapshot.ExportSites {
 		b.location(item.ID, item.Range)
 	}
-	bodies := functionBodiesByFile(snapshot.Functions)
 	for _, access := range snapshot.Accesses {
 		id := str(access.SemanticKey)
 		b.add("meta_access", id, str(access.FilePath), str(access.AccessPath))
-		if fn := innermostFunction(bodies[access.FilePath], access.Start, access.End); fn != "" {
-			b.add("site_in_fn", id, str(fn))
+		if access.FunctionSemanticKey != "" {
+			b.add("site_in_fn", id, str(access.FunctionSemanticKey))
+		}
+		if access.UnsupportedReason != "" {
+			reason, err := name(access.UnsupportedReason)
+			if err != nil {
+				return nil, err
+			}
+			b.add("site_attribution_unsupported", id, reason)
 		}
 		b.location(access.SemanticKey, access.Range)
 	}
@@ -491,37 +530,4 @@ func name(value string) (facts.Value, error) {
 		return facts.Value{}, fmt.Errorf("invalid empty name constant")
 	}
 	return facts.Name(value), nil
-}
-
-type functionBody struct {
-	key   string
-	start int
-	end   int
-}
-
-func functionBodiesByFile(functions []analysis.Function) map[string][]functionBody {
-	result := make(map[string][]functionBody)
-	for _, fn := range functions {
-		if fn.BodyEnd <= fn.BodyStart {
-			continue
-		}
-		result[fn.FilePath] = append(result[fn.FilePath], functionBody{key: fn.SemanticKey, start: fn.BodyStart, end: fn.BodyEnd})
-	}
-	return result
-}
-
-func innermostFunction(bodies []functionBody, start, end int) string {
-	best := ""
-	bestSize := -1
-	for _, body := range bodies {
-		if start < body.start || end > body.end {
-			continue
-		}
-		size := body.end - body.start
-		if bestSize == -1 || size < bestSize {
-			best = body.key
-			bestSize = size
-		}
-	}
-	return best
 }

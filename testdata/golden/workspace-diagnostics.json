@@ -110,12 +110,33 @@
     "entity_identity": {
       "semantic_key": "src/pure/helper.ts::function::loadValue"
     },
-    "message": "Pure function loadValue transitively calls effectful code",
+    "message": "Pure function loadValue calls code with suspension syntax",
     "provenance": {
       "backend_id": "typescript",
       "rule_version": 1
     },
     "rule_id": "arch.pure-no-effects",
+    "severity": "error",
+    "source_location": {
+      "endColumn": 26,
+      "endLine": 3,
+      "file": "src/pure/helper.ts",
+      "startColumn": 17,
+      "startLine": 3
+    }
+  },
+  {
+    "assertion_id": "reaches_effect",
+    "diagnostic_kind": "architecture_violation",
+    "entity_identity": {
+      "semantic_key": "src/pure/helper.ts::function::loadValue"
+    },
+    "message": "Pure function loadValue depends on an ambient source or suspension syntax through calls or function values",
+    "provenance": {
+      "backend_id": "typescript",
+      "rule_version": 1
+    },
+    "rule_id": "arch.pure-no-effects-strict",
     "severity": "error",
     "source_location": {
       "endColumn": 26,
@@ -152,7 +173,7 @@
     "entity_identity": {
       "semantic_key": "src/pure/math.ts::function::compute"
     },
-    "message": "Pure function compute transitively calls effectful code",
+    "message": "Pure function compute calls code with suspension syntax",
     "provenance": {
       "backend_id": "typescript",
       "rule_version": 1
@@ -168,24 +189,24 @@
     }
   },
   {
-    "assertion_id": "clock_in_pure",
+    "assertion_id": "reaches_effect",
     "diagnostic_kind": "architecture_violation",
     "entity_identity": {
-      "semantic_key": "src/pure/time.ts::function::stamp"
+      "semantic_key": "src/pure/math.ts::function::compute"
     },
-    "message": "Pure function stamp reads the clock",
+    "message": "Pure function compute depends on an ambient source or suspension syntax through calls or function values",
     "provenance": {
       "backend_id": "typescript",
       "rule_version": 1
     },
-    "rule_id": "arch.ambient",
+    "rule_id": "arch.pure-no-effects-strict",
     "severity": "error",
     "source_location": {
-      "endColumn": 22,
-      "endLine": 1,
-      "file": "src/pure/time.ts",
+      "endColumn": 24,
+      "endLine": 3,
+      "file": "src/pure/math.ts",
       "startColumn": 17,
-      "startLine": 1
+      "startLine": 3
     }
   },
   {
@@ -194,7 +215,7 @@
     "entity_identity": {
       "semantic_key": "src/pure/time.ts::function::stamp"
     },
-    "message": "Pure function stamp reaches an ambient source through calls or function values",
+    "message": "Pure function stamp depends on an ambient source or suspension syntax through calls or function values",
     "provenance": {
       "backend_id": "typescript",
       "rule_version": 1
@@ -207,6 +228,48 @@
       "file": "src/pure/time.ts",
       "startColumn": 17,
       "startLine": 1
+    }
+  },
+  {
+    "assertion_id": "clock_in_pure",
+    "diagnostic_kind": "architecture_violation",
+    "entity_identity": {
+      "semantic_key": "src/pure/time.ts::arrow_function::\u003canonymous@59\u003e"
+    },
+    "message": "Pure function \u003canonymous@59\u003e reads the clock",
+    "provenance": {
+      "backend_id": "typescript",
+      "rule_version": 1
+    },
+    "rule_id": "arch.ambient",
+    "severity": "error",
+    "source_location": {
+      "endColumn": 35,
+      "endLine": 2,
+      "file": "src/pure/time.ts",
+      "startColumn": 19,
+      "startLine": 2
+    }
+  },
+  {
+    "assertion_id": "reaches_effect",
+    "diagnostic_kind": "architecture_violation",
+    "entity_identity": {
+      "semantic_key": "src/pure/time.ts::arrow_function::\u003canonymous@59\u003e"
+    },
+    "message": "Pure function \u003canonymous@59\u003e depends on an ambient source or suspension syntax through calls or function values",
+    "provenance": {
+      "backend_id": "typescript",
+      "rule_version": 1
+    },
+    "rule_id": "arch.pure-no-effects-strict",
+    "severity": "error",
+    "source_location": {
+      "endColumn": 35,
+      "endLine": 2,
+      "file": "src/pure/time.ts",
+      "startColumn": 19,
+      "startLine": 2
     }
   },
   {

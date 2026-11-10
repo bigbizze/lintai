@@ -8,8 +8,29 @@ import (
 
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/internal/analysis"
+	"github.com/bigbizze/lintai/internal/tsgo/lintaiapi"
 	"github.com/bigbizze/lintai/internal/workspace"
 )
+
+func assignAccessOwners(accesses []analysis.Access, owners []lintaiapi.NodeOwner) {
+	type position struct {
+		file  string
+		start int
+	}
+	byPosition := make(map[position]lintaiapi.NodeOwner, len(owners))
+	for _, owner := range owners {
+		byPosition[position{owner.FilePath, owner.Start}] = owner
+	}
+	for i := range accesses {
+		owner, ok := byPosition[position{accesses[i].FilePath, accesses[i].Start}]
+		if !ok {
+			accesses[i].UnsupportedReason = "unsupported_context"
+			continue
+		}
+		accesses[i].FunctionSemanticKey = owner.FunctionSemanticKey
+		accesses[i].UnsupportedReason = owner.UnsupportedReason
+	}
+}
 
 const importMetaPrefix = "import.meta."
 

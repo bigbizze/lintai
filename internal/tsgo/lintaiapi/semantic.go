@@ -1691,6 +1691,7 @@ func mergeFunctionObservations(existing, incoming Function) Function {
 	}
 	if incoming.SemanticKey != "" {
 		existing.SignatureObservations = append(existing.SignatureObservations, incoming.SignatureObservations...)
+		existing.SignatureUnresolved = existing.SignatureUnresolved || incoming.SignatureUnresolved
 	}
 	byKey := make(map[string]FunctionSignatureObservation)
 	for _, observation := range existing.SignatureObservations {
@@ -1735,7 +1736,8 @@ func functionSignatureKey(observation FunctionSignatureObservation) string {
 
 func (e *extractor) functionSignatureObservation(node *ast.Node, params []string, returns string) FunctionSignatureObservation {
 	marks := make([]string, len(params))
-	if signature := e.checker.GetSignatureFromDeclaration(node); signature != nil {
+	signature := e.checker.GetSignatureFromDeclaration(node)
+	if signature != nil {
 		for index := range marks {
 			if signature.HasRestParameter() && index == len(marks)-1 {
 				marks[index] = MarkRest
@@ -1744,6 +1746,6 @@ func (e *extractor) functionSignatureObservation(node *ast.Node, params []string
 			}
 		}
 	}
-	complete := returns != "" && !slices.Contains(params, "")
+	complete := signature != nil && returns != "" && !slices.Contains(params, "")
 	return FunctionSignatureObservation{ParameterTypes: slices.Clone(params), ParameterMarks: marks, ReturnType: returns, Complete: complete}
 }

@@ -52,8 +52,37 @@ Decl fn_async(Fn)
 Decl fn_awaits(Fn)
   descr [
     extensional(),
-    doc("The function body contains an await expression."),
+    doc("An ordinary await expression belongs to this function, including its parameter defaults."),
     arg(Fn, "Function entity id.")
+  ].
+
+Decl fn_signature_omitted(Fn)
+  descr [extensional(), doc("Signature collection was skipped for an anonymous ownership-only function."), arg(Fn, "Function entity id.")].
+
+Decl fn_signature_unresolved(Fn)
+  descr [extensional(), doc("Signature collection was attempted but the checker did not provide a complete signature."), arg(Fn, "Function entity id.")].
+
+Decl suspension_site(Site, File, Kind)
+  descr [
+    extensional(),
+    doc("One syntax site for ordinary await, for await or await using. This does not prove execution."),
+    arg(Site, "Suspension site entity id."),
+    arg(File, "Workspace-relative path."),
+    arg(Kind, "/await, /for_await or /await_using.")
+  ].
+
+Decl suspension_in_fn(Site, Fn)
+  descr [extensional(), doc("The suspension site belongs to this function."), arg(Site, "Suspension site entity id."), arg(Fn, "Function entity id.")].
+
+Decl suspension_at_module(Site)
+  descr [extensional(), doc("The suspension site belongs to module evaluation."), arg(Site, "Suspension site entity id.")].
+
+Decl site_attribution_unsupported(Site, Reason)
+  descr [
+    extensional(),
+    doc("The site's lexical owner cannot be represented. It has no function or module owner."),
+    arg(Site, "Site entity id."),
+    arg(Reason, "/instance_construction or /unsupported_context.")
   ].
 
 Decl fn_param(Fn, Index, Type)
@@ -149,7 +178,7 @@ Decl call_edge(Call, Caller, Callee)
     extensional(),
     doc("A call to a collected function. The callee is the declaration that the type checker resolves for the call. A call through a value whose type is a function type, for example a callback parameter or a property of a record of functions, has no row; it is a call_unresolved row."),
     arg(Call, "Call entity id."),
-    arg(Caller, "Entity id of the calling function, or the module path for a call at module scope."),
+    arg(Caller, "Calling function, module path at module scope, or an empty string when attribution is unsupported."),
     arg(Callee, "Entity id of the called function.")
   ].
 
@@ -158,7 +187,7 @@ Decl external_call(Call, Caller, Module, Name)
     extensional(),
     doc("A call whose resolved declaration is outside the workspace source files: in the default library, in a package or in a declaration file."),
     arg(Call, "Call entity id."),
-    arg(Caller, "Entity id of the calling function, or the module path for a call at module scope."),
+    arg(Caller, "Calling function, module path at module scope, or an empty string when attribution is unsupported."),
     arg(Module, "\"lib\" for the default library, the package name for a package (the @types/ prefix is removed), the module name of a declare module block, or the path of a workspace declaration file."),
     arg(Name, "Name of the declaration with its containers, for example \"JSON.parse\", \"Set.add\" or \"DateConstructor.now\".")
   ].
@@ -168,7 +197,7 @@ Decl call_unresolved(Site, Caller)
     extensional(),
     doc("A call that lintai cannot follow: a call, new or tagged template whose target the checker does not resolve to a collected workspace function or an external declaration (callbacks, function-typed values, element-access callees, any-typed callees); f.call() or f.apply() when f is not a collected function; a function value that is not a collected function, passed to an external call (the row is at the argument); new of a workspace class without a constructor whose fields have initializers that run code. Every call site has exactly one of: call_edge, external_call, call_unresolved."),
     arg(Site, "Call site entity id."),
-    arg(Caller, "Entity id of the calling function, or the module path for a call at module scope.")
+    arg(Caller, "Calling function, module path at module scope, or an empty string when attribution is unsupported.")
   ].
 
 Decl import_opaque(Site, From)
@@ -182,9 +211,9 @@ Decl import_opaque(Site, From)
 Decl fn_ref(Ref, From, To)
   descr [
     extensional(),
-    doc("A reference to a collected function as a value, outside the callee position of a call: passed as an argument, stored, returned, or used as a property value. An inline arrow function, function expression or object literal method that is passed as a value is a reference from the function that contains it. Import and export specifiers are not references; import facts model them."),
+    doc("A function used as a value, for example passed as an argument, stored, returned or used as a property value. An inline arrow function, function expression or object literal method creates a reference from its surrounding owner. A nested function declaration alone does not create a reference. Import and export specifiers are not references."),
     arg(Ref, "Reference entity id."),
-    arg(From, "Entity id of the containing function, or the module path for a reference at module scope."),
+    arg(From, "Surrounding function, module path at module scope, or an empty string when attribution is unsupported."),
     arg(To, "Entity id of the referenced function.")
   ].
 
@@ -662,7 +691,7 @@ Decl config_adjusted(Config, Option, Action)
 Decl site_in_fn(Site, Fn)
   descr [
     extensional(),
-    doc("The innermost collected function that contains a call, external-call, unresolved-call, function-reference, ambient-use, global-ref or meta-access site. Sites at module scope have no row."),
+    doc("The lexical function owner of a call, external-call, unresolved-call, function-reference, ambient-use, global-ref or meta-access site. Module and unsupported sites have no row."),
     arg(Site, "Site entity id."),
     arg(Fn, "Function entity id.")
   ].

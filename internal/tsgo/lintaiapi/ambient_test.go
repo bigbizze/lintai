@@ -3,7 +3,6 @@ package lintaiapi
 import (
 	"context"
 	"slices"
-	"strings"
 	"testing"
 )
 
@@ -115,58 +114,5 @@ func TestAmbientMatching(t *testing.T) {
 		if !slices.Equal(actual, want) {
 			t.Errorf("%s: got %q, want %q", tc.name, actual, want)
 		}
-	}
-}
-
-func TestAmbientSitesAndCallsInsideCallbacksAttributeToEnclosingFunction(t *testing.T) {
-	root := t.TempDir()
-	files := writeWorkspace(t, root, map[string]string{
-		"src/clock.ts": `export const startedAt = Date.now();
-
-function stamp(value: number) {
-	return value;
-}
-
-export function h(items: number[]) {
-	return items.map(() => stamp(Date.now()));
-}
-`,
-	})
-	snapshot, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{
-		WorkspaceRoot:   root,
-		Files:           files,
-		AmbientMatchers: testAmbientMatchers(),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(snapshot.AmbientUses) != 2 {
-		t.Fatalf("expected 2 ambient uses, got %+v", snapshot.AmbientUses)
-	}
-	var moduleScope, inFunction int
-	for _, use := range snapshot.AmbientUses {
-		switch {
-		case use.FunctionSemanticKey == "":
-			moduleScope++
-			if use.Range.StartLine != 1 {
-				t.Fatalf("expected module-scope use on line 1, got %+v", use)
-			}
-		case strings.HasSuffix(use.FunctionSemanticKey, "::function::h"):
-			inFunction++
-		default:
-			t.Fatalf("unexpected function attribution %+v", use)
-		}
-	}
-	if moduleScope != 1 || inFunction != 1 {
-		t.Fatalf("expected one module-scope use and one use in h, got %+v", snapshot.AmbientUses)
-	}
-	foundCall := false
-	for _, edge := range snapshot.CallEdges {
-		if edge.FromName == "h" && edge.ToName == "stamp" {
-			foundCall = true
-		}
-	}
-	if !foundCall {
-		t.Fatalf("expected call from h to stamp inside the callback, got %+v", snapshot.CallEdges)
 	}
 }

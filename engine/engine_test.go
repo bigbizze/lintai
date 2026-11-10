@@ -3,14 +3,19 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
 
+	"github.com/bigbizze/lintai/backend"
 	"github.com/bigbizze/lintai/backend/typescript"
 	"github.com/bigbizze/lintai/diagnostics"
+	"github.com/bigbizze/lintai/facts"
+	"github.com/bigbizze/lintai/runtime"
 )
 
 func TestRuleErrorPhases(t *testing.T) {
@@ -566,5 +571,212 @@ export default rule("arch.public-api-infrastructure-types").version(1)
 	want := []string{"ContextThroughRight", "ValidationContext"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("public API policy findings: got %v, want %v", got, want)
+	}
+}
+
+// Exercise the published facts and the prelude on the same ownership boundaries.
+func TestSuspensionOwnershipAndReferencePolicy(t *testing.T) {
+	const source = `function known() {}
+export function total(input = (known(), import.meta.env)) {
+  function nestedAlone() {} function nested() {} const later = nested;
+  [1].map(async () => {
+    known();
+    unknown();
+    const saved = known;
+    Date.now();
+    import.meta.env;
+    await unknown();
+  });
+}
+class Absent {
+  call = known();
+  missing = unknown();
+  clock = Date.now();
+  meta = import.meta.env;
+  value = () => known();
+}
+class Present {
+  field = known();
+  constructor(x: number); constructor(x?: number) {}
+}
+async function make() {
+  class Missing { field = await unknown(); }
+}
+Date.now();
+export function values() { const saved = () => known(); return function returned() { known(); }; }
+`
+	root := t.TempDir()
+	writeTestFile(t, root, "src/scorecard/total.ts", source)
+	writeTestFile(t, root, "src/scorecard/only-unsupported.ts", `class Only { value = await unknown(); }`)
+	snapshot, err := typescript.New().BuildSnapshot(context.Background(), root, root, backend.SnapshotOptions{Files: backend.FileScopeWalk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := facts.Validate(snapshot); err != nil {
+		t.Fatal(err)
+	}
+	lines := map[string]int{}
+	for _, fact := range snapshot.Facts {
+		if fact.Relation == "location" && fact.Values[1].String == "src/scorecard/total.ts" {
+			lines[fact.Values[0].String] = int(fact.Values[2].Number)
+		}
+	}
+	find := func(relation string, line int) []facts.Fact {
+		var result []facts.Fact
+		for _, fact := range snapshot.Facts {
+			if fact.Relation == relation && lines[fact.Values[0].String] == line {
+				result = append(result, fact)
+			}
+		}
+		return result
+	}
+	owner := func(site string) string {
+		for _, fact := range snapshot.Facts {
+			if fact.Relation == "site_in_fn" && fact.Values[0].String == site {
+				return fact.Values[1].String
+			}
+		}
+		return ""
+	}
+	unsupported := func(site string) string {
+		for _, fact := range snapshot.Facts {
+			if fact.Relation == "site_attribution_unsupported" && fact.Values[0].String == site {
+				return fact.Values[1].String
+			}
+		}
+		return ""
+	}
+	callback := fmt.Sprintf("src/scorecard/total.ts::arrow_function::<anonymous@%d>", strings.Index(source, "async () =>"))
+	scorecard := "src/scorecard/total.ts::function::total"
+	known := "src/scorecard/total.ts::function::known"
+	constructor := "src/scorecard/total.ts::constructor::Present.constructor"
+	for _, check := range []struct {
+		relation   string
+		line       int
+		fn, reason string
+	}{
+		{"call_edge", 2, scorecard, ""}, {"meta_access", 2, scorecard, ""}, {"fn_ref", 3, scorecard, ""}, {"fn_ref", 4, scorecard, ""},
+		{"call_edge", 5, callback, ""}, {"call_unresolved", 6, callback, ""},
+		{"fn_ref", 7, callback, ""}, {"external_call", 8, callback, ""},
+		{"ambient_use", 8, callback, ""}, {"global_ref", 8, callback, ""},
+		{"meta_access", 9, callback, ""}, {"call_unresolved", 10, callback, ""},
+		{"call_edge", 14, "", "instance_construction"}, {"call_unresolved", 15, "", "instance_construction"},
+		{"external_call", 16, "", "instance_construction"}, {"ambient_use", 16, "", "instance_construction"},
+		{"global_ref", 16, "", "instance_construction"}, {"meta_access", 17, "", "instance_construction"},
+		{"fn_ref", 18, "", "instance_construction"}, {"call_edge", 21, constructor, ""},
+	} {
+		rows := find(check.relation, check.line)
+		if len(rows) != 1 {
+			t.Errorf("%s line %d: got %v", check.relation, check.line, rows)
+			continue
+		}
+		site := rows[0].Values[0].String
+		if got := owner(site); got != check.fn {
+			t.Errorf("%s line %d owner = %q, want %q", check.relation, check.line, got, check.fn)
+		}
+		if got := unsupported(site); got != check.reason {
+			t.Errorf("%s line %d unsupported = %q, want %q", check.relation, check.line, got, check.reason)
+		}
+		if check.relation == "call_edge" || check.relation == "call_unresolved" || check.relation == "external_call" || check.relation == "fn_ref" {
+			if got := rows[0].Values[1].String; got != check.fn {
+				t.Errorf("%s line %d caller = %q, want %q", check.relation, check.line, got, check.fn)
+			}
+		}
+	}
+	if rows := find("call_edge", 5); len(rows) == 1 && rows[0].Values[2].String != known {
+		t.Errorf("wrong callback target: %v", rows)
+	}
+	if rows := find("fn_ref", 7); len(rows) == 1 && rows[0].Values[2].String != known {
+		t.Errorf("wrong referenced function: %v", rows)
+	}
+	if rows := find("fn_ref", 3); len(rows) == 1 && rows[0].Values[2].String != "src/scorecard/total.ts::function::total.nested" {
+		t.Errorf("wrong nested function reference: %v", rows)
+	}
+	var valueTargets []string
+	for _, row := range find("fn_ref", 28) {
+		if got := owner(row.Values[0].String); got != "src/scorecard/total.ts::function::values" {
+			t.Errorf("function value owner = %q: %v", got, row)
+		}
+		valueTargets = append(valueTargets, row.Values[2].String)
+	}
+	slices.Sort(valueTargets)
+	if want := []string{"src/scorecard/total.ts::arrow_function::values.saved", "src/scorecard/total.ts::function_expression::values.returned"}; !slices.Equal(valueTargets, want) {
+		t.Errorf("assigned and returned references = %v, want %v", valueTargets, want)
+	}
+	if rows := find("suspension_site", 10); len(rows) != 1 {
+		t.Errorf("callback suspension: %v", rows)
+	} else {
+		site := rows[0].Values[0].String
+		found := false
+		for _, fact := range snapshot.Facts {
+			if fact.Relation == "suspension_in_fn" && fact.Values[0].String == site && fact.Values[1].String == callback {
+				found = true
+			}
+		}
+		if !found || !strings.HasPrefix(site, "suspension:") {
+			t.Errorf("callback suspension owner or ID: %v", rows)
+		}
+	}
+	if rows := find("suspension_site", 25); len(rows) != 1 {
+		t.Errorf("unsupported suspension: %v", rows)
+	} else if reason := unsupported(rows[0].Values[0].String); reason != "instance_construction" {
+		t.Errorf("unsupported suspension reason = %q", reason)
+	}
+	if rows := find("ambient_use", 27); len(rows) != 1 || owner(rows[0].Values[0].String) != "" || unsupported(rows[0].Values[0].String) != "" {
+		t.Errorf("module ambient use: %v", rows)
+	}
+	for _, fact := range snapshot.Facts {
+		if fact.Relation == "fn_ref" && strings.HasSuffix(fact.Values[2].String, "::function::total.nestedAlone") {
+			t.Errorf("declaration created a reference: %v", fact)
+		}
+		if fact.Relation == "call_edge" && fact.Values[1].String == scorecard && fact.Values[2].String == callback {
+			t.Errorf("containment created a call: %v", fact)
+		}
+		if fact.Relation == "fn_awaits" && fact.Values[0].String != callback {
+			t.Errorf("await attributed to wrong function: %v", fact)
+		}
+		if fact.Relation == "suspension_at_module" {
+			t.Errorf("callback suspension attributed to module: %v", fact)
+		}
+	}
+	base, err := facts.Store(snapshot.Facts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decls, prelude, err := facts.ParseSchema(snapshot.Schema)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := runtime.ProgramOutput{Text: `
+Decl direct(Fn).
+direct(Fn) :- fn_suspends(Fn).
+direct(Fn) :- call_edge(Site, Fn, To), !site_attribution_unknown(Site), direct(To).
+Decl with_refs(Fn).
+with_refs(Fn) :- fn_suspends(Fn).
+with_refs(Fn) :- call_edge(Site, Fn, To), !site_attribution_unknown(Site), with_refs(To).
+with_refs(Fn) :- fn_ref(Site, Fn, To), !site_attribution_unknown(Site), with_refs(To).
+Decl selected(Fn).
+selected(Fn) :- fn(Fn, File, _), fn_exported(Fn), glob(File, "src/scorecard/**").
+Decl call_only(Fn).
+call_only(Fn) :- selected(Fn), direct(Fn).
+Decl follow_refs(Fn).
+follow_refs(Fn) :- selected(Fn), with_refs(Fn).
+Decl module_seen(File).
+module_seen(File) :- module_has_suspension(File).
+Decl bad_owner(Site).
+bad_owner(Site) :- site_attribution_unsupported(Site, _), call_edge(Site, "", _), calls_reach("", _).
+`}
+	violations, perr := evaluateProgram(base, prelude, decls, output, []string{"call_only", "follow_refs", "module_seen", "bad_owner"}, nil, evalOptions{})
+	if perr != nil {
+		t.Fatal(perr)
+	}
+	var got []string
+	for _, item := range violations {
+		got = append(got, item.predicate+":"+item.anchor)
+	}
+	slices.Sort(got)
+	want := []string{"follow_refs:" + scorecard, "module_seen:src/scorecard/only-unsupported.ts", "module_seen:src/scorecard/total.ts"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("policy rows = %v, want %v", got, want)
 	}
 }

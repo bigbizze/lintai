@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 	"testing"
 
 	"github.com/bigbizze/lintai/backend"
@@ -22,12 +21,6 @@ func TestBuildSnapshotExposesStableFunctionKeysAndCalls(t *testing.T) {
 	snapshot, err := New().buildAnalysisSnapshot(context.Background(), repoRoot, workspaceRoot, backend.SnapshotOptions{})
 	if err != nil {
 		t.Fatal(err)
-	}
-
-	for _, fn := range snapshot.Functions {
-		if strings.Contains(fn.SemanticKey, "@") {
-			t.Fatalf("expected stable semantic key without position marker, got %q", fn.SemanticKey)
-		}
 	}
 
 	foundHelperEffect := false

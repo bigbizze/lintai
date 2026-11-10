@@ -58,8 +58,20 @@ Decl calls_reach(Caller, Callee)
     arg(Caller, "Function entity id, or module path for module-scope sites."),
     arg(Callee, "Function entity id reached through one or more calls.")
   ].
-calls_reach(A, B) :- call_edge(_, A, B).
-calls_reach(A, C) :- call_edge(_, A, B), calls_reach(B, C).
+calls_reach(A, B) :- call_edge(Site, A, B), !site_attribution_unknown(Site).
+calls_reach(A, C) :- call_edge(Site, A, B), !site_attribution_unknown(Site), calls_reach(B, C).
+
+Decl site_attribution_unknown(Site)
+  descr [doc("Site has an owner that lintai cannot represent."), arg(Site, "Site entity id.")].
+site_attribution_unknown(Site) :- site_attribution_unsupported(Site, _).
+
+Decl fn_suspends(Fn)
+  descr [doc("Fn owns an await, for await or await using site."), arg(Fn, "Function entity id.")].
+fn_suspends(Fn) :- suspension_in_fn(_, Fn).
+
+Decl module_has_suspension(File)
+  descr [doc("File contains a suspension site at any scope, including unsupported sites. This does not by itself mean module initialization suspends."), arg(File, "Workspace-relative path.")].
+module_has_suspension(File) :- suspension_site(_, File, _).
 
 Decl fn_uses_ambient(Fn, Source)
   descr [
@@ -76,7 +88,7 @@ Decl fn_reaches_ambient(Fn, Source)
     arg(Source, "Source name constant.")
   ].
 fn_reaches_ambient(Fn, Source) :- fn_uses_ambient(Fn, Source).
-fn_reaches_ambient(Fn, Source) :- call_edge(_, Fn, Callee), fn_reaches_ambient(Callee, Source).
+fn_reaches_ambient(Fn, Source) :- call_edge(Site, Fn, Callee), !site_attribution_unknown(Site), fn_reaches_ambient(Callee, Source).
 
 Decl module_uses_ambient(File, Source)
   descr [
@@ -97,14 +109,14 @@ module_reaches_ambient(File, Source) :- module_imports(File, Mid), module_reache
 
 Decl calls_or_refs_reach(From, To)
   descr [
-    doc("Transitive closure over call_edge and fn_ref together: a conservative over-approximation of workspace-internal reachability. It materializes every reachable pair and costs O(nodes^2) on large graphs. To check only whether a function reaches a target, use fn_reaches_ambient_strict or fn_reaches_unresolved, or propagate backward from the target over call_edge and fn_ref."),
+    doc("Follows call_edge and fn_ref together. A referenced function may never be called, and calls through function values can still be missing. It stores every connected pair, costing O(nodes^2) on large graphs. To check only whether a function reaches a target, use fn_reaches_ambient_strict or fn_reaches_unresolved, or propagate backward from the target."),
     arg(From, "Function entity id, or module path for module-scope sites."),
     arg(To, "Function entity id reached through calls or function-value references.")
   ].
-calls_or_refs_reach(A, B) :- call_edge(_, A, B).
-calls_or_refs_reach(A, B) :- fn_ref(_, A, B).
-calls_or_refs_reach(A, C) :- call_edge(_, A, B), calls_or_refs_reach(B, C).
-calls_or_refs_reach(A, C) :- fn_ref(_, A, B), calls_or_refs_reach(B, C).
+calls_or_refs_reach(A, B) :- call_edge(Site, A, B), !site_attribution_unknown(Site).
+calls_or_refs_reach(A, B) :- fn_ref(Site, A, B), !site_attribution_unknown(Site).
+calls_or_refs_reach(A, C) :- call_edge(Site, A, B), !site_attribution_unknown(Site), calls_or_refs_reach(B, C).
+calls_or_refs_reach(A, C) :- fn_ref(Site, A, B), !site_attribution_unknown(Site), calls_or_refs_reach(B, C).
 
 Decl fn_has_unresolved_call(Fn)
   descr [
@@ -126,8 +138,8 @@ Decl fn_reaches_unresolved(Fn)
     arg(Fn, "Function entity id, or module path for module-scope sites.")
   ].
 fn_reaches_unresolved(Fn) :- fn_has_unresolved_call(Fn).
-fn_reaches_unresolved(Fn) :- call_edge(_, Fn, Callee), fn_reaches_unresolved(Callee).
-fn_reaches_unresolved(Fn) :- fn_ref(_, Fn, Callee), fn_reaches_unresolved(Callee).
+fn_reaches_unresolved(Fn) :- call_edge(Site, Fn, Callee), !site_attribution_unknown(Site), fn_reaches_unresolved(Callee).
+fn_reaches_unresolved(Fn) :- fn_ref(Site, Fn, Callee), !site_attribution_unknown(Site), fn_reaches_unresolved(Callee).
 
 Decl fn_reaches_ambient_strict(Fn, Source)
   descr [
@@ -136,8 +148,8 @@ Decl fn_reaches_ambient_strict(Fn, Source)
     arg(Source, "Source name constant.")
   ].
 fn_reaches_ambient_strict(Fn, Source) :- fn_uses_ambient(Fn, Source).
-fn_reaches_ambient_strict(Fn, Source) :- call_edge(_, Fn, Callee), fn_reaches_ambient_strict(Callee, Source).
-fn_reaches_ambient_strict(Fn, Source) :- fn_ref(_, Fn, Callee), fn_reaches_ambient_strict(Callee, Source).
+fn_reaches_ambient_strict(Fn, Source) :- call_edge(Site, Fn, Callee), !site_attribution_unknown(Site), fn_reaches_ambient_strict(Callee, Source).
+fn_reaches_ambient_strict(Fn, Source) :- fn_ref(Site, Fn, Callee), !site_attribution_unknown(Site), fn_reaches_ambient_strict(Callee, Source).
 
 Decl fn_calls_package(Fn, Pkg)
   descr [

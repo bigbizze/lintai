@@ -69,7 +69,6 @@ type Function struct {
 	Kind           string
 	FilePath       string
 	ContainerName  string
-	ContainsAwait  bool
 	IsExported     bool
 	IsAsync        bool
 	ParameterCount int
@@ -79,10 +78,27 @@ type Function struct {
 	ParameterTypes        []string
 	SignatureObservations []FunctionSignatureObservation
 	SignatureConflict     bool
+	SignatureOmitted      bool
+	SignatureUnresolved   bool
 	Range                 SourceLocation
-	BodyStart             int
-	BodyEnd               int
 }
+
+type SuspensionSite struct {
+	EntityID, SemanticKey, FilePath, Kind  string
+	FunctionSemanticKey, UnsupportedReason string
+	AtModule                               bool
+	Range                                  SourceLocation
+}
+
+// NodeOwner connects an AST expression's first token to the owner used by
+// the facts visitor. The access extractor joins its existing matches by offset.
+type NodeOwner struct {
+	FilePath                               string
+	Start                                  int
+	FunctionSemanticKey, UnsupportedReason string
+}
+
+type UnsupportedAttribution struct{ Site, Reason string }
 
 type FunctionSignatureObservation struct {
 	ParameterTypes []string
@@ -313,19 +329,22 @@ type TypeRef struct {
 }
 
 type Snapshot struct {
-	Modules         []Module
-	Functions       []Function
-	ImportEdges     []ImportEdge
-	CallEdges       []CallEdge
-	ExternalCalls   []ExternalCall
-	CallsUnresolved []CallUnresolved
-	ImportsOpaque   []ImportOpaque
-	FnRefs          []FnRef
-	TypeRefs        []TypeRef
-	AmbientUses     []AmbientUse
-	GlobalRefs      []GlobalRef
-	Directives      []ModuleDirective
-	ParseErrors     []ParseError
+	Modules                 []Module
+	Functions               []Function
+	ImportEdges             []ImportEdge
+	CallEdges               []CallEdge
+	ExternalCalls           []ExternalCall
+	CallsUnresolved         []CallUnresolved
+	ImportsOpaque           []ImportOpaque
+	FnRefs                  []FnRef
+	SuspensionSites         []SuspensionSite
+	NodeOwners              []NodeOwner
+	UnsupportedAttributions []UnsupportedAttribution
+	TypeRefs                []TypeRef
+	AmbientUses             []AmbientUse
+	GlobalRefs              []GlobalRef
+	Directives              []ModuleDirective
+	ParseErrors             []ParseError
 	// Types are the type entities that function parameter and return types
 	// refer to, sorted by ID.
 	Types                       []TypeFact
@@ -396,6 +415,9 @@ type extractor struct {
 	unresolved                  []CallUnresolved
 	opaque                      []ImportOpaque
 	refs                        []FnRef
+	suspensionSites             []SuspensionSite
+	nodeOwners                  []NodeOwner
+	unsupportedAttributions     []UnsupportedAttribution
 	typeRefs                    []TypeRef
 	ambientUses                 []AmbientUse
 	globalRefs                  []GlobalRef
@@ -430,7 +452,9 @@ type functionMeta struct {
 }
 
 type functionState struct {
-	record *Function
+	record         *Function
+	reason         string
+	decoratorOwner *functionState
 }
 
 // callSource is the caller of a call: a collected function, or module scope.
@@ -439,6 +463,7 @@ type callSource struct {
 	name   string
 	path   string
 	module bool
+	reason string
 }
 
 // extractTiming records where extraction spends its time. BuildSnapshot
@@ -786,6 +811,9 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 		CallsUnresolved:             ex.unresolved,
 		ImportsOpaque:               ex.opaque,
 		FnRefs:                      ex.refs,
+		SuspensionSites:             ex.suspensionSites,
+		NodeOwners:                  ex.nodeOwners,
+		UnsupportedAttributions:     ex.unsupportedAttributions,
 		TypeRefs:                    ex.typeRefs,
 		AmbientUses:                 ex.ambientUses,
 		GlobalRefs:                  ex.globalRefs,
@@ -1119,6 +1147,9 @@ func mergeSnapshot(into *Snapshot, partial *Snapshot) {
 	into.CallsUnresolved = mergeByEntityID(into.CallsUnresolved, partial.CallsUnresolved, func(item CallUnresolved) string { return item.EntityID })
 	into.ImportsOpaque = mergeByEntityID(into.ImportsOpaque, partial.ImportsOpaque, func(item ImportOpaque) string { return item.EntityID })
 	into.FnRefs = mergeByEntityID(into.FnRefs, partial.FnRefs, func(item FnRef) string { return item.EntityID })
+	into.SuspensionSites = mergeByEntityID(into.SuspensionSites, partial.SuspensionSites, func(item SuspensionSite) string { return item.EntityID })
+	into.NodeOwners = mergeByEntityID(into.NodeOwners, partial.NodeOwners, func(item NodeOwner) string { return fmt.Sprintf("%s::%d", item.FilePath, item.Start) })
+	into.UnsupportedAttributions = mergeByEntityID(into.UnsupportedAttributions, partial.UnsupportedAttributions, func(item UnsupportedAttribution) string { return item.Site })
 	into.TypeRefs = mergeByEntityID(into.TypeRefs, partial.TypeRefs, func(item TypeRef) string { return item.EntityID })
 	into.AmbientUses = mergeByEntityID(into.AmbientUses, partial.AmbientUses, func(item AmbientUse) string { return item.EntityID })
 	into.GlobalRefs = mergeByEntityID(into.GlobalRefs, partial.GlobalRefs, func(item GlobalRef) string { return item.EntityID })
@@ -1146,6 +1177,7 @@ func sortSnapshot(snapshot *Snapshot) {
 	slices.SortFunc(snapshot.CallsUnresolved, func(a, b CallUnresolved) int { return strings.Compare(a.SemanticKey, b.SemanticKey) })
 	slices.SortFunc(snapshot.ImportsOpaque, func(a, b ImportOpaque) int { return strings.Compare(a.SemanticKey, b.SemanticKey) })
 	slices.SortFunc(snapshot.FnRefs, func(a, b FnRef) int { return strings.Compare(a.SemanticKey, b.SemanticKey) })
+	slices.SortFunc(snapshot.SuspensionSites, func(a, b SuspensionSite) int { return strings.Compare(a.SemanticKey, b.SemanticKey) })
 	slices.SortFunc(snapshot.TypeRefs, func(a, b TypeRef) int { return strings.Compare(a.SemanticKey, b.SemanticKey) })
 	slices.SortFunc(snapshot.AmbientUses, func(a, b AmbientUse) int { return strings.Compare(a.SemanticKey, b.SemanticKey) })
 	slices.SortFunc(snapshot.GlobalRefs, func(a, b GlobalRef) int { return strings.Compare(a.SemanticKey, b.SemanticKey) })
@@ -1209,6 +1241,16 @@ func (e *extractor) walkFacts(node *ast.Node, currentFunction *functionState) {
 	if node == nil {
 		return
 	}
+	if node.Kind == ast.KindAwaitExpression {
+		e.collectSuspension(node, "await", currentFunction)
+	} else if node.Kind == ast.KindForOfStatement && node.AsForInOrOfStatement().AwaitModifier != nil {
+		e.collectSuspension(node, "for_await", currentFunction)
+	} else if node.Kind == ast.KindVariableDeclarationList && ast.IsVarAwaitUsing(node) {
+		e.collectSuspension(node, "await_using", currentFunction)
+	}
+	if ast.IsPropertyAccessExpression(node) {
+		e.recordAccessOwner(node, currentFunction)
+	}
 	switch {
 	case ast.IsImportDeclaration(node):
 		e.collectImport(node, node.ModuleSpecifier(), ImportFormStatic, node.ImportClause() != nil && node.ImportClause().IsTypeOnly())
@@ -1251,38 +1293,100 @@ func (e *extractor) walkFacts(node *ast.Node, currentFunction *functionState) {
 		}
 	}
 
-	nextFunction := currentFunction
+	var functionOwner *functionState
 	if ast.IsFunctionLike(node) {
-		if record := e.lookupFunction(node); record != nil {
-			if e.ambientFile != nil && createsFunctionValue(node) {
-				e.recordFnRef(e.callSourceFor(node, currentFunction), record, record.Range)
+		record := e.functionNodes[node]
+		functionOwner = &functionState{record: record, decoratorOwner: currentFunction}
+		if record == nil || node.Body() == nil {
+			functionOwner.reason = "unsupported_context"
+		} else if e.ambientFile != nil && createsFunctionValue(node) {
+			location := e.nodeLocation(ast.GetSourceFileOfNode(node), node)
+			if ast.IsMethodDeclaration(node) || ast.IsGetAccessorDeclaration(node) || ast.IsSetAccessorDeclaration(node) {
+				location = record.Range
 			}
-			nextFunction = &functionState{record: record}
+			e.recordFnRef(e.callSourceFor(node, currentFunction), record, location)
 		}
 	}
-	if ast.IsPropertyDeclaration(node) && !ast.IsStatic(node) && node.Initializer() != nil && ast.IsClassLike(node.Parent) {
-		if constructor := ast.GetFirstConstructorWithBody(node.Parent); constructor != nil {
-			if record := e.lookupFunction(constructor); record != nil {
-				nextFunction = &functionState{record: record}
-			}
-		}
-	}
-
 	node.ForEachChild(func(child *ast.Node) bool {
-		e.walkFacts(child, nextFunction)
+		owner := currentFunction
+		if functionOwner != nil && (child == node.Body() || ast.IsParameterDeclaration(child)) {
+			owner = functionOwner
+		} else if ast.IsParameterDeclaration(node) && ast.IsDecorator(child) && currentFunction != nil {
+			owner = currentFunction.decoratorOwner
+		} else if ast.IsPropertyDeclaration(node) && !ast.IsStatic(node) && child == node.Initializer() {
+			owner = e.instanceInitializerOwner(node)
+		}
+		e.walkFacts(child, owner)
 		return false
 	})
+}
+
+func (e *extractor) instanceInitializerOwner(node *ast.Node) *functionState {
+	if node.Parent == nil || !ast.IsClassLike(node.Parent) {
+		return &functionState{reason: "unsupported_context"}
+	}
+	var constructor *ast.Node
+	for _, member := range node.Parent.Members() {
+		if ast.IsConstructorDeclaration(member) && ast.NodeIsPresent(member.Body()) {
+			if constructor != nil {
+				return &functionState{reason: "unsupported_context"}
+			}
+			constructor = member
+		}
+	}
+	if constructor == nil {
+		return &functionState{reason: "instance_construction"}
+	}
+	if record := e.functionNodes[constructor]; record != nil {
+		return &functionState{record: record}
+	}
+	return &functionState{reason: "unsupported_context"}
+}
+
+func (e *extractor) collectSuspension(node *ast.Node, kind string, owner *functionState) {
+	file := ast.GetSourceFileOfNode(node)
+	if file == nil {
+		return
+	}
+	path := e.relativePath(normalizeSlash(file.FileName().AsString()))
+	offset := scanner.GetTokenPosOfNode(node, file, false)
+	key := fmt.Sprintf("%s::suspension::%s::%d", path, kind, offset)
+	source := e.callSourceFor(node, owner)
+	site := SuspensionSite{EntityID: "suspension:" + key, SemanticKey: key, FilePath: path, Kind: kind, AtModule: source.module, UnsupportedReason: source.reason, Range: e.nodeLocation(file, node)}
+	if !source.module && source.reason == "" {
+		site.FunctionSemanticKey = source.key
+	}
+	e.suspensionSites = append(e.suspensionSites, site)
+	e.markUnsupported(site.EntityID, source.reason)
+}
+
+func (e *extractor) recordAccessOwner(node *ast.Node, owner *functionState) {
+	file := ast.GetSourceFileOfNode(node)
+	if file == nil {
+		return
+	}
+	start := scanner.GetTokenPosOfNode(node, file, false)
+	if start < 0 || start >= len(file.Text()) || !strings.HasPrefix(file.Text()[start:], "import.meta.") {
+		return
+	}
+	source := e.callSourceFor(node, owner)
+	entry := NodeOwner{FilePath: source.path, Start: start, UnsupportedReason: source.reason}
+	if !source.module && source.reason == "" {
+		entry.FunctionSemanticKey = source.key
+	}
+	e.nodeOwners = append(e.nodeOwners, entry)
+}
+
+func (e *extractor) markUnsupported(site, reason string) {
+	if reason != "" {
+		e.unsupportedAttributions = append(e.unsupportedAttributions, UnsupportedAttribution{Site: site, Reason: reason})
+	}
 }
 
 func (e *extractor) collectFunction(node *ast.Node) *Function {
 	if node.Body() == nil {
 		return nil
 	}
-	meta := functionMetaForNode(node)
-	if meta == nil || meta.localName == "" || meta.nameNode == nil {
-		return nil
-	}
-
 	file := ast.GetSourceFileOfNode(node)
 	if file == nil {
 		return nil
@@ -1291,17 +1395,49 @@ func (e *extractor) collectFunction(node *ast.Node) *Function {
 	if _, ok := e.requestedFiles[fileName]; !ok {
 		return nil
 	}
+	meta := functionMetaForNode(node)
+	omitted := meta == nil || meta.localName == "" || meta.nameNode == nil
+	if omitted {
+		kind := "function"
+		switch {
+		case ast.IsArrowFunction(node):
+			kind = "arrow_function"
+		case ast.IsFunctionExpression(node):
+			kind = "function_expression"
+		case ast.IsMethodDeclaration(node):
+			kind = "method"
+		case ast.IsConstructorDeclaration(node):
+			kind = "constructor"
+		case ast.IsGetAccessorDeclaration(node):
+			kind = "get_accessor"
+		case ast.IsSetAccessorDeclaration(node):
+			kind = "set_accessor"
+		}
+		meta = &functionMeta{localName: fmt.Sprintf("<anonymous@%d>", scanner.GetTokenPosOfNode(node, file, false)), kind: kind, nameNode: node, namingSource: node, lookupNodes: []*ast.Node{node}}
+	}
 
-	containerName := containerNameForNode(node, meta.namingSource)
+	containerName := ""
+	if !omitted {
+		containerName = containerNameForNode(node, meta.namingSource)
+	}
 	displayName := meta.localName
 	if containerName != "" {
 		displayName = containerName + "." + meta.localName
 	}
 
 	nameRange := e.nodeLocation(file, meta.nameNode)
-	returnType, parameterTypes := e.functionTypes(node)
+	var returnType string
+	var parameterTypes []string
+	var observations []FunctionSignatureObservation
+	if !omitted {
+		returnType, parameterTypes = e.functionTypes(node)
+		observations = []FunctionSignatureObservation{e.functionSignatureObservation(node, parameterTypes, returnType)}
+	}
 	baseKey := fmt.Sprintf("%s::%s::%s", nameRange.File, meta.kind, displayName)
-	semanticKey := withOrdinal(baseKey, nextOrdinal(e.functionCount, baseKey))
+	semanticKey := baseKey
+	if !omitted {
+		semanticKey = withOrdinal(baseKey, nextOrdinal(e.functionCount, baseKey))
+	}
 	record := Function{
 		EntityID:              "function:" + semanticKey,
 		SemanticKey:           semanticKey,
@@ -1309,19 +1445,19 @@ func (e *extractor) collectFunction(node *ast.Node) *Function {
 		Kind:                  meta.kind,
 		FilePath:              nameRange.File,
 		ContainerName:         containerName,
-		ContainsAwait:         containsAwait(node),
 		IsExported:            meta.exported || e.isExportedFunction(node, meta),
 		IsAsync:               ast.HasSyntacticModifier(node, ast.ModifierFlagsAsync),
 		ParameterCount:        len(node.Parameters()),
 		ReturnType:            returnType,
 		ParameterTypes:        parameterTypes,
-		SignatureObservations: []FunctionSignatureObservation{e.functionSignatureObservation(node, parameterTypes, returnType)},
+		SignatureObservations: observations,
+		SignatureOmitted:      omitted,
+		SignatureUnresolved:   !omitted && !observations[0].Complete,
 		Range:                 nameRange,
-		BodyStart:             node.Body().Pos(),
-		BodyEnd:               node.Body().End(),
 	}
 	e.functions = append(e.functions, record)
 	stored := &e.functions[len(e.functions)-1]
+	e.functionNodes[node] = stored
 	for _, lookupNode := range meta.lookupNodes {
 		if lookupNode == nil {
 			continue
@@ -1446,11 +1582,26 @@ func packageNameFromSpecifier(specifier string) string {
 
 func (e *extractor) callSourceFor(node *ast.Node, currentFunction *functionState) callSource {
 	if currentFunction != nil {
+		if currentFunction.record == nil {
+			path := e.relativePath(normalizeSlash(ast.GetSourceFileOfNode(node).FileName().AsString()))
+			reason := currentFunction.reason
+			if reason == "" {
+				reason = "unsupported_context"
+			}
+			return callSource{path: path, reason: reason}
+		}
 		record := currentFunction.record
 		return callSource{key: record.SemanticKey, name: record.Name, path: record.FilePath}
 	}
 	relative := e.relativePath(normalizeSlash(ast.GetSourceFileOfNode(node).FileName().AsString()))
 	return callSource{key: relative, name: relative, path: relative, module: true}
+}
+
+func (source callSource) siteKey() string {
+	if source.reason != "" {
+		return source.path + "::unsupported"
+	}
+	return source.key
 }
 
 // collectOpaqueImport records an import() or require() whose specifier is
@@ -1506,17 +1657,15 @@ func (e *extractor) collectCall(source callSource, node *ast.Node) {
 					return
 				}
 				e.externalCalls = append(e.externalCalls, external)
+				e.markUnsupported(external.SemanticKey, source.reason)
 				e.collectEscapingCallbacks(source, file, node)
 				return
 			}
 		}
-		if declaration == nil && workspaceClass != nil {
-			return
-		}
 		e.recordUnresolvedCall(source, location)
 		return
 	}
-	baseKey := fmt.Sprintf("%s::calls::%s", source.key, target.SemanticKey)
+	baseKey := fmt.Sprintf("%s::calls::%s", source.siteKey(), target.SemanticKey)
 	semanticKey := withOrdinal(baseKey, nextOrdinal(e.callCount, baseKey))
 	e.calls = append(e.calls, CallEdge{
 		EntityID:        "call:" + semanticKey,
@@ -1530,6 +1679,7 @@ func (e *extractor) collectCall(source callSource, node *ast.Node) {
 		ToPath:          target.FilePath,
 		Range:           location,
 	})
+	e.markUnsupported(semanticKey, source.reason)
 }
 
 // invokesFunctionValue reports f.call(...) or f.apply(...) where f is not a
@@ -1602,12 +1752,9 @@ func isLiteralValue(node *ast.Node) bool {
 	return ast.IsLiteralExpression(node)
 }
 
-// createsFunctionValue reports a collected function that its definition
-// passes on as a value: an arrow function or function expression in an
-// argument, an array or a return, and a method or function in an object
-// literal. A function that is stored in a variable, a class property or a
-// default export is a value only where its name is used, and matchFnRef
-// records those uses.
+// createsFunctionValue reports inline function values and object-literal
+// methods. A declaration by itself does not create a reference, and a
+// directly invoked expression is represented by its call instead.
 func createsFunctionValue(node *ast.Node) bool {
 	parent := node.Parent
 	if parent == nil {
@@ -1617,14 +1764,14 @@ func createsFunctionValue(node *ast.Node) bool {
 	case ast.IsMethodDeclaration(node), ast.IsGetAccessorDeclaration(node), ast.IsSetAccessorDeclaration(node):
 		return ast.IsObjectLiteralExpression(parent)
 	case ast.IsFunctionExpressionOrArrowFunction(node):
-		return !ast.IsVariableDeclaration(parent) && !ast.IsPropertyDeclaration(parent) && !ast.IsExportAssignment(parent)
+		return !isCallee(node)
 	}
 	return false
 }
 
 // recordFnRef records a reference from source to a collected function.
 func (e *extractor) recordFnRef(source callSource, target *Function, location SourceLocation) {
-	baseKey := fmt.Sprintf("%s::refs::%s", source.key, target.SemanticKey)
+	baseKey := fmt.Sprintf("%s::refs::%s", source.siteKey(), target.SemanticKey)
 	semanticKey := withOrdinal(baseKey, nextOrdinal(e.refCount, baseKey))
 	e.refs = append(e.refs, FnRef{
 		EntityID:        "fn_ref:" + semanticKey,
@@ -1636,12 +1783,13 @@ func (e *extractor) recordFnRef(source callSource, target *Function, location So
 		ToPath:          target.FilePath,
 		Range:           location,
 	})
+	e.markUnsupported(semanticKey, source.reason)
 }
 
 // recordUnresolvedCall records a call whose target is not known: a call
 // through a callback, a function-typed value or an any-typed value.
 func (e *extractor) recordUnresolvedCall(source callSource, location SourceLocation) {
-	baseKey := source.key + "::calls_unresolved"
+	baseKey := source.siteKey() + "::calls_unresolved"
 	semanticKey := withOrdinal(baseKey, nextOrdinal(e.unresolvedCount, baseKey))
 	e.unresolved = append(e.unresolved, CallUnresolved{
 		EntityID:        "call_unresolved:" + semanticKey,
@@ -1651,6 +1799,7 @@ func (e *extractor) recordUnresolvedCall(source callSource, location SourceLocat
 		FromPath:        source.path,
 		Range:           location,
 	})
+	e.markUnsupported(semanticKey, source.reason)
 }
 
 // calleeSymbol returns the symbol of the value that a call calls: the
@@ -1818,7 +1967,7 @@ func (e *extractor) matchFnRef(node *ast.Node, currentFunction *functionState) {
 	}
 	for ancestor := parent; ancestor != nil; ancestor = ancestor.Parent {
 		switch ancestor.Kind {
-		case ast.KindImportDeclaration, ast.KindExportDeclaration, ast.KindImportEqualsDeclaration, ast.KindExportAssignment:
+		case ast.KindImportDeclaration, ast.KindExportDeclaration, ast.KindImportEqualsDeclaration:
 			return
 		}
 		if ast.IsStatement(ancestor) || ast.IsFunctionLike(ancestor) {
@@ -1901,7 +2050,7 @@ func (e *extractor) externalCallFor(source callSource, callee *ast.Symbol, decl 
 	if moduleName == "" || name == "" {
 		return ExternalCall{}, false
 	}
-	baseKey := fmt.Sprintf("%s::external::%s::%s", source.key, moduleName, name)
+	baseKey := fmt.Sprintf("%s::external::%s::%s", source.siteKey(), moduleName, name)
 	semanticKey := withOrdinal(baseKey, nextOrdinal(e.externalCount, baseKey))
 	return ExternalCall{
 		EntityID:        "external_call:" + semanticKey,
@@ -2405,33 +2554,6 @@ func (e *extractor) relativePath(fileName string) string {
 		return normalizeSlash(fileName)
 	}
 	return filepath.ToSlash(relative)
-}
-
-func containsAwait(node *ast.Node) bool {
-	body := node.Body()
-	if body == nil {
-		return false
-	}
-	found := false
-	var visit func(current *ast.Node, root bool)
-	visit = func(current *ast.Node, root bool) {
-		if current == nil || found {
-			return
-		}
-		if !root && ast.IsFunctionLike(current) {
-			return
-		}
-		if current.Kind == ast.KindAwaitExpression {
-			found = true
-			return
-		}
-		current.ForEachChild(func(child *ast.Node) bool {
-			visit(child, false)
-			return found
-		})
-	}
-	visit(body, true)
-	return found
 }
 
 func functionMetaForNode(node *ast.Node) *functionMeta {
