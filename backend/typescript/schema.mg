@@ -347,9 +347,9 @@ Decl type_sig_param_rest(Type, Index)
 Decl type_incomplete(Type, Reason)
   descr [
     extensional(),
-    doc("The facts of the type leave out structure that a rule can depend on. A rule that must see every type inside a signature fails closed on such a type, for example with type_reaches_incomplete."),
+    doc("The facts of the type leave out structure that a rule can depend on: /truncated, /unsupported, /signatures, /constraint, /conflict or /members_omitted. A rule that must see every type inside a signature can use type_reaches_incomplete."),
     arg(Type, "Type entity id."),
-    arg(Reason, "/truncated (more than 16 levels), /unsupported (an /other type, or a type parameter with no declaration), /signatures (an /object with call, construct or index signatures), /constraint (a type parameter with a constraint) or /conflict (config groups give different structure).")
+    arg(Reason, "/truncated (more than 16 levels), /unsupported (an /other type, or a type parameter with no declaration), /signatures (an /object with call, construct or index signatures), /constraint (a type parameter with a constraint), /conflict (config groups give different structure) or /members_omitted (a named class, interface or enum whose members are not inspected).")
   ].
 
 Decl type_display(Type, Text)

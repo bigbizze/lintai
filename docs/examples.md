@@ -604,7 +604,9 @@ export function loadUser(input: { db: Db; id: string }): Promise<string> {
 
 The rule reports `loadUser` with `Db` from `src/infra/db.ts`.
 
-`type_contains` does not look into every part of a type. The strict variant also reports a signature that contains a type whose facts are incomplete (`type_incomplete`), so most types that the rule cannot inspect fail the rule. The members of classes, interfaces and enums are the exception: they are not emitted and not marked, so neither rule reports `Db` inside an interface:
+`type_contains` does not look into every part of a type. The strict variant also reports a signature that reaches a type with an incomplete marker (`type_incomplete`). Class, interface and enum members are not expanded, but the named type receives `/members_omitted`, so the strict rule catches a parameter or return type using it. This marker does not claim that a forbidden member exists or expose that member's type.
+
+Strict completeness also reaches default library interfaces. Ordinary `Promise<T>` and `T[]` use the library interfaces `Promise` and `Array`, which receive `/members_omitted`; a strict rule therefore reports these common wrappers even when `T` is fully represented. The rule below treats every incomplete type as a result, so it is intentionally conservative.
 
 ```ts
 import { dl, rule } from "@lintai/sdk";
@@ -627,11 +629,30 @@ export default rule("arch.domain-signatures-strict")
 
 For example, `export function pick<K extends keyof Db>(key: K): Db[K]` is reported: `K` has a constraint and `Db[K]` is an indexed access type, which is `/other`.
 
+A rule can make a narrower policy for known opaque leaves. The following helpers accept only the default library `Promise` and `Array` member-omission markers. Every other incompleteness reason remains a seed. Backward propagation still follows `type_child`, including the represented type arguments of those accepted wrappers:
+
+```ts
+Decl permitted_opaque_leaf(Type).
+permitted_opaque_leaf(T) :- type_named(T, "lib", "Promise"), type_origin_kind(T, /lib).
+permitted_opaque_leaf(T) :- type_named(T, "lib", "Array"), type_origin_kind(T, /lib).
+
+Decl disallowed_incomplete(Type).
+disallowed_incomplete(T) :- type_incomplete(T, Reason), Reason != /members_omitted.
+disallowed_incomplete(T) :- type_incomplete(T, /members_omitted), !permitted_opaque_leaf(T).
+
+Decl reaches_disallowed_incomplete(Type).
+reaches_disallowed_incomplete(T) :- disallowed_incomplete(T).
+reaches_disallowed_incomplete(T) :- type_child(T, Child), reaches_disallowed_incomplete(Child).
+```
+
+Use `reaches_disallowed_incomplete(T)` in the violation rule in place of `type_reaches_incomplete(T)`. This ignores only `/members_omitted` on the two named library leaves. If `Promise<Hidden>` reaches an unaccepted opaque `Hidden` type, that marker still propagates through the `Promise` type argument to the signature. The policy does not mark `any`, `unknown`, unconstrained parameters, or unknown runtime values as safe; those need separate rule-specific handling when they matter.
+
 Caveats:
 
 - `type_contains` does not look into the call, construct or index signatures of an anonymous object type, so `{ [k: string]: Db }` is not reported by the first rule. The type has `type_incomplete(T, /signatures)`, so the strict variant reports it.
 - `type_contains` does not look into type parameter constraints (`/constraint`), into conditional, mapped, indexed access and template literal types (`/other`, `/unsupported`), into types that are more than 16 levels deep (`/truncated`) or into types that two config groups compile with different structure (`/conflict`). Use `type_reaches_incomplete` to fail closed on these types.
-- `type_contains` does not look inside classes, interfaces or enums. If `User` is an interface with a property of type `Db`, a function that returns `User` is not reported. Add a rule for the declaration of `User`, or use `type_ref` and `type_ref_target` on the file that declares it.
+- `type_contains` does not look inside classes, interfaces or enums. If `User` is an interface with a property of type `Db`, a function that returns `User` is not reported by the first rule; the strict rule reports it through `/members_omitted`, without asserting that `Db` exists or emitting the member. A rule with a narrow opacity policy must keep `User` among its disallowed seeds unless it deliberately accepts that identity.
+- Default library `Promise` and `Array` interfaces also make the strict rule report ordinary wrappers. Use the rule-specific propagation above to accept selected opaque leaves while checking their represented arguments. An unmarked type such as `any` or `unknown` is not thereby known safe.
 - the checker erases some types before lintai sees them. `type Handle = Db` is `Db`, and `type UserId = string` is `/string`.
 - an `Origin` is a workspace-relative path only for types declared in workspace source files. A type from a package has the package name, so `glob(Origin, "src/infra/**")` does not match it.
 

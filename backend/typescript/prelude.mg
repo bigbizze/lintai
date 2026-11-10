@@ -160,7 +160,7 @@ type_child(T, C) :- type_sig_returns(T, C).
 
 Decl type_contains(Type, Inner)
   descr [
-    doc("Transitive closure of type_child. It materializes every reachable pair and costs O(nodes^2) on large graphs. To check only whether a type contains a target, use type_reaches_incomplete or propagate backward from the target over type_child. It does not look inside classes, interfaces or enums, into the call, construct or index signatures of an /object, into type parameter constraints, or into /other, truncated or conflicting types. Use type_reaches_incomplete to fail closed."),
+    doc("Transitive closure of type_child. It materializes every reachable pair and costs O(nodes^2) on large graphs. To check only whether a type contains a target, use type_reaches_incomplete or propagate backward from the target over type_child. It does not look inside class, interface or enum members, into the call, construct or index signatures of an /object, into type parameter constraints, or into /other, truncated or conflicting types. Named classes, interfaces and enums receive /members_omitted, so type_reaches_incomplete can fail closed on them."),
     arg(Type, "Type entity id."),
     arg(Inner, "Type entity id reached through one or more type_child steps.")
   ].
@@ -169,7 +169,7 @@ type_contains(T, D) :- type_child(T, C), type_contains(C, D).
 
 Decl type_reaches_incomplete(Type)
   descr [
-    doc("Type, or a type that it contains through type_child steps, has a type_incomplete row, so type_contains may not see every type inside it."),
+    doc("Type, or a type that it contains through type_child steps, has a type_incomplete row. This includes named classes, interfaces and enums marked /members_omitted because their members are not inspected."),
     arg(Type, "Type entity id.")
   ].
 type_reaches_incomplete(T) :- type_incomplete(T, _).

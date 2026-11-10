@@ -113,6 +113,8 @@ type_display("type:ad6e4a440764589d7bd19cf8b0ccb2ee","{ ok: false; error: string
 type_display("type:baed874d296d0719904f7819333bab8e","Promise<ActionResult<number>>").
 type_display("type:f2331b4aae7f44eefa2fe40c4a3cb92e","string").
 type_display("type:fa9639dd8b41dd6a84d627cda0c2c1f4","Promise<number>").
+type_incomplete("type:baed874d296d0719904f7819333bab8e",/members_omitted).
+type_incomplete("type:fa9639dd8b41dd6a84d627cda0c2c1f4",/members_omitted).
 type_kind("type:1b4533a98bd4525afbf8acc895ce80b4",/union).
 type_kind("type:1fe05b06f5bf66e5895ee783cd676780",/number).
 type_kind("type:4de194fca24f6c4be315d367550c16f8",/literal).

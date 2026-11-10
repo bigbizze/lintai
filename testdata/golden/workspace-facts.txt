@@ -263,6 +263,11 @@ type_display("type:d71e179c432b2e4a7fef9181e12b8e48","undefined").
 type_display("type:e078ba3d6ad8e72d20ee67c4ce8a1086","Config").
 type_display("type:f2331b4aae7f44eefa2fe40c4a3cb92e","string").
 type_display("type:fa9639dd8b41dd6a84d627cda0c2c1f4","Promise<number>").
+type_incomplete("type:4b1b28d05a2542b01b28fb00c90cc856",/members_omitted).
+type_incomplete("type:641f447bc652c807f56fc292d2d76570",/members_omitted).
+type_incomplete("type:65cb04faa8f481189361eabf43838645",/members_omitted).
+type_incomplete("type:a2e26017268361dc7536a6d5064914fe",/members_omitted).
+type_incomplete("type:fa9639dd8b41dd6a84d627cda0c2c1f4",/members_omitted).
 type_kind("type:195f88f8680404ae9582c9c03b9d6465",/function).
 type_kind("type:1fe05b06f5bf66e5895ee783cd676780",/number).
 type_kind("type:4b1b28d05a2542b01b28fb00c90cc856",/object).

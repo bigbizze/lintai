@@ -1,6 +1,14 @@
 # Semantic extraction completeness
 
-Status: proposed implementation specification. This document does not assert that the features are implemented. No release number is assigned.
+Status by implementation section:
+
+- Section 4, Type opacity: implemented.
+- Section 5, Export and declaration inventory: proposed; not implemented on this branch.
+- Section 6, Asynchronous suspension sites: proposed.
+- Section 7, Declared call provenance: deferred.
+- Section 8, Loaded rule metadata: proposed.
+
+No release number is assigned.
 
 ## 1. Purpose and authority
 
