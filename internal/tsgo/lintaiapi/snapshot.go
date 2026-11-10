@@ -1740,6 +1740,10 @@ func (e *extractor) collectCall(source callSource, node *ast.Node) {
 	}
 	if target == nil {
 		callee := e.calleeSymbol(node)
+		if callee != nil && callee.Flags()&ast.SymbolFlagsAccessor != 0 {
+			e.recordUnresolvedCall(source, location)
+			return
+		}
 		declarationExternal := declaration != nil && e.isExternalDeclaration(declaration)
 		if workspaceClass != nil && declarationExternal {
 			callee = e.externalBaseClass(workspaceClass)
@@ -2159,7 +2163,7 @@ func (e *extractor) certainBindingTarget(symbol *ast.Symbol) *Function {
 	if symbol.Flags()&ast.SymbolFlagsAlias != 0 {
 		symbol = e.checker.SkipAlias(symbol)
 	}
-	if symbol == nil || mutableFunctionBinding(symbol) {
+	if symbol == nil || symbol.Flags()&ast.SymbolFlagsAccessor != 0 || mutableFunctionBinding(symbol) {
 		return nil
 	}
 	return e.lookupFunction(symbol)

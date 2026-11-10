@@ -193,6 +193,65 @@ export default () => add(4);
 	}
 }
 
+func TestGetterReturnedCallablesRemainUnresolved(t *testing.T) {
+	snapshot := buildTestSnapshot(t, map[string]string{
+		"node_modules/pkg/package.json": `{ "name": "pkg", "types": "index.d.ts" }`,
+		"node_modules/pkg/index.d.ts":   "export declare class External { constructor(); get run(): () => void; method(): void; }\n",
+		"src/a.ts": `import { External } from "pkg";
+async function suspends() { await 0; }
+const box = {
+  get run() { return suspends; },
+  get callback() { return async () => { await 0; }; },
+  get maker() { return Worker; },
+  method() {}
+};
+class Worker {
+  constructor() {}
+  get run() { return suspends; }
+  method() {}
+}
+const worker = new Worker();
+const external = new External();
+export function invoke() {
+  box.run();
+  box.callback();
+  new box.maker();
+  worker.run();
+  box.method();
+  worker.method();
+  external.run();
+  external.method();
+}
+`,
+	})
+	var calls []string
+	for _, edge := range snapshot.CallEdges {
+		calls = append(calls, fmt.Sprintf("%d: call %s", edge.Range.StartLine, edge.ToName))
+	}
+	for _, call := range snapshot.ExternalCalls {
+		calls = append(calls, fmt.Sprintf("%d: external %s %s", call.Range.StartLine, call.Module, call.Name))
+	}
+	for _, call := range snapshot.CallsUnresolved {
+		calls = append(calls, fmt.Sprintf("%d: unresolved", call.Range.StartLine))
+	}
+	slices.Sort(calls)
+	want := []string{
+		"14: call Worker.constructor",
+		"15: external pkg External",
+		"17: unresolved",
+		"18: unresolved",
+		"19: unresolved",
+		"20: unresolved",
+		"21: call box.method",
+		"22: call Worker.method",
+		"23: unresolved",
+		"24: external pkg External.method",
+	}
+	if !slices.Equal(calls, want) {
+		t.Fatalf("call outcomes differ:\ngot:\n%s\nwant:\n%s", strings.Join(calls, "\n"), strings.Join(want, "\n"))
+	}
+}
+
 // Every call site has exactly one of call_edge, external_call and
 // call_unresolved, so a strict rule can fail closed on calls that the
 // checker does not resolve. A function used as a value is a fn_ref, and an
