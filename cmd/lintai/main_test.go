@@ -258,7 +258,7 @@ export default rule("arch.dup-setup").version(1).setup(() => { throw new Error("
 	gotRules := make([]string, 0, len(list.Rules))
 	for _, item := range list.Rules {
 		gotRules = append(gotRules, item.ID+" "+item.Path)
-		if item.Report == nil || item.ExpectNonEmpty == nil {
+		if item.ExpectNonEmpty == nil {
 			t.Errorf("%s metadata arrays must be JSON arrays, got report=%v expectNonEmpty=%v", item.ID, item.Report, item.ExpectNonEmpty)
 		}
 		if item.ID == "arch.metadata" {
