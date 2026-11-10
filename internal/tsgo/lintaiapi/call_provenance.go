@@ -170,7 +170,7 @@ func (e *extractor) callDeclarationMember(declaration *ast.Node, id string) (*De
 // receiver or the members of its type. Accessors returning callables are not
 // property signature declarations and must not become the callable endpoint.
 func (e *extractor) callUsesUnassociatedProperty(node *ast.Node) bool {
-	callee := ast.SkipParentheses(calleeOf(node))
+	callee := ast.SkipOuterExpressions(calleeOf(node), ast.OEKAll)
 	if !ast.IsPropertyAccessExpression(callee) && !ast.IsElementAccessExpression(callee) {
 		return false
 	}

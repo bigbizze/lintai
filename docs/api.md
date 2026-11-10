@@ -206,7 +206,7 @@ Caveats:
 
 ### Declared members at call sites
 
-Integration status: the schema, [policy fixture](../testdata/call-provenance/writer-policy.ts) and behavioral test are present. Extractor integration and executable verification are pending. This section describes the contract being integrated, not a published release.
+Implemented in this change; unavailable in published 0.7.0. The [capability policy](../testdata/call-provenance/writer-policy.ts) uses these facts to distinguish forbidden members from incomplete evidence.
 
 TypeScript can know which declared member a call uses even when lintai cannot know which implementation runs. For example:
 
@@ -221,9 +221,13 @@ function use(store: Reader & Writer) {
 
 The first call selects `Reader.read`; the second selects `Writer.write`. Both can remain `call_unresolved`. That runtime fact does not mean declaration evidence is missing. `const saved = store; saved.write()` can select the same `Writer.write` declaration without finding the implementation behind `store`.
 
-To ban a public member, select its owner with `module_export` and `export_target`, then join `call_declaration` to `declaration_member`. Export aliases still lead to the same owner. Require a positive member row; an unrelated `Other.write` does not match just because its name is `write`. Anonymous call signatures can be complete without a member row.
+To ban a public member, select its owner with `module_export` and `export_target`, then join `call_declaration` to `declaration_member`. Export aliases still lead to the same owner. A forbidden finding requires a positive member row; an unrelated `Other.write` does not match just because its name is `write`. Owner selection does not require an observed forbidden member. Anonymous call signatures can be complete without a member row.
 
-`/unresolved` means no usable signature declaration was selected, including an `any` call. `/synthetic` means the checker combined signatures without one concrete declaration. `/unsupported` means the signature or member association cannot be represented safely. For example, a shared callable type alias does not belong to each interface property that uses it. `/conflict` means checked programs disagree. Retain and check these markers even when a declaration row exists. The selected declaration may be an overload, an inline callable property's signature, or a declaration outside the analyzed files; it does not identify a runtime implementation.
+Ordinary and optional calls, receiver aliases, static element access and selected overloads retain the concrete signature chosen by the checker. Method owners are their declaring interfaces or classes, including the base declaration for an inherited method. Inline function-type properties and inline callable-object properties retain their signature identity and lexical owner. Shared callable aliases do not acquire owners from their uses. Constructors and tagged templates retain concrete selected signatures without an invented member name. A getter returning a callable is not the declaration of that callable. Dynamic access is never matched by spelling.
+
+`/unresolved` means no usable signature declaration was selected, including an `any` call or checker recovery. `/synthetic` means the checker combined signatures without one concrete declaration. `/unsupported` means the signature or member association cannot be represented safely. For example, a shared callable type alias does not belong to each interface property that uses it. `/conflict` means checked programs disagree. Retain and check these markers even when a declaration row exists. The selected declaration may be an overload, an inline callable property's signature, or a declaration outside the analyzed files; it does not identify a runtime implementation.
+
+Referenced declarations and owners retain identity, origin and location without becoming new export or type-extraction roots. Across checked programs, differing selections or completeness produce `/conflict`; known rows and incomplete reasons remain visible. Escaped callback values represented by `call_unresolved` are not invocations and receive `/unsupported`. Runtime relations (`call_edge`, `external_call`, `call_unresolved` and `fn_ref`) remain independent of this evidence.
 
 Rules must also check missing declaration rows and incomplete or missing owner/export selection. No forbidden match is not enough to establish the policy while required evidence is missing. See [the executable capability example](examples.md#18-forbid-a-declared-capability-member) for separate forbidden and indeterminate results. These facts do not prove that an unknown runtime value is safe.
 

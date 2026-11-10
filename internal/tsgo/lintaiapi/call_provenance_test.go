@@ -27,9 +27,16 @@ interface Inline {
 }
 
 class Getter { get returned(): () => void { return () => {}; } }
+class Overloaded {
+  constructor() {}
+  choose(value: string): string;
+  choose(value: number): number;
+  choose(value: string | number): string | number { return value; }
+}
+function tag(parts: TemplateStringsArray): string { return parts[0]; }
 function exercise(cap: Capabilities, other: Other, inline: Inline, getter: Getter,
   inherited: Derived, combined: ((x: "both" | "left") => void) | ((x: "both" | "right") => void),
-  unknown: any, free: Shared) {
+  unknown: any, free: Shared, overloaded: Overloaded) {
   cap.store.read();
   cap.store.write();
   const store = cap.store;
@@ -38,6 +45,8 @@ function exercise(cap: Capabilities, other: Other, inline: Inline, getter: Gette
   inline.inline(1);
   inline.object(1);
   inline.shared();
+  (inline.shared satisfies Shared)();
+  (inline.shared as Shared)();
   getter.returned();
   inherited.write();
   cap.store?.write();
@@ -45,6 +54,10 @@ function exercise(cap: Capabilities, other: Other, inline: Inline, getter: Gette
   combined("both");
   unknown();
   free();
+  overloaded.choose("text");
+  overloaded.choose(1);
+  new Overloaded();
+  tag` + "`hello`" + `;
 }
 `
 	root := t.TempDir()
@@ -74,9 +87,22 @@ function exercise(cap: Capabilities, other: Other, inline: Inline, getter: Gette
 		}
 		observations[observation.InvocationKey] = observation
 	}
+	runtimeLocations := make(map[string]SourceLocation)
+	for _, call := range partial.CallsUnresolved {
+		runtimeLocations[call.SemanticKey] = call.Range
+	}
+	for _, call := range partial.CallEdges {
+		runtimeLocations[call.SemanticKey] = call.Range
+	}
+	for _, call := range partial.ExternalCalls {
+		runtimeLocations[call.SemanticKey] = call.Range
+	}
 	var writes []string
+	var overloads []callDeclarationObservation
 	for _, test := range []struct {
 		call, owner, member, reason string
+		kind, selectedSource        string
+		runtimeFlexible             bool
 	}{
 		{call: "cap.store.read()", owner: "Reader", member: "read"},
 		{call: "cap.store.write()", owner: "Writer", member: "write"},
@@ -84,7 +110,9 @@ function exercise(cap: Capabilities, other: Other, inline: Inline, getter: Gette
 		{call: "other.write()", owner: "Other", member: "write"},
 		{call: "inline.inline(1)", owner: "Inline", member: "inline"},
 		{call: "inline.object(1)", owner: "Inline", member: "object"},
-		{call: "inline.shared()", reason: "unsupported"},
+		{call: "inline.shared()", reason: "unsupported", selectedSource: "type Shared = () => void;"},
+		{call: "(inline.shared satisfies Shared)()", reason: "unsupported", selectedSource: "type Shared = () => void;"},
+		{call: "(inline.shared as Shared)()", reason: "unsupported", selectedSource: "type Shared = () => void;"},
 		{call: "getter.returned()"},
 		{call: "inherited.write()", owner: "Writer", member: "write"},
 		{call: "cap.store?.write()", owner: "Writer", member: "write"},
@@ -92,20 +120,31 @@ function exercise(cap: Capabilities, other: Other, inline: Inline, getter: Gette
 		{call: `combined("both")`, reason: "synthetic"},
 		{call: "unknown()", reason: "unresolved"},
 		{call: "free()"},
+		{call: `overloaded.choose("text")`, owner: "Overloaded", member: "choose", selectedSource: "choose(value: string): string;", runtimeFlexible: true},
+		{call: "overloaded.choose(1)", owner: "Overloaded", member: "choose", selectedSource: "choose(value: number): number;", runtimeFlexible: true},
+		{call: "new Overloaded()", kind: "new", selectedSource: "constructor() {}", runtimeFlexible: true},
+		{call: "tag`hello`", kind: "tagged_template", selectedSource: "function tag(parts: TemplateStringsArray): string", runtimeFlexible: true},
 	} {
 		t.Run(test.call, func(t *testing.T) {
 			offset := strings.Index(source, "  "+test.call) + 2
 			if offset < 2 {
 				t.Fatal("fixture call not found")
 			}
-			key, _ := json.Marshal([]any{"invocation-v1", "src/calls.ts", offset, "call"})
+			kind := test.kind
+			if kind == "" {
+				kind = "call"
+			}
+			key, _ := json.Marshal([]any{"invocation-v1", "src/calls.ts", offset, kind})
 			observation, ok := observations[string(key)]
 			if !ok {
 				t.Fatalf("missing observation for %s", key)
 			}
-			call, ok := unresolved[observation.Site]
-			if !ok || call.Range.StartLine != strings.Count(source[:offset], "\n")+1 {
-				t.Fatalf("lost original runtime-unresolved site/location: %+v", observation)
+			location, ok := runtimeLocations[observation.Site]
+			if !ok || location.StartLine != strings.Count(source[:offset], "\n")+1 {
+				t.Fatalf("lost original runtime site/location: %+v", observation)
+			}
+			if _, unresolvedSite := unresolved[observation.Site]; !test.runtimeFlexible && !unresolvedSite {
+				t.Fatalf("capability call lost runtime-unresolved status: %+v", observation)
 			}
 			if strings.Join(observation.Incomplete, ",") != test.reason {
 				t.Fatalf("incomplete outcome: %+v", observation)
@@ -119,6 +158,18 @@ function exercise(cap: Capabilities, other: Other, inline: Inline, getter: Gette
 			declaration, exists := declarations[observation.Declaration]
 			if !exists || test.call == "getter.returned()" && declaration.Kind != "signature" {
 				t.Fatalf("missing or misattributed signature endpoint: %+v", observation)
+			}
+			if test.selectedSource != "" {
+				selectedOffset := strings.Index(source, test.selectedSource)
+				if selectedOffset < 0 || declaration.Location.File != "src/calls.ts" || declaration.Location.StartLine != strings.Count(source[:selectedOffset], "\n")+1 {
+					t.Fatalf("selected wrong source declaration for %s: %+v", test.call, declaration)
+				}
+			}
+			if test.owner == "Overloaded" {
+				if declaration.Function != "" || len(declaration.FunctionObservations) != 0 {
+					t.Fatalf("overload incorrectly linked to implementation function: %+v", declaration)
+				}
+				overloads = append(overloads, observation)
 			}
 			if test.member == "" {
 				if observation.Member != nil {
@@ -134,6 +185,18 @@ function exercise(cap: Capabilities, other: Other, inline: Inline, getter: Gette
 				writes = append(writes, observation.Declaration)
 			}
 		})
+	}
+	if len(overloads) != 2 || overloads[0].Declaration == overloads[1].Declaration || overloads[0].Member == nil || overloads[1].Member == nil || overloads[0].Member.OwnerDeclaration != overloads[1].Member.OwnerDeclaration {
+		t.Fatalf("overloads must select distinct declarations with the same lexical class owner: %+v", overloads)
+	}
+	if owner := declarations[overloads[0].Member.OwnerDeclaration]; owner.Kind != "class" {
+		t.Fatalf("overload owner is not the class declaration: %+v", owner)
+	}
+	implementationLine := strings.Count(source[:strings.Index(source, "choose(value: string | number)")], "\n") + 1
+	if !slices.ContainsFunc(partial.Functions, func(function Function) bool {
+		return function.Name == "Overloaded.choose" && function.ContainerName == "Overloaded" && function.Range.StartLine == implementationLine
+	}) {
+		t.Fatal("method implementation was not independently collected")
 	}
 	for _, write := range writes {
 		if write != writes[0] {
