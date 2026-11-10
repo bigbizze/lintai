@@ -302,11 +302,8 @@ export class LintAIClient {
 	// so that they are not repeated for every file. An editor lints files
 	// again, so it gets them on every call.
 	problems(): string[] {
-		if (this.options.reportProblemsOnce) {
-			if (this.problemsReported) {
-				return [];
-			}
-			this.problemsReported = true;
+		if (this.options.reportProblemsOnce && this.problemsReported) {
+			return [];
 		}
 		const items: string[] = [];
 		if (this.serveFailure) {
@@ -322,6 +319,7 @@ export class LintAIClient {
 			const phase = diagnostic.phase ? ` (phase ${diagnostic.phase})` : "";
 			items.push(`[lintai] rule ${diagnostic.rule_id} could not run${phase}: ${diagnostic.message}`);
 		}
+		if (items.length) this.problemsReported = true;
 		return items;
 	}
 
@@ -958,7 +956,7 @@ export function resolveBridgeOptions(options: LintaiOptions, cwd: string, host: 
 		ruleGlobs,
 		excludes: options.exclude ?? [],
 		files: options.files ?? "tsconfig",
-		...(options.sourceLinks === undefined ? {} : { sourceLinks: path.resolve(workspaceRoot, options.sourceLinks) }),
+		...(options.sourceLinks ? { sourceLinks: path.resolve(workspaceRoot, options.sourceLinks) } : {}),
 		env: options.env ?? {},
 		...(options.factLimit === undefined ? {} : { factLimit: options.factLimit }),
 		...(options.rulesLock === undefined ? {} : { rulesLock: path.resolve(workspaceRoot, options.rulesLock) }),

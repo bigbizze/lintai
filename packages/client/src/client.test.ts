@@ -741,6 +741,66 @@ test("resolveBridgeOptions defaults to serve mode and workspace repo root", () =
 	assert.match(options.assetRoot, /packages[\\/]client$/);
 });
 
+for (const mode of ["serve", "oneshot"] as const) {
+	test(`empty sourceLinks acts like no option in ${mode} mode`, () => {
+		const child = createTestProcess();
+		const writes: Buffer[] = [];
+		const watched: string[] = [];
+		child.stdin.on("data", (chunk) => writes.push(Buffer.from(chunk)));
+		const diagnostic = {
+			rule_id: "arch.ok",
+			assertion_id: "default",
+			message: "ok",
+			source_location: {
+				file: "src/example.ts",
+				startLine: 1,
+				startColumn: 1,
+				endLine: 1,
+				endColumn: 2,
+			},
+		};
+		const client = new LintAIClient(
+			resolveBridgeOptions(
+				{ mode, binary: "/tmp/lintai", workspaceRoot: "/tmp", sourceLinks: "" },
+				"/tmp",
+				cliHost,
+			),
+			createTestDependencies({
+				spawnServe: () => child,
+				readServeSync: () => {
+					const body = Buffer.concat(writes).toString("utf8").split("\r\n\r\n")[1];
+					const request = JSON.parse(body) as { params: { sourceLinks?: string } };
+					return request.params.sourceLinks
+						? createFramedResponse({
+								jsonrpc: "2.0",
+								id: 1,
+								error: { code: -32603, message: "source links is a directory" },
+							})
+						: createInitializeResult("arch.ok");
+				},
+				spawnSync: (_command, args) => {
+					const index = args.indexOf("--source-links");
+					return index >= 0 && args[index + 1]
+						? { stdout: "", stderr: "source links is a directory", error: undefined, status: 2 }
+						: { stdout: JSON.stringify([diagnostic]), stderr: "", error: undefined, status: 0 };
+				},
+				watchInputPath: (target) => {
+					watched.push(target);
+					return { close() {} };
+				},
+				log: () => undefined,
+			}),
+		);
+		try {
+			assert.equal(client.getDiagnostics("src/example.ts")[0]?.rule_id, "arch.ok");
+			assert.deepEqual(client.problems(), []);
+			assert.deepEqual(watched, []);
+		} finally {
+			client.dispose();
+		}
+	});
+}
+
 test("resolveBridgeOptions finds the installed lintai binary from the workspace root", () => {
 	const tempRoot = mkdtempSync(path.join(os.tmpdir(), "lintai-client-"));
 	try {
@@ -836,6 +896,45 @@ test("a CLI host reports workspace problems on the first file only", () => {
 	client.getDiagnostics("src/b.ts");
 	assert.deepEqual(client.problems(), []);
 	client.dispose();
+});
+
+test("a clean oneshot pass does not hide a later source-links analysis failure", async () => {
+	let onInputChange: ((filename?: string) => void) | undefined;
+	let runs = 0;
+	const client = new LintAIClient(
+		resolveBridgeOptions(
+			{ binary: "/tmp/lintai", workspaceRoot: "/tmp", sourceLinks: "source-links.json" },
+			"/tmp",
+			cliHost,
+		),
+		createTestDependencies({
+			watchInputPath: (_target, onChange) => {
+				onInputChange = onChange;
+				return { close() {} };
+			},
+			spawnSync: () =>
+				++runs === 1
+					? { stdout: "[]", stderr: "", error: undefined, status: 0 }
+					: { stdout: "", stderr: "invalid source links", error: undefined, status: 2 },
+			log: () => undefined,
+		}),
+	);
+	try {
+		assert.deepEqual(client.getDiagnostics("src/a.ts"), []);
+		assert.deepEqual(client.problems(), []);
+		assert.ok(onInputChange);
+		onInputChange("source-links.json");
+		await new Promise((resolve) => setTimeout(resolve, 250));
+		assert.deepEqual(client.getDiagnostics("src/b.ts"), []);
+		assert.equal(runs, 2);
+		assert.match(
+			client.problems().join("\n"),
+			/could not analyze the workspace:.*invalid source links/,
+		);
+		assert.deepEqual(client.problems(), []);
+	} finally {
+		client.dispose();
+	}
 });
 
 test("toReports converts 1-based lintai columns to 0-based report columns and skips unlocated diagnostics", () => {
