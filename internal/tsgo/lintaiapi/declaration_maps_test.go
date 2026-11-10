@@ -326,8 +326,13 @@ func TestDeclarationMapPreservesExactSegmentEvidence(t *testing.T) {
 	tests := []struct {
 		name, generated, mappings, outcome string
 		missingFirst                       bool
+		malformedNames                     bool
 		wantCandidates                     int
 	}{
+		{
+			name: "malformed names before ambiguity", generated: "export declare function load(): void;\n//# sourceMappingURL=index.d.ts.map\n",
+			mappings: "AAAA,ACAA", outcome: "malformed_map", malformedNames: true,
+		},
 		{
 			name:      "ambiguous despite failed reverse mapping",
 			generated: "export declare function load(x: string): void;\nexport declare function load(x: number): void;\n//# sourceMappingURL=index.d.ts.map\n",
@@ -361,7 +366,11 @@ func TestDeclarationMapPreservesExactSegmentEvidence(t *testing.T) {
 					delete(files, "source/second.ts")
 				}
 			}
-			contents, err := json.Marshal(map[string]any{"version": 3, "file": "index.d.ts", "sources": sources, "names": []string{}, "mappings": test.mappings})
+			var names any = []string{}
+			if test.malformedNames {
+				names = 42
+			}
+			contents, err := json.Marshal(map[string]any{"version": 3, "file": "index.d.ts", "sources": sources, "names": names, "mappings": test.mappings})
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -44,6 +44,7 @@ type rawDeclarationMap struct {
 	File           string            `json:"file"`
 	SourceRoot     *string           `json:"sourceRoot"`
 	Sources        []*string         `json:"sources"`
+	Names          []string          `json:"names"`
 	SourcesContent []json.RawMessage `json:"sourcesContent"`
 	Mappings       string            `json:"mappings"`
 }
