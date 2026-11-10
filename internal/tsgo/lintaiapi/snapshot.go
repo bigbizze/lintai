@@ -19,6 +19,7 @@ import (
 	"github.com/bigbizze/lintai/internal/tsgo/internal/scanner"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/tsoptions"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/tspath"
+	"github.com/bigbizze/lintai/internal/tsgo/internal/vfs"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/vfs/osvfs"
 )
 
@@ -835,6 +836,36 @@ func newConfigCache(host compiler.CompilerHost) *configCache {
 	return &configCache{host: host, configs: make(map[string]*parsedConfig), errors: make(map[string]error), candidates: make(map[string]bool)}
 }
 
+// configInputFS records the files consulted while parsing a config, including
+// dependencies read before a diagnostic causes the config to be rejected.
+// The regular resolution tracker already records missing directory probes.
+type configInputFS struct {
+	vfs.FS
+	inputs map[string]bool
+}
+
+func (fs configInputFS) record(path string, exists bool) {
+	path = normalizeSlash(path)
+	if path == "" || tspath.IsUrl(path) || strings.HasPrefix(path, "^/") {
+		return
+	}
+	fs.inputs[path] = fs.inputs[path] || exists
+}
+
+func (fs configInputFS) FileExists(path tspath.RootedFilePath) bool {
+	exists := fs.FS.FileExists(path)
+	if !exists && !fs.FS.DirectoryExists(tspath.RootedDirectoryPathFromAbsolute(path.AsString())) {
+		fs.record(path.AsString(), false)
+	}
+	return exists
+}
+
+func (fs configInputFS) ReadFile(path tspath.RootedFilePath) (string, bool) {
+	contents, ok := fs.FS.ReadFile(path)
+	fs.record(path.AsString(), ok || fs.FS.FileExists(path))
+	return contents, ok
+}
+
 func (c *configCache) load(configPath string) (*parsedConfig, error) {
 	if parsed, ok := c.configs[configPath]; ok {
 		return parsed, nil
@@ -842,9 +873,15 @@ func (c *configCache) load(configPath string) (*parsedConfig, error) {
 	if err, ok := c.errors[configPath]; ok {
 		return nil, err
 	}
-	command, diags := tsoptions.GetParsedCommandLineOfConfigFile(tspath.RootedFilePathFromAbsolute(configPath), &core.CompilerOptions{}, nil, c.host.FS(), nil)
+	command, diags := tsoptions.GetParsedCommandLineOfConfigFile(tspath.RootedFilePathFromAbsolute(configPath), &core.CompilerOptions{}, nil, configInputFS{FS: c.host.FS(), inputs: c.candidates}, nil)
 	if command != nil {
 		diags = append(diags, command.GetConfigFileParsingDiagnostics()...)
+		// References can affect later owner selection even if this config has
+		// diagnostics, so retain their paths before rejecting the parse.
+		for _, reference := range command.ResolvedProjectReferencePaths() {
+			path := normalizeSlash(reference.AsString())
+			c.candidates[path] = c.candidates[path] || c.host.FS().FileExists(reference)
+		}
 	}
 	if len(diags) > 0 {
 		err := fmt.Errorf("tsconfig diagnostics: %s", joinDiagnostics(diags))

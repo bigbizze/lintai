@@ -2,7 +2,6 @@ package lintaiapi
 
 import (
 	"context"
-	"fmt"
 	"slices"
 	"strings"
 	"time"
@@ -10,6 +9,8 @@ import (
 	"github.com/bigbizze/lintai/internal/tsgo/internal/ast"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/checker"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/compiler"
+	"github.com/bigbizze/lintai/internal/tsgo/internal/contentmapper"
+	"github.com/bigbizze/lintai/internal/tsgo/internal/core"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/module"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/packagejson"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/tsoptions"
@@ -168,25 +169,51 @@ func (a *auxiliarySourcePrograms) selectSourceConfig(nearest, sourceFile string)
 	if len(owners) == 1 {
 		return owners[0], ""
 	}
-	var signature string
-	for index, owner := range owners {
+	var first *tsoptions.ParsedCommandLine
+	for _, owner := range owners {
 		command, err := a.configs.program(owner)
 		if err != nil {
 			return "", AssociationUnsupported
 		}
-		roots := make([]string, 0, len(command.FileNames()))
-		for _, file := range command.FileNames() {
-			roots = append(roots, normalizeSlash(file.AsString()))
-		}
-		slices.Sort(roots)
-		current := fmt.Sprintf("%#v|%s", command.CompilerOptions(), strings.Join(roots, "\x00"))
-		if index == 0 {
-			signature = current
-		} else if current != signature {
+		if first == nil {
+			first = command
+		} else if !equivalentSourceConfigs(first, command, caseSensitivity) {
 			return "", AssociationUnsupported
 		}
 	}
 	return owners[0], ""
+}
+
+// ConfigFilePath identifies the JSON file, but its directory can affect type
+// and package resolution. Compare that directory and the other program inputs
+// separately, while ignoring the config filename itself.
+func equivalentSourceConfigs(left, right *tsoptions.ParsedCommandLine, caseSensitivity tspath.CaseSensitivity) bool {
+	if caseSensitivity.PathKey(left.BaseDirectory().AsPath()) != caseSensitivity.PathKey(right.BaseDirectory().AsPath()) {
+		return false
+	}
+	leftOptions, rightOptions := left.CompilerOptions().Clone(), right.CompilerOptions().Clone()
+	leftOptions.ConfigFilePath, rightOptions.ConfigFilePath = "", ""
+	if !leftOptions.Equals(rightOptions) || !left.TypeAcquisition().Equals(right.TypeAcquisition()) {
+		return false
+	}
+	if !slices.EqualFunc(left.ContentMappers(), right.ContentMappers(), (*contentmapper.Mapper).Equals) {
+		return false
+	}
+	if !slices.EqualFunc(left.ProjectReferences(), right.ProjectReferences(), func(a, b *core.ProjectReference) bool {
+		return a == b || a != nil && b != nil && a.Circular == b.Circular &&
+			caseSensitivity.PathKey(core.ResolveProjectReferencePath(a).AsPath()) == caseSensitivity.PathKey(core.ResolveProjectReferencePath(b).AsPath())
+	}) {
+		return false
+	}
+	roots := func(command *tsoptions.ParsedCommandLine) []string {
+		paths := make([]string, 0, len(command.FileNames()))
+		for _, file := range command.FileNames() {
+			paths = append(paths, caseSensitivity.PathKey(file.AsPath()).AsString())
+		}
+		slices.Sort(paths)
+		return slices.Compact(paths)
+	}
+	return slices.Equal(roots(left), roots(right))
 }
 
 func configIncludesFile(config *parsedConfig, file string, caseSensitivity tspath.CaseSensitivity) bool {
