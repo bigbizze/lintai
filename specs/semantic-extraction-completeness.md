@@ -1,14 +1,6 @@
 # Semantic extraction completeness
 
-Status by implementation section:
-
-- Section 4, Type opacity: implemented.
-- Section 5, Export and declaration inventory: proposed; not implemented on this branch.
-- Section 6, Asynchronous suspension sites: proposed.
-- Section 7, Declared call provenance: deferred.
-- Section 8, Loaded rule metadata: proposed.
-
-No release number is assigned.
+Status: implementation status is recorded in each feature section. Sections without an implementation status remain proposed; section 7 is deferred until a concrete capability-call rule needs it. No release number is assigned.
 
 ## 1. Purpose and authority
 
@@ -37,6 +29,8 @@ Use the existing extractor, snapshot, analysis model, fact builder, schema, and 
 - Completeness claims are relative to the documented extraction model. Neither an absent violation nor an absent incomplete marker proves general program safety.
 
 ## 4. Type opacity
+
+Status: implemented.
 
 ### 4.1 Representation
 
