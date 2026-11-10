@@ -8611,14 +8611,22 @@ func (c *Checker) isSymbolOrSymbolForCall(node *ast.Node) bool {
  * @return a signature of the call-like expression or undefined if one can't be found
  */
 func (c *Checker) getResolvedSignature(node *ast.Node, candidatesOutArray *[]*Signature, checkMode CheckMode) *Signature {
+	signature, _ := c.getResolvedSignatureWithRecovery(node, candidatesOutArray, checkMode)
+	return signature
+}
+
+// Keep invocation recovery paired with the selected signature, including when flow
+// analysis returns a temporary result that must not replace the cached pair.
+func (c *Checker) getResolvedSignatureWithRecovery(node *ast.Node, candidatesOutArray *[]*Signature, checkMode CheckMode) (*Signature, bool) {
 	links := c.signatureLinks.Get(node)
 	// If getResolvedSignature has already been called, we will have cached the resolvedSignature.
 	// However, it is possible that either candidatesOutArray was not passed in the first time,
 	// or that a different candidatesOutArray was passed in. Therefore, we need to redo the work
 	// to correctly fill the candidatesOutArray.
 	cached := links.resolvedSignature
+	cachedRecovery := links.resolvedSignatureRecovery
 	if cached != nil && cached != c.resolvingSignature && candidatesOutArray == nil {
-		return cached
+		return cached, cachedRecovery
 	}
 	saveResolutionStart := c.resolutionStart
 	if cached == nil {
@@ -8631,7 +8639,9 @@ func (c *Checker) getResolvedSignature(node *ast.Node, candidatesOutArray *[]*Si
 		c.resolutionStart = len(c.typeResolutions)
 	}
 	links.resolvedSignature = c.resolvingSignature
+	links.resolvedSignatureRecovery = false
 	result := c.resolveSignature(node, candidatesOutArray, checkMode)
+	recovery := links.resolvedSignatureRecovery
 	c.resolutionStart = saveResolutionStart
 	// When CheckMode.SkipGenericFunctions is set we use resolvingSignature to indicate that call
 	// resolution should be deferred.
@@ -8643,17 +8653,20 @@ func (c *Checker) getResolvedSignature(node *ast.Node, candidatesOutArray *[]*Si
 		// In such a case we ignore the local result and reuse the correct one that was cached.
 		if links.resolvedSignature != c.resolvingSignature {
 			result = links.resolvedSignature
+			recovery = links.resolvedSignatureRecovery
 		}
 		// If signature resolution originated in control flow type analysis (for example to compute the
 		// assigned type in a flow assignment) we don't cache the result as it may be based on temporary
 		// types from the control flow analysis.
 		if len(c.flowLoopStack) == 0 {
 			links.resolvedSignature = result
+			links.resolvedSignatureRecovery = recovery
 		} else {
 			links.resolvedSignature = cached
+			links.resolvedSignatureRecovery = cachedRecovery
 		}
 	}
-	return result
+	return result, recovery
 }
 
 func (c *Checker) resolveSignature(node *ast.Node, candidatesOutArray *[]*Signature, checkMode CheckMode) *Signature {
@@ -9157,7 +9170,9 @@ func (c *Checker) resolveCall(node *ast.Node, signatures []*Signature, candidate
 	// don't hit this issue because they only observe this result after it's had a chance to
 	// be cached, but the error reporting code below executes before getResolvedSignature sets
 	// resolvedSignature.
-	c.signatureLinks.Get(node).resolvedSignature = result
+	links := c.signatureLinks.Get(node)
+	links.resolvedSignature = result
+	links.resolvedSignatureRecovery = true
 	// No signatures were applicable. Now report errors based on the last applicable signature with
 	// no arguments excluded from assignability checks.
 	// If candidate is undefined, it means that no candidates had a suitable arity. In that case,
@@ -30114,7 +30129,9 @@ func (c *Checker) getContextuallyTypedParameterType(parameter *ast.Node) *Type {
 		}
 		links := c.signatureLinks.Get(iife)
 		cached := links.resolvedSignature
+		cachedRecovery := links.resolvedSignatureRecovery
 		links.resolvedSignature = c.anySignature
+		links.resolvedSignatureRecovery = false
 		var t *Type
 		switch {
 		case indexOfParameter < len(args):
@@ -30125,6 +30142,7 @@ func (c *Checker) getContextuallyTypedParameterType(parameter *ast.Node) *Type {
 			t = c.undefinedWideningType
 		}
 		links.resolvedSignature = cached
+		links.resolvedSignatureRecovery = cachedRecovery
 		return t
 	}
 	contextualSignature := c.getContextualSignature(fn)
