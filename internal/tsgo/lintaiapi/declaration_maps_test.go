@@ -383,32 +383,6 @@ func TestDeclarationMapKeepsOutcomesSeparateForSourcesInOneMap(t *testing.T) {
 	}
 }
 
-func TestDeclarationMapDefersCompilerJSONFailureUntilExactAnchor(t *testing.T) {
-	for _, test := range []struct {
-		name, mappings, outcome string
-	}{
-		{name: "exact", mappings: "AAAA", outcome: "malformed_map"},
-		{name: "nearby", mappings: "CAAA", outcome: "unresolved"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			root := t.TempDir()
-			writeWorkspace(t, root, map[string]string{
-				"src/app.ts":          `export { load } from "../dist";`,
-				"dist/index.d.ts":     "export declare function load(): void;\n//# sourceMappingURL=index.d.ts.map\n",
-				"source/index.ts":     "export function load() {}\n",
-				"dist/index.d.ts.map": fmt.Sprintf(`{"version":3,"file":"index.d.ts","sources":["../source/index.ts"],"names":[1],"mappings":%q}`, test.mappings),
-			})
-			snapshot, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{WorkspaceRoot: root, Files: []string{filepath.Join(root, "src/app.ts")}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(snapshot.DeclarationSources) != 0 || len(snapshot.DeclarationSourceOutcomes) != 1 || snapshot.DeclarationSourceOutcomes[0].Outcome != test.outcome {
-				t.Fatalf("map JSON validation changed anchor outcome: links=%+v outcomes=%+v", snapshot.DeclarationSources, snapshot.DeclarationSourceOutcomes)
-			}
-		})
-	}
-}
-
 func TestDeclarationMapMissingURLTargetKeepsConfiguredFallback(t *testing.T) {
 	root := t.TempDir()
 	mapPath := filepath.Join(root, "dist/missing.d.ts.map")

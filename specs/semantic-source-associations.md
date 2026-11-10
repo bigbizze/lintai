@@ -628,3 +628,26 @@ Compatibility notes:
    and the planned performance comparison. Update status and API documentation.
 
 Keep PR4 suspension ownership and PR5 broader syntax facts out of this sequence.
+
+
+### Declaration-map scaling after the review fixes
+
+Commit `941b705` was measured on macOS arm64 (Apple M4) with the existing
+`BenchmarkDeclarationMapScaling` fixture. Each size was run once:
+
+```sh
+go test ./internal/tsgo/lintaiapi -run '^$' -bench '^BenchmarkDeclarationMapScaling$' -benchtime=1x -count=1
+```
+
+| Declarations | Extraction time | Allocated bytes |
+| --- | ---: | ---: |
+| 20 | 21.16 ms | 18,796,352 |
+| 40 | 18.75 ms | 19,728,736 |
+| 80 | 19.94 ms | 21,895,608 |
+
+The fixture checks the expected precise links. These are single local measurements,
+not timing limits or predictions for other repositories. The cache lasts for one
+checked program. Each file is read once and parsed when needed; each generated file
+reuses one compiler mapper and one exact-anchor index. The index and compiler mapper
+each decode the map once. Keeping the compiler mapper avoids maintaining a second
+implementation of its position-mapping rules.
