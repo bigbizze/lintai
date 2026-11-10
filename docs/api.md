@@ -1,5 +1,11 @@
 # API and Caveats
 
+## Semantic extraction and rule inspection (0.7.0)
+
+This release adds public export and declaration inventories, checked-to-source declaration associations, explicit type-opacity facts, and suspension sites for `await`, `for await`, and module-scope suspension. Shared lexical ownership keeps call, reference, and suspension facts attached to the correct function or module. Rule listings expose validated versions, reported predicates, and `expectNonEmpty` declarations.
+
+Source associations report incomplete or ambiguous evidence instead of guessing. The client tracks semantic inputs and verifies changes during analysis before caching results. Library-type opacity remains explicit; accepting it also trusts any merged augmentations. See the predicate reference below and [examples.md](examples.md) for rule-author guidance.
+
 ## Linear reachability predicates (0.6.4)
 
 `fn_reaches_ambient`, `fn_reaches_ambient_strict`, `fn_reaches_unresolved`, `module_reaches_ambient` and `type_reaches_incomplete` now propagate backward from their targets one edge at a time. They no longer build `calls_reach`, `calls_or_refs_reach`, `imports_reach` or `type_contains`, so their cost grows with nodes × targets instead of nodes². Their results are unchanged. The closure predicates remain for rules that need both ends of a pair. See example 16 in [examples.md](examples.md) for the same pattern with your own target relation.
