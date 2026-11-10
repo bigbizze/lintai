@@ -1,6 +1,6 @@
 # Semantic extraction completeness
 
-Status: implementation status is recorded in each feature section. Sections without an implementation status remain proposed; section 7 is deferred until a concrete capability-call rule needs it. No release number is assigned.
+Status: implementation status is recorded in each feature section. Sections without an implementation status remain proposed. Section 7 has a staged consumer rule and test; extraction integration and executable verification remain pending. No release number is assigned.
 
 ## 1. Purpose and authority
 
@@ -143,7 +143,7 @@ An `async` function with no such syntax does not get `fn_suspends`. These facts 
 
 The implementation plan and bounded member-association rules are in [declared call provenance implementation](../todo/semantic-call-provenance.md).
 
-This section defines the feature but does not require implementing it before a concrete capability-call rule needs it. If deferred, release documentation MUST identify it as deferred, rather than claim full implementation of this specification.
+Status: the concrete [Writer capability policy](../testdata/call-provenance/writer-policy.ts), reusable TypeScript fixture and `TestDeclaredWriterCapabilityPolicy` engine test are staged. The test expects exactly two forbidden writes and separate shared-alias, synthetic-union and `any` diagnostics; it also checks a missing export alias. Extractor/checker integration, running this test, CLI/serve acceptance, regression checks and representative measurements remain pending. This staging change does not establish full implementation or published support.
 
 ### 7.1 Relations and meaning
 

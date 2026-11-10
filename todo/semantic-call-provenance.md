@@ -1,6 +1,6 @@
 # Declared call provenance implementation
 
-Status: proposed; not implemented in 0.7.0.
+Status: consumer policy and documentation staged for integration. The reusable [call-provenance fixture](../testdata/call-provenance/writer-policy.ts) and one engine behavioral test are added. Extractor/checker integration and all executable verification remain pending; no passing test or published feature is claimed. This is task staging within U2, not an independently reviewed unit.
 
 This specification implements section 7 of [semantic extraction completeness](../specs/semantic-extraction-completeness.md#7-declared-call-provenance). It uses the declaration identity contract in [semantic source associations](../specs/semantic-source-associations.md#2-entity-identity-and-locations). It adds evidence about the declaration selected by the checker, not evidence about which runtime implementation executes.
 
@@ -127,6 +127,8 @@ Extend the existing snapshot/model/fact pipeline rather than adding a second ana
 One observation is needed per call site per analyzed program, plus distinct referenced declaration/member endpoints. Deduplicate endpoints using the existing maps. Do not scan all declarations for every call, construct transitive closures, expand interface members, or traverse dependency injection graphs. Use the checker result already available for each invocation; cache endpoint metadata by declaration identity where useful.
 
 ## 8. Focused verification and completion
+
+Consumer staging adds `TestDeclaredWriterCapabilityPolicy` in `engine/engine_test.go`, using the actual fixture rule. Expected results are two forbidden writes and three indeterminate calls (shared alias `/unsupported`, union `/synthetic`, `any` `/unresolved`). Removing the public export alias must report missing selection instead of silently accepting the writes. Run `go test ./engine -run '^TestDeclaredWriterCapabilityPolicy$' -count=1` after checker integration. This command has not been run in the staging task. CLI/serve reuse, runtime-status assertions in extractor tests, conflict/unsupported shape coverage, full regression checks and measurements below remain integration work.
 
 Use the examples in this specification as the seed for one small extractor fixture and one rule-level test. Avoid a new test framework or a broad equivalence suite. Extend existing fixture tables for closely related cases:
 

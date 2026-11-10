@@ -878,3 +878,46 @@ Expect more indeterminate results than violations at first. `Promise<T>`, `T[]` 
 `--severity` and linter levels apply to a whole rule, not to one predicate. To keep violations as errors and make uncertainty a warning, move `indeterminate` and `inventory_incomplete` into a second rule file, and share the Datalog through a `dl` fragment in a helper module, that is, a file with no default export.
 
 The rule reads the source entry as an analyzed module. If other packages import the build output, check the source entry anyway: a source association links declarations, but it does not bring the types of an auxiliary source program into the snapshot. Finally, these facts are the checker's view of the declared types. They do not prove what values exist at runtime.
+
+## 18. Forbid a declared capability member
+
+Suppose a function receives a store that can read and write. You want to forbid calls to the declared `Writer.write` member while allowing `Reader.read`. TypeScript can identify those members even when lintai cannot find the implementation supplied to the function.
+
+The reusable example is in [testdata/call-provenance](../testdata/call-provenance). It contains [contracts.ts](../testdata/call-provenance/contracts.ts), [calls.ts](../testdata/call-provenance/calls.ts), a tsconfig and the actual [writer-policy.ts rule](../testdata/call-provenance/writer-policy.ts). The rule and behavioral test are staged; extractor integration and executable verification are pending. No passing test or published support is claimed here.
+
+The contract exports `Writer` under the alias `PublicWriter`. The rule selects that type-space export in `contracts.ts`, follows `export_target` to its owner declaration, then joins the selected call declaration to `declaration_member`. It never matches receiver text or a type's display name. This is the key join from the rule:
+
+```mangle
+forbidden(S) :- selected(S), !selection_uncertain(), call_declaration(S, D),
+  declaration_member(D, O, "write"), owner(O).
+```
+
+The rule selects sites located in `calls.ts` from all three runtime relations: `call_edge`, `external_call` and `call_unresolved`. That includes module-level calls. It reports two outcomes:
+
+- `forbidden`: positive evidence that the call selects the chosen `Writer.write` member.
+- `indeterminate`: the policy cannot be established because signature evidence or owner/export selection is incomplete or missing.
+
+Expected fixture diagnostics after integration:
+
+| Call in `calls.ts` | Expected result |
+| --- | --- |
+| Line 6: `cap.store.read()` | Allowed; selects `Reader.read`. |
+| Line 7: `cap.store.write()` | Forbidden. |
+| Line 9: `store.write()` after a receiver alias | Forbidden. |
+| Line 10: `other.write()` | Allowed; selects `Other.write`. |
+| Line 14: `shared.write()` | Cannot establish policy: `unsupported`. The shared callable alias has no unique lexical member owner. |
+| Line 15: `union.write(undefined as never)` | Cannot establish policy: `synthetic`. The two incompatible signatures require a combined signature. The `never` argument makes this call type-check without choosing a signature component. |
+| Line 16: `dynamic()` | Cannot establish policy: `unresolved`; the callee is `any`. |
+| Lines 20–21: `local()` and `Date.now()` | Allowed; complete signatures without the banned member. |
+
+There should be exactly two forbidden diagnostics and three indeterminate diagnostics. The first four capability calls remain runtime-unresolved; the rule does not use that fact as a declaration error. Removing the `PublicWriter` export alias should replace the two forbidden diagnostics with one `missing export` diagnostic at `calls.ts:1`, while keeping the three signature diagnostics. The behavioral test checks the full diagnostic lists, including rule id, assertion, source file, line and message.
+
+The rule checks all four signature reasons, including `/conflict`, and catches missing declaration evidence without treating it as compliance. It also checks export inventory, export target and owner completeness. It requires retained `write` member evidence for the selected owner; a scope with no such evidence is indeterminate. A retained forbidden member and an incomplete signature can produce both outcomes at one site. These calls are all actual invocations. In other sources, `call_unresolved` can also mark an escaped callback argument; that is not an invocation, and its `/unsupported` evidence conservatively produces an indeterminate result with this rule.
+
+Once the checker API and extractor are integrated, run the one behavioral test from the repository root:
+
+```sh
+go test ./engine -run '^TestDeclaredWriterCapabilityPolicy$' -count=1
+```
+
+For later CLI and serve acceptance, use this same fixture as the workspace and select only `writer-policy.ts` explicitly. It is outside the default fixture rule set. Expected counts above are acceptance targets, not recorded test results. Do not copy the policy into another test suite.
