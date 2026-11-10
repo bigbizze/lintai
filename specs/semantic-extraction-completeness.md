@@ -1,6 +1,6 @@
 # Semantic extraction completeness
 
-Status: proposed implementation specification. This document does not assert that the features are implemented. No release number is assigned.
+Status: implementation status is recorded in each feature section. Sections without an implementation status remain proposed; section 7 is deferred until a concrete capability-call rule needs it. No release number is assigned.
 
 ## 1. Purpose and authority
 
@@ -160,6 +160,8 @@ For calls with no resolvable declaration, emit the appropriate incomplete reason
 A fixture rule targeting an example interface member `Writer.write` must match declaration origin, owner, and member identity. The fixture must define that interface. A same-named member on an unrelated object must not match.
 
 ## 8. Loaded rule metadata
+
+Status: implemented.
 
 Extend the existing `lintai rules --json` output. Each valid rule has:
 

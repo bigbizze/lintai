@@ -11,10 +11,13 @@ import (
 	"github.com/bigbizze/lintai/runtime"
 )
 
-// ListedRule is a rule file and the id of its rule.
+// ListedRule is a rule file and metadata from its loaded rule.
 type ListedRule struct {
-	ID   string `json:"id"`
-	Path string `json:"path"`
+	ID             string   `json:"id"`
+	Path           string   `json:"path"`
+	Version        int      `json:"version"`
+	Report         []string `json:"report"`
+	ExpectNonEmpty []string `json:"expectNonEmpty"`
 }
 
 // RuleLoadError is a rule file that did not bundle or load, or that has an
@@ -32,15 +35,15 @@ type RuleList struct {
 	Errors []RuleLoadError `json:"errors"`
 }
 
-// ListRules bundles the rules that options select and reads the id of each
-// rule from its pure bundle. It does not run setup(), build a snapshot or
-// evaluate a program. A rule that does not bundle or load is in Errors. A
-// rule with a valid id that is not a complete rule (no program(), report()
-// or message()) is in Errors with its id. Two rule files with one id are
-// both in Errors with the id and not in Rules. A file without
-// a default export is a helper module and is in neither list. Paths are
-// relative to the workspace root. Rules is sorted by id, then path, and
-// Errors by path, then message.
+// ListRules bundles the rules that options select and reads validated
+// metadata from each loaded pure bundle. It does not run setup(), facts(),
+// program() or message(), build a snapshot or evaluate a program. A rule
+// that does not bundle or load is in Errors. A rule with a valid id that is
+// not a complete rule (no program(), report() or message()) is in Errors
+// with its id. Two rule files with one id are both in Errors with the id and
+// not in Rules. A file without a default export is a helper module and is in
+// neither list. Paths are relative to the workspace root. Rules is sorted
+// by id, then path, and Errors by path, then message.
 func ListRules(ctx context.Context, options Options) (RuleList, error) {
 	rulePaths, err := discoverRulePaths(options.WorkspaceRoot, options.RuleGlobs)
 	if err != nil {
@@ -92,8 +95,18 @@ func ListRules(ctx context.Context, options Options) (RuleList, error) {
 			continue
 		}
 		if isRule {
-			_, shapeErr := runtime.LoadPureBundle(string(code))
-			found = append(found, foundRule{ListedRule: ListedRule{ID: id, Path: key}, shapeErr: shapeErr})
+			loadedRule, shapeErr := runtime.LoadPureBundle(string(code))
+			listed := ListedRule{ID: id, Path: key}
+			if shapeErr == nil {
+				listed = ListedRule{
+					ID:             id,
+					Path:           key,
+					Version:        loadedRule.RuleVersion(),
+					Report:         loadedRule.Report(),
+					ExpectNonEmpty: append([]string{}, loadedRule.ExpectNonEmpty()...),
+				}
+			}
+			found = append(found, foundRule{ListedRule: listed, shapeErr: shapeErr})
 		}
 	}
 	pathsByID := make(map[string][]string, len(found))

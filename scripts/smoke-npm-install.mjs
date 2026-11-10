@@ -130,8 +130,20 @@ const listed = spawnSync("pnpm", ["exec", "lintai", "rules", "--json", "--worksp
 assert.equal(listed.status, 0, `expected lintai rules to succeed, got ${listed.status}\n${listed.stderr}`);
 assert.deepEqual(JSON.parse(listed.stdout), {
 	rules: [
-		{ id: "arch.actions-return-action-result", path: "lintai-rules/actions-return-action-result.ts" },
-		{ id: "arch.no-async", path: "lintai-rules/no-async.ts" },
+		{
+			id: "arch.actions-return-action-result",
+			path: "lintai-rules/actions-return-action-result.ts",
+			version: 1,
+			report: ["violation"],
+			expectNonEmpty: [],
+		},
+		{
+			id: "arch.no-async",
+			path: "lintai-rules/no-async.ts",
+			version: 1,
+			report: ["violation"],
+			expectNonEmpty: [],
+		},
 	],
 	errors: [],
 });
