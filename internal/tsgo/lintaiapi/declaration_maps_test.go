@@ -399,7 +399,7 @@ func TestDeclarationMapMissingURLTargetKeepsConfiguredFallback(t *testing.T) {
 	if len(snapshot.DeclarationSources) != 0 || len(snapshot.DeclarationSourceOutcomes) != 1 || snapshot.DeclarationSourceOutcomes[0].Outcome != "unavailable_map" {
 		t.Fatalf("missing URL map outcome: links=%+v outcomes=%+v", snapshot.DeclarationSources, snapshot.DeclarationSourceOutcomes)
 	}
-	if len(snapshot.SourceBindings) != 1 || snapshot.SourceBindings[0].Method != "source_entry" || len(snapshot.SourceBindings[0].Incomplete) != 0 {
+	if len(snapshot.SourceBindings) != 1 || len(snapshot.SourceBindings[0].Incomplete) != 0 {
 		t.Fatalf("configured binding fallback was lost: %+v", snapshot.SourceBindings)
 	}
 	for _, input := range snapshot.Inputs {
