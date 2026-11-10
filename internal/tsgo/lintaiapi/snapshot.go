@@ -2060,10 +2060,16 @@ func calleeNameNode(node *ast.Node) *ast.Node {
 
 // resolveCallTarget returns the collected function that a call resolves to.
 // When it finds none, it returns the declaration of the checker's resolved
-// signature, if there is one. A call links to a function only through the
-// checker's signature or through the callee's own symbol, never through a
-// name lookup, so seen.add() on a Set does not link to a local add.
+// signature, if there is one. A call links through a literal callee, the
+// checker's signature or the callee's own symbol, never through a name lookup,
+// so seen.add() on a Set does not link to a local add.
 func (e *extractor) resolveCallTarget(node *ast.Node) (*Function, *ast.Node) {
+	expression := ast.SkipOuterExpressions(calleeOf(node), ast.OEKAll)
+	if expression != nil && ast.IsFunctionExpressionOrArrowFunction(expression) {
+		if target := e.lookupFunction(expression); target != nil {
+			return target, nil
+		}
+	}
 	var declaration *ast.Node
 	if signature := e.checker.GetResolvedSignature(node); signature != nil {
 		declaration = signature.Declaration()
@@ -2072,13 +2078,10 @@ func (e *extractor) resolveCallTarget(node *ast.Node) (*Function, *ast.Node) {
 			target = e.lookupFunction(declaration.Symbol())
 		}
 		// A signature can select one branch of an ambiguous function value.
-		// An ownership-only target is definite here only for that literal.
-		callee := ast.SkipOuterExpressions(calleeOf(node), ast.OEKAll)
-		if target != nil && (!target.SignatureOmitted || ast.IsFunctionExpressionOrArrowFunction(callee) && e.lookupFunction(callee) == target) {
+		if target != nil && !target.SignatureOmitted {
 			return target, nil
 		}
 	}
-	expression := ast.SkipOuterExpressions(calleeOf(node), ast.OEKAll)
 	if expression != nil && (ast.IsIdentifier(expression) || ast.IsPropertyAccessExpression(expression)) {
 		if target := e.lookupFunction(e.checker.GetSymbolAtLocation(expression)); target != nil {
 			return target, nil
