@@ -230,6 +230,14 @@ type RuleWatchSpec = {
 	scopeRoot: string;
 };
 
+type DirectoryIdentity = { dev: bigint; ino: bigint };
+
+type InputWatchSpec = {
+	identity: DirectoryIdentity | undefined;
+	inputs: string[];
+	children: Map<string, DirectoryIdentity | undefined>;
+};
+
 export class LintAIClient {
 	private readonly options: ResolvedBridgeOptions;
 	private readonly dependencies: ClientDependencies;
@@ -253,6 +261,8 @@ export class LintAIClient {
 	private attachedStdoutListener = false;
 	private readonly ruleWatchers: FileWatcher[] = [];
 	private readonly inputWatchers: FileWatcher[] = [];
+	private inputPaths: string[] = [];
+	private inputWatchGeneration = 0;
 	private ruleInvalidationTimer: ReturnType<typeof setTimeout> | undefined;
 	private inputInvalidationTimer: ReturnType<typeof setTimeout> | undefined;
 	private pendingRuleInvalidation = false;
@@ -373,6 +383,7 @@ export class LintAIClient {
 			watcher.close();
 		}
 		this.ruleWatchers.length = 0;
+		this.inputWatchGeneration += 1;
 		for (const watcher of this.inputWatchers) {
 			watcher.close();
 		}
@@ -798,18 +809,51 @@ export class LintAIClient {
 			...inputPaths.map((item) => path.resolve(item)),
 			...(this.options.sourceLinks === undefined ? [] : [path.resolve(this.options.sourceLinks)]),
 		])];
+		this.inputPaths = paths;
+		const generation = ++this.inputWatchGeneration;
 		for (const watcher of this.inputWatchers) {
 			watcher.close();
 		}
 		this.inputWatchers.length = 0;
+		const specs = new Map<string, InputWatchSpec>();
+		const specFor = (directory: string): InputWatchSpec => {
+			let spec = specs.get(directory);
+			if (!spec) {
+				spec = { identity: directoryIdentity(directory), inputs: [], children: new Map() };
+				specs.set(directory, spec);
+			}
+			return spec;
+		};
 		const directories = new Set<string>();
 		for (const input of paths) {
 			const target = nearestExistingDirectory(path.dirname(input));
-			if (target) directories.add(target);
+			if (target) {
+				directories.add(target);
+				specFor(target).inputs.push(input);
+			}
 		}
-		for (const target of directories) {
+		for (const directory of directories) {
+			// Parent watches only check the identities of directories leading to an
+			// input. They do not watch subtrees or invalidate for unrelated files.
+			const boundary = isSameOrAncestor(this.options.workspaceRoot, directory)
+				? path.dirname(this.options.workspaceRoot)
+				: path.parse(directory).root;
+			let child = directory;
+			while (child !== boundary) {
+				const parent = path.dirname(child);
+				if (parent === child) break;
+				specFor(parent).children.set(child, specFor(child).identity);
+				child = parent;
+			}
+		}
+		for (const [target, spec] of specs) {
+			const directoryChanged = (changed?: string) =>
+				!sameDirectory(spec.identity, directoryIdentity(target)) ||
+				[...spec.children].some(([child, identity]) =>
+					(!changed || changed === child) && !sameDirectory(identity, directoryIdentity(child)),
+				);
 			const onError = (error: unknown) => {
-				if (this.state === "disposed") return;
+				if (this.state === "disposed" || generation !== this.inputWatchGeneration) return;
 				this.problemsReported = false;
 				const message = `input watcher unavailable for ${target}: ${asError(error).message}`;
 				if (this.state === "fallback") {
@@ -823,14 +867,20 @@ export class LintAIClient {
 				const watcher = this.dependencies.watchInputPath(
 					target,
 					(filename) => {
+						if (this.state === "disposed" || generation !== this.inputWatchGeneration) return;
 						const changed = filename && path.resolve(target, filename);
-						if (!changed || !existsSync(target) || paths.some((input) => isSameOrAncestor(changed, input))) {
+						if (
+							directoryChanged(changed) ||
+							spec.inputs.some((input) => !changed || isSameOrAncestor(changed, input))
+						) {
 							this.scheduleInputInvalidation();
 						}
 					},
 					onError,
 				);
 				this.inputWatchers.push(watcher);
+				// A directory may have been replaced while the watches were installed.
+				if (directoryChanged()) this.scheduleInputInvalidation();
 			} catch (error) {
 				onError(error);
 			}
@@ -846,15 +896,8 @@ export class LintAIClient {
 			if (this.state === "disposed") {
 				return;
 			}
-			this.analysisEpoch += 1;
-			this.diagnosticsByFile = new Map();
-			this.unlocated = [];
-			this.analysisFailure = undefined;
-			this.oneshotCache = undefined;
-			this.refreshInFlight = undefined;
-			if (this.state === "ready") {
-				this.state = "invalidated";
-			}
+			this.updateInputWatchers(this.inputPaths);
+			this.invalidateDiagnostics();
 		}, 200);
 	}
 
@@ -901,25 +944,28 @@ export class LintAIClient {
 		if (this.state === "disposed") {
 			return;
 		}
-		this.analysisEpoch += 1;
 		this.pendingRuleInvalidation = false;
-		this.diagnosticsByFile = new Map();
-		this.unlocated = [];
-		this.analysisFailure = undefined;
-		this.oneshotCache = undefined;
-		this.refreshInFlight = undefined;
-		if (this.state === "idle") {
-			return;
-		}
-		if (this.state === "starting") {
+		this.invalidateDiagnostics();
+		if (this.state === "idle" || this.state === "starting") {
 			return;
 		}
 		if (this.state === "fallback") {
 			this.dependencies.log("lintai rule files changed; clearing cached diagnostics");
 			return;
 		}
-		this.state = "invalidated";
 		this.dependencies.log("lintai rule files changed; refreshing diagnostics on next lint pass");
+	}
+
+	private invalidateDiagnostics(): void {
+		this.analysisEpoch += 1;
+		this.diagnosticsByFile = new Map();
+		this.unlocated = [];
+		this.analysisFailure = undefined;
+		this.oneshotCache = undefined;
+		this.refreshInFlight = undefined;
+		if (this.state === "ready") {
+			this.state = "invalidated";
+		}
 	}
 
 	private warnOnce(message: string): void {
@@ -1235,6 +1281,19 @@ function nearestExistingDirectory(target: string): string | undefined {
 		if (parent === current) return undefined;
 		current = parent;
 	}
+}
+
+function directoryIdentity(directory: string): DirectoryIdentity | undefined {
+	try {
+		const stats = statSync(directory, { bigint: true });
+		return stats.isDirectory() ? { dev: stats.dev, ino: stats.ino } : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function sameDirectory(left: DirectoryIdentity | undefined, right: DirectoryIdentity | undefined): boolean {
+	return left?.dev === right?.dev && left?.ino === right?.ino;
 }
 
 function isSameOrAncestor(ancestor: string, candidate: string): boolean {
