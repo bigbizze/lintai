@@ -61,9 +61,12 @@ file. Its display name is `<anonymous@offset>`. This is deterministic across
 traversal and configuration order; moving the node may change its ID. Keep existing
 `fn_kind`, location, export, and async behavior where applicable.
 
-New anonymous identities are ownership roots only. Do not call `functionTypes` for
-them, emit parameter/return facts for them, or expand type roots because of them.
-Named functions retain normal signature collection. Emit
+Anonymous functions represented only for ownership do not have signatures collected:
+do not call `functionTypes` for them, emit parameter/return facts for them, or expand
+type roots because of them. This includes genuinely inline anonymous callbacks.
+Functions with a recognized binding retain normal signature collection, including
+when a transparent expression wrapper separates the function from its binding.
+Named functions also retain normal signature collection. Emit
 `fn_signature_unresolved` when an attempted signature lacks a checker signature or
 any required parameter/return type ID; an emitted `/other` type with its own
 `type_incomplete` marker is still a collected signature type. `fn_signature_omitted`

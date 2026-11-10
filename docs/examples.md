@@ -583,25 +583,48 @@ import { dl, rule } from "@lintai/sdk";
 export default rule("arch.actions-return-action-result")
 	.version(1)
 	.program(dl`
+		Decl action(Fn, Name).
+		action(Fn, Name) :-
+			fn(Fn, File, Name), fn_exported(Fn), glob(File, "src/actions/**"), fn_async(Fn).
+
+		Decl has_return(Fn).
+		has_return(Fn) :- fn_returns(Fn, _).
+		Decl signature_issue(Fn, Reason).
+		signature_issue(Fn, "omitted") :- action(Fn, _), fn_signature_omitted(Fn).
+		signature_issue(Fn, "unresolved") :- action(Fn, _), fn_signature_unresolved(Fn).
+		signature_issue(Fn, "conflict") :- action(Fn, _), fn_signature_conflict(Fn).
+		signature_issue(Fn, "missing") :-
+			action(Fn, _), !has_return(Fn), !fn_signature_omitted(Fn),
+			!fn_signature_unresolved(Fn), !fn_signature_conflict(Fn).
+		Decl signature_uncertain(Fn).
+		signature_uncertain(Fn) :- signature_issue(Fn, _).
+
 		Decl violation(Fn, Name, Returned, Reason).
 		Decl returns_action_result(Fn).
 		returns_action_result(Fn) :-
-			fn_returns_awaited(Fn, R), !fn_signature_conflict(Fn),
+			fn_returns_awaited(Fn, R), !signature_uncertain(Fn),
 			type_named(R, "src/core/result.ts", "ActionResult").
 		violation(Fn, Name, Returned, "wrong") :-
-			fn(Fn, File, Name), fn_exported(Fn), glob(File, "src/actions/**"),
-			fn_async(Fn), !fn_signature_conflict(Fn), !returns_action_result(Fn),
+			action(Fn, Name), !signature_uncertain(Fn), !returns_action_result(Fn),
 			fn_returns(Fn, T), type_display(T, Returned).
-		violation(Fn, Name, "", "conflict") :-
-			fn(Fn, File, Name), fn_exported(Fn), glob(File, "src/actions/**"),
-			fn_async(Fn), fn_signature_conflict(Fn).
+		violation(Fn, Name, "", Reason) :- action(Fn, Name), signature_issue(Fn, Reason).
 	`)
 	.report("violation")
-	.message((row) =>
-		row.Reason === "conflict"
-			? `${row.Name} has conflicting checked signatures; cannot determine whether its return type is allowed`
-			: `${row.Name} must return Promise<ActionResult<T>>, but returns ${row.Returned}`,
-	);
+	.message((row) => {
+		if (row.Reason === "conflict") {
+			return `${row.Name} has conflicting checked signatures; cannot determine whether its return type is allowed`;
+		}
+		if (row.Reason === "omitted") {
+			return `${row.Name} has no collected signature; cannot determine whether its return type is allowed`;
+		}
+		if (row.Reason === "unresolved") {
+			return `${row.Name} has an unresolved signature; cannot determine whether its return type is allowed`;
+		}
+		if (row.Reason === "missing") {
+			return `${row.Name} has no recorded return type; cannot determine whether its return type is allowed`;
+		}
+		return `${row.Name} must return Promise<ActionResult<T>>, but returns ${row.Returned}`;
+	});
 ```
 
 Planted violation:
@@ -617,6 +640,8 @@ export async function save(): Promise<ActionResult<number>> {
 The rule reports `save`. Its return type is written `Promise<ActionResult<number>>`, but `ActionResult` is declared in `src/legacy/types.ts`, so `type_named` has a different `Origin`. `fn_returns_awaited` removes one level of `Promise` from the return type. If TypeScript infers the return type, the rule accepts the function only when the returned value already has the type `ActionResult`. An inferred object literal type, such as `Promise<{ ok: boolean; value: number }>`, has no `ActionResult` name, so the rule reports it.
 
 The same function can be checked by more than one TypeScript configuration. If the checked signatures disagree, `fn_returns` contains observations from those configurations. Even if one return type matches `ActionResult`, the rule reports that the result is uncertain. A signature conflict can also come from different parameter types, so it does not necessarily mean the return types differ.
+
+The rule also reports a signature that was omitted or could not be fully resolved. An unresolved signature can still have a return row, but that row alone does not establish a complete signature. If there is no return row and no signature marker, the rule reports the missing return type. A conflict and an unresolved signature can occur together, so the rule reports both. These findings mean the rule cannot decide whether the return type is allowed.
 
 Caveats:
 
@@ -662,7 +687,7 @@ export function loadUser(input: { db: Db; id: string }): Promise<string> {
 
 The rule reports `loadUser` with `Db` from `src/infra/db.ts`.
 
-`type_contains` does not look into every part of a type. The strict variant also reports a signature that reaches a type with an incomplete marker (`type_incomplete`). Class, interface and enum members are not expanded, but the named type receives `/members_omitted`, so the strict rule catches a parameter or return type using it. This marker does not claim that a forbidden member exists or expose that member's type.
+`type_contains` does not look into every part of a type. The strict variant also reports a signature that reaches a type with an incomplete marker (`type_incomplete`), or whose signature evidence is incomplete or conflicting. Class, interface and enum members are not expanded, but the named type receives `/members_omitted`, so the strict rule catches a parameter or return type using it. This marker does not claim that a forbidden member exists or expose that member's type.
 
 Strict completeness also reaches default library interfaces. Ordinary `Promise<T>` and `T[]` use the library interfaces `Promise` and `Array`, which receive `/members_omitted`; a strict rule therefore reports these common wrappers even when `T` is fully represented. The rule below treats every incomplete type as a result, so it is intentionally conservative.
 
@@ -672,20 +697,52 @@ import { dl, rule } from "@lintai/sdk";
 export default rule("arch.domain-signatures-strict")
 	.version(1)
 	.program(dl`
+		Decl domain_function(Fn, Name).
+		domain_function(Fn, Name) :-
+			fn(Fn, File, Name), fn_exported(Fn), glob(File, "src/domain/**").
+
 		Decl signature_type(Fn, T).
 		signature_type(Fn, T) :- fn_param(Fn, _, T).
 		signature_type(Fn, T) :- fn_returns(Fn, T).
 
-		Decl violation(Fn, Name, Shown).
-		violation(Fn, Name, Shown) :-
-			fn(Fn, File, Name), fn_exported(Fn), glob(File, "src/domain/**"),
+		Decl has_return(Fn).
+		has_return(Fn) :- fn_returns(Fn, _).
+		Decl signature_issue(Fn, Reason).
+		signature_issue(Fn, "omitted") :- domain_function(Fn, _), fn_signature_omitted(Fn).
+		signature_issue(Fn, "unresolved") :- domain_function(Fn, _), fn_signature_unresolved(Fn).
+		signature_issue(Fn, "conflict") :- domain_function(Fn, _), fn_signature_conflict(Fn).
+		signature_issue(Fn, "missing") :-
+			domain_function(Fn, _), !has_return(Fn), !fn_signature_omitted(Fn),
+			!fn_signature_unresolved(Fn), !fn_signature_conflict(Fn).
+
+		Decl violation(Fn, Name, Shown, Reason).
+		violation(Fn, Name, Shown, "type") :-
+			domain_function(Fn, Name),
 			signature_type(Fn, T), type_reaches_incomplete(T), type_display(T, Shown).
+		violation(Fn, Name, "", Reason) :-
+			domain_function(Fn, Name), signature_issue(Fn, Reason).
 	`)
 	.report("violation")
-	.message((row) => `${row.Name} has a type that lintai cannot inspect: ${row.Shown}`);
+	.message((row) => {
+		if (row.Reason === "type") {
+			return `${row.Name} has a type that lintai cannot inspect: ${row.Shown}`;
+		}
+		if (row.Reason === "conflict") {
+			return `${row.Name} has conflicting checked signatures; cannot determine whether its signature exposes infrastructure types`;
+		}
+		if (row.Reason === "omitted") {
+			return `${row.Name} has no collected signature; cannot determine whether its signature exposes infrastructure types`;
+		}
+		if (row.Reason === "unresolved") {
+			return `${row.Name} has an unresolved signature; cannot determine whether its signature exposes infrastructure types`;
+		}
+		return `${row.Name} has no recorded return type; cannot determine whether its signature exposes infrastructure types`;
+	});
 ```
 
 For example, `export function pick<K extends keyof Db>(key: K): Db[K]` is reported: `K` has a constraint and `Db[K]` is an indexed access type, which is `/other`.
+
+The strict rule checks for signature problems after selecting each exported domain function. It reports omitted, unresolved and conflicting signatures, as well as a missing return row when no marker explains it. It can also report an incomplete type from any parameter or return row that is present. These are different gaps: `type_reaches_incomplete` describes a collected type graph, while the signature markers and missing return check describe missing or conflicting signature evidence. No `fn_param` rows alone do not mean a signature is missing; a function can have zero parameters.
 
 A rule can make a narrower policy for known opaque leaves. The following helpers accept only the default library `Promise` and `Array` member-omission markers. Every other incompleteness reason remains a seed. Backward propagation still follows `type_child`, including the represented type arguments of those accepted wrappers:
 
@@ -703,7 +760,7 @@ reaches_disallowed_incomplete(T) :- disallowed_incomplete(T).
 reaches_disallowed_incomplete(T) :- type_child(T, Child), reaches_disallowed_incomplete(Child).
 ```
 
-Use `reaches_disallowed_incomplete(T)` in the violation rule in place of `type_reaches_incomplete(T)`. This ignores only `/members_omitted` on the two named library leaves. If `Promise<Hidden>` reaches an unaccepted opaque `Hidden` type, that marker still propagates through the `Promise` type argument to the signature. The policy does not mark `any`, `unknown`, unconstrained parameters, or unknown runtime values as safe; those need separate rule-specific handling when they matter.
+Use `reaches_disallowed_incomplete(T)` in the type-graph violation rule in place of `type_reaches_incomplete(T)`. Keep the signature issue rules as well. This ignores only `/members_omitted` on the two named library leaves. If `Promise<Hidden>` reaches an unaccepted opaque `Hidden` type, that marker still propagates through the `Promise` type argument to the signature. The policy does not mark `any`, `unknown`, unconstrained parameters, or unknown runtime values as safe; those need separate rule-specific handling when they matter.
 
 Caveats:
 
