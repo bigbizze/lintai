@@ -1,7 +1,8 @@
 # Broader syntax facts after suspension sites
 
-Status: design-only future work for PR 5. These ideas follow PR 4's suspension
-sites and do not require isolated declaration builds. PR 5 adds no broad syntax
+Status: design-only future work. These ideas follow the suspension sites specified
+in [semantic extraction completeness, section 6](semantic-extraction-completeness.md#6-asynchronous-suspension-sites)
+and do not require isolated declaration builds. This document adds no broad syntax
 extraction or runtime behavior.
 
 ## Purpose and boundaries

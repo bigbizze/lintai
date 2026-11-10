@@ -1,12 +1,14 @@
 # Isolated declaration builds and source links
 
-Status: design-only future work for PR 5. This document does not specify a
+Status: design-only future work. This document does not specify a
 runtime build runner, a final build configuration schema, or new source-link
 facts.
 
 ## Starting point
 
-PR 3's agreed source-resolution and association contract is the baseline:
+The following source-resolution and association sequence is proposed. Its detailed
+contract remains to be specified before implementation; it is not implemented or
+required by the current [export inventory specification](semantic-extraction-completeness.md#5-export-and-declaration-inventory):
 
 1. Use source when normal TypeScript resolution reaches it.
 2. Use TypeScript project-reference source redirects where configured, respecting
@@ -25,7 +27,7 @@ declaration sets; it does not guess source paths or pair overloads one by one.
 
 Optional build execution is separate future work. It could produce fresh
 declarations and maps for a repository whose normal build is needed to expose its
-types. It is not needed to complete the PR 3 source-link contract.
+types. Source-link support does not require optional build execution.
 
 ## Output capture and source provenance
 
@@ -35,14 +37,17 @@ choose whether extraction runs inside the container or reads captured output on
 the host, and must translate container paths to stable workspace identities.
 Partial or failed builds must not silently mix new declarations with old maps.
 
-Capturing output proves which files the build produced. It does not, by itself,
-prove which source declaration produced a particular generated declaration or
+Capturing output records the files available in the captured view. To attribute
+those files to the current build, use an initially empty output area or other
+evidence that distinguishes current output from files left by earlier builds.
+A successful incremental build alone does not establish that distinction.
+Capture does not, by itself, prove which source declaration produced a particular generated declaration or
 that a source association is correct. A usable, validated declaration map can
 provide declaration-association evidence, but does not prove the source and
 generated files came from the same build. Missing, malformed, unavailable,
 unsupported, or ambiguous maps must remain distinguishable. If maps cannot
-establish a link, the explicit PR 3 binding fallback may still apply under its
-contract; matching names alone are not proof of freshness or one-to-one
+establish a link, an explicit configured binding fallback could apply once its
+contract is specified; matching names alone are not proof of freshness or one-to-one
 declaration identity.
 
 ## Isolation and permissions
@@ -87,8 +92,8 @@ platform, and declared network-provided inputs. If a command can read undeclared
 files, environment values, or mutable external data, a cache hit cannot be
 assumed correct. Any eventual cache must be bounded and have a clear eviction
 policy. Cache invalidation must also notice inputs that were missing and later
-appear. These requirements are separate from PR 3's snapshot refresh for
-source-link configuration, maps, and source files.
+appear. Source-link support will also need snapshot invalidation for changes to
+its configuration, maps, and source files; that contract remains to be specified.
 
 ## Decisions before implementation
 
@@ -102,11 +107,11 @@ source-link configuration, maps, and source files.
 - How paths, symlinks, multiple package instances, generated source, and
   conflicting project configurations are handled across platforms.
 - What evidence is accepted for each source link, including missing or ambiguous
-  maps and the existing configured binding fallback.
+  maps and the proposed configured binding fallback.
 - Whether measured warm-run savings justify bounded caching, and which inputs
   can be captured well enough to make a cache hit correct.
 
 These decisions should be made from an adopting repository and measured builds.
 Do not invent final source-link schemas or a general build framework in this
-design-only PR. PR 3's map/configuration outcomes remain the reference for
-unavailable evidence; build output must not be described as source provenance.
+design document. The source-link specification must define map/configuration
+outcomes for unavailable evidence; build output must not be described as source provenance.

@@ -269,10 +269,10 @@ Likely checks include:
 
 ## 21. Isolated declaration builds and source links
 
-PR 5 records a design-only follow-up for optional isolated build execution and
-its relationship to source links. The PR 3 contract already covers source-first
-resolution, project-reference redirects, validated declaration maps, and an
-explicit configured binding fallback. See
+This design-only follow-up considers optional isolated build execution and its
+relationship to source links. It proposes source-first resolution,
+project-reference redirects, validated declaration maps, and an explicit
+configured binding fallback whose detailed contract remains to be specified. See
 [`isolated-declaration-builds.md`](isolated-declaration-builds.md). A future
 build runner must keep captured output distinct from evidence of source
 provenance.
@@ -281,7 +281,7 @@ provenance.
 
 ## 22. Broader syntax facts after suspension sites
 
-PR 5 also records consumer-led ideas for loops, switches, assignments and
+This design records consumer-led ideas for loops, switches, assignments and
 updates, object literals, exceptions, and generator yield. See
 [`broader-syntax-facts.md`](broader-syntax-facts.md). These are syntax facts;
 they do not by themselves establish execution, reachability, or effects. Final
