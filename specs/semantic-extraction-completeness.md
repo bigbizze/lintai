@@ -50,6 +50,8 @@ This feature does not add member expansion or claim that `any`, unconstrained pa
 
 ## 5. Export and declaration inventory
 
+Status: implemented; see the detailed [source-association contract](semantic-source-associations.md) for association, conflict, and invalidation behavior.
+
 ### 5.1 Entities and relations
 
 Use the following base relations:

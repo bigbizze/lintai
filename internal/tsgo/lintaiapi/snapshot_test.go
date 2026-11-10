@@ -133,6 +133,63 @@ export function helper() {
 	}
 }
 
+func TestBuildSnapshotTracksMissingNearestTsconfigForCreation(t *testing.T) {
+	for _, existingConfig := range []bool{true, false} {
+		name := "synthetic"
+		if existingConfig {
+			name = "parent config"
+		}
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			files := map[string]string{
+				"src/core/app.ts": `import { marker } from "choice"; export const selected = marker;`,
+				"targets/old.ts":  `export const marker = "old";`,
+				"targets/new.ts":  `export const marker = "new";`,
+			}
+			if existingConfig {
+				files["tsconfig.json"] = `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","baseUrl":".","paths":{"choice":["./targets/old"]}},"files":["src/core/app.ts"]}`
+			}
+			writeWorkspace(t, root, files)
+			request := BuildSnapshotRequest{WorkspaceRoot: root, Files: []string{filepath.Join(root, "src/core/app.ts")}}
+			build := func() *Snapshot {
+				t.Helper()
+				snapshot, err := BuildSnapshot(context.Background(), request)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return snapshot
+			}
+			before := build()
+			for _, path := range []string{"src/core/tsconfig.json", "src/tsconfig.json"} {
+				candidate := filepath.Join(root, path)
+				if !slices.ContainsFunc(before.Inputs, func(input SnapshotInput) bool { return input.Path == candidate && !input.Exists }) {
+					t.Fatalf("missing nearest-config candidate %s was not tracked: %+v", candidate, before.Inputs)
+				}
+			}
+			if !existingConfig && !slices.ContainsFunc(before.Inputs, func(input SnapshotInput) bool {
+				return input.Path == filepath.Join(root, "tsconfig.json") && !input.Exists
+			}) {
+				t.Fatalf("missing root config was not tracked for the synthetic program: %+v", before.Inputs)
+			}
+			if !slices.ContainsFunc(before.ImportEdges, func(edge ImportEdge) bool {
+				return edge.Specifier == "choice" && (existingConfig && edge.ToPath == "targets/old.ts" || !existingConfig && edge.Unresolved)
+			}) {
+				t.Fatalf("unexpected resolution before creating the config: %+v", before.ImportEdges)
+			}
+			candidate := filepath.Join(root, "src/core/tsconfig.json")
+			config := `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","baseUrl":"../..","paths":{"choice":["./targets/new"]}},"files":["app.ts"]}`
+			if err := os.WriteFile(candidate, []byte(config), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			after := build()
+			if !slices.ContainsFunc(after.Inputs, func(input SnapshotInput) bool { return input.Path == candidate && input.Exists }) ||
+				!slices.ContainsFunc(after.ImportEdges, func(edge ImportEdge) bool { return edge.Specifier == "choice" && edge.ToPath == "targets/new.ts" }) {
+				t.Fatalf("created nearer config did not change the program resolution: inputs=%+v imports=%+v", after.Inputs, after.ImportEdges)
+			}
+		})
+	}
+}
+
 func TestBuildSnapshotExtractsExpandedMetadata(t *testing.T) {
 	root := t.TempDir()
 	files := writeWorkspace(t, root, map[string]string{

@@ -74,6 +74,61 @@ func TestSourceEntryUsesCompilerResolutionForSymlinkedWorkspace(t *testing.T) {
 	}
 }
 
+func TestExportEqualsExpressionKeepsTypeRootAndConfiguredBinding(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspace(t, root, map[string]string{
+		"tsconfig.json":                      `{"compilerOptions":{"strict":true,"module":"preserve","moduleResolution":"bundler"},"include":["src/**/*.ts"]}`,
+		"packages/contracts/tsconfig.json":   `{"compilerOptions":{"strict":true,"module":"preserve","moduleResolution":"bundler"},"include":["src/**/*.ts"]}`,
+		"node_modules/knex/package.json":     `{"name":"knex","types":"index.d.ts"}`,
+		"node_modules/knex/index.d.ts":       `export interface Knex { raw(sql: string): string }`,
+		"packages/contracts/dist/index.d.ts": `import type { Knex } from "knex"; declare const api: { db: Knex }; export = api;`,
+		"packages/contracts/src/index.ts":    `import type { Knex } from "knex"; declare const db: Knex; export = { db };`,
+		"src/app.ts":                         `import api = require("../packages/contracts/dist"); export const use = () => api.db;`,
+		"source-links.json":                  `{"version":1,"entries":[{"checkedEntry":"packages/contracts/dist/index.d.ts","sourceEntry":"packages/contracts/src/index.ts"}]}`,
+	})
+	snapshot, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{
+		WorkspaceRoot: root,
+		Files: []string{
+			filepath.Join(root, "src/app.ts"),
+			filepath.Join(root, "packages/contracts/src/index.ts"),
+		},
+		SourceLinks: "source-links.json",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	public := semanticExport(t, snapshot, "packages/contracts/src/index.ts", "export=", SpaceValue)
+	if len(public.Targets) != 1 || len(public.Incomplete) != 0 {
+		t.Fatalf("export assignment is incomplete: %+v", public)
+	}
+	declaration := semanticDeclaration(t, snapshot, public.Targets[0])
+	if declaration.Kind != "export_expression" || len(declaration.Incomplete) != 0 || len(declaration.Types) != 1 || declaration.Types[0].Space != SpaceValue {
+		t.Fatalf("export expression did not retain its value type: %+v", declaration)
+	}
+	types := newTypeIndex(t, snapshot)
+	valueType := types.get(declaration.Types[0].Type)
+	dbIndex := slices.IndexFunc(valueType.Props, func(prop TypeProp) bool { return prop.Name == "db" })
+	if dbIndex < 0 {
+		t.Fatalf("exported object lost its db type: %+v", valueType)
+	}
+	dbType := types.get(valueType.Props[dbIndex].Type)
+	if dbType.Name != "Knex" || dbType.OriginKind != OriginKindPackage || dbType.Origin != "knex" {
+		t.Fatalf("exported object did not retain the Knex dependency: %+v", dbType)
+	}
+	if _, found := findSemanticExport(snapshot, "packages/contracts/src/index.ts", "db", SpaceValue); found {
+		t.Fatal("export assignment invented a named export for its db property")
+	}
+	if len(snapshot.SourceBindings) != 1 {
+		t.Fatalf("export assignment binding was not matched: %+v", snapshot.SourceBindings)
+	}
+	binding := snapshot.SourceBindings[0]
+	if binding.Name != "export=" || binding.Space != SpaceValue || binding.Method != "source_entry" ||
+		!binding.CheckedComplete || !binding.SourceComplete || len(binding.Incomplete) != 0 ||
+		len(binding.CheckedDeclarations) != 1 || !slices.Equal(binding.SourceDeclarations, public.Targets) {
+		t.Fatalf("export assignment binding did not retain its checked and source endpoints: %+v", binding)
+	}
+}
+
 func TestSourceEntryKeepsCheckedTypesAndRecordsOverloadMembershipSets(t *testing.T) {
 	root := t.TempDir()
 	writeWorkspace(t, root, map[string]string{

@@ -60,7 +60,7 @@ func (a *auxiliarySourcePrograms) forEntry(entry configuredSourceEntry) (*auxili
 	configPath := entry.ConfigPath
 	cacheKey := configPath
 	if configPath == "" {
-		nearest, err := findNearestConfigPath(a.workspaceRoot, entry.SourcePath)
+		nearest, err := a.configs.findNearestConfigPath(a.workspaceRoot, entry.SourcePath)
 		if err != nil {
 			return nil, AssociationUnsupported
 		}
@@ -409,14 +409,23 @@ func (e *extractor) moduleBindings(file *ast.SourceFile) []moduleBinding {
 			if statement.Kind != ast.KindExportAssignment || !statement.AsExportAssignment().IsExportEquals {
 				continue
 			}
-			symbol := e.checker.GetSymbolAtLocation(statement.AsExportAssignment().Expression)
+			expression := statement.AsExportAssignment().Expression
+			var symbol *ast.Symbol
+			if expression != nil {
+				symbol = e.checker.GetSymbolAtLocation(expression)
+			}
+			var declarations []*ast.Node
 			if symbol != nil {
 				symbol = e.checker.SkipAlias(symbol)
 				if symbol != nil {
-					declarations := symbol.Declarations()
-					result = append(result, moduleBinding{name: "export=", space: SpaceValue, symbol: symbol, declarations: declarations, complete: len(declarations) > 0})
+					declarations = symbol.Declarations()
 				}
 			}
+			if len(declarations) == 0 {
+				symbol = nil
+				declarations = []*ast.Node{statement}
+			}
+			result = append(result, moduleBinding{name: "export=", space: SpaceValue, symbol: symbol, declarations: declarations, complete: expression != nil})
 		}
 	}
 	return result

@@ -32,12 +32,13 @@ export type Primitive = string;
 		"src/defaults.ts": `export { default as NamedDefault } from "./base";
 export default class {}
 `,
-		"src/namespace.ts": `export * as all from "./base";`,
-		"src/star-a.ts":    `export * from "./star-b"; export const known = 1;`,
-		"src/star-b.ts":    `export * from "./star-c";`,
-		"src/star-c.ts":    `export * from "./star-a"; export * from "./missing"; export const leaf = 1;`,
-		"src/star-root.ts": `export * from "./star-a";`,
-		"src/cjs.ts":       `const api = { run() {} }; export = api;`,
+		"src/namespace.ts":            `export * as all from "./base";`,
+		"src/namespace-incomplete.ts": `export * as child from "./star-a";`,
+		"src/star-a.ts":               `export * from "./star-b"; export const known = 1;`,
+		"src/star-b.ts":               `export * from "./star-c";`,
+		"src/star-c.ts":               `export * from "./star-a"; export * from "./missing"; export const leaf = 1;`,
+		"src/star-root.ts":            `export * from "./star-a";`,
+		"src/cjs.ts":                  `const api = { run() {} }; export = api;`,
 	})
 
 	first := semanticExport(t, snapshot, "src/index.ts", "first", SpaceValue)
@@ -113,10 +114,50 @@ export default class {}
 		}
 	}
 	semanticExport(t, snapshot, "src/star-root.ts", "leaf", SpaceValue)
+	semanticExport(t, snapshot, "src/namespace-incomplete.ts", "child", SpaceValue)
+	if slices.ContainsFunc(snapshot.ModuleExportsIncomplete, func(item ModuleExportsIncompleteFact) bool {
+		return item.File == "src/namespace-incomplete.ts"
+	}) {
+		t.Fatalf("namespace source's incomplete inventory propagated to its single binding: %+v", snapshot.ModuleExportsIncomplete)
+	}
 	if !slices.ContainsFunc(snapshot.ImportEdges, func(edge ImportEdge) bool {
 		return edge.FromPath == "src/star-c.ts" && edge.Specifier == "./missing" && edge.Unresolved
 	}) {
 		t.Fatal("unresolved star import fact was lost")
+	}
+}
+
+func TestDeclarationTypeObservationsCompareOnlyObservedSpaces(t *testing.T) {
+	root := t.TempDir()
+	config := `{"compilerOptions":{"strict":true,"module":"preserve","moduleResolution":"bundler"},"files":["index.ts"]}`
+	writeWorkspace(t, root, map[string]string{
+		"type/tsconfig.json":               config,
+		"type/index.ts":                    `export type { Widget } from "widget";`,
+		"both/tsconfig.json":               config,
+		"both/index.ts":                    `export { Widget } from "widget";`,
+		"node_modules/widget/package.json": `{"name":"widget","types":"index.d.ts"}`,
+		"node_modules/widget/index.d.ts":   `export declare class Widget {}`,
+	})
+	snapshot, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{
+		WorkspaceRoot: root,
+		Files:         []string{filepath.Join(root, "type/index.ts"), filepath.Join(root, "both/index.ts")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	typeOnly := semanticExport(t, snapshot, "type/index.ts", "Widget", SpaceType)
+	both := semanticExport(t, snapshot, "both/index.ts", "Widget", SpaceValue)
+	if len(typeOnly.Targets) != 1 || !slices.Equal(typeOnly.Targets, both.Targets) {
+		t.Fatalf("re-exports did not resolve to the same class: type=%+v value=%+v", typeOnly, both)
+	}
+	declaration := semanticDeclaration(t, snapshot, typeOnly.Targets[0])
+	if len(declaration.TypeObservations) != 2 ||
+		!slices.ContainsFunc(declaration.TypeObservations, func(observation []DeclarationType) bool {
+			return len(observation) == 1 && observation[0].Space == SpaceType
+		}) ||
+		!slices.ContainsFunc(declaration.TypeObservations, func(observation []DeclarationType) bool { return len(observation) == 2 }) ||
+		slices.Contains(declaration.Incomplete, AssociationConflict) {
+		t.Fatalf("matching type-space observations conflicted with an extra value-space observation: %+v", declaration)
 	}
 }
 

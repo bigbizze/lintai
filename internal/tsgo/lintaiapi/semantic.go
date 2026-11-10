@@ -48,9 +48,6 @@ func (e *extractor) collectSemanticExports(file *ast.SourceFile) {
 			return
 		}
 		contributions[item.publicName] = append(contributions[item.publicName], item)
-		if item.reexport && item.sourceName == "*" && item.module != "" {
-			starSources = append(starSources, item.module)
-		}
 		if item.site != e.importSiteByNode[node] {
 			e.addExportSite(item.site, node)
 		}
@@ -255,21 +252,26 @@ func (e *extractor) collectSemanticExports(file *ast.SourceFile) {
 				symbol = e.checker.GetSymbolAtLocation(expression)
 			}
 			var targets []string
-			complete := symbol != nil && len(symbol.Declarations()) > 0
+			complete := false
 			if symbol != nil {
 				symbol = e.checker.SkipAlias(symbol)
-				for _, declaration := range symbol.Declarations() {
-					id, supported := e.addDeclaration(declaration, symbol, "export=", SpaceValue)
-					if id != "" {
-						targets = append(targets, id)
+				if symbol != nil {
+					complete = len(symbol.Declarations()) > 0
+					for _, declaration := range symbol.Declarations() {
+						id, supported := e.addDeclaration(declaration, symbol, "export=", SpaceValue)
+						if id != "" {
+							targets = append(targets, id)
+						}
+						complete = complete && supported
 					}
-					complete = complete && supported
 				}
 			}
 			if len(targets) == 0 {
-				id, _ := e.addDeclaration(statement, nil, "export=", SpaceValue)
-				targets = append(targets, id)
-				complete = true
+				id, supported := e.addDeclaration(statement, nil, "export=", SpaceValue)
+				if id != "" {
+					targets = append(targets, id)
+				}
+				complete = id != "" && supported
 			}
 			targets = sortedUnique(targets)
 			items := contributions["export="]
@@ -559,16 +561,17 @@ func (e *extractor) addDeclaration(node *ast.Node, symbol *ast.Symbol, publicNam
 	}
 	fact.TypesComplete = true
 	if symbol == nil {
-		if node.Kind == ast.KindExportAssignment && !node.AsExportAssignment().IsExportEquals {
+		if node.Kind == ast.KindExportAssignment {
 			if expression := node.AsExportAssignment().Expression; expression != nil {
 				typeValue := e.checker.GetTypeAtLocation(expression)
 				if typeValue != nil {
 					e.addDeclarationType(fact, SpaceValue, e.emitFunctionType(typeValue, expression))
-				} else {
-					fact.TypesComplete = false
-					fact.Incomplete = append(fact.Incomplete, AssociationUnresolved)
+					return id, fact.TypesComplete
 				}
 			}
+			fact.TypesComplete = false
+			fact.Incomplete = append(fact.Incomplete, AssociationUnresolved)
+			return id, false
 		}
 		return id, true
 	}
@@ -1340,13 +1343,21 @@ func declarationSetKey(items []DeclarationType) string {
 }
 
 func declarationSetsDisagree(items [][]DeclarationType) bool {
-	if len(items) < 2 {
-		return false
-	}
-	want := declarationSetKey(items[0])
-	for _, item := range items[1:] {
-		if declarationSetKey(item) != want {
-			return true
+	// Each sorted set contains only the spaces that this program observed.
+	// Compare answers within a space, not against an unobserved space.
+	observed := make(map[string][]DeclarationType)
+	for _, item := range items {
+		for start := 0; start < len(item); {
+			end := start + 1
+			for end < len(item) && item[end].Space == item[start].Space {
+				end++
+			}
+			space := item[start].Space
+			if previous, ok := observed[space]; ok && !slices.Equal(previous, item[start:end]) {
+				return true
+			}
+			observed[space] = item[start:end]
+			start = end
 		}
 	}
 	return false

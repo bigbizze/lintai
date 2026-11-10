@@ -344,8 +344,8 @@ type Snapshot struct {
 	// ConfigFiles are the absolute paths of the tsconfig files that the
 	// snapshot read, including extended and referenced configs.
 	ConfigFiles []string
-	// InputPaths includes association inputs that may be absent. ConfigFiles
-	// remains the list of present TypeScript configuration inputs.
+	// Inputs includes program, configuration, and association inputs, including
+	// absent paths. ConfigFiles remains the list of present configs.
 	Inputs []SnapshotInput
 	// ConfigAdjustments are the compiler options that lintai changed because
 	// TypeScript 7 rejects them, sorted by config path and option.
@@ -825,13 +825,14 @@ type parsedConfig struct {
 }
 
 type configCache struct {
-	host    compiler.CompilerHost
-	configs map[string]*parsedConfig
-	errors  map[string]error
+	host       compiler.CompilerHost
+	configs    map[string]*parsedConfig
+	errors     map[string]error
+	candidates map[string]bool
 }
 
 func newConfigCache(host compiler.CompilerHost) *configCache {
-	return &configCache{host: host, configs: make(map[string]*parsedConfig), errors: make(map[string]error)}
+	return &configCache{host: host, configs: make(map[string]*parsedConfig), errors: make(map[string]error), candidates: make(map[string]bool)}
 }
 
 func (c *configCache) load(configPath string) (*parsedConfig, error) {
@@ -905,7 +906,7 @@ func (c *configCache) files() []string {
 }
 
 func (c *configCache) inputs() []SnapshotInput {
-	byPath := make(map[string]bool)
+	byPath := maps.Clone(c.candidates)
 	for configPath, parsed := range c.configs {
 		byPath[configPath] = true
 		for _, extended := range parsed.original.ExtendedSourceFiles() {
@@ -1010,7 +1011,7 @@ func syntheticConfig(host compiler.CompilerHost, workspaceRoot string, files []s
 func discoverConfigGroups(workspaceRoot string, files []string, configs *configCache) ([]configGroup, error) {
 	grouped := make(map[string][]string)
 	for _, file := range files {
-		configPath, err := findNearestConfigPath(workspaceRoot, file)
+		configPath, err := configs.findNearestConfigPath(workspaceRoot, file)
 		if err != nil {
 			return nil, err
 		}
@@ -1044,16 +1045,19 @@ func discoverConfigGroups(workspaceRoot string, files []string, configs *configC
 	return groups, nil
 }
 
-func findNearestConfigPath(workspaceRoot string, file string) (string, error) {
+func (c *configCache) findNearestConfigPath(workspaceRoot string, file string) (string, error) {
 	rootPath := filepath.Clean(filepath.FromSlash(workspaceRoot))
 	current := filepath.Dir(filepath.FromSlash(file))
 	for {
-		candidate := filepath.Join(current, "tsconfig.json")
+		candidate := normalizeSlash(filepath.Join(current, "tsconfig.json"))
 		if _, err := os.Stat(candidate); err == nil {
-			return normalizeSlash(candidate), nil
+			c.candidates[candidate] = true
+			return candidate, nil
 		} else if !os.IsNotExist(err) {
 			return "", err
 		}
+		// Creation of a checked candidate can change the selected config.
+		c.candidates[candidate] = false
 		if current == rootPath {
 			return "", nil
 		}
