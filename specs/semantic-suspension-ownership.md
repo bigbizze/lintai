@@ -150,11 +150,15 @@ The shared owner result is authoritative for:
 - Ambient and global sites in `internal/tsgo/lintaiapi/ambient.go`
   (`recordAmbient`, `matchGlobalRef`).
 - Suspension-site ownership and `fn_awaits` emission.
-- `meta_access` from `backend/typescript/access_extract.go`. Preserve the existing
-  access recognition, but join its source offsets to the shared AST owner result.
-  Remove `functionBodiesByFile`/`innermostFunction` as a separate ownership rule;
-  body-only ranges miss parameter defaults and can disagree with computed names,
-  class evaluation, or instance initialization.
+- `meta_access` from the compiler AST in `internal/tsgo/lintaiapi/snapshot.go`.
+  Record the first plain-dot member of `import.meta`, its compiler location, and
+  its owner in the same visit. A longer path such as `import.meta.env.MODE` records
+  `import.meta.env`. Optional or bracket access to the first member and
+  `(import.meta).env` are not recorded. Template expressions and whitespace or
+  comments between tokens are supported; text in strings, comments, and regular
+  expressions is ignored.
+  Do not use a text scanner or a separate offset join to find the owner. Compiler
+  locations use 1-based lines and UTF-16 columns.
 
 For a representable function owner, emit the existing `site_in_fn` row for call,
 reference, ambient, global, and meta-access sites. For module scope retain current
@@ -190,10 +194,9 @@ and facts consumers together:
   shared owner traversal, call/reference and suspension records.
 - `internal/tsgo/lintaiapi/ambient.go`: ambient/global ownership.
 - `internal/analysis/model.go` and `backend/typescript/backend.go`: carry owner,
-  signature-status, and suspension records to fact publication.
-- `backend/typescript/access_extract.go`, `backend/typescript/facts.go`, and
-  `backend/typescript/schema.mg`: access ownership, remove body-range attribution,
-  publish exact relations and locations. `backend/typescript/prelude.mg` derives
+  access, signature-status, and suspension records to fact publication.
+- `backend/typescript/facts.go` and `backend/typescript/schema.mg`: publish exact
+  relations and locations. `backend/typescript/prelude.mg` derives
   `fn_suspends` and `module_has_suspension` and excludes unsupported sites from
   owner-based reachability.
 - `docs/api.md`, `docs/examples.md`, `testdata/fixtures/rules/pure-no-effects.ts`,

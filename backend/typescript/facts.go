@@ -80,6 +80,12 @@ func factsFromAnalysis(snapshot *analysis.Snapshot) ([]facts.Fact, error) {
 			}
 		} else if site.AtModule {
 			b.add("suspension_at_module", id)
+		} else if site.UnsupportedReason != "" {
+			reason, err := name(site.UnsupportedReason)
+			if err != nil {
+				return nil, err
+			}
+			b.add("site_attribution_unsupported", id, reason)
 		}
 		b.location(site.EntityID, site.Range)
 	}

@@ -83,12 +83,6 @@ func (b *Backend) buildAnalysisSnapshot(ctx context.Context, repoRoot, workspace
 	importEdges := convertImportEdges(extracted.ImportEdges)
 	callEdges := convertCallEdges(extracted.CallEdges)
 	typeRefs := convertTypeRefs(extracted.TypeRefs)
-	accesses, err := extractAccesses(workspaceRoot, files)
-	if err != nil {
-		return nil, err
-	}
-	assignAccessOwners(accesses, extracted.NodeOwners)
-
 	inputPaths := make([]string, 0, len(extracted.Inputs))
 	for _, input := range extracted.Inputs {
 		inputPaths = append(inputPaths, input.Path)
@@ -121,7 +115,7 @@ func (b *Backend) buildAnalysisSnapshot(ctx context.Context, repoRoot, workspace
 		SuspensionSites:             convertSuspensionSites(extracted.SuspensionSites),
 		UnsupportedAttributions:     convertUnsupportedAttributions(extracted.UnsupportedAttributions),
 		TypeRefs:                    typeRefs,
-		Accesses:                    accesses,
+		Accesses:                    convertAccesses(extracted.Accesses),
 		AmbientSources:              convertAmbientSources(sources),
 		AmbientUses:                 convertAmbientUses(extracted.AmbientUses),
 		GlobalRefs:                  convertGlobalRefs(extracted.GlobalRefs),
@@ -197,6 +191,18 @@ func convertSuspensionSites(items []lintaiapi.SuspensionSite) []analysis.Suspens
 	result := make([]analysis.SuspensionSite, 0, len(items))
 	for _, item := range items {
 		result = append(result, analysis.SuspensionSite{EntityID: item.EntityID, SemanticKey: item.SemanticKey, FilePath: item.FilePath, Kind: item.Kind, FunctionSemanticKey: item.FunctionSemanticKey, UnsupportedReason: item.UnsupportedReason, AtModule: item.AtModule, Range: convertLocation(item.Range)})
+	}
+	return result
+}
+
+func convertAccesses(items []lintaiapi.Access) []analysis.Access {
+	result := make([]analysis.Access, 0, len(items))
+	for _, item := range items {
+		result = append(result, analysis.Access{
+			EntityID: item.EntityID, SemanticKey: item.SemanticKey,
+			Root: "import.meta", AccessPath: item.AccessPath, Origin: "special_form", FilePath: item.FilePath,
+			FunctionSemanticKey: item.FunctionSemanticKey, UnsupportedReason: item.UnsupportedReason, Range: convertLocation(item.Range),
+		})
 	}
 	return result
 }

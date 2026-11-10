@@ -240,8 +240,6 @@ type Access struct {
 	Origin              string
 	FilePath            string
 	Range               diagnostics.SourceLocation
-	Start               int
-	End                 int
 	FunctionSemanticKey string
 	UnsupportedReason   string
 }

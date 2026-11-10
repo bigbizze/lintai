@@ -314,8 +314,10 @@ export default rule("arch.no-direct-import-meta-env")
 
 Caveats:
 
-- extraction is semantic, so strings and comments that contain `import.meta.env` do not match
+- strings, comments and regular expressions that contain `import.meta.env` do not match; an access inside a template expression does
 - the access path stops at the first member, so `import.meta.env.API_URL` is recorded as `import.meta.env`
+- spaces and comments between the tokens do not change the access path
+- the first member must use a plain dot: `import.meta?.env`, `import.meta["env"]` and `(import.meta).env` are not recorded
 - `site_in_fn(Acc, Fn)` gives the lexical function owner of the access; unsupported owners have `site_attribution_unsupported`
 
 ## 8. Directives, library calls and unresolved imports

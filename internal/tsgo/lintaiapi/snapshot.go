@@ -90,12 +90,11 @@ type SuspensionSite struct {
 	Range                                  SourceLocation
 }
 
-// NodeOwner connects an AST expression's first token to the owner used by
-// the facts visitor. The access extractor joins its existing matches by offset.
-type NodeOwner struct {
-	FilePath                               string
-	Start                                  int
+type Access struct {
+	EntityID, SemanticKey, FilePath        string
+	AccessPath                             string
 	FunctionSemanticKey, UnsupportedReason string
+	Range                                  SourceLocation
 }
 
 type UnsupportedAttribution struct{ Site, Reason string }
@@ -338,7 +337,7 @@ type Snapshot struct {
 	ImportsOpaque           []ImportOpaque
 	FnRefs                  []FnRef
 	SuspensionSites         []SuspensionSite
-	NodeOwners              []NodeOwner
+	Accesses                []Access
 	UnsupportedAttributions []UnsupportedAttribution
 	TypeRefs                []TypeRef
 	AmbientUses             []AmbientUse
@@ -389,6 +388,8 @@ type extractor struct {
 	functionKeys                map[string]*Function
 	functionSyms                map[*ast.Symbol]*Function
 	functionCount               map[string]int
+	accessCount                 map[string]int
+	instanceOwners              map[*ast.Node]*functionState
 	importCount                 map[string]int
 	callCount                   map[string]int
 	externalCount               map[string]int
@@ -416,7 +417,7 @@ type extractor struct {
 	opaque                      []ImportOpaque
 	refs                        []FnRef
 	suspensionSites             []SuspensionSite
-	nodeOwners                  []NodeOwner
+	accesses                    []Access
 	unsupportedAttributions     []UnsupportedAttribution
 	typeRefs                    []TypeRef
 	ambientUses                 []AmbientUse
@@ -781,6 +782,8 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 		typeTruncated:   make(map[*checker.Type]struct{}),
 		timing:          timing,
 		sourceEntries:   sourceEntries,
+		accessCount:     make(map[string]int),
+		instanceOwners:  make(map[*ast.Node]*functionState),
 	}
 	for _, file := range requestedFiles {
 		ex.requestedFiles[file] = struct{}{}
@@ -854,7 +857,7 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 		ImportsOpaque:               ex.opaque,
 		FnRefs:                      ex.refs,
 		SuspensionSites:             ex.suspensionSites,
-		NodeOwners:                  ex.nodeOwners,
+		Accesses:                    ex.accesses,
 		UnsupportedAttributions:     ex.unsupportedAttributions,
 		TypeRefs:                    ex.typeRefs,
 		AmbientUses:                 ex.ambientUses,
@@ -1190,7 +1193,7 @@ func mergeSnapshot(into *Snapshot, partial *Snapshot) {
 	into.ImportsOpaque = mergeByEntityID(into.ImportsOpaque, partial.ImportsOpaque, func(item ImportOpaque) string { return item.EntityID })
 	into.FnRefs = mergeByEntityID(into.FnRefs, partial.FnRefs, func(item FnRef) string { return item.EntityID })
 	into.SuspensionSites = mergeByEntityID(into.SuspensionSites, partial.SuspensionSites, func(item SuspensionSite) string { return item.EntityID })
-	into.NodeOwners = mergeByEntityID(into.NodeOwners, partial.NodeOwners, func(item NodeOwner) string { return fmt.Sprintf("%s::%d", item.FilePath, item.Start) })
+	into.Accesses = mergeByEntityID(into.Accesses, partial.Accesses, func(item Access) string { return item.EntityID })
 	into.UnsupportedAttributions = mergeByEntityID(into.UnsupportedAttributions, partial.UnsupportedAttributions, func(item UnsupportedAttribution) string { return item.Site })
 	into.TypeRefs = mergeByEntityID(into.TypeRefs, partial.TypeRefs, func(item TypeRef) string { return item.EntityID })
 	into.AmbientUses = mergeByEntityID(into.AmbientUses, partial.AmbientUses, func(item AmbientUse) string { return item.EntityID })
@@ -1220,6 +1223,7 @@ func sortSnapshot(snapshot *Snapshot) {
 	slices.SortFunc(snapshot.ImportsOpaque, func(a, b ImportOpaque) int { return strings.Compare(a.SemanticKey, b.SemanticKey) })
 	slices.SortFunc(snapshot.FnRefs, func(a, b FnRef) int { return strings.Compare(a.SemanticKey, b.SemanticKey) })
 	slices.SortFunc(snapshot.SuspensionSites, func(a, b SuspensionSite) int { return strings.Compare(a.SemanticKey, b.SemanticKey) })
+	slices.SortFunc(snapshot.Accesses, func(a, b Access) int { return strings.Compare(a.SemanticKey, b.SemanticKey) })
 	slices.SortFunc(snapshot.TypeRefs, func(a, b TypeRef) int { return strings.Compare(a.SemanticKey, b.SemanticKey) })
 	slices.SortFunc(snapshot.AmbientUses, func(a, b AmbientUse) int { return strings.Compare(a.SemanticKey, b.SemanticKey) })
 	slices.SortFunc(snapshot.GlobalRefs, func(a, b GlobalRef) int { return strings.Compare(a.SemanticKey, b.SemanticKey) })
@@ -1291,7 +1295,7 @@ func (e *extractor) walkFacts(node *ast.Node, currentFunction *functionState) {
 		e.collectSuspension(node, "await_using", currentFunction)
 	}
 	if ast.IsPropertyAccessExpression(node) {
-		e.recordAccessOwner(node, currentFunction)
+		e.collectAccess(node, currentFunction)
 	}
 	switch {
 	case ast.IsImportDeclaration(node):
@@ -1367,8 +1371,18 @@ func (e *extractor) instanceInitializerOwner(node *ast.Node) *functionState {
 	if node.Parent == nil || !ast.IsClassLike(node.Parent) {
 		return &functionState{reason: "unsupported_context"}
 	}
+	class := node.Parent
+	if owner, ok := e.instanceOwners[class]; ok {
+		return owner
+	}
+	owner := e.classConstructorOwner(class)
+	e.instanceOwners[class] = owner
+	return owner
+}
+
+func (e *extractor) classConstructorOwner(class *ast.Node) *functionState {
 	var constructor *ast.Node
-	for _, member := range node.Parent.Members() {
+	for _, member := range class.Members() {
 		if ast.IsConstructorDeclaration(member) && ast.NodeIsPresent(member.Body()) {
 			if constructor != nil {
 				return &functionState{reason: "unsupported_context"}
@@ -1399,24 +1413,28 @@ func (e *extractor) collectSuspension(node *ast.Node, kind string, owner *functi
 		site.FunctionSemanticKey = source.key
 	}
 	e.suspensionSites = append(e.suspensionSites, site)
-	e.markUnsupported(site.EntityID, source.reason)
 }
 
-func (e *extractor) recordAccessOwner(node *ast.Node, owner *functionState) {
+func (e *extractor) collectAccess(node *ast.Node, owner *functionState) {
+	access := node.AsPropertyAccessExpression()
+	meta := access.Expression
+	if meta == nil || !ast.IsMetaProperty(meta) || meta.AsMetaProperty().KeywordToken != ast.KindImportKeyword || !ast.NodeIsPresent(meta.Name()) || meta.Name().Text() != "meta" ||
+		access.QuestionDotToken != nil || !ast.NodeIsPresent(access.Name()) || !ast.IsIdentifier(access.Name()) {
+		return
+	}
 	file := ast.GetSourceFileOfNode(node)
 	if file == nil {
 		return
 	}
-	start := scanner.GetTokenPosOfNode(node, file, false)
-	if start < 0 || start >= len(file.Text()) || !strings.HasPrefix(file.Text()[start:], "import.meta.") {
-		return
-	}
 	source := e.callSourceFor(node, owner)
-	entry := NodeOwner{FilePath: source.path, Start: start, UnsupportedReason: source.reason}
+	path := "import.meta." + access.Name().Text()
+	baseKey := fmt.Sprintf("%s::access::%s", source.path, path)
+	key := withOrdinal(baseKey, nextOrdinal(e.accessCount, baseKey))
+	entry := Access{EntityID: "access:" + key, SemanticKey: key, FilePath: source.path, AccessPath: path, UnsupportedReason: source.reason, Range: e.nodeLocation(file, node)}
 	if !source.module && source.reason == "" {
 		entry.FunctionSemanticKey = source.key
 	}
-	e.nodeOwners = append(e.nodeOwners, entry)
+	e.accesses = append(e.accesses, entry)
 }
 
 func (e *extractor) markUnsupported(site, reason string) {
