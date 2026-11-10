@@ -354,7 +354,7 @@ type Snapshot struct {
 	AmbientUses               []AmbientUse
 	GlobalRefs                []GlobalRef
 	escapingCallbacks         []escapingCallback
-	// Per-program evidence; the merge/finalization task owns reconciliation.
+	// Raw per-program evidence, compared before public facts are flattened.
 	callDeclarationObservations []callDeclarationObservation
 	Directives                  []ModuleDirective
 	ParseErrors                 []ParseError
@@ -585,10 +585,14 @@ func BuildSnapshot(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, er
 	finalizeSemanticObservations(merged)
 	if req.TsconfigFiles {
 		keepModuleFiles(merged)
+	}
+	finalizeCallDeclarationObservations(merged)
+	if req.TsconfigFiles {
 		keepRetainedSemantics(merged)
 		keepReachableTypes(merged)
 	}
 	merged.escapingCallbacks = nil
+	merged.callDeclarationObservations = nil
 	merged.ConfigFiles = configs.files()
 	merged.Inputs = append(merged.Inputs, configs.inputs()...)
 	merged.Inputs = append(merged.Inputs, trackedFS.snapshotInputs()...)
@@ -676,6 +680,7 @@ func keepModuleFiles(snap *Snapshot) {
 		}
 		emittedEscapes[call.EntityID] = true
 		snap.CallsUnresolved = append(snap.CallsUnresolved, call)
+		snap.callDeclarationObservations = append(snap.callDeclarationObservations, item.callDeclarationObservation())
 		if item.reason != "" {
 			snap.UnsupportedAttributions = append(snap.UnsupportedAttributions, UnsupportedAttribution{Site: call.SemanticKey, Reason: item.reason})
 		}
@@ -692,8 +697,8 @@ func keepModuleFiles(snap *Snapshot) {
 	}
 }
 
-// Retain declaration endpoints only for surviving exports and configured
-// associations, then retain map endpoints reached from those declarations.
+// Retain declaration endpoints for surviving exports, configured associations,
+// and call provenance, then retain map endpoints reached from those declarations.
 // This runs after conflict detection so every program's observation counts.
 func keepRetainedSemantics(snap *Snapshot) {
 	modules := make(map[string]bool, len(snap.Modules))
@@ -703,6 +708,17 @@ func keepRetainedSemantics(snap *Snapshot) {
 	snap.Exports = slices.DeleteFunc(snap.Exports, func(item ExportFact) bool { return !modules[item.File] })
 	exportTargets := make(map[string]bool)
 	keep := make(map[string]bool)
+	provenanceEndpoints := make(map[string]bool)
+	for _, call := range snap.CallDeclarations {
+		keep[call.Declaration] = true
+		provenanceEndpoints[call.Declaration] = true
+	}
+	for _, member := range snap.DeclarationMembers {
+		keep[member.Declaration] = true
+		keep[member.OwnerDeclaration] = true
+		provenanceEndpoints[member.Declaration] = true
+		provenanceEndpoints[member.OwnerDeclaration] = true
+	}
 	sites := make(map[string]bool)
 	for _, item := range snap.Exports {
 		for _, id := range item.Targets {
@@ -737,7 +753,9 @@ func keepRetainedSemantics(snap *Snapshot) {
 	snap.Declarations = slices.DeleteFunc(snap.Declarations, func(item DeclarationFact) bool { return !keep[item.ID] })
 	for index := range snap.Declarations {
 		item := &snap.Declarations[index]
-		if !exportTargets[item.ID] {
+		// Metadata-only provenance never extracts types. Any types already on
+		// these endpoints were collected independently and must survive.
+		if !exportTargets[item.ID] && !provenanceEndpoints[item.ID] {
 			item.Types = nil
 			item.TypeObservations = nil
 		}
@@ -1216,6 +1234,7 @@ func (c *configCache) findNearestConfigPath(workspaceRoot string, file string) (
 }
 
 func mergeSnapshot(into *Snapshot, partial *Snapshot) {
+	into.callDeclarationObservations = append(into.callDeclarationObservations, partial.callDeclarationObservations...)
 	into.Modules = mergeByEntityID(into.Modules, partial.Modules, func(item Module) string { return item.EntityID })
 	into.Functions = mergeFunctionSlices(into.Functions, partial.Functions)
 	into.ImportEdges = mergeByEntityID(into.ImportEdges, partial.ImportEdges, func(item ImportEdge) string { return item.EntityID })

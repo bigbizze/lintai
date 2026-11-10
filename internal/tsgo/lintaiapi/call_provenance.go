@@ -1,7 +1,11 @@
 package lintaiapi
 
 import (
+	"cmp"
 	"encoding/json"
+	"maps"
+	"slices"
+	"strings"
 
 	"github.com/bigbizze/lintai/internal/tsgo/internal/ast"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/scanner"
@@ -190,9 +194,75 @@ func (e *extractor) recordEscapedCallDeclaration(source callSource, location Sou
 	e.callDeclarationObservations = append(e.callDeclarationObservations, escapedCallDeclarationObservation(site))
 }
 
-// The filtering/finalization task must append this observation only when it
-// materializes the callback's unresolved site. Never query a signature on the
+// Filtering appends this observation only when it materializes the
+// callback's unresolved site. Never query a signature on the
 // escaped value, and never group it with real invocation observations.
 func (callback escapingCallback) callDeclarationObservation() callDeclarationObservation {
 	return escapedCallDeclarationObservation(callback.call.SemanticKey)
+}
+
+// Compare the original program observations before unioning any evidence. A
+// program that did not analyze an invocation contributes no observation. Compare
+// even observations whose emitted sites were filtered out, then emit only facts
+// attached to surviving runtime sites. Escaped values have no invocation key and
+// therefore never enter the disagreement groups.
+func finalizeCallDeclarationObservations(snapshot *Snapshot) {
+	first := make(map[string]string)
+	conflicts := make(map[string]bool)
+	for _, observation := range snapshot.callDeclarationObservations {
+		if observation.InvocationKey == "" {
+			continue
+		}
+		key, _ := json.Marshal([]any{observation.Site, observation.Declaration, observation.Member,
+			strings.Join(sortedUnique(observation.Incomplete), "\x00")})
+		if previous, exists := first[observation.InvocationKey]; exists {
+			if previous != string(key) {
+				conflicts[observation.InvocationKey] = true
+			}
+		} else {
+			first[observation.InvocationKey] = string(key)
+		}
+	}
+	sites := make(map[string]bool)
+	for _, call := range snapshot.CallEdges {
+		sites[call.SemanticKey] = true
+	}
+	for _, call := range snapshot.ExternalCalls {
+		sites[call.SemanticKey] = true
+	}
+	for _, call := range snapshot.CallsUnresolved {
+		sites[call.SemanticKey] = true
+	}
+	declarations := make(map[CallDeclarationFact]struct{})
+	members := make(map[DeclarationMemberFact]struct{})
+	incomplete := make(map[CallDeclarationIncompleteFact]struct{})
+	for _, observation := range snapshot.callDeclarationObservations {
+		if !sites[observation.Site] {
+			continue
+		}
+		if observation.Declaration != "" {
+			declarations[CallDeclarationFact{Site: observation.Site, Declaration: observation.Declaration}] = struct{}{}
+			if observation.Member != nil {
+				members[*observation.Member] = struct{}{}
+			}
+		}
+		for _, reason := range observation.Incomplete {
+			incomplete[CallDeclarationIncompleteFact{Site: observation.Site, Reason: reason}] = struct{}{}
+		}
+		if observation.InvocationKey != "" && conflicts[observation.InvocationKey] {
+			incomplete[CallDeclarationIncompleteFact{Site: observation.Site, Reason: "conflict"}] = struct{}{}
+		}
+	}
+	snapshot.CallDeclarations = slices.Collect(maps.Keys(declarations))
+	slices.SortFunc(snapshot.CallDeclarations, func(a, b CallDeclarationFact) int {
+		return cmp.Or(strings.Compare(a.Site, b.Site), strings.Compare(a.Declaration, b.Declaration))
+	})
+	snapshot.DeclarationMembers = slices.Collect(maps.Keys(members))
+	slices.SortFunc(snapshot.DeclarationMembers, func(a, b DeclarationMemberFact) int {
+		return cmp.Or(strings.Compare(a.Declaration, b.Declaration), strings.Compare(a.OwnerDeclaration, b.OwnerDeclaration), strings.Compare(a.Name, b.Name))
+	})
+	snapshot.CallDeclarationIncomplete = slices.Collect(maps.Keys(incomplete))
+	slices.SortFunc(snapshot.CallDeclarationIncomplete, func(a, b CallDeclarationIncompleteFact) int {
+		return cmp.Or(strings.Compare(a.Site, b.Site), strings.Compare(a.Reason, b.Reason))
+	})
 }
