@@ -604,6 +604,12 @@ async function make() {
 }
 Date.now();
 export function values() { const saved = () => known(); return function returned() { known(); }; }
+export function choose(flag: boolean) {
+  (flag ? () => 0 : () => Date.now())();
+  (((() => known()) as () => void)!)();
+  const bound = ((() => known()) satisfies () => void);
+  (bound as () => void)();
+}
 `
 	root := t.TempDir()
 	writeTestFile(t, root, "src/scorecard/total.ts", source)
@@ -725,6 +731,33 @@ export function values() { const saved = () => known(); return function returned
 	if rows := find("ambient_use", 27); len(rows) != 1 || owner(rows[0].Values[0].String) != "" || unsupported(rows[0].Values[0].String) != "" {
 		t.Errorf("module ambient use: %v", rows)
 	}
+	choose := "src/scorecard/total.ts::function::choose"
+	for _, check := range []struct {
+		line             int
+		relation, target string
+	}{
+		{30, "call_unresolved", ""},
+		{31, "call_edge", fmt.Sprintf("src/scorecard/total.ts::arrow_function::<anonymous@%d>", strings.Index(source, "() => known()) as"))},
+		{33, "call_edge", fmt.Sprintf("src/scorecard/total.ts::arrow_function::<anonymous@%d>", strings.Index(source, "() => known()) satisfies"))},
+	} {
+		var outcomes []facts.Fact
+		for _, relation := range []string{"call_edge", "external_call", "call_unresolved"} {
+			for _, row := range find(relation, check.line) {
+				if row.Values[1].String == choose {
+					outcomes = append(outcomes, row)
+				}
+			}
+		}
+		if len(outcomes) != 1 || outcomes[0].Relation != check.relation || check.target != "" && outcomes[0].Values[2].String != check.target {
+			t.Errorf("choose line %d outcomes: %v", check.line, outcomes)
+		}
+	}
+	if rows := find("fn_ref", 30); len(rows) != 2 {
+		t.Errorf("conditional function values: %v", rows)
+	}
+	if rows := find("fn_ref", 31); len(rows) != 0 {
+		t.Errorf("direct IIFE was also treated as a function value: %v", rows)
+	}
 	for _, fact := range snapshot.Facts {
 		if fact.Relation == "fn_ref" && strings.HasSuffix(fact.Values[2].String, "::function::total.nestedAlone") {
 			t.Errorf("declaration created a reference: %v", fact)
@@ -765,8 +798,10 @@ Decl module_seen(File).
 module_seen(File) :- module_has_suspension(File).
 Decl bad_owner(Site).
 bad_owner(Site) :- site_attribution_unsupported(Site, _), call_edge(Site, "", _), calls_reach("", _).
+Decl uncertain(Fn).
+uncertain(Fn) :- fn(Fn, _, "choose"), fn_has_unresolved_call(Fn).
 `}
-	violations, perr := evaluateProgram(base, prelude, decls, output, []string{"call_only", "follow_refs", "module_seen", "bad_owner"}, nil, evalOptions{})
+	violations, perr := evaluateProgram(base, prelude, decls, output, []string{"call_only", "follow_refs", "module_seen", "bad_owner", "uncertain"}, nil, evalOptions{})
 	if perr != nil {
 		t.Fatal(perr)
 	}
@@ -775,7 +810,7 @@ bad_owner(Site) :- site_attribution_unsupported(Site, _), call_edge(Site, "", _)
 		got = append(got, item.predicate+":"+item.anchor)
 	}
 	slices.Sort(got)
-	want := []string{"follow_refs:" + scorecard, "module_seen:src/scorecard/only-unsupported.ts", "module_seen:src/scorecard/total.ts"}
+	want := []string{"follow_refs:" + scorecard, "module_seen:src/scorecard/only-unsupported.ts", "module_seen:src/scorecard/total.ts", "uncertain:" + choose}
 	if !slices.Equal(got, want) {
 		t.Fatalf("policy rows = %v, want %v", got, want)
 	}

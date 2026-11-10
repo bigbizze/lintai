@@ -113,6 +113,8 @@ This inventory answers which names a module exports and which declarations/type 
 
 ## 6. Asynchronous suspension sites
 
+Status: implemented. See [Semantic suspension ownership](semantic-suspension-ownership.md) for the ownership contract.
+
 ### 6.1 Relations
 
 | Relation | Meaning |
@@ -121,7 +123,7 @@ This inventory answers which names a module exports and which declarations/type 
 | `suspension_in_fn(Site, Fn)` | The collected function containing the site. |
 | `suspension_at_module(Site)` | Site executes in module scope rather than a function. |
 
-Every site MUST have exactly one ownership classification: a function relation or module-scope marker. Nested function sites belong to the nested function only. Scope classification MUST use the extractor's actual function boundaries, not a text search for `async` or `await`.
+Every site MUST have exactly one ownership classification: a function relation, module-scope marker, or `site_attribution_unsupported` marker when its owner cannot be represented. Nested function sites belong to the nested function only. Scope classification MUST use the extractor's actual function boundaries, not a text search for `async` or `await`.
 
 Emit one `/await` site per await expression, one `/for_await` site per asynchronous iteration statement, and one `/await_using` site per asynchronous resource declaration statement/list, including its loop-header form. Separate await expressions inside these constructs produce their own sites.
 

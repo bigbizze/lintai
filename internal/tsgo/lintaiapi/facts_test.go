@@ -315,6 +315,75 @@ export const made = [new Stamped(), new Quiet()];
 	}
 }
 
+func TestWrappedFunctionBindings(t *testing.T) {
+	const source = `interface OwnershipOnly { secret: string }
+const callback = (async (value: OwnershipOnly) => { await value; });
+export const exported = ((async () => { await 1; })!);
+const object = { handler: (((function () { return 1; }) as () => number)!) };
+class Box { handler = (<() => number>(() => 1)); }
+const alias = (function original() { return 1; });
+const direct = () => 1;
+export function total(box: Box): void { void callback; void object.handler; void box.handler; void alias; void direct; }
+export default ((() => 1) satisfies () => number);
+`
+	snapshot := buildTestSnapshot(t, map[string]string{"src/main.ts": source})
+	functions := make(map[string]Function)
+	for _, fn := range snapshot.Functions {
+		functions[fn.SemanticKey] = fn
+	}
+	var anonymous []string
+	for _, item := range []struct {
+		fragment, token, kind string
+		exported              bool
+	}{
+		{"const callback = (async (value:", "async", "arrow_function", false},
+		{"export const exported = ((async", "async", "arrow_function", true},
+		{"handler: (((function () { return 1; })", "function", "function_expression", false},
+		{"handler = (<() => number>(() => 1)", "() => 1", "arrow_function", false},
+		{"export default ((() => 1)", "() => 1", "arrow_function", true},
+	} {
+		offset := strings.Index(source, item.fragment) + strings.Index(item.fragment, item.token)
+		key := fmt.Sprintf("src/main.ts::%s::<anonymous@%d>", item.kind, offset)
+		fn, ok := functions[key]
+		if !ok || fn.IsExported != item.exported || !fn.SignatureOmitted || fn.SignatureUnresolved || len(fn.ParameterTypes) != 0 || fn.ReturnType != "" {
+			t.Errorf("wrapped function %q: %+v", item.fragment, fn)
+		}
+		anonymous = append(anonymous, key)
+	}
+	for _, key := range []string{"src/main.ts::function_expression::original", "src/main.ts::arrow_function::direct"} {
+		if fn, ok := functions[key]; !ok || fn.SignatureOmitted || fn.ReturnType == "" {
+			t.Errorf("named function identity or signature changed: %+v", fn)
+		}
+	}
+	wantRefs := []string{anonymous[0], anonymous[2], anonymous[3], "src/main.ts::function_expression::original", "src/main.ts::arrow_function::direct"}
+	var refs []string
+	for _, ref := range snapshot.FnRefs {
+		if ref.FromSemanticKey == "src/main.ts::function::total" {
+			refs = append(refs, ref.ToSemanticKey)
+		}
+	}
+	slices.Sort(refs)
+	slices.Sort(wantRefs)
+	if !slices.Equal(refs, wantRefs) {
+		t.Errorf("binding references = %v, want %v", refs, wantRefs)
+	}
+	var suspensionOwners []string
+	for _, site := range snapshot.SuspensionSites {
+		suspensionOwners = append(suspensionOwners, site.FunctionSemanticKey)
+	}
+	slices.Sort(suspensionOwners)
+	wantOwners := []string{anonymous[0], anonymous[1]}
+	slices.Sort(wantOwners)
+	if !slices.Equal(suspensionOwners, wantOwners) {
+		t.Errorf("suspension owners = %v, want %v", suspensionOwners, wantOwners)
+	}
+	for _, typ := range snapshot.Types {
+		if typ.Name == "OwnershipOnly" {
+			t.Errorf("ownership-only signature added a type root: %+v", typ)
+		}
+	}
+}
+
 // Locations start at the first token. Before this, they started at the
 // leading trivia, so import columns were one too small and a call after a
 // comment started on an earlier line.

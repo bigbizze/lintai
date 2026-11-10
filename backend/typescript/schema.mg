@@ -195,7 +195,7 @@ Decl external_call(Call, Caller, Module, Name)
 Decl call_unresolved(Site, Caller)
   descr [
     extensional(),
-    doc("A call that lintai cannot follow: a call, new or tagged template whose target the checker does not resolve to a collected workspace function or an external declaration (callbacks, function-typed values, element-access callees, any-typed callees); f.call() or f.apply() when f is not a collected function; a function value that is not a collected function, passed to an external call (the row is at the argument); new of a workspace class without a constructor whose fields have initializers that run code. Every call site has exactly one of: call_edge, external_call, call_unresolved."),
+    doc("A call that lintai cannot follow: a call, new or tagged template whose target is not a retained workspace function or an external declaration, including a function in a file excluded by the file scope; f.call() or f.apply() when f is not a collected function; a function value that is not a collected function, passed to an external call (the row is at the argument); new of a workspace class without a constructor whose fields have initializers that run code. Every call site has exactly one of: call_edge, external_call, call_unresolved."),
     arg(Site, "Call site entity id."),
     arg(Caller, "Calling function, module path at module scope, or an empty string when attribution is unsupported.")
   ].
@@ -211,7 +211,7 @@ Decl import_opaque(Site, From)
 Decl fn_ref(Ref, From, To)
   descr [
     extensional(),
-    doc("A function used as a value, for example passed as an argument, stored, returned or used as a property value. An inline arrow function, function expression or object literal method creates a reference from its surrounding owner. A nested function declaration alone does not create a reference. Import and export specifiers are not references."),
+    doc("A collected function used as a value, for example passed as an argument, stored, returned or used as a property value. An inline arrow function, function expression or object literal method creates a reference from its surrounding owner. A nested function declaration alone does not create a reference. Import and export specifiers are not references."),
     arg(Ref, "Reference entity id."),
     arg(From, "Surrounding function, module path at module scope, or an empty string when attribution is unsupported."),
     arg(To, "Entity id of the referenced function.")

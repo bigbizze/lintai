@@ -269,9 +269,9 @@ type ExternalCall struct {
 	Range           SourceLocation
 }
 
-// CallUnresolved is a call or new expression whose target the checker does
-// not resolve to a collected function or to an external declaration, for
-// example a call through a callback parameter or an any-typed value.
+// CallUnresolved is a call or new expression without a retained function
+// target or an external declaration, for example a call through a callback
+// parameter or to a function in a filtered-out file.
 type CallUnresolved struct {
 	EntityID        string
 	SemanticKey     string
@@ -586,10 +586,9 @@ func BuildSnapshot(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, er
 	return merged, nil
 }
 
-// keepModuleFiles removes the functions in files that are not modules, and
-// the call edges to them. A group can collect the functions of a file that
-// it imports from another group, and that group can leave the file out.
-// Import edges to such a file stay: the import is in the source.
+// keepModuleFiles removes functions in files that are not modules. A group
+// can collect functions from an imported file that its own group leaves out.
+// Calls to those functions stay unresolved; imports to the file also stay.
 func keepModuleFiles(snap *Snapshot) {
 	modules := make(map[string]struct{}, len(snap.Modules))
 	for _, item := range snap.Modules {
@@ -600,22 +599,65 @@ func keepModuleFiles(snap *Snapshot) {
 		return ok
 	}
 	snap.Functions = slices.DeleteFunc(snap.Functions, func(item Function) bool { return !isModule(item.FilePath) })
-	snap.CallEdges = slices.DeleteFunc(snap.CallEdges, func(item CallEdge) bool { return !isModule(item.ToPath) })
 	functions := make(map[string]struct{}, len(snap.Functions))
 	for _, item := range snap.Functions {
 		functions[item.SemanticKey] = struct{}{}
 	}
+	hasFunction := func(key string) bool {
+		_, ok := functions[key]
+		return ok
+	}
+	keepSource := func(path, key string, module bool) bool {
+		return isModule(path) && (module || key == "" || hasFunction(key))
+	}
+	removedSites := make(map[string]bool)
+	snap.CallEdges = slices.DeleteFunc(snap.CallEdges, func(item CallEdge) bool {
+		if !keepSource(item.FromPath, item.FromSemanticKey, item.FromModule) {
+			removedSites[item.SemanticKey] = true
+			return true
+		}
+		if isModule(item.ToPath) && hasFunction(item.ToSemanticKey) {
+			return false
+		}
+		snap.CallsUnresolved = append(snap.CallsUnresolved, CallUnresolved{
+			EntityID: item.EntityID, SemanticKey: item.SemanticKey,
+			FromSemanticKey: item.FromSemanticKey, FromModule: item.FromModule,
+			FromPath: item.FromPath, Range: item.Range,
+		})
+		return true
+	})
+	snap.ExternalCalls = slices.DeleteFunc(snap.ExternalCalls, func(item ExternalCall) bool {
+		remove := !keepSource(item.FromPath, item.FromSemanticKey, item.FromModule)
+		if remove {
+			removedSites[item.SemanticKey] = true
+		}
+		return remove
+	})
+	snap.CallsUnresolved = slices.DeleteFunc(snap.CallsUnresolved, func(item CallUnresolved) bool {
+		remove := !keepSource(item.FromPath, item.FromSemanticKey, item.FromModule)
+		if remove {
+			removedSites[item.SemanticKey] = true
+		}
+		return remove
+	})
+	snap.FnRefs = slices.DeleteFunc(snap.FnRefs, func(item FnRef) bool {
+		remove := !keepSource(item.FromPath, item.FromSemanticKey, item.FromModule) || !isModule(item.ToPath) || !hasFunction(item.ToSemanticKey)
+		if remove {
+			removedSites[item.SemanticKey] = true
+		}
+		return remove
+	})
+	snap.UnsupportedAttributions = slices.DeleteFunc(snap.UnsupportedAttributions, func(item UnsupportedAttribution) bool {
+		return removedSites[item.Site]
+	})
 	snap.FnSignatureConflicts = slices.DeleteFunc(snap.FnSignatureConflicts, func(id string) bool {
-		_, ok := functions[id]
-		return !ok
+		return !hasFunction(id)
 	})
 	for index := range snap.Declarations {
-		if snap.Declarations[index].Function == "" {
-			continue
-		}
-		if _, ok := functions[snap.Declarations[index].Function]; !ok {
+		if !hasFunction(snap.Declarations[index].Function) {
 			snap.Declarations[index].Function = ""
 		}
+		snap.Declarations[index].FunctionObservations = slices.DeleteFunc(snap.Declarations[index].FunctionObservations, func(id string) bool { return !hasFunction(id) })
 	}
 }
 
@@ -1415,6 +1457,22 @@ func (e *extractor) collectFunction(node *ast.Node) *Function {
 		}
 		meta = &functionMeta{localName: fmt.Sprintf("<anonymous@%d>", scanner.GetTokenPosOfNode(node, file, false)), kind: kind, nameNode: node, namingSource: node, lookupNodes: []*ast.Node{node}}
 	}
+	// A wrapper did not previously give the function a named identity. Use
+	// its binding for lookup and export status without changing that identity
+	// or collecting a signature for an ownership-only function.
+	var binding *functionMeta
+	if ast.IsFunctionExpressionOrArrowFunction(node) {
+		expression := node
+		for expression.Parent != nil && ast.IsOuterExpression(expression.Parent, ast.OEKAll) && expression.Parent.Expression() == expression {
+			expression = expression.Parent
+		}
+		if expression != node {
+			binding = expressionFunctionBinding(node, expression, meta.kind)
+			if binding != nil {
+				meta.lookupNodes = append(meta.lookupNodes, binding.lookupNodes[1:]...)
+			}
+		}
+	}
 
 	containerName := ""
 	if !omitted {
@@ -1445,7 +1503,7 @@ func (e *extractor) collectFunction(node *ast.Node) *Function {
 		Kind:                  meta.kind,
 		FilePath:              nameRange.File,
 		ContainerName:         containerName,
-		IsExported:            meta.exported || e.isExportedFunction(node, meta),
+		IsExported:            meta.exported || e.isExportedFunction(node, meta) || binding != nil && (binding.exported || e.isExportedFunction(node, binding)),
 		IsAsync:               ast.HasSyntacticModifier(node, ast.ModifierFlagsAsync),
 		ParameterCount:        len(node.Parameters()),
 		ReturnType:            returnType,
@@ -1457,7 +1515,6 @@ func (e *extractor) collectFunction(node *ast.Node) *Function {
 	}
 	e.functions = append(e.functions, record)
 	stored := &e.functions[len(e.functions)-1]
-	e.functionNodes[node] = stored
 	for _, lookupNode := range meta.lookupNodes {
 		if lookupNode == nil {
 			continue
@@ -1469,12 +1526,6 @@ func (e *extractor) collectFunction(node *ast.Node) *Function {
 		if symbol := lookupNode.Symbol(); symbol != nil {
 			e.functionSyms[symbol] = stored
 		}
-	}
-	if key := nodeKey(node); key != "" {
-		e.functionKeys[key] = stored
-	}
-	if symbol := node.Symbol(); symbol != nil {
-		e.functionSyms[symbol] = stored
 	}
 	return stored
 }
@@ -1981,10 +2032,10 @@ func (e *extractor) matchFnRef(node *ast.Node, currentFunction *functionState) {
 	e.recordFnRef(e.callSourceFor(node, currentFunction), target, e.nodeLocation(e.ambientFile.file, node))
 }
 
-// isCallee reports the callee of a call or new expression, through
-// parentheses.
+// isCallee reports the callee of a call, new or tagged template expression,
+// through transparent wrappers.
 func isCallee(node *ast.Node) bool {
-	for node.Parent != nil && node.Parent.Kind == ast.KindParenthesizedExpression {
+	for node.Parent != nil && ast.IsOuterExpression(node.Parent, ast.OEKAll) && node.Parent.Expression() == node {
 		node = node.Parent
 	}
 	parent := node.Parent
@@ -2016,16 +2067,18 @@ func (e *extractor) resolveCallTarget(node *ast.Node) (*Function, *ast.Node) {
 	var declaration *ast.Node
 	if signature := e.checker.GetResolvedSignature(node); signature != nil {
 		declaration = signature.Declaration()
-		if target := e.lookupFunction(declaration); target != nil {
+		target := e.lookupFunction(declaration)
+		if target == nil && declaration != nil {
+			target = e.lookupFunction(declaration.Symbol())
+		}
+		// A signature can select one branch of an ambiguous function value.
+		// An ownership-only target is definite here only for that literal.
+		callee := ast.SkipOuterExpressions(calleeOf(node), ast.OEKAll)
+		if target != nil && (!target.SignatureOmitted || ast.IsFunctionExpressionOrArrowFunction(callee) && e.lookupFunction(callee) == target) {
 			return target, nil
 		}
-		if declaration != nil {
-			if target := e.lookupFunction(declaration.Symbol()); target != nil {
-				return target, nil
-			}
-		}
 	}
-	expression := ast.SkipParentheses(calleeOf(node))
+	expression := ast.SkipOuterExpressions(calleeOf(node), ast.OEKAll)
 	if expression != nil && (ast.IsIdentifier(expression) || ast.IsPropertyAccessExpression(expression)) {
 		if target := e.lookupFunction(e.checker.GetSymbolAtLocation(expression)); target != nil {
 			return target, nil
@@ -2629,49 +2682,8 @@ func functionMetaForNode(node *ast.Node) *functionMeta {
 }
 
 func expressionFunctionMeta(node *ast.Node, kind string) *functionMeta {
-	parent := node.Parent
-	if parent == nil {
-		return nil
-	}
-	if ast.IsVariableDeclaration(parent) && parent.Name() != nil {
-		nameNode := parent.Name().AsNode()
-		return &functionMeta{
-			localName:    parent.Name().Text(),
-			kind:         kind,
-			nameNode:     nameNode,
-			namingSource: parent,
-			lookupNodes:  []*ast.Node{node, parent, nameNode},
-		}
-	}
-	if ast.IsPropertyAssignment(parent) && parent.Name() != nil {
-		nameNode := parent.Name().AsNode()
-		return &functionMeta{
-			localName:    propertyNameText(nameNode),
-			kind:         kind,
-			nameNode:     nameNode,
-			namingSource: parent,
-			lookupNodes:  []*ast.Node{node, parent, nameNode},
-		}
-	}
-	if ast.IsPropertyDeclaration(parent) && parent.Initializer() == node && parent.Name() != nil {
-		nameNode := parent.Name().AsNode()
-		return &functionMeta{
-			localName:    propertyNameText(nameNode),
-			kind:         kind,
-			nameNode:     nameNode,
-			namingSource: parent,
-			lookupNodes:  []*ast.Node{node, parent, nameNode},
-		}
-	}
-	if ast.IsExportAssignment(parent) && !parent.AsExportAssignment().IsExportEquals && node.Name() == nil {
-		return &functionMeta{
-			localName:    "default",
-			kind:         kind,
-			nameNode:     node,
-			namingSource: parent,
-			lookupNodes:  []*ast.Node{node, parent},
-			exported:     true,
-		}
+	if binding := expressionFunctionBinding(node, node, kind); binding != nil {
+		return binding
 	}
 	name := node.Name()
 	if name == nil {
@@ -2685,6 +2697,54 @@ func expressionFunctionMeta(node *ast.Node, kind string) *functionMeta {
 		namingSource: node,
 		lookupNodes:  []*ast.Node{node, nameNode},
 	}
+}
+
+func expressionFunctionBinding(node, expression *ast.Node, kind string) *functionMeta {
+	parent := expression.Parent
+	if parent == nil {
+		return nil
+	}
+	if ast.IsVariableDeclaration(parent) && parent.Initializer() == expression && parent.Name() != nil && (expression == node || ast.IsIdentifier(parent.Name())) {
+		nameNode := parent.Name().AsNode()
+		return &functionMeta{
+			localName:    parent.Name().Text(),
+			kind:         kind,
+			nameNode:     nameNode,
+			namingSource: parent,
+			lookupNodes:  []*ast.Node{node, parent, nameNode},
+		}
+	}
+	if ast.IsPropertyAssignment(parent) && parent.Initializer() == expression && parent.Name() != nil {
+		nameNode := parent.Name().AsNode()
+		return &functionMeta{
+			localName:    propertyNameText(nameNode),
+			kind:         kind,
+			nameNode:     nameNode,
+			namingSource: parent,
+			lookupNodes:  []*ast.Node{node, parent, nameNode},
+		}
+	}
+	if ast.IsPropertyDeclaration(parent) && parent.Initializer() == expression && parent.Name() != nil {
+		nameNode := parent.Name().AsNode()
+		return &functionMeta{
+			localName:    propertyNameText(nameNode),
+			kind:         kind,
+			nameNode:     nameNode,
+			namingSource: parent,
+			lookupNodes:  []*ast.Node{node, parent, nameNode},
+		}
+	}
+	if ast.IsExportAssignment(parent) && parent.AsExportAssignment().Expression == expression && !parent.AsExportAssignment().IsExportEquals && (node.Name() == nil || expression != node) {
+		return &functionMeta{
+			localName:    "default",
+			kind:         kind,
+			nameNode:     node,
+			namingSource: parent,
+			lookupNodes:  []*ast.Node{node, parent},
+			exported:     true,
+		}
+	}
+	return nil
 }
 
 func containerNameForNode(node *ast.Node, namingSource *ast.Node) string {

@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/bigbizze/lintai/backend"
+	"github.com/bigbizze/lintai/facts"
 	"github.com/bigbizze/lintai/internal/analysis"
 )
 
@@ -36,6 +37,112 @@ func TestBuildSnapshotExposesStableFunctionKeysAndCalls(t *testing.T) {
 	}
 	if !foundHelperEffect || !foundComputeHelper {
 		t.Fatalf("expected fixture call edges, got %+v", snapshot.CallEdges)
+	}
+}
+
+func TestFilteredCallTargetsRemainUnresolved(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "tsconfig.json", `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler"},"files":["src/main.ts"]}`)
+	writeWorkspaceFile(t, root, "src/excluded/tsconfig.json", `{"files":["other.ts"]}`)
+	writeWorkspaceFile(t, root, "src/excluded/other.ts", `export const other = 1;`)
+	writeWorkspaceFile(t, root, "src/excluded/effect.ts", `export function effect() { return helper(); } function helper() { return 1; }`)
+	writeWorkspaceFile(t, root, "src/main.ts", `import { effect } from "./excluded/effect";
+effect();
+export function run() {
+  effect();
+  effect();
+  return effect;
+}
+class C {
+  value = effect();
+  ref = effect;
+}
+function kept() { return 1; }
+export function use() { return kept(); }
+`)
+	build := func(scope backend.FileScope) facts.Snapshot {
+		t.Helper()
+		snapshot, err := New().BuildSnapshot(context.Background(), root, root, backend.SnapshotOptions{Files: scope})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := facts.Validate(snapshot); err != nil {
+			t.Fatal(err)
+		}
+		return snapshot
+	}
+	walk, filtered := build(backend.FileScopeWalk), build(backend.FileScopeTsconfig)
+	index := func(snapshot facts.Snapshot) map[string]map[string]facts.Fact {
+		result := make(map[string]map[string]facts.Fact)
+		for _, fact := range snapshot.Facts {
+			if result[fact.Relation] == nil {
+				result[fact.Relation] = make(map[string]facts.Fact)
+			}
+			result[fact.Relation][fact.Values[0].String] = fact
+		}
+		return result
+	}
+	before, after := index(walk), index(filtered)
+	const target = "src/excluded/effect.ts::function::effect"
+	want := map[int]string{2: "src/main.ts", 4: "src/main.ts::function::run", 5: "src/main.ts::function::run", 9: ""}
+	for site, edge := range before["call_edge"] {
+		if edge.Values[2].String != target {
+			continue
+		}
+		location := before["location"][site]
+		line := int(location.Values[2].Number)
+		owner, ok := want[line]
+		if !ok || edge.Values[1].String != owner {
+			t.Fatalf("unexpected original call: %v at %v", edge, location)
+		}
+		delete(want, line)
+		unresolved, ok := after["call_unresolved"][site]
+		if !ok || unresolved.Values[1].String != owner || !slices.Equal(location.Values, after["location"][site].Values) {
+			t.Errorf("call site changed or disappeared: %v at %v; unresolved %v at %v", edge, location, unresolved, after["location"][site])
+		}
+		if owner == "src/main.ts::function::run" {
+			if fact, ok := after["site_in_fn"][site]; !ok || fact.Values[1].String != owner {
+				t.Errorf("call lost its lexical owner: %v", unresolved)
+			}
+		}
+		if line == 9 {
+			if fact, ok := after["site_attribution_unsupported"][site]; !ok || fact.Values[1].String != "instance_construction" {
+				t.Errorf("call lost its unsupported attribution: %v", unresolved)
+			}
+		}
+	}
+	if len(want) != 0 {
+		t.Errorf("missing original calls at lines %v", want)
+	}
+	if len(after["call_unresolved"]) != 4 || len(after["call_edge"]) != 1 || len(after["external_call"]) != 0 {
+		t.Errorf("unexpected call outcomes: unresolved %v, edges %v, external %v", after["call_unresolved"], after["call_edge"], after["external_call"])
+	}
+	for _, edge := range after["call_edge"] {
+		if edge.Values[1].String != "src/main.ts::function::use" || edge.Values[2].String != "src/main.ts::function::kept" {
+			t.Errorf("unexpected retained call: %v", edge)
+		}
+	}
+	removedRefs := 0
+	unsupportedRef := false
+	for site, ref := range before["fn_ref"] {
+		if ref.Values[2].String == target {
+			removedRefs++
+			if marker, ok := before["site_attribution_unsupported"][site]; ok && marker.Values[1].String == "instance_construction" {
+				unsupportedRef = true
+			}
+			if _, ok := after["site_attribution_unsupported"][site]; ok {
+				t.Errorf("removed reference left an attribution marker: %v", ref)
+			}
+		}
+	}
+	if removedRefs != 2 || !unsupportedRef {
+		t.Errorf("expected ordinary and unsupported references before filtering, got %d, unsupported = %t", removedRefs, unsupportedRef)
+	}
+	if len(after["fn_ref"]) != 0 {
+		t.Errorf("references to filtered functions survived: %v", after["fn_ref"])
+	}
+	if _, ok := after["module"]["src/excluded/effect.ts"]; ok {
+		t.Error("filtered target was added as a module")
 	}
 }
 
