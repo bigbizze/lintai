@@ -9,7 +9,7 @@ LintAI lets you write rules like "components must not import domain code", "pure
 LintAI is a whole-workspace architecture engine:
 
 - it builds a semantic snapshot of your TypeScript workspace in Go
-- it converts the snapshot into base relations (facts) such as `fn`, `import_edge`, `call_edge`, `ambient_use` and `type_named`
+- it converts the snapshot into base relations (facts) such as `fn`, `import_edge`, `call_edge`, `ambient_use`, `type_named` and `module_export`
 - each rule is a Datalog program, in the [Mangle](https://codeberg.org/TauCeti/mangle-go) dialect, that derives violation rows from those facts
 - it reports file-scoped diagnostics that can be consumed by the CLI, ESLint or oxlint
 
@@ -35,7 +35,7 @@ LintAI fills that gap with Datalog over repository-level semantic facts. Recursi
 Current caveats:
 
 - it does not replace tests, the type checker, or runtime validation
-- types are structural facts keyed by where each named type is declared: `fn_returns(Fn, Type)` gives a type entity, and `type_named`, `type_arg`, `type_member` and the other `type_*` relations describe it. Members of classes, interfaces and enums are not expanded, and these types receive `type_incomplete(Type, /members_omitted)`. Conditional, mapped and indexed access types are `/other` with display text only. `type_contains` does not look into these types, into type parameter constraints or into the signatures of object types; `type_reaches_incomplete` reports represented types that are incomplete, including ordinary library `Promise` and `Array` interfaces. A rule may accept a specific opaque library type while still checking its represented type arguments; see the [narrow policy example](docs/examples.md#15-domain-signatures-do-not-mention-infrastructure-types). `any`, `unknown` and other unmarked types are not thereby known to be safe
+- types are structural facts keyed by the declarations that the checker actually read: `fn_returns(Fn, Type)` gives a type entity, and `type_named`, `type_arg`, `type_member` and the other `type_*` relations describe it. Members of classes, interfaces and enums are not expanded, and these types receive `type_incomplete(Type, /members_omitted)`. Conditional, mapped and indexed access types are `/other` with display text only. `type_contains` does not look into these types, into type parameter constraints or into the signatures of object types; `type_reaches_incomplete` reports represented types that are incomplete, including ordinary library `Promise` and `Array` interfaces. A rule may accept a specific opaque library type while still checking its represented type arguments; see the [narrow policy example](docs/examples.md#15-domain-signatures-do-not-mention-infrastructure-types). `any`, `unknown` and other unmarked types are not thereby known to be safe
 - calls to functions outside the workspace are in `external_call`, but lintai does not analyze code inside `node_modules`
 - lintai is a deterministic gate against cooperative but careless authors, not a security boundary against an adversary with write access to the repository and its CI. See [docs/trust.md](docs/trust.md).
 
@@ -50,6 +50,10 @@ A rule runs in these phases:
 5. `message()` runs in the restricted runtime to format each diagnostic.
 
 The TypeScript snapshot is built in Go by a copy of the TypeScript 7 compiler that is compiled into the `lintai` binary, at the version in `internal/tsgo/VERSION` (now 7.1.0-beta). The extractor, `internal/tsgo/lintaiapi`, calls the compiler's parser and checker in the same process. No Node process, `tsc` executable or `typescript` npm package takes part in extraction. The ESLint and oxlint plugins can keep a persistent `lintai serve` process alive for editor use, while the CLI runs one-shot analysis.
+
+The snapshot also records what each module exports. For each public name it gives the declarations behind the name and the re-export steps that brought it there, so a rule can start at a package entry such as `packages/common/src/index.ts` and check every type that the package makes public, even when a name passes through `export *` and a rename in other files. When lintai cannot see something completely, for example an `export *` from a module that does not resolve, it adds an incomplete fact, so a strict rule can report that it cannot decide instead of passing.
+
+Workspace packages are often imported through their build output, such as `packages/contracts/dist/index.d.ts`. lintai does not guess the matching `src/` file. It lets TypeScript decide: configured project `references` let the checker redirect generated declarations to referenced source unless `disableSourceOfProjectReferenceRedirect` is enabled. When the checker still reads a generated `.d.ts` file, lintai can link its declarations back to source through a declaration map or a `--source-links` file, and it records that link as extra evidence without replacing what the checker saw. See [Exports and declarations](docs/api.md#exports-and-declarations) and [Source resolution order](docs/api.md#source-resolution-order).
 
 Current caveats:
 
@@ -201,11 +205,11 @@ The full reference lives in [docs/api.md](docs/api.md). Highlights:
 - rule builder:
   - `rule(id).version(n).setup(fn).facts(fn).program(p).report(...preds).expectNonEmpty(...preds).message(fn)`
 - `dl` tagged template: interpolates strings, numbers, `dl.name("x")` (the name constant `/x`) and other `dl` fragments, with correct escaping
-- base relations: `module`, `fn`, `fn_*`, `import_edge`, `import_*`, `import_opaque`, `call_edge`, `call_unresolved`, `fn_ref`, `external_call`, `type_ref`, `type_ref_target`, `type_kind`, `type_named`, `type_arg`, `type_member`, `type_literal`, `type_param_name`, `type_prop`, `type_prop_optional`, `type_prop_readonly`, `type_sig_param`, `type_sig_param_optional`, `type_sig_param_rest`, `type_sig_returns`, `type_display`, `type_origin_kind`, `type_arg_optional`, `type_arg_rest`, `type_readonly`, `type_incomplete`, `meta_access`, `ambient_source`, `ambient_use`, `ambient_key`, `ambient_dynamic`, `ambient_write`, `global_ref`, `module_directive`, `module_parse_error`, `site_in_fn`, `location`
-- prelude: `glob`, `import_runtime`, `module_imports`, `imports_reach`, `calls_reach`, `fn_uses_ambient`, `fn_reaches_ambient`, `module_uses_ambient`, `module_reaches_ambient`, `fn_calls_package`, `module_calls_package`, `type_child`, `type_contains`, `type_reaches_incomplete`, `type_is_promise`, `fn_returns_awaited`
+- base relations: `module`, `fn`, `fn_*`, `import_edge`, `import_*`, `import_opaque`, `call_edge`, `call_unresolved`, `fn_ref`, `external_call`, `type_ref`, `type_ref_target`, `type_kind`, `type_named`, `type_arg`, `type_member`, `type_literal`, `type_param_name`, `type_prop`, `type_prop_optional`, `type_prop_readonly`, `type_sig_param`, `type_sig_param_optional`, `type_sig_param_rest`, `type_sig_returns`, `type_display`, `type_origin_kind`, `type_arg_optional`, `type_arg_rest`, `type_readonly`, `type_incomplete`, `declaration`, `declaration_*`, `module_export`, `export_*`, `module_exports_incomplete`, `fn_signature_conflict`, `source_entry`, `source_entry_*`, `source_binding`, `source_binding_*`, `meta_access`, `ambient_source`, `ambient_use`, `ambient_key`, `ambient_dynamic`, `ambient_write`, `global_ref`, `module_directive`, `module_parse_error`, `site_in_fn`, `location`
+- prelude: `glob`, `import_runtime`, `export_from`, `module_imports`, `imports_reach`, `calls_reach`, `fn_uses_ambient`, `fn_reaches_ambient`, `module_uses_ambient`, `module_reaches_ambient`, `fn_calls_package`, `module_calls_package`, `type_child`, `type_contains`, `type_reaches_incomplete`, `type_is_promise`, `fn_returns_awaited`
 - strict mode: `calls_or_refs_reach`, `fn_reaches_ambient_strict`, `fn_has_unresolved_call`, `module_has_unresolved_call` and `fn_reaches_unresolved` also follow function values and report calls that lintai cannot resolve
 - ambient sources: `clock` (`Date.now`, `new Date()`, `performance.now`), `env` (`process.env`), `random` (`Math.random`, `crypto.randomUUID` and other `crypto` random functions), `crypto` (`crypto.subtle`), `network` (`fetch`), `timer` (`setTimeout`, `setInterval`, `setImmediate`, `queueMicrotask`) and `process` (`process.cwd`, `process.argv`)
-- CLI: `lintai schema`, `lintai facts`, `lintai lock`, `lintai rules`, `--explain`, `--fact-limit`, `--severity <rule-id>=error|warning|off`, `--rules-lock`, `--setup-sandbox auto|on|off`
+- CLI: `lintai schema`, `lintai facts`, `lintai lock`, `lintai rules`, `--explain`, `--fact-limit`, `--source-links <file>`, `--severity <rule-id>=error|warning|off`, `--rules-lock`, `--setup-sandbox auto|on|off`
 - optional `config` export:
   - `export const config = z.object({...})`
 
@@ -217,6 +221,7 @@ Important caveats:
 - `type_display` is the text that TypeScript 7 prints; use it in messages, and match types with `type_named` and the other structural relations
 - TypeScript flattens nested unions, so `ActionResult<number> | null` has the members of `ActionResult<number>` and no `type_named` row for `ActionResult`
 - `type_contains` does not find every type in a signature; `type_incomplete` marks types whose facts leave out structure, and `type_reaches_incomplete` finds them. Class, interface and enum members are omitted and marked `/members_omitted`; default library `Promise` and `Array` interfaces also make strict completeness checks report a result. An unmarked type such as `any` or `unknown` is not proved safe
+- when two tsconfig files compile one function with different signatures, `fn_param` and `fn_returns` hold the rows from both, and `fn_signature_conflict(Fn)` marks the function. Guard with `!fn_signature_conflict(Fn)` before you treat its parameters and return type as one signature
 - `type_is_promise` and `fn_returns_awaited` match only the lib `Promise`, and remove exactly one level of it
 - a rule cannot redefine base or prelude predicates
 - `glob` and `!glob` need both arguments bound by earlier premises
@@ -246,6 +251,7 @@ More examples live in [docs/examples.md](docs/examples.md). They cover:
 - strict purity rules that also follow function values and report unresolved calls
 - a package capability table
 - type rules: a server action must return `Promise<ActionResult<T>>`, and domain signatures must not contain infrastructure types, with a strict variant that reports types lintai cannot inspect
+- a public API rule: the exports of a shared package must not expose types from infrastructure packages, with separate results for exports that lintai cannot fully inspect
 
 Important caveat:
 

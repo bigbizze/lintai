@@ -63,6 +63,9 @@ type Snapshot struct {
 	Version string
 	Schema  Schema
 	Facts   []Fact
+	// InputPaths are additional workspace dependencies whose changes may
+	// alter extracted facts, including paths that were absent at extraction.
+	InputPaths []string
 }
 
 // Validate checks that a snapshot has a versioned schema and that every fact

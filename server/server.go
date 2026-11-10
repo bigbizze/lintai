@@ -52,6 +52,7 @@ type InitializeParams struct {
 	RuleGlobs     []string       `json:"ruleGlobs"`
 	Excludes      []string       `json:"excludes,omitempty"`
 	Files         string         `json:"files,omitempty"`
+	SourceLinks   string         `json:"sourceLinks,omitempty"`
 	Env           map[string]any `json:"env"`
 	FactLimit     int            `json:"factLimit,omitempty"`
 	// Severity maps a rule id to "error", "warning" or "off".
@@ -81,6 +82,7 @@ type AnalysisResult struct {
 	DiagnosticCount int                      `json:"diagnosticCount"`
 	SnapshotVersion string                   `json:"snapshotVersion"`
 	Diagnostics     []diagnostics.Diagnostic `json:"diagnostics"`
+	InputPaths      []string                 `json:"inputPaths,omitempty"`
 }
 
 type FileDiagnosticsResult struct {
@@ -197,6 +199,7 @@ func (s *Server) handleInitialize(ctx context.Context, rawParams json.RawMessage
 		RuleGlobs:     append([]string(nil), params.RuleGlobs...),
 		Excludes:      append([]string(nil), params.Excludes...),
 		Files:         scope,
+		SourceLinks:   params.SourceLinks,
 		Env:           params.Env,
 		Severity:      diagnostics.SeverityError,
 		RuleSeverity:  ruleSeverity,
@@ -319,6 +322,7 @@ func analysisResult(result engine.Result) AnalysisResult {
 		DiagnosticCount: len(result.Diagnostics),
 		SnapshotVersion: result.SnapshotVersion,
 		Diagnostics:     items,
+		InputPaths:      append([]string(nil), result.InputPaths...),
 	}
 }
 
@@ -337,6 +341,8 @@ func classifyError(err error) *jsonrpc.ResponseError {
 	switch {
 	case strings.HasPrefix(message, "invalid params:"):
 		return &jsonrpc.ResponseError{Code: errCodeInvalidParams, Message: message}
+	case strings.HasPrefix(message, "invalid --source-links:"):
+		return &jsonrpc.ResponseError{Code: errCodeInvalidParams, Message: "invalid params: " + message}
 	case message == "server not initialized":
 		return &jsonrpc.ResponseError{Code: errCodeNotInitialized, Message: message}
 	default:

@@ -1,0 +1,467 @@
+package lintaiapi
+
+import (
+	"context"
+	"slices"
+	"strings"
+	"time"
+
+	"github.com/bigbizze/lintai/internal/tsgo/internal/ast"
+	"github.com/bigbizze/lintai/internal/tsgo/internal/checker"
+	"github.com/bigbizze/lintai/internal/tsgo/internal/compiler"
+	"github.com/bigbizze/lintai/internal/tsgo/internal/contentmapper"
+	"github.com/bigbizze/lintai/internal/tsgo/internal/core"
+	"github.com/bigbizze/lintai/internal/tsgo/internal/module"
+	"github.com/bigbizze/lintai/internal/tsgo/internal/packagejson"
+	"github.com/bigbizze/lintai/internal/tsgo/internal/tsoptions"
+	"github.com/bigbizze/lintai/internal/tsgo/internal/tspath"
+)
+
+type auxiliarySourceProgram struct {
+	program              *compiler.Program
+	checker              *checker.Checker
+	resolver             module.Resolver
+	done                 func()
+	inputs               []SnapshotInput
+	semanticBindingCache *semanticBindingCache
+}
+
+type auxiliarySourceView struct {
+	file *ast.SourceFile
+	ex   *extractor
+}
+
+type auxiliarySourcePrograms struct {
+	ctx           context.Context
+	host          compiler.CompilerHost
+	workspaceRoot string
+	configs       *configCache
+	timing        *extractTiming
+	programs      map[string]*auxiliarySourceProgram
+}
+
+func newAuxiliarySourcePrograms(ctx context.Context, host compiler.CompilerHost, workspaceRoot string, configs *configCache, timing *extractTiming) *auxiliarySourcePrograms {
+	return &auxiliarySourcePrograms{
+		ctx: ctx, host: host, workspaceRoot: workspaceRoot, configs: configs, timing: timing,
+		programs: make(map[string]*auxiliarySourceProgram),
+	}
+}
+
+func (a *auxiliarySourcePrograms) close() {
+	for _, item := range a.programs {
+		if item.done != nil {
+			item.done()
+		}
+	}
+}
+
+func (a *auxiliarySourcePrograms) forEntry(entry configuredSourceEntry) (*auxiliarySourceView, string) {
+	if !a.host.FS().FileExists(tspath.RootedFilePathFromAbsolute(entry.SourcePath)) {
+		return nil, AssociationUnresolved
+	}
+	configPath := entry.ConfigPath
+	cacheKey := configPath
+	if configPath == "" {
+		nearest, err := a.configs.findNearestConfigPath(a.workspaceRoot, entry.SourcePath)
+		if err != nil {
+			return nil, AssociationUnsupported
+		}
+		if nearest != "" {
+			selected, reason := a.selectSourceConfig(nearest, entry.SourcePath)
+			if reason != "" {
+				return nil, reason
+			}
+			configPath = selected
+			cacheKey = configPath
+		}
+	}
+	var config *tsoptions.ParsedCommandLine
+	if configPath != "" {
+		var err error
+		config, err = a.configs.program(configPath)
+		if err != nil {
+			return nil, AssociationUnsupported
+		}
+		if entry.ConfigPath != "" {
+			parsed, err := a.configs.load(configPath)
+			if err != nil || !configIncludesFile(parsed, entry.SourcePath, a.host.FS().CaseSensitivity()) {
+				return nil, AssociationUnsupported
+			}
+		}
+	} else {
+		cacheKey = "synthetic:" + entry.SourcePath
+		var err error
+		config, err = syntheticConfig(a.host, a.workspaceRoot, []string{entry.SourcePath})
+		if err != nil {
+			return nil, AssociationUnsupported
+		}
+	}
+	item := a.programs[cacheKey]
+	if item == nil {
+		started := time.Now()
+		a.timing.auxiliaryPrograms++
+		var resolver module.Resolver
+		program := compiler.NewProgram(compiler.ProgramOptions{
+			ProgramConfig: compiler.ProgramConfig{Config: config, UseSourceOfProjectReference: true},
+			ProgramHosts:  compiler.ProgramHosts{Host: a.host},
+			ProgramFactories: compiler.ProgramFactories{
+				CreateModuleResolver: func(options module.ResolverOptions) module.Resolver {
+					resolver = module.NewResolver(options)
+					return resolver
+				},
+			},
+		})
+		if len(program.GetConfigFileParsingDiagnostics()) > 0 {
+			a.timing.auxiliaryProgram += time.Since(started)
+			return nil, AssociationUnsupported
+		}
+		typeChecker, done := program.GetTypeChecker(a.ctx)
+		item = &auxiliarySourceProgram{program: program, checker: typeChecker, resolver: resolver, done: done, semanticBindingCache: newSemanticBindingCache()}
+		a.programs[cacheKey] = item
+		inputExtractor := &extractor{workspaceRoot: a.workspaceRoot, program: program, host: a.host}
+		inputExtractor.recordProgramInputs()
+		item.inputs = inputExtractor.inputs
+		a.timing.auxiliaryProgram += time.Since(started)
+	}
+	file := item.program.GetSourceFile(tspath.RootedFilePathFromAbsolute(entry.SourcePath))
+	if file == nil || file.Symbol == nil || !ast.IsExternalOrCommonJSModule(file) {
+		return nil, AssociationUnsupported
+	}
+	ex := &extractor{
+		workspaceRoot: a.workspaceRoot, host: a.host, program: item.program, resolver: item.resolver, checker: item.checker,
+		declarations: make(map[string]*DeclarationFact), semanticBindingCache: item.semanticBindingCache,
+	}
+	ex.inputs = append(ex.inputs, item.inputs...)
+	return &auxiliarySourceView{file: file, ex: ex}, ""
+}
+
+func (a *auxiliarySourcePrograms) selectSourceConfig(nearest, sourceFile string) (string, string) {
+	caseSensitivity := a.host.FS().CaseSensitivity()
+	visited := make(map[string]struct{})
+	var owners []string
+	var collect func(string) error
+	collect = func(configPath string) error {
+		if _, seen := visited[configPath]; seen {
+			return nil
+		}
+		visited[configPath] = struct{}{}
+		parsed, err := a.configs.load(configPath)
+		if err != nil {
+			return err
+		}
+		if configIncludesFile(parsed, sourceFile, caseSensitivity) {
+			owners = append(owners, configPath)
+			return nil
+		}
+		for _, reference := range parsed.references {
+			if err := collect(reference); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := collect(nearest); err != nil {
+		return "", AssociationUnsupported
+	}
+	owners = sortedUnique(owners)
+	if len(owners) == 0 {
+		return nearest, ""
+	}
+	if len(owners) == 1 {
+		return owners[0], ""
+	}
+	var first *tsoptions.ParsedCommandLine
+	for _, owner := range owners {
+		command, err := a.configs.program(owner)
+		if err != nil {
+			return "", AssociationUnsupported
+		}
+		if first == nil {
+			first = command
+		} else if !equivalentSourceConfigs(first, command, caseSensitivity) {
+			return "", AssociationUnsupported
+		}
+	}
+	return owners[0], ""
+}
+
+// ConfigFilePath identifies the JSON file, but its directory can affect type
+// and package resolution. Compare that directory and the other program inputs
+// separately, while ignoring the config filename itself.
+func equivalentSourceConfigs(left, right *tsoptions.ParsedCommandLine, caseSensitivity tspath.CaseSensitivity) bool {
+	if caseSensitivity.PathKey(left.BaseDirectory().AsPath()) != caseSensitivity.PathKey(right.BaseDirectory().AsPath()) {
+		return false
+	}
+	leftOptions, rightOptions := left.CompilerOptions().Clone(), right.CompilerOptions().Clone()
+	leftOptions.ConfigFilePath, rightOptions.ConfigFilePath = "", ""
+	if !leftOptions.Equals(rightOptions) || !left.TypeAcquisition().Equals(right.TypeAcquisition()) {
+		return false
+	}
+	if !slices.EqualFunc(left.ContentMappers(), right.ContentMappers(), (*contentmapper.Mapper).Equals) {
+		return false
+	}
+	if !slices.EqualFunc(left.ProjectReferences(), right.ProjectReferences(), func(a, b *core.ProjectReference) bool {
+		return a == b || a != nil && b != nil && a.Circular == b.Circular &&
+			caseSensitivity.PathKey(core.ResolveProjectReferencePath(a).AsPath()) == caseSensitivity.PathKey(core.ResolveProjectReferencePath(b).AsPath())
+	}) {
+		return false
+	}
+	roots := func(command *tsoptions.ParsedCommandLine) []string {
+		paths := make([]string, 0, len(command.FileNames()))
+		for _, file := range command.FileNames() {
+			paths = append(paths, caseSensitivity.PathKey(file.AsPath()).AsString())
+		}
+		slices.Sort(paths)
+		return slices.Compact(paths)
+	}
+	return slices.Equal(roots(left), roots(right))
+}
+
+func configIncludesFile(config *parsedConfig, file string, caseSensitivity tspath.CaseSensitivity) bool {
+	want := caseSensitivity.PathKey(tspath.RootedPathFromAbsolute(file)).AsString()
+	for candidate := range config.rootFiles {
+		rooted, ok := tspath.TryRootedPathFromAbsolute(candidate)
+		if ok && caseSensitivity.PathKey(rooted).AsString() == want {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *extractor) applyConfiguredSourceEntries(entries []configuredSourceEntry, auxiliary *auxiliarySourcePrograms, resolutions *sourceEntryResolutions) error {
+	for _, entry := range entries {
+		checked := e.checkedSourceFile(entry.CheckedPath)
+		if checked == nil {
+			continue
+		}
+		if err := resolutions.record(e.canonicalFileIdentity(checked.FileName().AsString()), entry); err != nil {
+			return err
+		}
+		e.sourceEntryFacts = append(e.sourceEntryFacts, SourceEntryFact{
+			ID: entry.ID, CheckedEntry: entry.CheckedEntry, SourceEntry: entry.SourceEntry, Tsconfig: entry.SourceConfig, Applied: true,
+		})
+		e.inputs = append(e.inputs, SnapshotInput{Path: entry.CheckedPath, Exists: true}, SnapshotInput{Path: entry.SourcePath, Exists: e.host.FS().FileExists(tspath.RootedFilePathFromAbsolute(entry.SourcePath))})
+		e.recordSourceConfigCandidates(entry.SourcePath)
+		sourceProgram, sourceOutcome := e.sourceViewInProgram(entry), ""
+		if sourceProgram == nil {
+			sourceProgram, sourceOutcome = auxiliary.forEntry(entry)
+		}
+		if sourceOutcome == "" {
+			e.inputs = append(e.inputs, sourceProgram.ex.inputs...)
+			for _, reason := range sourceProgram.ex.exportInventoryIncomplete(sourceProgram.file) {
+				e.sourceEntryFacts = append(e.sourceEntryFacts, SourceEntryFact{ID: entry.ID, Incomplete: []string{reason}})
+			}
+		}
+		sourceBindings := make(map[bindingKey]moduleBinding)
+		if sourceOutcome == "" {
+			for _, binding := range sourceProgram.ex.moduleBindings(sourceProgram.file) {
+				sourceBindings[bindingKey{binding.name, binding.space}] = binding
+			}
+		}
+		bindings := e.moduleBindings(checked)
+		for _, binding := range bindings {
+			assoc := sourceBindingID(entry.ID, e.canonicalFileIdentity(checked.FileName().AsString()), binding.name, binding.space)
+			item := SourceBindingFact{
+				ID: assoc, Entry: entry.ID, CheckedFile: e.canonicalFileIdentity(checked.FileName().AsString()),
+				Name: binding.name, Space: binding.space,
+			}
+			var checkedReasons []string
+			item.CheckedDeclarations, checkedReasons = bindingDeclarationEndpoints(e, binding)
+			for _, declaration := range binding.declarations {
+				e.recoverDeclarationMap(declaration, true, binding.name)
+			}
+			item.CheckedComplete = len(checkedReasons) == 0
+			if item.CheckedComplete {
+				item.CheckedObservations = [][]string{item.CheckedDeclarations}
+			}
+			item.Incomplete = append(item.Incomplete, checkedReasons...)
+			if sourceOutcome != "" {
+				item.Incomplete = append(item.Incomplete, sourceOutcome)
+				e.sourceEntryFacts = append(e.sourceEntryFacts, SourceEntryFact{ID: entry.ID, Incomplete: []string{sourceOutcome}})
+			} else if sourceBinding, found := sourceBindings[bindingKey{binding.name, binding.space}]; !found {
+				item.Incomplete = append(item.Incomplete, AssociationUnresolved)
+				e.sourceEntryFacts = append(e.sourceEntryFacts, SourceEntryFact{ID: entry.ID, Incomplete: []string{AssociationUnresolved}})
+			} else {
+				var sourceReasons []string
+				item.SourceDeclarations, sourceReasons = bindingDeclarationEndpoints(sourceProgram.ex, sourceBinding)
+				item.SourceComplete = len(sourceReasons) == 0
+				if item.SourceComplete {
+					item.SourceObservations = [][]string{item.SourceDeclarations}
+					if item.CheckedComplete {
+						item.SourceFile = sourceProgram.ex.canonicalFileIdentity(sourceProgram.file.FileName().AsString())
+						item.SourceFiles = []string{item.SourceFile}
+					}
+				}
+				item.Incomplete = append(item.Incomplete, sourceReasons...)
+			}
+			item.Incomplete = sortedUnique(item.Incomplete)
+			e.sourceBindingFacts = append(e.sourceBindingFacts, item)
+		}
+		if sourceOutcome == "" {
+			e.sourceProgramDeclarations = append(e.sourceProgramDeclarations, sourceProgram.ex.sortedDeclarations()...)
+		}
+		if len(bindings) == 0 && sourceOutcome != "" {
+			e.sourceEntryFacts = append(e.sourceEntryFacts, SourceEntryFact{ID: entry.ID, Incomplete: []string{sourceOutcome}})
+		}
+	}
+	return nil
+}
+
+// checkedSourceFile follows only the aliases recorded by this program's module
+// and type-reference resolutions. The source file's own compiler path remains
+// its identity, and a project-reference redirect is not the checked entry.
+func (e *extractor) checkedSourceFile(path string) *ast.SourceFile {
+	want := e.program.PathKeyForFileName(tspath.RootedFilePathFromAbsolute(path))
+	if file := e.program.GetSourceFileByPath(want); file != nil && file.PathKey() == want {
+		return file
+	}
+	var matched *ast.SourceFile
+	conflict := false
+	match := func(original tspath.RootedFilePath, resolved tspath.PathKey) {
+		if original == "" || e.program.PathKeyForFileName(original) != want {
+			return
+		}
+		file := e.program.GetSourceFileByPath(resolved)
+		if file == nil || file.PathKey() != resolved {
+			return
+		}
+		if matched != nil && matched.PathKey() != file.PathKey() {
+			conflict = true
+		}
+		matched = file
+	}
+	for _, resolutions := range e.program.GetResolvedModules() {
+		for _, resolution := range resolutions {
+			if resolution.IsResolved() {
+				match(resolution.OriginalPath, resolution.ResolvedPath)
+			}
+		}
+	}
+	for _, resolutions := range e.program.GetResolvedTypeReferenceDirectives() {
+		for _, resolution := range resolutions {
+			if resolution != nil && resolution.IsResolved() {
+				match(resolution.OriginalPath, resolution.ResolvedPath)
+			}
+		}
+	}
+	if conflict {
+		return nil
+	}
+	return matched
+}
+
+// bindingDeclarationEndpoints records the declarations of one exported binding
+// as endpoints. A binding without declarations has an unresolved target. A
+// declaration form that the extraction does not model is unsupported.
+func bindingDeclarationEndpoints(e *extractor, binding moduleBinding) ([]string, []string) {
+	var ids, reasons []string
+	if !binding.complete {
+		if binding.ambiguous {
+			reasons = append(reasons, AssociationConflict)
+		} else {
+			reasons = append(reasons, AssociationUnresolved)
+		}
+	}
+	for _, declaration := range binding.declarations {
+		id, supported := e.addDeclarationEndpoint(declaration, binding.symbol, binding.name)
+		if id == "" {
+			reasons = append(reasons, AssociationUnresolved)
+			continue
+		}
+		ids = append(ids, id)
+		if !supported {
+			reasons = append(reasons, AssociationUnsupported)
+		}
+	}
+	return sortedUnique(ids), sortedUnique(reasons)
+}
+
+// sourceViewInProgram uses the consumer's checker when the configured source
+// entry is already part of the checked program. Only a source entry outside
+// that program needs an auxiliary program.
+func (e *extractor) sourceViewInProgram(entry configuredSourceEntry) *auxiliarySourceView {
+	file := e.program.GetSourceFile(tspath.RootedFilePathFromAbsolute(entry.SourcePath))
+	if file == nil || file.IsDeclarationFile || file.Symbol == nil || !ast.IsExternalOrCommonJSModule(file) {
+		return nil
+	}
+	ex := &extractor{
+		workspaceRoot: e.workspaceRoot, host: e.host, program: e.program, resolver: e.resolver, checker: e.checker,
+		declarations: make(map[string]*DeclarationFact), semanticBindingCache: e.bindingCache(),
+	}
+	return &auxiliarySourceView{file: file, ex: ex}
+}
+
+type moduleBinding struct {
+	name             string
+	space            string
+	declarationSpace string
+	symbol           *ast.Symbol
+	declarations     []*ast.Node
+	complete         bool
+	ambiguous        bool
+}
+
+type bindingKey struct{ name, space string }
+
+func (e *extractor) moduleBindings(file *ast.SourceFile) []moduleBinding {
+	return e.checkedBindings(file).bindings
+}
+
+func (e *extractor) addDeclarationEndpoint(node *ast.Node, symbol *ast.Symbol, publicName string) (string, bool) {
+	id, _, supported := e.addDeclarationMetadata(node, symbol, publicName)
+	return id, supported
+}
+
+func (e *extractor) recordProgramInputs() {
+	for _, file := range e.program.FilesByPath() {
+		if file == nil {
+			continue
+		}
+		path := normalizeSlash(file.FileName().AsString())
+		// Bundled compiler libraries are virtual URLs served by the bundled
+		// filesystem. They are not workspace inputs and must not be handed to
+		// the OS-backed snapshot hasher as paths such as bundled:///libs/....
+		if tspath.IsUrl(path) || strings.HasPrefix(path, "^/") {
+			continue
+		}
+		if rooted, ok := tspath.TryRootedFilePathFromAbsolute(path); ok {
+			e.inputs = append(e.inputs, SnapshotInput{Path: path, Exists: e.host.FS().FileExists(rooted)})
+		}
+	}
+	e.program.PackageJsonCacheEntries(func(_ tspath.PathKey, entry *packagejson.InfoCacheEntry) bool {
+		if entry != nil {
+			path := normalizeSlash(entry.PackageDirectory.ResolveFile("package.json").AsString())
+			e.inputs = append(e.inputs, SnapshotInput{Path: path, Exists: entry.Exists()})
+		}
+		return true
+	})
+}
+
+func (e *extractor) recordSourceConfigCandidates(sourcePath string) {
+	current := filepathDir(sourcePath)
+	root := e.workspaceRoot
+	if root != "/" {
+		root = strings.TrimSuffix(root, "/")
+	}
+	for {
+		candidate := normalizeSlash(current + "/tsconfig.json")
+		rooted, ok := tspath.TryRootedFilePathFromAbsolute(candidate)
+		e.inputs = append(e.inputs, SnapshotInput{Path: candidate, Exists: ok && e.host.FS().FileExists(rooted)})
+		if current == root {
+			return
+		}
+		parent := filepathDir(current)
+		if parent == current || !isWithinRoot(root, parent) {
+			return
+		}
+		current = parent
+	}
+}
+
+func filepathDir(path string) string {
+	index := strings.LastIndex(path, "/")
+	if index <= 0 {
+		return "/"
+	}
+	return path[:index]
+}

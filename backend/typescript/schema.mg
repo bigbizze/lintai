@@ -360,6 +360,220 @@ Decl type_display(Type, Text)
     arg(Text, "Type text.")
   ].
 
+Decl declaration(Declaration, Name, Kind)
+  descr [
+    extensional(),
+    doc("An actual declaration endpoint observed by the TypeScript checker. Overloads and merged declarations have separate IDs."),
+    arg(Declaration, "Canonical declaration entity id."),
+    arg(Name, "Qualified declaration name, or default for an anonymous default declaration."),
+    arg(Kind, "/function, /variable, /type_alias, /interface, /class, /enum, /namespace, /method, /property, /signature or /export_expression.")
+  ].
+
+Decl declaration_origin(Declaration, OriginKind, Origin)
+  descr [
+    extensional(),
+    doc("Descriptive origin of an actual declaration. Origin is not part of declaration identity."),
+    arg(Declaration, "Canonical declaration entity id."),
+    arg(OriginKind, "/source_file, /declaration_file, /package, /ambient_module or /lib."),
+    arg(Origin, "Workspace path, package name/version, ambient module or library label.")
+  ].
+
+Decl declaration_type(Declaration, Space, Type)
+  descr [
+    extensional(),
+    doc("A checker-observed type association for a declaration. A class can have separate type and value-space associations."),
+    arg(Declaration, "Canonical declaration entity id."),
+    arg(Space, "/type or /value."),
+    arg(Type, "Type entity id.")
+  ].
+
+Decl declaration_fn(Declaration, Fn)
+  descr [
+    extensional(),
+    doc("Direct correspondence from a declaration endpoint to an already collected function."),
+    arg(Declaration, "Canonical declaration entity id."),
+    arg(Fn, "Function entity id.")
+  ].
+
+Decl declaration_incomplete(Declaration, Reason)
+  descr [
+    extensional(),
+    doc("The declaration's checker type or direct function association is unresolved, unsupported or conflicted. Optional source recovery failure is reported separately."),
+    arg(Declaration, "Canonical declaration entity id."),
+    arg(Reason, "/unresolved, /unsupported or /conflict.")
+  ].
+
+Decl module_export(Export, File, Name, Space)
+  descr [
+    extensional(),
+    doc("A checker-visible public binding of a retained analyzed module."),
+    arg(Export, "Canonical public export entity id."),
+    arg(File, "Analyzed module path."),
+    arg(Name, "Public export name; default and export= are explicit names."),
+    arg(Space, "/type or /value.")
+  ].
+
+Decl export_target(Export, Declaration)
+  descr [
+    extensional(),
+    doc("An actual declaration endpoint of a public binding. Overload and merge members are separate set members and are not paired."),
+    arg(Export, "Public export entity id."),
+    arg(Declaration, "Canonical declaration entity id.")
+  ].
+
+Decl export_via(Export, Site)
+  descr [
+    extensional(),
+    doc("Syntax site contributing to a public binding, including a local export statement."),
+    arg(Export, "Public export entity id."),
+    arg(Site, "Import/re-export statement or deterministic local export-site id.")
+  ].
+
+Decl export_reexport(Export, Site, Module, SourceName, Space)
+  descr [
+    extensional(),
+    doc("A binding-specific immediate re-export edge. Module is the resolved canonical module identity; star and namespace forms use source name *."),
+    arg(Export, "Public export entity id."),
+    arg(Site, "Re-export syntax site."),
+    arg(Module, "Resolved canonical source module path."),
+    arg(SourceName, "Immediate source-side name or * for star and namespace forms."),
+    arg(Space, "/type or /value.")
+  ].
+
+Decl export_incomplete(Export, Reason)
+  descr [
+    extensional(),
+    doc("A known public binding has an unresolved, unsupported or conflicted target. Known positive targets remain available."),
+    arg(Export, "Public export entity id."),
+    arg(Reason, "/unresolved, /unsupported or /conflict.")
+  ].
+
+Decl module_exports_incomplete(File, Reason)
+  descr [
+    extensional(),
+    doc("The module's public-name inventory is incomplete or conflicted. Absence is not a safe result while this fact applies."),
+    arg(File, "Analyzed module path."),
+    arg(Reason, "/unresolved, /unsupported or /conflict.")
+  ].
+
+Decl fn_signature_conflict(Fn)
+  descr [
+    extensional(),
+    doc("Complete checker observations for this function disagree as full parameter and return signatures. Flat fn_param and fn_returns facts are a union and must not be combined as one signature."),
+    arg(Fn, "Function entity id.")
+  ].
+
+Decl declaration_source_candidate(CheckedDecl, SourceDecl, Method)
+  descr [
+    extensional(),
+    doc("A declaration-map anchor that passed source-file and declaration-context validation. All candidates are retained when ambiguous."),
+    arg(CheckedDecl, "Checked declaration entity id."),
+    arg(SourceDecl, "Source declaration entity id."),
+    arg(Method, "/declaration_map.")
+  ].
+
+Decl declaration_source(CheckedDecl, SourceDecl, Method)
+  descr [
+    extensional(),
+    doc("A unique precise checked-to-source declaration link. It never equates the declaration identities."),
+    arg(CheckedDecl, "Checked declaration entity id."),
+    arg(SourceDecl, "Source declaration entity id."),
+    arg(Method, "/declaration_map.")
+  ].
+
+Decl declaration_source_outcome(CheckedDecl, Outcome)
+  descr [
+    extensional(),
+    doc("Terminal result of a requested declaration-map attempt. No row means there was no attempt or a unique link succeeded."),
+    arg(CheckedDecl, "Checked declaration entity id."),
+    arg(Outcome, "/missing_map, /unavailable_map, /malformed_map, /unavailable_source, /unsupported, /unresolved, /ambiguous or /conflict.")
+  ].
+
+Decl source_entry(Entry, CheckedEntry, SourceEntry)
+  descr [
+    extensional(),
+    doc("One validated, canonical source-links JSON entry."),
+    arg(Entry, "Deterministic configured-entry entity id."),
+    arg(CheckedEntry, "Workspace-relative checked entry path."),
+    arg(SourceEntry, "Workspace-relative source entry path." )
+  ].
+
+Decl source_entry_tsconfig(Entry, Tsconfig)
+  descr [
+    extensional(),
+    doc("Explicit source project configuration selected for an entry."),
+    arg(Entry, "Configured-entry entity id."),
+    arg(Tsconfig, "Workspace-relative tsconfig path.")
+  ].
+
+Decl source_entry_applied(Entry)
+  descr [
+    extensional(),
+    doc("The configured checked path matched a file used by an analyzed program and its binding attempts were evaluated."),
+    arg(Entry, "Configured-entry entity id.")
+  ].
+
+Decl source_entry_unapplied(Entry)
+  descr [
+    extensional(),
+    doc("The valid checked path did not match any file used by an analyzed program."),
+    arg(Entry, "Configured-entry entity id.")
+  ].
+
+Decl source_entry_incomplete(Entry, Reason)
+  descr [
+    extensional(),
+    doc("The optional source program or its export inventory is unresolved, unsupported or conflicted."),
+    arg(Entry, "Configured-entry entity id."),
+    arg(Reason, "/unresolved, /unsupported or /conflict.")
+  ].
+
+Decl source_binding_attempt(Assoc, Entry, CheckedFile, Name, Space)
+  descr [
+    extensional(),
+    doc("One configured attempt to associate a checker-visible public binding with the source entry."),
+    arg(Assoc, "Deterministic configured binding association id."),
+    arg(Entry, "Configured-entry entity id."),
+    arg(CheckedFile, "Canonical actual checked file identity."),
+    arg(Name, "Public binding name."),
+    arg(Space, "/type or /value.")
+  ].
+
+Decl source_binding(Assoc, SourceFile, SourceName, Space, Method)
+  descr [
+    extensional(),
+    doc("A configured binding association. The source public name and space must match; this is not declaration equality or build freshness evidence."),
+    arg(Assoc, "Configured binding association id."),
+    arg(SourceFile, "Canonical source entry file identity."),
+    arg(SourceName, "Matched source public name."),
+    arg(Space, "/type or /value."),
+    arg(Method, "/source_entry.")
+  ].
+
+Decl source_binding_checked_decl(Assoc, Declaration)
+  descr [
+    extensional(),
+    doc("Membership in the independently observed checked declaration set for this binding."),
+    arg(Assoc, "Configured binding association id."),
+    arg(Declaration, "Checked declaration entity id.")
+  ].
+
+Decl source_binding_source_decl(Assoc, Declaration)
+  descr [
+    extensional(),
+    doc("Membership in the independently observed source declaration set for this binding."),
+    arg(Assoc, "Configured binding association id."),
+    arg(Declaration, "Source declaration entity id.")
+  ].
+
+Decl source_binding_incomplete(Assoc, Reason)
+  descr [
+    extensional(),
+    doc("The source binding set is unresolved, unsupported or conflicted. Guard this before claiming a coherent association."),
+    arg(Assoc, "Configured binding association id."),
+    arg(Reason, "/unresolved, /unsupported or /conflict.")
+  ].
+
 Decl meta_access(Acc, File, AccessPath)
   descr [
     extensional(),

@@ -1,6 +1,6 @@
 import { spawn, spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { PassThrough, type Readable, type Writable } from "node:stream";
-import { existsSync, readFileSync, readSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readSync, statSync, watch } from "node:fs";
 import path from "node:path";
 import chokidar from "chokidar";
 import { fileURLToPath } from "node:url";
@@ -31,6 +31,7 @@ export type LintaiOptions = {
 	rules?: string[];
 	exclude?: string[];
 	files?: "tsconfig" | "walk";
+	sourceLinks?: string;
 	env?: Record<string, unknown>;
 	factLimit?: number;
 	rulesLock?: string;
@@ -51,6 +52,7 @@ export type ResolvedBridgeOptions = {
 	ruleGlobs: string[];
 	excludes: string[];
 	files: "tsconfig" | "walk";
+	sourceLinks?: string;
 	env: Record<string, unknown>;
 	factLimit?: number;
 	rulesLock?: string;
@@ -64,6 +66,7 @@ type InitializeResult = {
 	diagnosticCount: number;
 	snapshotVersion: string;
 	diagnostics: Diagnostic[];
+	inputPaths?: string[];
 };
 
 type JSONRPCRequest = {
@@ -110,12 +113,15 @@ type FileWatcher = {
 	close(): void;
 };
 
-type WatchPath = (target: string, onChange: (filename?: string) => void) => FileWatcher;
-
 type ClientDependencies = {
 	spawnServe: SpawnServe;
 	spawnSync: SpawnSyncLike;
-	watchPath: WatchPath;
+	watchPath: (target: string, onChange: (filename?: string) => void) => FileWatcher;
+	watchInputPath: (
+		target: string,
+		onChange: (filename?: string) => void,
+		onError: (error: Error) => void,
+	) => FileWatcher;
 	readServeSync: (child: ClientProcess, timeoutMs: number) => Buffer;
 	modifiedAt: (file: string) => number | undefined;
 	log: (message: string) => void;
@@ -165,6 +171,13 @@ const defaultDependencies: ClientDependencies = {
 				void watcher.close();
 			},
 		};
+	},
+	watchInputPath(target, onChange, onError) {
+		const watcher = watch(target, { persistent: false, recursive: false }, (_event, filename) =>
+			onChange(filename ?? undefined),
+		);
+		watcher.on("error", onError);
+		return watcher;
 	},
 	readServeSync(child, timeoutMs) {
 		const spawner = spawnerFor(child);
@@ -217,6 +230,14 @@ type RuleWatchSpec = {
 	scopeRoot: string;
 };
 
+type DirectoryIdentity = { dev: bigint; ino: bigint };
+
+type InputWatchSpec = {
+	identity: DirectoryIdentity | undefined;
+	inputs: string[];
+	children: Map<string, DirectoryIdentity | undefined>;
+};
+
 export class LintAIClient {
 	private readonly options: ResolvedBridgeOptions;
 	private readonly dependencies: ClientDependencies;
@@ -239,7 +260,16 @@ export class LintAIClient {
 	private readonly savedVersionsAnalyzed = new Map<string, number>();
 	private attachedStdoutListener = false;
 	private readonly ruleWatchers: FileWatcher[] = [];
+	private readonly inputWatchers: FileWatcher[] = [];
+	private inputPaths: string[] = [];
+	private inputPathSet = new Set<string>();
+	private inputDirectories = new Set<string>();
+	private inputWatchGeneration = 0;
+	private inputSignatures = new Map<string, string>();
+	private inputCheckReset: ReturnType<typeof setImmediate> | undefined;
+	private inputRetryReset: ReturnType<typeof setImmediate> | undefined;
 	private ruleInvalidationTimer: ReturnType<typeof setTimeout> | undefined;
+	private inputInvalidationTimer: ReturnType<typeof setTimeout> | undefined;
 	private pendingRuleInvalidation = false;
 	private analysisEpoch = 0;
 	private readonly processExitHandler = () => {
@@ -250,6 +280,7 @@ export class LintAIClient {
 		this.options = options;
 		this.dependencies = dependencies;
 		this.ensureRuleWatchers();
+		this.updateInputWatchers([]);
 		process.on("exit", this.processExitHandler);
 	}
 
@@ -257,6 +288,9 @@ export class LintAIClient {
 		const normalized = normalizeFile(file);
 		this.ensureStarted();
 
+		if (this.inputsChangedSinceCached()) {
+			this.invalidateDiagnostics();
+		}
 		if (this.state === "invalidated") {
 			this.refreshInvalidatedDiagnosticsSync();
 		}
@@ -286,11 +320,8 @@ export class LintAIClient {
 	// so that they are not repeated for every file. An editor lints files
 	// again, so it gets them on every call.
 	problems(): string[] {
-		if (this.options.reportProblemsOnce) {
-			if (this.problemsReported) {
-				return [];
-			}
-			this.problemsReported = true;
+		if (this.options.reportProblemsOnce && this.problemsReported) {
+			return [];
 		}
 		const items: string[] = [];
 		if (this.serveFailure) {
@@ -306,6 +337,7 @@ export class LintAIClient {
 			const phase = diagnostic.phase ? ` (phase ${diagnostic.phase})` : "";
 			items.push(`[lintai] rule ${diagnostic.rule_id} could not run${phase}: ${diagnostic.message}`);
 		}
+		if (items.length) this.problemsReported = true;
 		return items;
 	}
 
@@ -319,12 +351,13 @@ export class LintAIClient {
 		}
 		const targetEpoch = this.analysisEpoch;
 		const startedAt = this.dependencies.now();
+		const inputsBefore = this.captureInputSignatures();
 		this.refreshInFlight = this.sendRequest<InitializeResult>("reanalyze", {})
 			.then((result) => {
 				if (this.isOutdated(targetEpoch, startedAt)) {
 					return;
 				}
-				this.setDiagnostics(result.diagnostics, startedAt);
+				this.setDiagnostics(result.diagnostics, startedAt, inputsBefore, result.inputPaths);
 			})
 			.catch((error) => {
 				if (this.isOutdated(targetEpoch, startedAt)) {
@@ -351,10 +384,27 @@ export class LintAIClient {
 			clearTimeout(this.ruleInvalidationTimer);
 			this.ruleInvalidationTimer = undefined;
 		}
+		if (this.inputInvalidationTimer) {
+			clearTimeout(this.inputInvalidationTimer);
+			this.inputInvalidationTimer = undefined;
+		}
+		if (this.inputCheckReset) {
+			clearImmediate(this.inputCheckReset);
+			this.inputCheckReset = undefined;
+		}
+		if (this.inputRetryReset) {
+			clearImmediate(this.inputRetryReset);
+			this.inputRetryReset = undefined;
+		}
 		for (const watcher of this.ruleWatchers) {
 			watcher.close();
 		}
 		this.ruleWatchers.length = 0;
+		this.inputWatchGeneration += 1;
+		for (const watcher of this.inputWatchers) {
+			watcher.close();
+		}
+		this.inputWatchers.length = 0;
 
 		const child = this.child;
 		this.child = undefined;
@@ -411,6 +461,7 @@ export class LintAIClient {
 				finishInitialization = resolve;
 			});
 			const startedAt = this.dependencies.now();
+			const inputsBefore = this.captureInputSignatures();
 			const resultValue = this.requestSync<InitializeResult>("initialize", {
 				repoRoot: this.options.repoRoot,
 				assetRoot: this.options.assetRoot,
@@ -418,6 +469,7 @@ export class LintAIClient {
 				ruleGlobs: this.options.ruleGlobs,
 				excludes: this.options.excludes,
 				files: this.options.files,
+				...(this.options.sourceLinks === undefined ? {} : { sourceLinks: this.options.sourceLinks }),
 				env: this.options.env,
 				...(this.options.factLimit === undefined ? {} : { factLimit: this.options.factLimit }),
 				...(this.options.rulesLock === undefined ? {} : { rulesLock: this.options.rulesLock }),
@@ -430,8 +482,12 @@ export class LintAIClient {
 				...(this.options.setupSandbox === undefined ? {} : { setupSandbox: this.options.setupSandbox }),
 			});
 			this.attachStdoutListener();
-			this.setDiagnostics(resultValue.diagnostics, startedAt);
-			this.state = this.pendingRuleInvalidation ? "invalidated" : "ready";
+			const current = this.setDiagnostics(
+				resultValue.diagnostics, startedAt, inputsBefore, resultValue.inputPaths,
+			);
+			if (this.state === "starting") {
+				this.state = !current || this.pendingRuleInvalidation ? "invalidated" : "ready";
+			}
 			finishInitialization();
 		} catch (error) {
 			this.handleServeFailure(asError(error));
@@ -442,10 +498,20 @@ export class LintAIClient {
 	}
 
 	private getOneshotDiagnostics(file: string): Diagnostic[] {
-		if (!this.oneshotCache) {
-			this.oneshotCache = this.loadOneshotDiagnostics();
+		if (!this.oneshotCache && !this.inputRetryReset) {
+			for (let attempt = 0; attempt < 2; attempt++) {
+				const inputsBefore = this.captureInputSignatures();
+				const diagnostics = this.loadOneshotDiagnostics();
+				this.recordInputSignatures();
+				if (this.inputSignaturesMatch(inputsBefore)) {
+					this.oneshotCache = diagnostics;
+					break;
+				}
+				this.analysisFailure = "workspace inputs changed during analysis; retrying on the next lint pass";
+				if (attempt === 1) this.deferInputRetry();
+			}
 		}
-		return this.oneshotCache.byFile.get(file) ?? [];
+		return this.oneshotCache?.byFile.get(file) ?? [];
 	}
 
 	private loadOneshotDiagnostics(): IndexedDiagnostics {
@@ -465,6 +531,7 @@ export class LintAIClient {
 				...this.options.excludes.flatMap((glob) => ["--exclude", glob]),
 				"--files",
 				this.options.files,
+				...(this.options.sourceLinks === undefined ? [] : ["--source-links", this.options.sourceLinks]),
 				"--env-json",
 				JSON.stringify(this.options.env),
 				...(this.options.factLimit === undefined ? [] : ["--fact-limit", String(this.options.factLimit)]),
@@ -600,8 +667,8 @@ export class LintAIClient {
 		void this.refresh();
 	}
 
-	private refreshInvalidatedDiagnosticsSync(): void {
-		if (this.state !== "invalidated") {
+	private refreshInvalidatedDiagnosticsSync(verifyInputs = true): void {
+		if (this.state !== "invalidated" || this.inputRetryReset) {
 			return;
 		}
 		const targetEpoch = this.analysisEpoch;
@@ -610,13 +677,19 @@ export class LintAIClient {
 			return;
 		}
 		const startedAt = this.dependencies.now();
+		const inputsBefore = this.captureInputSignatures();
 		try {
 			const result = this.requestSync<InitializeResult>("reanalyze", { reason: "rule_changed" });
 			if (targetEpoch !== this.analysisEpoch || this.state !== "invalidated") {
 				return;
 			}
-			this.setDiagnostics(result.diagnostics, startedAt);
-			this.state = "ready";
+			const current = this.setDiagnostics(result.diagnostics, startedAt, inputsBefore, result.inputPaths);
+			if (!current) {
+				if (verifyInputs) this.refreshInvalidatedDiagnosticsSync(false);
+				else this.deferInputRetry();
+			} else if (this.state === "invalidated") {
+				this.state = "ready";
+			}
 		} catch (error) {
 			const child = this.child;
 			this.child = undefined;
@@ -659,13 +732,16 @@ export class LintAIClient {
 	private reanalyzeSync(): void {
 		const targetEpoch = this.analysisEpoch;
 		const startedAt = this.dependencies.now();
+		const inputsBefore = this.captureInputSignatures();
 		this.lastDiagnosticsRequestAt = startedAt;
 		try {
 			const result = this.requestSync<InitializeResult>("reanalyze", { reason: "file_saved" });
 			if (targetEpoch !== this.analysisEpoch || this.state !== "ready") {
 				return;
 			}
-			this.setDiagnostics(result.diagnostics, startedAt);
+			if (!this.setDiagnostics(result.diagnostics, startedAt, inputsBefore, result.inputPaths)) {
+				this.refreshInvalidatedDiagnosticsSync(false);
+			}
 		} catch (error) {
 			if (targetEpoch !== this.analysisEpoch || this.state !== "ready") {
 				return;
@@ -756,12 +832,171 @@ export class LintAIClient {
 		this.state = "fallback";
 	}
 
-	private setDiagnostics(diagnostics: Diagnostic[], analyzedAt: number): void {
+	private setDiagnostics(
+		diagnostics: Diagnostic[],
+		analyzedAt: number,
+		inputsBefore: Map<string, string>,
+		inputPaths?: string[],
+	): boolean {
 		const indexed = indexDiagnostics(diagnostics);
 		this.diagnosticsAnalyzedAt = analyzedAt;
 		this.diagnosticsByFile = indexed.byFile;
 		this.unlocated = indexed.unlocated;
 		this.analysisFailure = undefined;
+		this.updateInputWatchers(inputPaths ?? []);
+		this.recordInputSignatures();
+		if (!this.inputSignaturesMatch(inputsBefore)) {
+			this.invalidateDiagnostics();
+			this.analysisFailure = "workspace inputs changed during analysis; retrying on the next lint pass";
+			return false;
+		}
+		return true;
+	}
+
+	private inputSignaturesMatch(inputsBefore: Map<string, string>): boolean {
+		for (const [input, signature] of this.inputSignatures) {
+			if (inputsBefore.get(input) !== signature) return false;
+		}
+		return true;
+	}
+
+	private recordInputSignatures(): void {
+		this.inputSignatures = this.captureInputSignatures();
+	}
+
+	private captureInputSignatures(): Map<string, string> {
+		return new Map(this.inputPaths.map((input) => [input, inputSignature(input)]));
+	}
+
+	private deferInputRetry(): void {
+		if (this.inputRetryReset) return;
+		this.inputRetryReset = setImmediate(() => {
+			this.inputRetryReset = undefined;
+		});
+		this.inputRetryReset.unref();
+	}
+
+	// inputsChangedSinceCached compares the inputs of the cached diagnostics with
+	// the metadata recorded when the cache was filled. A native watcher can miss
+	// changes made just after it is installed, so this check does not depend on
+	// watcher events. It runs at most once per event loop turn, so a linter that
+	// asks for each file in one synchronous loop does not stat every input for
+	// each file.
+	private inputsChangedSinceCached(): boolean {
+		const cached = this.state === "ready" || (this.state === "fallback" && this.oneshotCache !== undefined);
+		if (!cached || this.inputCheckReset || this.inputSignatures.size === 0) {
+			return false;
+		}
+		this.inputCheckReset = setImmediate(() => {
+			this.inputCheckReset = undefined;
+		});
+		this.inputCheckReset.unref();
+		for (const [input, signature] of this.inputSignatures) {
+			if (inputSignature(input) !== signature) return true;
+		}
+		return false;
+	}
+
+	private updateInputWatchers(inputPaths: string[]): void {
+		const paths = [...new Set([
+			...inputPaths.map((item) => path.resolve(item)),
+			...(this.options.sourceLinks === undefined ? [] : [path.resolve(this.options.sourceLinks)]),
+		])];
+		this.inputPaths = paths;
+		this.inputPathSet = new Set(paths);
+		const generation = ++this.inputWatchGeneration;
+		for (const watcher of this.inputWatchers) {
+			watcher.close();
+		}
+		this.inputWatchers.length = 0;
+		const specs = new Map<string, InputWatchSpec>();
+		const specFor = (directory: string): InputWatchSpec => {
+			let spec = specs.get(directory);
+			if (!spec) {
+				spec = { identity: directoryIdentity(directory), inputs: [], children: new Map() };
+				specs.set(directory, spec);
+			}
+			return spec;
+		};
+		const directories = new Set<string>();
+		for (const input of paths) {
+			const target = nearestExistingDirectory(path.dirname(input));
+			if (target) {
+				directories.add(target);
+				specFor(target).inputs.push(input);
+			}
+		}
+		for (const directory of directories) {
+			// Parent watches only check the identities of directories leading to an
+			// input. They do not watch subtrees or invalidate for unrelated files.
+			const boundary = isSameOrAncestor(this.options.workspaceRoot, directory)
+				? path.dirname(this.options.workspaceRoot)
+				: path.parse(directory).root;
+			let child = directory;
+			while (child !== boundary) {
+				const parent = path.dirname(child);
+				if (parent === child) break;
+				specFor(parent).children.set(child, specFor(child).identity);
+				child = parent;
+			}
+		}
+		this.inputDirectories = new Set(specs.keys());
+		for (const [target, spec] of specs) {
+			const directoryChanged = (changed?: string) =>
+				(this.inputDirectories.has(target) && !sameDirectory(spec.identity, directoryIdentity(target))) ||
+				[...spec.children].some(([child, identity]) =>
+					(!changed || changed === child) && this.inputDirectories.has(child) &&
+					!sameDirectory(identity, directoryIdentity(child)),
+				);
+			const onError = (error: unknown) => {
+				if (this.state === "disposed" || generation !== this.inputWatchGeneration) return;
+				this.problemsReported = false;
+				const message = `input watcher unavailable for ${target}: ${asError(error).message}`;
+				if (this.state === "fallback") {
+					this.warnOnce(`lintai ${message}`);
+					this.serveFailure = [this.serveFailure, message].filter(Boolean).join("; ");
+				} else {
+					this.handleServeFailure(new Error(message));
+				}
+			};
+			try {
+				const watcher = this.dependencies.watchInputPath(
+					target,
+					(filename) => {
+						if (this.state === "disposed") return;
+						const changed = filename && path.resolve(target, filename);
+						if (
+							directoryChanged(changed) ||
+							spec.inputs.some((input) =>
+								this.inputPathSet.has(input) && (!changed || isSameOrAncestor(changed, input)),
+							)
+						) {
+							this.scheduleInputInvalidation();
+						}
+					},
+					onError,
+				);
+				this.inputWatchers.push(watcher);
+				// A directory may have been replaced while the watches were installed.
+				if (directoryChanged()) this.scheduleInputInvalidation();
+			} catch (error) {
+				onError(error);
+			}
+		}
+	}
+
+	private scheduleInputInvalidation(): void {
+		if (this.inputInvalidationTimer) {
+			clearTimeout(this.inputInvalidationTimer);
+		}
+		this.inputInvalidationTimer = setTimeout(() => {
+			this.inputInvalidationTimer = undefined;
+			if (this.state === "disposed") {
+				return;
+			}
+			this.updateInputWatchers(this.inputPaths);
+			this.invalidateDiagnostics();
+		}, 200);
 	}
 
 	private ensureRuleWatchers(): void {
@@ -807,25 +1042,28 @@ export class LintAIClient {
 		if (this.state === "disposed") {
 			return;
 		}
-		this.analysisEpoch += 1;
 		this.pendingRuleInvalidation = false;
-		this.diagnosticsByFile = new Map();
-		this.unlocated = [];
-		this.analysisFailure = undefined;
-		this.oneshotCache = undefined;
-		this.refreshInFlight = undefined;
-		if (this.state === "idle") {
-			return;
-		}
-		if (this.state === "starting") {
+		this.invalidateDiagnostics();
+		if (this.state === "idle" || this.state === "starting") {
 			return;
 		}
 		if (this.state === "fallback") {
 			this.dependencies.log("lintai rule files changed; clearing cached diagnostics");
 			return;
 		}
-		this.state = "invalidated";
 		this.dependencies.log("lintai rule files changed; refreshing diagnostics on next lint pass");
+	}
+
+	private invalidateDiagnostics(): void {
+		this.analysisEpoch += 1;
+		this.diagnosticsByFile = new Map();
+		this.unlocated = [];
+		this.analysisFailure = undefined;
+		this.oneshotCache = undefined;
+		this.refreshInFlight = undefined;
+		if (this.state === "ready") {
+			this.state = "invalidated";
+		}
 	}
 
 	private warnOnce(message: string): void {
@@ -862,6 +1100,7 @@ export function resolveBridgeOptions(options: LintaiOptions, cwd: string, host: 
 		ruleGlobs,
 		excludes: options.exclude ?? [],
 		files: options.files ?? "tsconfig",
+		...(options.sourceLinks ? { sourceLinks: path.resolve(workspaceRoot, options.sourceLinks) } : {}),
 		env: options.env ?? {},
 		...(options.factLimit === undefined ? {} : { factLimit: options.factLimit }),
 		...(options.rulesLock === undefined ? {} : { rulesLock: path.resolve(workspaceRoot, options.rulesLock) }),
@@ -1124,6 +1363,49 @@ function nearestExistingAncestor(target: string): string | undefined {
 		}
 		current = parent;
 	}
+}
+
+function nearestExistingDirectory(target: string): string | undefined {
+	let current = target;
+	while (true) {
+		if (existsSync(current)) {
+			try {
+				if (statSync(current).isDirectory()) return current;
+			} catch {
+				// Keep walking when the path disappeared between existsSync and statSync.
+			}
+		}
+		const parent = path.dirname(current);
+		if (parent === current) return undefined;
+		current = parent;
+	}
+}
+
+function directoryIdentity(directory: string): DirectoryIdentity | undefined {
+	try {
+		const stats = statSync(directory, { bigint: true });
+		return stats.isDirectory() ? { dev: stats.dev, ino: stats.ino } : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function inputSignature(file: string): string {
+	try {
+		const stats = statSync(file, { bigint: true, throwIfNoEntry: false });
+		return stats ? `${stats.dev}:${stats.ino}:${stats.mtimeNs}:${stats.ctimeNs}:${stats.size}` : "missing";
+	} catch (error) {
+		return `error:${asError(error).message}`;
+	}
+}
+
+function sameDirectory(left: DirectoryIdentity | undefined, right: DirectoryIdentity | undefined): boolean {
+	return left?.dev === right?.dev && left?.ino === right?.ino;
+}
+
+function isSameOrAncestor(ancestor: string, candidate: string): boolean {
+	const relative = path.relative(ancestor, candidate);
+	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 export function createTestProcess(): ClientProcess & {

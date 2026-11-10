@@ -19,6 +19,7 @@ import (
 	"github.com/bigbizze/lintai/internal/tsgo/internal/scanner"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/tsoptions"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/tspath"
+	"github.com/bigbizze/lintai/internal/tsgo/internal/vfs"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/vfs/osvfs"
 )
 
@@ -34,6 +35,7 @@ const (
 type BuildSnapshotRequest struct {
 	WorkspaceRoot   string
 	Files           []string
+	SourceLinks     string
 	AmbientMatchers []AmbientMatcher
 	// TsconfigFiles limits the modules to the files that tsc compiles. A
 	// file under a tsconfig.json is a module only when the program of that
@@ -73,11 +75,123 @@ type Function struct {
 	ParameterCount int
 	// ReturnType and ParameterTypes are type entity IDs. Snapshot.Types
 	// holds the facts of each type.
-	ReturnType     string
+	ReturnType            string
+	ParameterTypes        []string
+	SignatureObservations []FunctionSignatureObservation
+	SignatureConflict     bool
+	Range                 SourceLocation
+	BodyStart             int
+	BodyEnd               int
+}
+
+type FunctionSignatureObservation struct {
 	ParameterTypes []string
-	Range          SourceLocation
-	BodyStart      int
-	BodyEnd        int
+	ParameterMarks []string
+	ReturnType     string
+	Complete       bool
+}
+
+type DeclarationFact struct {
+	ID                   string
+	Name                 string
+	Kind                 string
+	OriginKind           string
+	Origin               string
+	Types                []DeclarationType
+	TypeObservations     [][]DeclarationType
+	TypesComplete        bool
+	Function             string
+	FunctionObservations []string
+	Incomplete           []string
+	Location             SourceLocation
+}
+
+type DeclarationType struct {
+	Space string
+	Type  string
+}
+
+type ExportFact struct {
+	ID                 string
+	File               string
+	Name               string
+	Space              string
+	Targets            []string
+	Via                []string
+	Reexports          []ExportReexportFact
+	Incomplete         []string
+	TargetObservations [][]string
+	Location           SourceLocation
+}
+
+type ExportReexportFact struct {
+	Site       string
+	Module     string
+	SourceName string
+	Space      string
+}
+
+type ModuleExportObservation struct {
+	Identity    string
+	File        string
+	Bindings    []string
+	Complete    bool
+	Reasons     []string
+	StarSources []string
+	Retained    bool
+}
+
+type ModuleExportsIncompleteFact struct {
+	File   string
+	Reason string
+}
+
+type DeclarationSourceFact struct {
+	CheckedDecl string
+	SourceDecl  string
+	Method      string
+}
+
+type DeclarationSourceOutcomeFact struct {
+	CheckedDecl string
+	Outcome     string
+}
+
+type SourceEntryFact struct {
+	ID           string
+	CheckedEntry string
+	SourceEntry  string
+	Tsconfig     string
+	Applied      bool
+	Incomplete   []string
+}
+
+type SourceBindingFact struct {
+	ID                  string
+	Entry               string
+	CheckedFile         string
+	Name                string
+	Space               string
+	SourceFile          string
+	SourceFiles         []string
+	CheckedDeclarations []string
+	SourceDeclarations  []string
+	CheckedComplete     bool
+	CheckedObservations [][]string
+	SourceComplete      bool
+	SourceObservations  [][]string
+	Incomplete          []string
+}
+
+type SnapshotInput struct {
+	Path        string
+	Exists      bool
+	OptionalMap bool
+}
+
+type ExportSiteFact struct {
+	ID       string
+	Location SourceLocation
 }
 
 type ImportedSymbol struct {
@@ -198,19 +312,6 @@ type TypeRef struct {
 	Range       SourceLocation
 }
 
-type PendingDtsCall struct {
-	DtsPath         string
-	TargetName      string
-	FromSemanticKey string
-	FromModule      bool
-	FromName        string
-	FromPath        string
-	Range           SourceLocation
-	// Fallback is the external call that the call becomes when no source
-	// function matches the declaration.
-	Fallback ExternalCall
-}
-
 type Snapshot struct {
 	Modules         []Module
 	Functions       []Function
@@ -225,13 +326,26 @@ type Snapshot struct {
 	GlobalRefs      []GlobalRef
 	Directives      []ModuleDirective
 	ParseErrors     []ParseError
-	PendingDtsCalls []PendingDtsCall
 	// Types are the type entities that function parameter and return types
 	// refer to, sorted by ID.
-	Types []TypeFact
+	Types                       []TypeFact
+	Declarations                []DeclarationFact
+	Exports                     []ExportFact
+	ModuleExportObservations    []ModuleExportObservation
+	ModuleExportsIncomplete     []ModuleExportsIncompleteFact
+	FnSignatureConflicts        []string
+	ExportSites                 []ExportSiteFact
+	DeclarationSourceCandidates []DeclarationSourceFact
+	DeclarationSources          []DeclarationSourceFact
+	DeclarationSourceOutcomes   []DeclarationSourceOutcomeFact
+	SourceEntries               []SourceEntryFact
+	SourceBindings              []SourceBindingFact
 	// ConfigFiles are the absolute paths of the tsconfig files that the
 	// snapshot read, including extended and referenced configs.
 	ConfigFiles []string
+	// Inputs includes program, configuration, and association inputs, including
+	// absent paths. ConfigFiles remains the list of present configs.
+	Inputs []SnapshotInput
 	// ConfigAdjustments are the compiler options that lintai changed because
 	// TypeScript 7 rejects them, sorted by config path and option.
 	ConfigAdjustments []ConfigAdjustment
@@ -244,49 +358,66 @@ type configGroup struct {
 }
 
 type extractor struct {
-	workspaceRoot   string
-	program         *compiler.Program
-	resolver        module.Resolver
-	checker         *checker.Checker
-	requestedFiles  map[string]struct{}
-	primaryFiles    map[string]struct{}
-	filesByPath     map[string]*ast.SourceFile
-	functionNodes   map[*ast.Node]*Function
-	functionKeys    map[string]*Function
-	functionSyms    map[*ast.Symbol]*Function
-	functionCount   map[string]int
-	importCount     map[string]int
-	callCount       map[string]int
-	externalCount   map[string]int
-	unresolvedCount map[string]int
-	opaqueCount     map[string]int
-	refCount        map[string]int
-	typeRefCount    map[string]int
-	ambientCount    map[string]int
-	globalRefCount  map[string]int
-	functions       []Function
-	imports         []ImportEdge
-	calls           []CallEdge
-	externalCalls   []ExternalCall
-	unresolved      []CallUnresolved
-	opaque          []ImportOpaque
-	refs            []FnRef
-	typeRefs        []TypeRef
-	ambientUses     []AmbientUse
-	globalRefs      []GlobalRef
-	pendingDtsCalls []PendingDtsCall
-	ambient         *ambientIndex
-	ambientFile     *ambientFileState
-	ambientMembers  map[*ast.Symbol][]*AmbientMatcher
-	ambientDone     map[*ast.Node]struct{}
-	globalSyms      map[string]*ast.Symbol
-	typeFacts       map[string]*TypeFact
-	typeIDs         map[*checker.Type]string
-	typeKeys        map[typeKeyAt]typeKeyResult
-	typeFactSeen    map[*checker.Type]struct{}
-	typeShapes      map[*checker.Type]*typeShape
-	typeTruncated   map[*checker.Type]struct{}
-	timing          *extractTiming
+	workspaceRoot               string
+	host                        compiler.CompilerHost
+	program                     *compiler.Program
+	resolver                    module.Resolver
+	checker                     *checker.Checker
+	requestedFiles              map[string]struct{}
+	primaryFiles                map[string]struct{}
+	filesByPath                 map[string]*ast.SourceFile
+	functionNodes               map[*ast.Node]*Function
+	functionKeys                map[string]*Function
+	functionSyms                map[*ast.Symbol]*Function
+	functionCount               map[string]int
+	importCount                 map[string]int
+	callCount                   map[string]int
+	externalCount               map[string]int
+	unresolvedCount             map[string]int
+	opaqueCount                 map[string]int
+	refCount                    map[string]int
+	typeRefCount                map[string]int
+	ambientCount                map[string]int
+	globalRefCount              map[string]int
+	functions                   []Function
+	declarations                map[string]*DeclarationFact
+	exports                     map[string]*ExportFact
+	moduleExportObservations    []ModuleExportObservation
+	exportSites                 []ExportSiteFact
+	declarationSourceCandidates []DeclarationSourceFact
+	declarationSources          []DeclarationSourceFact
+	declarationSourceOutcomes   []DeclarationSourceOutcomeFact
+	sourceEntryFacts            []SourceEntryFact
+	sourceBindingFacts          []SourceBindingFact
+	sourceProgramDeclarations   []DeclarationFact
+	imports                     []ImportEdge
+	calls                       []CallEdge
+	externalCalls               []ExternalCall
+	unresolved                  []CallUnresolved
+	opaque                      []ImportOpaque
+	refs                        []FnRef
+	typeRefs                    []TypeRef
+	ambientUses                 []AmbientUse
+	globalRefs                  []GlobalRef
+	ambient                     *ambientIndex
+	ambientFile                 *ambientFileState
+	ambientMembers              map[*ast.Symbol][]*AmbientMatcher
+	ambientDone                 map[*ast.Node]struct{}
+	globalSyms                  map[string]*ast.Symbol
+	typeFacts                   map[string]*TypeFact
+	typeIDs                     map[*checker.Type]string
+	typeKeys                    map[typeKeyAt]typeKeyResult
+	typeFactSeen                map[*checker.Type]struct{}
+	typeShapes                  map[*checker.Type]*typeShape
+	typeTruncated               map[*checker.Type]struct{}
+	timing                      *extractTiming
+	sourceEntries               []configuredSourceEntry
+	inputs                      []SnapshotInput
+	declarationNodes            map[string]*ast.Node
+	mapAttempted                map[string]struct{}
+	declarationMaps             *declarationMapCache
+	moduleExportIndex           map[*ast.SourceFile]map[string]*ast.Symbol
+	semanticBindingCache        *semanticBindingCache
 }
 
 type functionMeta struct {
@@ -313,10 +444,12 @@ type callSource struct {
 // extractTiming records where extraction spends its time. BuildSnapshot
 // prints it to stderr when LINTAI_EXTRACT_TIMING=1.
 type extractTiming struct {
-	programs int
-	config   time.Duration
-	program  time.Duration
-	walk     time.Duration
+	programs          int
+	auxiliaryPrograms int
+	config            time.Duration
+	program           time.Duration
+	auxiliaryProgram  time.Duration
+	walk              time.Duration
 	// types is the part of walk that builds type facts.
 	types time.Duration
 }
@@ -333,17 +466,27 @@ func BuildSnapshot(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, er
 		return nil, err
 	}
 	if len(files) == 0 {
-		return &Snapshot{}, nil
+		if req.SourceLinks == "" {
+			return &Snapshot{}, nil
+		}
 	}
 
+	trackedFS := trackResolutionInputs(osvfs.FS(), workspaceRoot)
 	host := compiler.NewCompilerHost(
-		bundled.WrapFS(osvfs.FS()),
+		bundled.WrapFS(trackedFS),
 		bundled.LibPath(),
 		nil,
 		nil,
 		nil,
 	)
+	sourceEntries, sourceLinksFile, err := readSourceLinks(workspaceRoot, req.SourceLinks, host.FS().CaseSensitivity())
+	if err != nil {
+		return nil, err
+	}
 	configs := newConfigCache(host)
+	auxiliary := newAuxiliarySourcePrograms(ctx, host, workspaceRoot, configs, timing)
+	defer auxiliary.close()
+	entryResolutions := newSourceEntryResolutions()
 	configStarted := time.Now()
 	groups, err := discoverConfigGroups(workspaceRoot, files, configs)
 	if err != nil {
@@ -351,9 +494,15 @@ func BuildSnapshot(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, er
 	}
 	timing.config = time.Since(configStarted)
 	merged := &Snapshot{}
+	for _, entry := range sourceEntries {
+		merged.Inputs = append(merged.Inputs,
+			SnapshotInput{Path: entry.CheckedPath, Exists: host.FS().FileExists(tspath.RootedFilePathFromAbsolute(entry.CheckedPath))},
+			SnapshotInput{Path: entry.SourcePath, Exists: host.FS().FileExists(tspath.RootedFilePathFromAbsolute(entry.SourcePath))},
+		)
+	}
 	missing := make(map[string]struct{})
 	for _, group := range groups {
-		partial, groupMissing, err := buildSnapshotForGroup(ctx, host, workspaceRoot, files, group, req.AmbientMatchers, timing)
+		partial, groupMissing, err := buildSnapshotForGroup(ctx, host, workspaceRoot, files, group, req.AmbientMatchers, sourceEntries, configs, auxiliary, entryResolutions, timing)
 		if err != nil {
 			return nil, err
 		}
@@ -371,23 +520,43 @@ func BuildSnapshot(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, er
 			fallbackFiles = append(fallbackFiles, file)
 		}
 		slices.Sort(fallbackFiles)
-		partial, _, err := buildSnapshotForGroup(ctx, host, workspaceRoot, files, configGroup{PrimaryFiles: fallbackFiles}, req.AmbientMatchers, timing)
+		partial, _, err := buildSnapshotForGroup(ctx, host, workspaceRoot, files, configGroup{PrimaryFiles: fallbackFiles}, req.AmbientMatchers, sourceEntries, configs, auxiliary, entryResolutions, timing)
 		if err != nil {
 			return nil, err
 		}
 		mergeSnapshot(merged, partial)
 	}
-	resolveDtsCalls(merged)
+	for _, entry := range sourceEntries {
+		merged.SourceEntries = append(merged.SourceEntries, SourceEntryFact{ID: entry.ID, CheckedEntry: entry.CheckedEntry, SourceEntry: entry.SourceEntry, Tsconfig: entry.SourceConfig})
+	}
+	entryResolutions.canonicalize(merged, sourceEntries)
+	if req.TsconfigFiles {
+		modules := make(map[string]bool, len(merged.Modules))
+		for _, module := range merged.Modules {
+			modules[module.Path] = true
+		}
+		for index := range merged.ModuleExportObservations {
+			item := &merged.ModuleExportObservations[index]
+			item.Retained = item.Retained && modules[item.File]
+		}
+	}
+	finalizeSemanticObservations(merged)
 	if req.TsconfigFiles {
 		keepModuleFiles(merged)
+		keepRetainedSemantics(merged)
 		keepReachableTypes(merged)
 	}
 	merged.ConfigFiles = configs.files()
+	merged.Inputs = append(merged.Inputs, configs.inputs()...)
+	merged.Inputs = append(merged.Inputs, trackedFS.snapshotInputs()...)
+	if sourceLinksFile != "" {
+		merged.Inputs = append(merged.Inputs, SnapshotInput{Path: sourceLinksFile, Exists: true})
+	}
 	merged.ConfigAdjustments = configs.adjustments()
 	sortSnapshot(merged)
 	if os.Getenv("LINTAI_EXTRACT_TIMING") == "1" {
-		fmt.Fprintf(os.Stderr, "lintai: extract files=%d programs=%d config_ms=%d program_ms=%d walk_ms=%d types_ms=%d type_entities=%d total_ms=%d\n",
-			len(files), timing.programs, timing.config.Milliseconds(), timing.program.Milliseconds(), timing.walk.Milliseconds(), timing.types.Milliseconds(), len(merged.Types), time.Since(started).Milliseconds())
+		fmt.Fprintf(os.Stderr, "lintai: extract files=%d programs=%d auxiliary_programs=%d config_ms=%d program_ms=%d auxiliary_program_ms=%d walk_ms=%d types_ms=%d type_entities=%d declarations=%d exports=%d total_ms=%d\n",
+			len(files), timing.programs, timing.auxiliaryPrograms, timing.config.Milliseconds(), timing.program.Milliseconds(), timing.auxiliaryProgram.Milliseconds(), timing.walk.Milliseconds(), timing.types.Milliseconds(), len(merged.Types), len(merged.Declarations), len(merged.Exports), time.Since(started).Milliseconds())
 	}
 	return merged, nil
 }
@@ -407,46 +576,78 @@ func keepModuleFiles(snap *Snapshot) {
 	}
 	snap.Functions = slices.DeleteFunc(snap.Functions, func(item Function) bool { return !isModule(item.FilePath) })
 	snap.CallEdges = slices.DeleteFunc(snap.CallEdges, func(item CallEdge) bool { return !isModule(item.ToPath) })
-}
-
-// resolveDtsCalls resolves unresolved calls where the target declaration is
-// in a .d.ts file but the source function exists in the snapshot under a
-// different path (dist/ → src/ mapping). This happens in monorepos where
-// packages consume each other's compiled output.
-func resolveDtsCalls(snap *Snapshot) {
-	// Build index of functions by (name, path)
-	type fnKey struct{ name, path string }
-	fnIndex := make(map[fnKey]int, len(snap.Functions))
-	for i, fn := range snap.Functions {
-		fnIndex[fnKey{fn.Name, fn.FilePath}] = i
+	functions := make(map[string]struct{}, len(snap.Functions))
+	for _, item := range snap.Functions {
+		functions[item.SemanticKey] = struct{}{}
 	}
-
-	for _, pending := range snap.PendingDtsCalls {
-		srcPath := mapDtsToSource(pending.DtsPath)
-		idx, ok := fnIndex[fnKey{pending.TargetName, srcPath}]
-		if srcPath == "" || !ok {
-			snap.ExternalCalls = append(snap.ExternalCalls, pending.Fallback)
+	snap.FnSignatureConflicts = slices.DeleteFunc(snap.FnSignatureConflicts, func(id string) bool {
+		_, ok := functions[id]
+		return !ok
+	})
+	for index := range snap.Declarations {
+		if snap.Declarations[index].Function == "" {
 			continue
 		}
-		target := &snap.Functions[idx]
-		baseKey := fmt.Sprintf("%s::calls::%s", pending.FromSemanticKey, target.SemanticKey)
-		snap.CallEdges = append(snap.CallEdges, CallEdge{
-			EntityID:        "call:" + baseKey,
-			SemanticKey:     baseKey,
-			FromSemanticKey: pending.FromSemanticKey,
-			FromModule:      pending.FromModule,
-			ToSemanticKey:   target.SemanticKey,
-			FromName:        pending.FromName,
-			ToName:          target.Name,
-			FromPath:        pending.FromPath,
-			ToPath:          target.FilePath,
-			Range:           pending.Range,
-		})
+		if _, ok := functions[snap.Declarations[index].Function]; !ok {
+			snap.Declarations[index].Function = ""
+		}
 	}
-	snap.PendingDtsCalls = nil
 }
 
-func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, workspaceRoot string, requestedFiles []string, group configGroup, ambientMatchers []AmbientMatcher, timing *extractTiming) (*Snapshot, []string, error) {
+// Retain declaration endpoints only for surviving exports and configured
+// associations, then retain map endpoints reached from those declarations.
+// This runs after conflict detection so every program's observation counts.
+func keepRetainedSemantics(snap *Snapshot) {
+	modules := make(map[string]bool, len(snap.Modules))
+	for _, module := range snap.Modules {
+		modules[module.Path] = true
+	}
+	snap.Exports = slices.DeleteFunc(snap.Exports, func(item ExportFact) bool { return !modules[item.File] })
+	exportTargets := make(map[string]bool)
+	keep := make(map[string]bool)
+	sites := make(map[string]bool)
+	for _, item := range snap.Exports {
+		for _, id := range item.Targets {
+			exportTargets[id] = true
+			keep[id] = true
+		}
+		for _, id := range item.Via {
+			sites[id] = true
+		}
+	}
+	for _, binding := range snap.SourceBindings {
+		for _, id := range binding.CheckedDeclarations {
+			keep[id] = true
+		}
+		for _, id := range binding.SourceDeclarations {
+			keep[id] = true
+		}
+	}
+	for _, item := range snap.DeclarationSourceCandidates {
+		if keep[item.CheckedDecl] {
+			keep[item.SourceDecl] = true
+		}
+	}
+	for _, item := range snap.DeclarationSources {
+		if keep[item.CheckedDecl] {
+			keep[item.SourceDecl] = true
+		}
+	}
+	snap.DeclarationSourceCandidates = slices.DeleteFunc(snap.DeclarationSourceCandidates, func(item DeclarationSourceFact) bool { return !keep[item.CheckedDecl] })
+	snap.DeclarationSources = slices.DeleteFunc(snap.DeclarationSources, func(item DeclarationSourceFact) bool { return !keep[item.CheckedDecl] })
+	snap.DeclarationSourceOutcomes = slices.DeleteFunc(snap.DeclarationSourceOutcomes, func(item DeclarationSourceOutcomeFact) bool { return !keep[item.CheckedDecl] })
+	snap.Declarations = slices.DeleteFunc(snap.Declarations, func(item DeclarationFact) bool { return !keep[item.ID] })
+	for index := range snap.Declarations {
+		item := &snap.Declarations[index]
+		if !exportTargets[item.ID] {
+			item.Types = nil
+			item.TypeObservations = nil
+		}
+	}
+	snap.ExportSites = slices.DeleteFunc(snap.ExportSites, func(item ExportSiteFact) bool { return !sites[item.ID] })
+}
+
+func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, workspaceRoot string, requestedFiles []string, group configGroup, ambientMatchers []AmbientMatcher, sourceEntries []configuredSourceEntry, configs *configCache, auxiliary *auxiliarySourcePrograms, resolutions *sourceEntryResolutions, timing *extractTiming) (*Snapshot, []string, error) {
 	programStarted := time.Now()
 	timing.programs++
 	config := group.Config
@@ -459,7 +660,7 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 	}
 	var resolver module.Resolver
 	program := compiler.NewProgram(compiler.ProgramOptions{
-		ProgramConfig: compiler.ProgramConfig{Config: config},
+		ProgramConfig: compiler.ProgramConfig{Config: config, UseSourceOfProjectReference: true},
 		ProgramHosts:  compiler.ProgramHosts{Host: host},
 		ProgramFactories: compiler.ProgramFactories{
 			CreateModuleResolver: func(options module.ResolverOptions) module.Resolver {
@@ -480,6 +681,7 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 
 	ex := &extractor{
 		workspaceRoot:   workspaceRoot,
+		host:            host,
 		program:         program,
 		resolver:        resolver,
 		checker:         typeChecker,
@@ -489,6 +691,8 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 		functionNodes:   make(map[*ast.Node]*Function),
 		functionKeys:    make(map[string]*Function),
 		functionSyms:    make(map[*ast.Symbol]*Function),
+		declarations:    make(map[string]*DeclarationFact),
+		exports:         make(map[string]*ExportFact),
 		functionCount:   make(map[string]int),
 		importCount:     make(map[string]int),
 		callCount:       make(map[string]int),
@@ -509,6 +713,7 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 		typeShapes:      make(map[*checker.Type]*typeShape),
 		typeTruncated:   make(map[*checker.Type]struct{}),
 		timing:          timing,
+		sourceEntries:   sourceEntries,
 	}
 	for _, file := range requestedFiles {
 		ex.requestedFiles[file] = struct{}{}
@@ -560,23 +765,43 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 		ex.walkFacts(sourceFile.AsNode(), nil)
 	}
 	ex.ambientFile = nil
+	for _, file := range requestedFiles {
+		if sourceFile := ex.filesByPath[file]; sourceFile != nil {
+			ex.collectSemanticExports(sourceFile)
+		}
+	}
+	if len(sourceEntries) > 0 {
+		if err := ex.applyConfiguredSourceEntries(sourceEntries, auxiliary, resolutions); err != nil {
+			return nil, nil, err
+		}
+	}
+	ex.recordProgramInputs()
 
 	partial := &Snapshot{
-		Modules:         modules,
-		Functions:       ex.functions,
-		ImportEdges:     ex.imports,
-		CallEdges:       ex.calls,
-		ExternalCalls:   ex.externalCalls,
-		CallsUnresolved: ex.unresolved,
-		ImportsOpaque:   ex.opaque,
-		FnRefs:          ex.refs,
-		TypeRefs:        ex.typeRefs,
-		AmbientUses:     ex.ambientUses,
-		GlobalRefs:      ex.globalRefs,
-		Directives:      directives,
-		ParseErrors:     parseErrors,
-		PendingDtsCalls: ex.pendingDtsCalls,
-		Types:           ex.sortedTypeFacts(),
+		Modules:                     modules,
+		Functions:                   ex.functions,
+		ImportEdges:                 ex.imports,
+		CallEdges:                   ex.calls,
+		ExternalCalls:               ex.externalCalls,
+		CallsUnresolved:             ex.unresolved,
+		ImportsOpaque:               ex.opaque,
+		FnRefs:                      ex.refs,
+		TypeRefs:                    ex.typeRefs,
+		AmbientUses:                 ex.ambientUses,
+		GlobalRefs:                  ex.globalRefs,
+		Directives:                  directives,
+		ParseErrors:                 parseErrors,
+		Types:                       ex.sortedTypeFacts(),
+		Exports:                     ex.sortedExports(),
+		ModuleExportObservations:    ex.moduleExportObservations,
+		ExportSites:                 ex.exportSites,
+		DeclarationSourceCandidates: ex.declarationSourceCandidates,
+		DeclarationSources:          ex.declarationSources,
+		DeclarationSourceOutcomes:   ex.declarationSourceOutcomes,
+		SourceEntries:               ex.sourceEntryFacts,
+		SourceBindings:              ex.sourceBindingFacts,
+		Declarations:                append(ex.sortedDeclarations(), ex.sourceProgramDeclarations...),
+		Inputs:                      ex.inputs,
 	}
 	sortSnapshot(partial)
 	return partial, missingPrimary, nil
@@ -589,21 +814,53 @@ type parsedConfig struct {
 	// command line to build the program with: the original, or an adjusted
 	// copy when TypeScript 7 rejects options of the original. command is nil
 	// until program is called for the config.
-	original    *tsoptions.ParsedCommandLine
-	command     *tsoptions.ParsedCommandLine
-	adjustments []ConfigAdjustment
-	rootFiles   map[string]struct{}
-	references  []string
+	original        *tsoptions.ParsedCommandLine
+	command         *tsoptions.ParsedCommandLine
+	adjustments     []ConfigAdjustment
+	rootFiles       map[string]struct{}
+	references      []string
+	referenceInputs []string
 }
 
 type configCache struct {
-	host    compiler.CompilerHost
-	configs map[string]*parsedConfig
-	errors  map[string]error
+	host       compiler.CompilerHost
+	configs    map[string]*parsedConfig
+	errors     map[string]error
+	candidates map[string]bool
 }
 
 func newConfigCache(host compiler.CompilerHost) *configCache {
-	return &configCache{host: host, configs: make(map[string]*parsedConfig), errors: make(map[string]error)}
+	return &configCache{host: host, configs: make(map[string]*parsedConfig), errors: make(map[string]error), candidates: make(map[string]bool)}
+}
+
+// configInputFS records the files consulted while parsing a config, including
+// dependencies read before a diagnostic causes the config to be rejected.
+// The regular resolution tracker already records missing directory probes.
+type configInputFS struct {
+	vfs.FS
+	inputs map[string]bool
+}
+
+func (fs configInputFS) record(path string, exists bool) {
+	path = normalizeSlash(path)
+	if path == "" || tspath.IsUrl(path) || strings.HasPrefix(path, "^/") {
+		return
+	}
+	fs.inputs[path] = fs.inputs[path] || exists
+}
+
+func (fs configInputFS) FileExists(path tspath.RootedFilePath) bool {
+	exists := fs.FS.FileExists(path)
+	if !exists && !fs.FS.DirectoryExists(tspath.RootedDirectoryPathFromAbsolute(path.AsString())) {
+		fs.record(path.AsString(), false)
+	}
+	return exists
+}
+
+func (fs configInputFS) ReadFile(path tspath.RootedFilePath) (string, bool) {
+	contents, ok := fs.FS.ReadFile(path)
+	fs.record(path.AsString(), ok || fs.FS.FileExists(path))
+	return contents, ok
 }
 
 func (c *configCache) load(configPath string) (*parsedConfig, error) {
@@ -613,9 +870,15 @@ func (c *configCache) load(configPath string) (*parsedConfig, error) {
 	if err, ok := c.errors[configPath]; ok {
 		return nil, err
 	}
-	command, diags := tsoptions.GetParsedCommandLineOfConfigFile(tspath.RootedFilePathFromAbsolute(configPath), &core.CompilerOptions{}, nil, c.host.FS(), nil)
+	command, diags := tsoptions.GetParsedCommandLineOfConfigFile(tspath.RootedFilePathFromAbsolute(configPath), &core.CompilerOptions{}, nil, configInputFS{FS: c.host.FS(), inputs: c.candidates}, nil)
 	if command != nil {
 		diags = append(diags, command.GetConfigFileParsingDiagnostics()...)
+		// References can affect later owner selection even if this config has
+		// diagnostics, so retain their paths before rejecting the parse.
+		for _, reference := range command.ResolvedProjectReferencePaths() {
+			path := normalizeSlash(reference.AsString())
+			c.candidates[path] = c.candidates[path] || c.host.FS().FileExists(reference)
+		}
 	}
 	if len(diags) > 0 {
 		err := fmt.Errorf("tsconfig diagnostics: %s", joinDiagnostics(diags))
@@ -627,13 +890,15 @@ func (c *configCache) load(configPath string) (*parsedConfig, error) {
 		rootFiles[normalizeSlash(fileName.AsString())] = struct{}{}
 	}
 	references := make([]string, 0, len(command.ProjectReferences()))
+	referenceInputs := make([]string, 0, len(command.ProjectReferences()))
 	for _, reference := range command.ResolvedProjectReferencePaths() {
 		referencePath := normalizeSlash(reference.AsString())
+		referenceInputs = append(referenceInputs, referencePath)
 		if c.host.FS().FileExists(reference) {
 			references = append(references, referencePath)
 		}
 	}
-	parsed := &parsedConfig{original: command, rootFiles: rootFiles, references: references}
+	parsed := &parsedConfig{original: command, rootFiles: rootFiles, references: references, referenceInputs: referenceInputs}
 	c.configs[configPath] = parsed
 	return parsed, nil
 }
@@ -672,6 +937,25 @@ func (c *configCache) files() []string {
 	}
 	slices.Sort(result)
 	return slices.Compact(result)
+}
+
+func (c *configCache) inputs() []SnapshotInput {
+	byPath := maps.Clone(c.candidates)
+	for configPath, parsed := range c.configs {
+		byPath[configPath] = true
+		for _, extended := range parsed.original.ExtendedSourceFiles() {
+			byPath[normalizeSlash(extended.AsString())] = true
+		}
+		for _, reference := range parsed.referenceInputs {
+			rooted, ok := tspath.TryRootedFilePathFromAbsolute(reference)
+			byPath[reference] = ok && c.host.FS().FileExists(rooted)
+		}
+	}
+	result := make([]SnapshotInput, 0, len(byPath))
+	for path, exists := range byPath {
+		result = append(result, SnapshotInput{Path: path, Exists: exists})
+	}
+	return uniqueSnapshotInputs(result)
 }
 
 // adjustments returns the option changes of every loaded config, sorted by
@@ -761,7 +1045,7 @@ func syntheticConfig(host compiler.CompilerHost, workspaceRoot string, files []s
 func discoverConfigGroups(workspaceRoot string, files []string, configs *configCache) ([]configGroup, error) {
 	grouped := make(map[string][]string)
 	for _, file := range files {
-		configPath, err := findNearestConfigPath(workspaceRoot, file)
+		configPath, err := configs.findNearestConfigPath(workspaceRoot, file)
 		if err != nil {
 			return nil, err
 		}
@@ -795,16 +1079,19 @@ func discoverConfigGroups(workspaceRoot string, files []string, configs *configC
 	return groups, nil
 }
 
-func findNearestConfigPath(workspaceRoot string, file string) (string, error) {
+func (c *configCache) findNearestConfigPath(workspaceRoot string, file string) (string, error) {
 	rootPath := filepath.Clean(filepath.FromSlash(workspaceRoot))
 	current := filepath.Dir(filepath.FromSlash(file))
 	for {
-		candidate := filepath.Join(current, "tsconfig.json")
+		candidate := normalizeSlash(filepath.Join(current, "tsconfig.json"))
 		if _, err := os.Stat(candidate); err == nil {
-			return normalizeSlash(candidate), nil
+			c.candidates[candidate] = true
+			return candidate, nil
 		} else if !os.IsNotExist(err) {
 			return "", err
 		}
+		// Creation of a checked candidate can change the selected config.
+		c.candidates[candidate] = false
 		if current == rootPath {
 			return "", nil
 		}
@@ -825,7 +1112,7 @@ func findNearestConfigPath(workspaceRoot string, file string) (string, error) {
 
 func mergeSnapshot(into *Snapshot, partial *Snapshot) {
 	into.Modules = mergeByEntityID(into.Modules, partial.Modules, func(item Module) string { return item.EntityID })
-	into.Functions = mergeByEntityID(into.Functions, partial.Functions, func(item Function) string { return item.EntityID })
+	into.Functions = mergeFunctionSlices(into.Functions, partial.Functions)
 	into.ImportEdges = mergeByEntityID(into.ImportEdges, partial.ImportEdges, func(item ImportEdge) string { return item.EntityID })
 	into.CallEdges = mergeByEntityID(into.CallEdges, partial.CallEdges, func(item CallEdge) string { return item.EntityID })
 	into.ExternalCalls = mergeByEntityID(into.ExternalCalls, partial.ExternalCalls, func(item ExternalCall) string { return item.EntityID })
@@ -837,8 +1124,17 @@ func mergeSnapshot(into *Snapshot, partial *Snapshot) {
 	into.GlobalRefs = mergeByEntityID(into.GlobalRefs, partial.GlobalRefs, func(item GlobalRef) string { return item.EntityID })
 	into.Directives = mergeByEntityID(into.Directives, partial.Directives, func(item ModuleDirective) string { return item.EntityID })
 	into.ParseErrors = mergeByEntityID(into.ParseErrors, partial.ParseErrors, func(item ParseError) string { return item.EntityID })
-	into.PendingDtsCalls = append(into.PendingDtsCalls, partial.PendingDtsCalls...)
 	into.Types = mergeTypes(into.Types, partial.Types)
+	into.Declarations = append(into.Declarations, partial.Declarations...)
+	into.Exports = append(into.Exports, partial.Exports...)
+	into.ModuleExportObservations = append(into.ModuleExportObservations, partial.ModuleExportObservations...)
+	into.ExportSites = mergeByEntityID(into.ExportSites, partial.ExportSites, func(item ExportSiteFact) string { return item.ID })
+	into.DeclarationSourceCandidates = append(into.DeclarationSourceCandidates, partial.DeclarationSourceCandidates...)
+	into.DeclarationSources = append(into.DeclarationSources, partial.DeclarationSources...)
+	into.DeclarationSourceOutcomes = append(into.DeclarationSourceOutcomes, partial.DeclarationSourceOutcomes...)
+	into.SourceEntries = append(into.SourceEntries, partial.SourceEntries...)
+	into.SourceBindings = append(into.SourceBindings, partial.SourceBindings...)
+	into.Inputs = append(into.Inputs, partial.Inputs...)
 }
 
 func sortSnapshot(snapshot *Snapshot) {
@@ -856,6 +1152,28 @@ func sortSnapshot(snapshot *Snapshot) {
 	slices.SortFunc(snapshot.Directives, func(a, b ModuleDirective) int { return strings.Compare(a.SemanticKey, b.SemanticKey) })
 	slices.SortFunc(snapshot.ParseErrors, func(a, b ParseError) int { return strings.Compare(a.SemanticKey, b.SemanticKey) })
 	slices.SortFunc(snapshot.Types, func(a, b TypeFact) int { return strings.Compare(a.ID, b.ID) })
+	slices.SortFunc(snapshot.Declarations, func(a, b DeclarationFact) int { return strings.Compare(a.ID, b.ID) })
+	slices.SortFunc(snapshot.Exports, func(a, b ExportFact) int { return strings.Compare(a.ID, b.ID) })
+	slices.SortFunc(snapshot.ModuleExportsIncomplete, func(a, b ModuleExportsIncompleteFact) int {
+		return strings.Compare(a.File+"\x00"+a.Reason, b.File+"\x00"+b.Reason)
+	})
+	snapshot.Inputs = uniqueSnapshotInputs(snapshot.Inputs)
+}
+
+func mergeFunctionSlices(existing []Function, incoming []Function) []Function {
+	index := make(map[string]int, len(existing))
+	for i, item := range existing {
+		index[item.EntityID] = i
+	}
+	for _, item := range incoming {
+		if i, ok := index[item.EntityID]; ok {
+			existing[i] = mergeFunctionObservations(existing[i], item)
+			continue
+		}
+		index[item.EntityID] = len(existing)
+		existing = append(existing, item)
+	}
+	return existing
 }
 
 func mergeByEntityID[T any](existing []T, incoming []T, entityID func(T) string) []T {
@@ -985,21 +1303,22 @@ func (e *extractor) collectFunction(node *ast.Node) *Function {
 	baseKey := fmt.Sprintf("%s::%s::%s", nameRange.File, meta.kind, displayName)
 	semanticKey := withOrdinal(baseKey, nextOrdinal(e.functionCount, baseKey))
 	record := Function{
-		EntityID:       "function:" + semanticKey,
-		SemanticKey:    semanticKey,
-		Name:           displayName,
-		Kind:           meta.kind,
-		FilePath:       nameRange.File,
-		ContainerName:  containerName,
-		ContainsAwait:  containsAwait(node),
-		IsExported:     meta.exported || e.isExportedFunction(node, meta),
-		IsAsync:        ast.HasSyntacticModifier(node, ast.ModifierFlagsAsync),
-		ParameterCount: len(node.Parameters()),
-		ReturnType:     returnType,
-		ParameterTypes: parameterTypes,
-		Range:          nameRange,
-		BodyStart:      node.Body().Pos(),
-		BodyEnd:        node.Body().End(),
+		EntityID:              "function:" + semanticKey,
+		SemanticKey:           semanticKey,
+		Name:                  displayName,
+		Kind:                  meta.kind,
+		FilePath:              nameRange.File,
+		ContainerName:         containerName,
+		ContainsAwait:         containsAwait(node),
+		IsExported:            meta.exported || e.isExportedFunction(node, meta),
+		IsAsync:               ast.HasSyntacticModifier(node, ast.ModifierFlagsAsync),
+		ParameterCount:        len(node.Parameters()),
+		ReturnType:            returnType,
+		ParameterTypes:        parameterTypes,
+		SignatureObservations: []FunctionSignatureObservation{e.functionSignatureObservation(node, parameterTypes, returnType)},
+		Range:                 nameRange,
+		BodyStart:             node.Body().Pos(),
+		BodyEnd:               node.Body().End(),
 	}
 	e.functions = append(e.functions, record)
 	stored := &e.functions[len(e.functions)-1]
@@ -1059,6 +1378,9 @@ func (e *extractor) collectImport(node *ast.Node, moduleSpecifier *ast.Node, for
 	location := e.nodeLocation(file, moduleSpecifier)
 	baseKey := fmt.Sprintf("%s::import::%s", fromPath, specifier)
 	semanticKey := withOrdinal(baseKey, nextOrdinal(e.importCount, baseKey))
+	if ast.IsExportDeclaration(node) {
+		semanticKey = e.exportSiteID(file, node)
+	}
 	importedSymbols, hasDefaultImport, hasNamespaceImport, hasNamedImports := extractImportedSymbols(node, typeOnly)
 	e.imports = append(e.imports, ImportEdge{
 		EntityID:           "import:" + semanticKey,
@@ -1183,9 +1505,7 @@ func (e *extractor) collectCall(source callSource, node *ast.Node) {
 					e.recordUnresolvedCall(source, location)
 					return
 				}
-				if !e.recordPendingDtsCall(source, declaration, location, external) {
-					e.externalCalls = append(e.externalCalls, external)
-				}
+				e.externalCalls = append(e.externalCalls, external)
 				e.collectEscapingCallbacks(source, file, node)
 				return
 			}
@@ -1565,45 +1885,6 @@ func (e *extractor) resolveCallTarget(node *ast.Node) (*Function, *ast.Node) {
 	return nil, declaration
 }
 
-// recordPendingDtsCall records a call to a declaration in a workspace dist/
-// .d.ts file. resolveDtsCalls later links it to the matching source
-// function, or records external when there is none.
-func (e *extractor) recordPendingDtsCall(source callSource, decl *ast.Node, location SourceLocation, external ExternalCall) bool {
-	if decl == nil {
-		return false
-	}
-	sf := ast.GetSourceFileOfNode(decl)
-	if sf == nil {
-		return false
-	}
-	fileName := normalizeSlash(sf.FileName().AsString())
-	if !strings.HasSuffix(fileName, ".d.ts") || !isWithinRoot(e.workspaceRoot, fileName) || strings.Contains(fileName, "/node_modules/") {
-		return false
-	}
-	name := ""
-	if decl.Symbol() != nil {
-		name = decl.Symbol().Name()
-	}
-	if name == "" {
-		return false
-	}
-	relPath := e.relativePath(fileName)
-	if !strings.Contains(relPath, "/dist/") {
-		return false
-	}
-	e.pendingDtsCalls = append(e.pendingDtsCalls, PendingDtsCall{
-		DtsPath:         relPath,
-		TargetName:      name,
-		FromSemanticKey: source.key,
-		FromModule:      source.module,
-		FromName:        source.name,
-		FromPath:        source.path,
-		Range:           location,
-		Fallback:        external,
-	})
-	return true
-}
-
 // externalCallFor returns the external call for a call of callee, a symbol
 // that is declared in the default library, in a package or in a declaration
 // file. decl is the declaration of the resolved signature, or else of the
@@ -1748,16 +2029,6 @@ func (e *extractor) moduleParseError(file *ast.SourceFile, relative string) (Par
 		Message:     first.String(),
 		Range:       e.location(file, first.Pos(), first.End()),
 	}, true
-}
-
-func mapDtsToSource(dtsPath string) string {
-	// packages/foo/dist/bar.d.ts → packages/foo/src/bar.ts
-	if !strings.Contains(dtsPath, "/dist/") {
-		return ""
-	}
-	srcPath := strings.Replace(dtsPath, "/dist/", "/src/", 1)
-	srcPath = strings.TrimSuffix(srcPath, ".d.ts") + ".ts"
-	return srcPath
 }
 
 func (e *extractor) lookupFunction(value any) *Function {

@@ -5,7 +5,7 @@
     "entity_identity": {
       "semantic_key": "src/core/entry.ts"
     },
-    "message": "src/core/entry.ts reaches src/services/fetchData.ts through its imports",
+    "message": "src/core/entry.ts reaches src/services/fetch-data.ts through its imports",
     "provenance": {
       "backend_id": "typescript",
       "rule_version": 1
@@ -26,7 +26,7 @@
     "entity_identity": {
       "semantic_key": "src/core/leaf.ts"
     },
-    "message": "src/core/leaf.ts reaches src/services/fetchData.ts through its imports",
+    "message": "src/core/leaf.ts reaches src/services/fetch-data.ts through its imports",
     "provenance": {
       "backend_id": "typescript",
       "rule_version": 1
@@ -47,7 +47,7 @@
     "entity_identity": {
       "semantic_key": "src/core/mid.ts"
     },
-    "message": "src/core/mid.ts reaches src/services/fetchData.ts through its imports",
+    "message": "src/core/mid.ts reaches src/services/fetch-data.ts through its imports",
     "provenance": {
       "backend_id": "typescript",
       "rule_version": 1
@@ -66,9 +66,9 @@
     "assertion_id": "violation",
     "diagnostic_kind": "architecture_violation",
     "entity_identity": {
-      "semantic_key": "src/pure/helper.ts::import::../services/fetchData"
+      "semantic_key": "src/pure/helper.ts::import::../services/fetch-data"
     },
-    "message": "Layer /pure must not import layer /services (src/pure/helper.ts -\u003e src/services/fetchData.ts)",
+    "message": "Layer /pure must not import layer /services (src/pure/helper.ts -\u003e src/services/fetch-data.ts)",
     "provenance": {
       "backend_id": "typescript",
       "rule_version": 1
@@ -76,7 +76,7 @@
     "rule_id": "arch.layers",
     "severity": "error",
     "source_location": {
-      "endColumn": 50,
+      "endColumn": 51,
       "endLine": 1,
       "file": "src/pure/helper.ts",
       "startColumn": 27,
@@ -87,9 +87,9 @@
     "assertion_id": "violation",
     "diagnostic_kind": "architecture_violation",
     "entity_identity": {
-      "semantic_key": "src/pure/helper.ts::import::../services/fetchData"
+      "semantic_key": "src/pure/helper.ts::import::../services/fetch-data"
     },
-    "message": "Pure module src/pure/helper.ts must not import src/services/fetchData.ts",
+    "message": "Pure module src/pure/helper.ts must not import src/services/fetch-data.ts",
     "provenance": {
       "backend_id": "typescript",
       "rule_version": 1
@@ -97,7 +97,7 @@
     "rule_id": "arch.pure-no-service-imports",
     "severity": "error",
     "source_location": {
-      "endColumn": 50,
+      "endColumn": 51,
       "endLine": 1,
       "file": "src/pure/helper.ts",
       "startColumn": 27,

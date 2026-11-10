@@ -127,6 +127,22 @@ func TestExitCodes(t *testing.T) {
 	}
 }
 
+func TestFactsCommandPropagatesSourceLinksConfigurationErrors(t *testing.T) {
+	workspace := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workspace, "source-links.json"), []byte(`{"version":2,"entries":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := run(context.Background(), []string{
+		"facts", "--workspace-root", workspace, "--source-links", "source-links.json",
+	}, io.Discard)
+	if code := exitCode(err, io.Discard); code != exitUsage {
+		t.Fatalf("exit code %d, want %d: %v", code, exitUsage, err)
+	}
+	if err == nil || !strings.Contains(err.Error(), "invalid --source-links: unsupported version 2") {
+		t.Fatalf("source-links config error was lost by the CLI: %v", err)
+	}
+}
+
 // Authoring mistakes give an error that names the cause. A helper module
 // under the rule glob is not a rule and is skipped.
 func TestAuthoringErrors(t *testing.T) {

@@ -17,6 +17,15 @@ Decl import_has_symbols(Imp)
   ].
 import_has_symbols(Imp) :- import_symbol(Imp, _, _).
 
+Decl export_from(Site, Module, Name)
+  descr [
+    doc("The immediate resolved source of one public export binding. Name is the source-side name, or * for a star/namespace export. Re-export chains are not expanded."),
+    arg(Site, "Re-export syntax site."),
+    arg(Module, "Resolved canonical source module path."),
+    arg(Name, "Source-side public name or *.")
+  ].
+export_from(Site, Module, Name) :- export_reexport(_, Site, Module, Name, _).
+
 Decl import_runtime(Imp)
   descr [
     doc("The import loads its target at runtime: it is not type-only, and it is a side-effect import, has at least one value binding, or is kept by verbatimModuleSyntax (import_retained)."),

@@ -38,6 +38,9 @@ type SnapshotOptions struct {
 	// files to leave out.
 	Excludes []string
 	Files    FileScope
+	// SourceLinks selects the optional source-entry association JSON file.
+	// It is resolved relative to the workspace root when not absolute.
+	SourceLinks string
 }
 
 // Backend builds a versioned, language-neutral fact snapshot for a workspace.

@@ -224,7 +224,8 @@ export function unwrap<T>(x: Unwrap<T>): T extends string ? 1 : 2 { return 1 as 
 	}
 
 	// A type that makes a new type at each level stops at the depth limit.
-	if len(snap.Types) > 200 {
+	// Exported type aliases are roots, so the bound includes their types.
+	if len(snap.Types) > 300 {
 		t.Fatalf("expected a bounded fact set, got %d types", len(snap.Types))
 	}
 	if deep := x.param("deep", 0); deep.Name != "Deep" || deep.Kind != TypeKindObject {
@@ -271,23 +272,41 @@ export function unwrap<T>(x: Unwrap<T>): T extends string ? 1 : 2 { return 1 as 
 	}
 }
 
-// A type from packages/core/dist/*.d.ts and the same type from
-// packages/core/src/*.ts are one entity, as calls through dist/ resolve to
-// the source function.
-func TestTypeFactsMapDistDeclarationsToSource(t *testing.T) {
-	snap := buildTestSnapshot(t, map[string]string{
-		"packages/core/src/result.ts":    "export type Result = { ok: boolean };\n",
-		"packages/core/dist/result.d.ts": "export type Result = { ok: boolean };\n",
+// Generated declarations and source declarations retain distinct identities
+// and descriptive origins unless TypeScript itself redirects the program.
+func TestTypeFactsKeepGeneratedAndSourceDeclarationIdentity(t *testing.T) {
+	files := map[string]string{
+		"packages/core/src/result.ts":                          "export type Result = { ok: boolean };\n",
+		"packages/core/dist/result.d.ts":                       "export type Result = { ok: boolean };\n",
+		"node_modules/first/node_modules/shared/package.json":  `{"name":"shared","version":"1.0.0","types":"index.d.ts"}`,
+		"node_modules/first/node_modules/shared/index.d.ts":    `export interface Contract { id: string }`,
+		"node_modules/second/node_modules/shared/package.json": `{"name":"shared","version":"1.0.0","types":"index.d.ts"}`,
+		"node_modules/second/node_modules/shared/index.d.ts":   `export interface Contract { id: string }`,
 		"src/a.ts": `import type { Result } from "../packages/core/src/result";
 import type { Result as Built } from "../packages/core/dist/result";
+import type { Contract as First } from "../node_modules/first/node_modules/shared/index";
+import type { Contract as Second } from "../node_modules/second/node_modules/shared/index";
 export function fromSource(x: Result): void {}
 export function fromDist(x: Built): void {}
+export function fromFirst(x: First): void {}
+export function fromSecond(x: Second): void {}
 `,
-	})
-	x := newTypeIndex(t, snap)
-	source := x.param("fromSource", 0)
-	if source.Origin != "packages/core/src/result.ts" || source.ID != x.fn("fromDist").ParameterTypes[0] {
-		t.Fatalf("source %+v dist %+v", source, x.param("fromDist", 0))
+	}
+	for _, deduplicate := range []bool{true, false} {
+		t.Run(fmt.Sprintf("deduplicatePackages=%t", deduplicate), func(t *testing.T) {
+			files["tsconfig.json"] = strings.Replace(strictConfig, `"strict": true,`, fmt.Sprintf(`"strict": true, "deduplicatePackages": %t,`, deduplicate), 1)
+			snap := buildTestSnapshot(t, files)
+			x := newTypeIndex(t, snap)
+			source := x.param("fromSource", 0)
+			dist := x.param("fromDist", 0)
+			if source.Origin != "packages/core/src/result.ts" || dist.Origin != "packages/core/dist/result.d.ts" || source.ID == dist.ID {
+				t.Fatalf("source %+v dist %+v", source, dist)
+			}
+			first, second := x.param("fromFirst", 0), x.param("fromSecond", 0)
+			if first.OriginKind != OriginKindPackage || second.OriginKind != OriginKindPackage || first.Origin != "shared" || second.Origin != "shared" || (first.ID == second.ID) != deduplicate {
+				t.Fatalf("checked package identity disagrees with deduplication=%t: first=%+v second=%+v", deduplicate, first, second)
+			}
+		})
 	}
 }
 
@@ -359,6 +378,60 @@ func TestTypeFactsConflictAcrossConfigGroups(t *testing.T) {
 	y := newTypeIndex(t, strictFirst)
 	if !reflect.DeepEqual(r, y.param("fa", 0)) {
 		t.Fatalf("the group order changed R:\n%+v\n%+v", r, y.param("fa", 0))
+	}
+}
+
+func TestFunctionSignatureConflictsKeepCompleteObservations(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		"shared/api.ts":        `export const parse = (value: string | undefined) => value;`,
+		"loose/tsconfig.json":  `{"compilerOptions":{"strict":false},"include":["**/*.ts","../shared/**/*.ts"]}`,
+		"loose/index.ts":       `export { parse } from "../shared/api";`,
+		"loose/use.ts":         `import { parse } from "../shared/api"; export const loose = parse("x");`,
+		"strict/tsconfig.json": `{"compilerOptions":{"strict":true},"include":["**/*.ts","../shared/**/*.ts"]}`,
+		"strict/index.ts":      `export { parse } from "../shared/api";`,
+		"strict/use.ts":        `import { parse } from "../shared/api"; export const strict = parse("x");`,
+		"tsconfig.json":        `{"files":["shared/api.ts"],"references":[{"path":"./loose"},{"path":"./strict"}]}`,
+	}
+	snapshot, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{WorkspaceRoot: root, Files: writeWorkspace(t, root, files), TsconfigFiles: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parse *Function
+	for index := range snapshot.Functions {
+		if snapshot.Functions[index].FilePath == "shared/api.ts" && snapshot.Functions[index].Name == "parse" {
+			parse = &snapshot.Functions[index]
+			break
+		}
+	}
+	if parse == nil || !parse.SignatureConflict || len(parse.SignatureObservations) != 2 {
+		t.Fatalf("expected two conflicting complete signatures, got %+v", parse)
+	}
+	for _, observation := range parse.SignatureObservations {
+		if !observation.Complete || len(observation.ParameterTypes) != 1 || observation.ReturnType == "" {
+			t.Fatalf("incomplete signature observation: %+v", observation)
+		}
+	}
+	if len(parse.ParameterTypes) != 0 || parse.ReturnType != "" {
+		t.Fatalf("a conflicting signature exposed a coherent first observation: %+v", parse)
+	}
+	if !slices.Contains(snapshot.FnSignatureConflicts, parse.SemanticKey) {
+		t.Fatalf("missing fn_signature_conflict outcome for %s: %v", parse.SemanticKey, snapshot.FnSignatureConflicts)
+	}
+	var declaration *DeclarationFact
+	for index := range snapshot.Declarations {
+		if snapshot.Declarations[index].Name == "parse" && snapshot.Declarations[index].Kind == "variable" {
+			declaration = &snapshot.Declarations[index]
+			break
+		}
+	}
+	if declaration == nil || !slices.Contains(declaration.Incomplete, AssociationConflict) || len(declaration.TypeObservations) != 2 {
+		t.Fatalf("expected the exported declaration type conflict, got %+v", declaration)
+	}
+	for _, value := range declaration.Types {
+		if !slices.ContainsFunc(snapshot.Types, func(item TypeFact) bool { return item.ID == value.Type }) {
+			t.Fatalf("retention lost an observed declaration type: %+v", declaration)
+		}
 	}
 }
 

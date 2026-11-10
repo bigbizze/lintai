@@ -341,22 +341,11 @@ export function maybe(): Promise<number> | undefined { return undefined; }
 export function constrained<T extends Db>(x: T): void {}
 export function picked<K extends keyof Db>(k: K): Db[K] { return null as never; }
 `)
-	writeTestFile(t, workspaceRoot, "lintai-rules/actions.ts", `import { dl, rule } from "@lintai/sdk";
-export default rule("arch.actions-return-action-result").version(1)
-	.program(dl`+"`"+`
-		Decl violation(Fn, Name, Returned).
-		Decl returns_action_result(Fn).
-		returns_action_result(Fn) :-
-			fn_returns_awaited(Fn, R),
-			type_named(R, "src/core/result.ts", "ActionResult").
-		violation(Fn, Name, Returned) :-
-			fn(Fn, File, Name), fn_exported(Fn), glob(File, "src/actions/**"),
-			fn_async(Fn), !returns_action_result(Fn),
-			fn_returns(Fn, T), type_display(T, Returned).
-	`+"`"+`)
-	.report("violation")
-	.message((row) => `+"`${row.Name} returns ${row.Returned}`"+`);
-`)
+	actionRule, err := os.ReadFile(filepath.Join(repoRoot, "testdata/npm-smoke/lintai-rules/actions-return-action-result.ts"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, workspaceRoot, "lintai-rules/actions.ts", string(actionRule))
 	writeTestFile(t, workspaceRoot, "lintai-rules/domain.ts", `import { dl, rule } from "@lintai/sdk";
 export default rule("arch.domain-signatures").version(1)
 	.program(dl`+"`"+`
@@ -411,7 +400,7 @@ export default rule("t.awaited").version(1)
 	for _, messages := range byRule {
 		sort.Strings(messages)
 	}
-	if got := byRule["arch.actions-return-action-result"]; len(got) != 1 || got[0] != "legacy returns Promise<Legacy<number>>" {
+	if got := byRule["arch.actions-return-action-result"]; len(got) != 1 || got[0] != "legacy must return Promise<ActionResult<T>>, but returns Promise<Legacy<number>>" {
 		t.Fatalf("actions rule: %+v", items)
 	}
 	// type_contains does not see the Db in a type parameter constraint,
@@ -429,5 +418,153 @@ export default rule("t.awaited").version(1)
 	want := []string{"Db.query:number", "constrained:void", "hidden:void", "legacy:Legacy<number>", "load:number", "maybe:Promise<number> | undefined", "picked:Db[K]", "plain:number", "save:ActionResult<number>", "sync:number"}
 	if got := byRule["t.awaited"]; strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("fn_returns_awaited: got %v, want %v", got, want)
+	}
+}
+
+func TestActionReturnRuleReportsConflictingCheckedSignatures(t *testing.T) {
+	repoRoot, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name       string
+		rootConfig string
+		groups     []string
+		want       []string
+	}{
+		{
+			name:       "loose",
+			rootConfig: `{"compilerOptions":{"strict":false},"files":["src/actions/save.ts","src/core/result.ts"],"references":[{"path":"./loose"}]}`,
+			groups:     []string{"loose"},
+			want:       []string{"wrong must return Promise<ActionResult<T>>, but returns Promise<number>"},
+		},
+		{
+			name:       "strict",
+			rootConfig: `{"compilerOptions":{"strict":true},"files":["src/actions/save.ts","src/core/result.ts"],"references":[{"path":"./strict"}]}`,
+			groups:     []string{"strict"},
+			want: []string{
+				"mixed must return Promise<ActionResult<T>>, but returns Promise<ActionResult<number> | undefined>",
+				"wrong must return Promise<ActionResult<T>>, but returns Promise<number>",
+			},
+		},
+		{
+			name:       "both",
+			rootConfig: `{"compilerOptions":{"strict":false},"files":["src/actions/save.ts","src/core/result.ts"],"references":[{"path":"./loose"},{"path":"./strict"}]}`,
+			groups:     []string{"loose", "strict"},
+			want: []string{
+				"ambiguous has conflicting checked signatures; cannot determine whether its return type is allowed",
+				"mixed has conflicting checked signatures; cannot determine whether its return type is allowed",
+				"wrong must return Promise<ActionResult<T>>, but returns Promise<number>",
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeTestFile(t, root, "tsconfig.json", test.rootConfig)
+			writeTestFile(t, root, "src/core/result.ts", `export type ActionResult<T> = { ok: true; value: T } | { ok: false; error: string };`)
+			writeTestFile(t, root, "src/actions/save.ts", `import type { ActionResult } from "../core/result";
+export async function approved(): Promise<ActionResult<number>> { return { ok: true, value: 1 }; }
+export async function wrong(): Promise<number> { return 1; }
+export async function mixed(): Promise<ActionResult<number> | undefined> { return undefined; }
+export async function ambiguous(value: string | undefined): Promise<ActionResult<number>> { return { ok: true, value: value?.length ?? 0 }; }
+`)
+			for _, group := range test.groups {
+				strict := "false"
+				if group == "strict" {
+					strict = "true"
+				}
+				writeTestFile(t, root, group+"/tsconfig.json", `{"compilerOptions":{"strict":`+strict+`},"include":["**/*.ts","../src/**/*.ts"]}`)
+				writeTestFile(t, root, group+"/use.ts", `export { mixed } from "../src/actions/save";`)
+			}
+			rulePath := filepath.Join(repoRoot, "testdata/npm-smoke/lintai-rules/actions-return-action-result.ts")
+			items, err := New(typescript.New()).Run(context.Background(), Options{
+				RepoRoot:      repoRoot,
+				AssetRoot:     filepath.Join(repoRoot, "packages", "client"),
+				WorkspaceRoot: root,
+				RuleGlobs:     []string{rulePath},
+				Env:           map[string]any{},
+				Severity:      diagnostics.SeverityError,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := make([]string, 0, len(items))
+			for _, item := range items {
+				if item.RuleID != "arch.actions-return-action-result" || item.SourceLocation == nil || item.SourceLocation.File != "src/actions/save.ts" {
+					t.Fatalf("unexpected diagnostic: %+v", item)
+				}
+				got = append(got, item.Message)
+			}
+			sort.Strings(got)
+			if strings.Join(got, "\n") != strings.Join(test.want, "\n") {
+				t.Fatalf("diagnostics got %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
+func TestExportedInfrastructureTypePolicyFindsKnexWithoutFlaggingContracts(t *testing.T) {
+	repoRoot, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceRoot := t.TempDir()
+	writeTestFile(t, workspaceRoot, "tsconfig.json", `{"compilerOptions":{"strict":true,"module":"preserve","moduleResolution":"bundler"},"include":["src/**/*.ts"]}`)
+	writeTestFile(t, workspaceRoot, "node_modules/knex/package.json", `{"name":"knex","types":"index.d.ts"}`)
+	writeTestFile(t, workspaceRoot, "node_modules/knex/index.d.ts", `export interface Knex { query(sql: string): Promise<unknown> }`)
+	writeTestFile(t, workspaceRoot, "node_modules/@echo/grpc/package.json", `{"name":"@echo/grpc","types":"index.d.ts"}`)
+	writeTestFile(t, workspaceRoot, "node_modules/@echo/grpc/index.d.ts", `export type EchoMessage = { eventVersionId: number; traceId: string }`)
+	writeTestFile(t, workspaceRoot, "src/common/validation.ts", `import type { Knex } from "knex";
+export type ValidationContext = { db: Knex; actorId: string };
+`)
+	writeTestFile(t, workspaceRoot, "src/common/left.ts", `export type { ValidationContext } from "./validation";`)
+	writeTestFile(t, workspaceRoot, "src/common/right.ts", `export type { ValidationContext } from "./validation";`)
+	writeTestFile(t, workspaceRoot, "src/common/event.ts", `export type EventDTO = { eventVersionId: number };`)
+	writeTestFile(t, workspaceRoot, "src/common/rpc.ts", `import type { EchoMessage } from "@echo/grpc";
+export type EventMessage = { payload: EchoMessage };
+`)
+	writeTestFile(t, workspaceRoot, "src/common/index.ts", `export type { ValidationContext } from "./left";
+export type { ValidationContext as ContextThroughRight } from "./right";
+export type { EventDTO } from "./event";
+export type { EventMessage } from "./rpc";
+`)
+	rule := `import { dl, rule } from "@lintai/sdk";
+export default rule("arch.public-api-infrastructure-types").version(1)
+	.program(dl` + "`" + `
+		Decl api_root(Export, File, Name, Type).
+		api_root(E, F, N, T) :- module_export(E, F, N, /type), glob(F, "src/common/index.ts"), export_target(E, D), declaration_type(D, /type, T).
+		Decl reaches_knex(Type).
+		reaches_knex(T) :- type_named(T, "knex", _), type_origin_kind(T, /package).
+		reaches_knex(T) :- type_child(T, Child), reaches_knex(Child).
+		Decl violation(Export, Name).
+		violation(Export, Name) :- api_root(Export, _, Name, Type), reaches_knex(Type).
+	` + "`" + `)
+	.report("violation")
+	.message((row) => row.Name);
+`
+	writeTestFile(t, workspaceRoot, "lintai-rules/public-api.ts", rule)
+	items, err := New(typescript.New()).Run(context.Background(), Options{
+		RepoRoot:      repoRoot,
+		AssetRoot:     filepath.Join(repoRoot, "packages", "client"),
+		WorkspaceRoot: workspaceRoot,
+		RuleGlobs:     []string{"lintai-rules/**/*.ts"},
+		Env:           map[string]any{},
+		Severity:      diagnostics.SeverityError,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, item := range items {
+		if item.RuleID != "arch.public-api-infrastructure-types" {
+			t.Fatalf("unexpected diagnostic: %+v", item)
+		}
+		got = append(got, item.Message)
+	}
+	sort.Strings(got)
+	want := []string{"ContextThroughRight", "ValidationContext"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("public API policy findings: got %v, want %v", got, want)
 	}
 }
