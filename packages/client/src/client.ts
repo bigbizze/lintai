@@ -31,6 +31,7 @@ export type LintaiOptions = {
 	rules?: string[];
 	exclude?: string[];
 	files?: "tsconfig" | "walk";
+	sourceLinks?: string;
 	env?: Record<string, unknown>;
 	factLimit?: number;
 	rulesLock?: string;
@@ -51,6 +52,7 @@ export type ResolvedBridgeOptions = {
 	ruleGlobs: string[];
 	excludes: string[];
 	files: "tsconfig" | "walk";
+	sourceLinks?: string;
 	env: Record<string, unknown>;
 	factLimit?: number;
 	rulesLock?: string;
@@ -64,6 +66,7 @@ type InitializeResult = {
 	diagnosticCount: number;
 	snapshotVersion: string;
 	diagnostics: Diagnostic[];
+	inputPaths?: string[];
 };
 
 type JSONRPCRequest = {
@@ -110,7 +113,10 @@ type FileWatcher = {
 	close(): void;
 };
 
-type WatchPath = (target: string, onChange: (filename?: string) => void) => FileWatcher;
+// Input watchers set recursive to false. Each one watches the nearest existing
+// directory of an input, and creating a missing input first creates a direct
+// child of that directory.
+type WatchPath = (target: string, onChange: (filename?: string) => void, options?: { recursive: boolean }) => FileWatcher;
 
 type ClientDependencies = {
 	spawnServe: SpawnServe;
@@ -148,10 +154,11 @@ const defaultDependencies: ClientDependencies = {
 		}
 		return spawnSync(command, args, options);
 	},
-	watchPath(target, onChange) {
+	watchPath(target, onChange, options) {
 		const watcher = chokidar.watch(target, {
 			ignoreInitial: true,
 			persistent: false,
+			...(options?.recursive === false ? { depth: 0 } : {}),
 			awaitWriteFinish: {
 				stabilityThreshold: 100,
 				pollInterval: 25,
@@ -239,7 +246,10 @@ export class LintAIClient {
 	private readonly savedVersionsAnalyzed = new Map<string, number>();
 	private attachedStdoutListener = false;
 	private readonly ruleWatchers: FileWatcher[] = [];
+	private readonly inputWatchers: FileWatcher[] = [];
+	private watchedInputPaths: string[] = [];
 	private ruleInvalidationTimer: ReturnType<typeof setTimeout> | undefined;
+	private inputInvalidationTimer: ReturnType<typeof setTimeout> | undefined;
 	private pendingRuleInvalidation = false;
 	private analysisEpoch = 0;
 	private readonly processExitHandler = () => {
@@ -250,6 +260,7 @@ export class LintAIClient {
 		this.options = options;
 		this.dependencies = dependencies;
 		this.ensureRuleWatchers();
+		this.updateInputWatchers([]);
 		process.on("exit", this.processExitHandler);
 	}
 
@@ -324,7 +335,7 @@ export class LintAIClient {
 				if (this.isOutdated(targetEpoch, startedAt)) {
 					return;
 				}
-				this.setDiagnostics(result.diagnostics, startedAt);
+				this.setDiagnostics(result.diagnostics, startedAt, result.inputPaths);
 			})
 			.catch((error) => {
 				if (this.isOutdated(targetEpoch, startedAt)) {
@@ -351,10 +362,18 @@ export class LintAIClient {
 			clearTimeout(this.ruleInvalidationTimer);
 			this.ruleInvalidationTimer = undefined;
 		}
+		if (this.inputInvalidationTimer) {
+			clearTimeout(this.inputInvalidationTimer);
+			this.inputInvalidationTimer = undefined;
+		}
 		for (const watcher of this.ruleWatchers) {
 			watcher.close();
 		}
 		this.ruleWatchers.length = 0;
+		for (const watcher of this.inputWatchers) {
+			watcher.close();
+		}
+		this.inputWatchers.length = 0;
 
 		const child = this.child;
 		this.child = undefined;
@@ -418,6 +437,7 @@ export class LintAIClient {
 				ruleGlobs: this.options.ruleGlobs,
 				excludes: this.options.excludes,
 				files: this.options.files,
+				...(this.options.sourceLinks === undefined ? {} : { sourceLinks: this.options.sourceLinks }),
 				env: this.options.env,
 				...(this.options.factLimit === undefined ? {} : { factLimit: this.options.factLimit }),
 				...(this.options.rulesLock === undefined ? {} : { rulesLock: this.options.rulesLock }),
@@ -430,7 +450,7 @@ export class LintAIClient {
 				...(this.options.setupSandbox === undefined ? {} : { setupSandbox: this.options.setupSandbox }),
 			});
 			this.attachStdoutListener();
-			this.setDiagnostics(resultValue.diagnostics, startedAt);
+			this.setDiagnostics(resultValue.diagnostics, startedAt, resultValue.inputPaths);
 			this.state = this.pendingRuleInvalidation ? "invalidated" : "ready";
 			finishInitialization();
 		} catch (error) {
@@ -465,6 +485,7 @@ export class LintAIClient {
 				...this.options.excludes.flatMap((glob) => ["--exclude", glob]),
 				"--files",
 				this.options.files,
+				...(this.options.sourceLinks === undefined ? [] : ["--source-links", this.options.sourceLinks]),
 				"--env-json",
 				JSON.stringify(this.options.env),
 				...(this.options.factLimit === undefined ? [] : ["--fact-limit", String(this.options.factLimit)]),
@@ -615,7 +636,7 @@ export class LintAIClient {
 			if (targetEpoch !== this.analysisEpoch || this.state !== "invalidated") {
 				return;
 			}
-			this.setDiagnostics(result.diagnostics, startedAt);
+			this.setDiagnostics(result.diagnostics, startedAt, result.inputPaths);
 			this.state = "ready";
 		} catch (error) {
 			const child = this.child;
@@ -665,7 +686,7 @@ export class LintAIClient {
 			if (targetEpoch !== this.analysisEpoch || this.state !== "ready") {
 				return;
 			}
-			this.setDiagnostics(result.diagnostics, startedAt);
+			this.setDiagnostics(result.diagnostics, startedAt, result.inputPaths);
 		} catch (error) {
 			if (targetEpoch !== this.analysisEpoch || this.state !== "ready") {
 				return;
@@ -756,12 +777,74 @@ export class LintAIClient {
 		this.state = "fallback";
 	}
 
-	private setDiagnostics(diagnostics: Diagnostic[], analyzedAt: number): void {
+	private setDiagnostics(diagnostics: Diagnostic[], analyzedAt: number, inputPaths?: string[]): void {
 		const indexed = indexDiagnostics(diagnostics);
 		this.diagnosticsAnalyzedAt = analyzedAt;
 		this.diagnosticsByFile = indexed.byFile;
 		this.unlocated = indexed.unlocated;
 		this.analysisFailure = undefined;
+		if (inputPaths) {
+			this.updateInputWatchers(inputPaths);
+		}
+	}
+
+	private updateInputWatchers(inputPaths: string[]): void {
+		const paths = [...new Set([
+			...inputPaths.map((item) => path.resolve(item)),
+			...(this.options.sourceLinks === undefined ? [] : [path.resolve(this.options.sourceLinks)]),
+		])].sort();
+		if (paths.length === this.watchedInputPaths.length && paths.every((item, index) => item === this.watchedInputPaths[index])) {
+			return;
+		}
+		for (const watcher of this.inputWatchers) {
+			watcher.close();
+		}
+		this.inputWatchers.length = 0;
+		this.watchedInputPaths = paths;
+		const inputsByDirectory = new Map<string, string[]>();
+		for (const input of paths) {
+			const target = nearestExistingDirectory(path.dirname(input));
+			if (!target) continue;
+			inputsByDirectory.set(target, [...(inputsByDirectory.get(target) ?? []), input]);
+		}
+		for (const [target, watchedInputs] of inputsByDirectory) {
+			try {
+				const watcher = this.dependencies.watchPath(target, (filename) => {
+					if (!filename) {
+						this.scheduleInputInvalidation();
+						return;
+					}
+					const changed = path.resolve(target, filename);
+					if (watchedInputs.some((input) => isSameOrAncestor(changed, input))) {
+						this.scheduleInputInvalidation();
+					}
+				}, { recursive: false });
+				this.inputWatchers.push(watcher);
+			} catch (error) {
+				this.warnOnce(`lintai input watcher unavailable for ${target}: ${asError(error).message}`);
+			}
+		}
+	}
+
+	private scheduleInputInvalidation(): void {
+		if (this.inputInvalidationTimer) {
+			clearTimeout(this.inputInvalidationTimer);
+		}
+		this.inputInvalidationTimer = setTimeout(() => {
+			this.inputInvalidationTimer = undefined;
+			if (this.state === "disposed") {
+				return;
+			}
+			this.analysisEpoch += 1;
+			this.diagnosticsByFile = new Map();
+			this.unlocated = [];
+			this.analysisFailure = undefined;
+			this.oneshotCache = undefined;
+			this.refreshInFlight = undefined;
+			if (this.state === "ready") {
+				this.state = "invalidated";
+			}
+		}, 200);
 	}
 
 	private ensureRuleWatchers(): void {
@@ -862,6 +945,7 @@ export function resolveBridgeOptions(options: LintaiOptions, cwd: string, host: 
 		ruleGlobs,
 		excludes: options.exclude ?? [],
 		files: options.files ?? "tsconfig",
+		...(options.sourceLinks === undefined ? {} : { sourceLinks: path.resolve(workspaceRoot, options.sourceLinks) }),
 		env: options.env ?? {},
 		...(options.factLimit === undefined ? {} : { factLimit: options.factLimit }),
 		...(options.rulesLock === undefined ? {} : { rulesLock: path.resolve(workspaceRoot, options.rulesLock) }),
@@ -1124,6 +1208,27 @@ function nearestExistingAncestor(target: string): string | undefined {
 		}
 		current = parent;
 	}
+}
+
+function nearestExistingDirectory(target: string): string | undefined {
+	let current = target;
+	while (true) {
+		if (existsSync(current)) {
+			try {
+				if (statSync(current).isDirectory()) return current;
+			} catch {
+				// Keep walking when the path disappeared between existsSync and statSync.
+			}
+		}
+		const parent = path.dirname(current);
+		if (parent === current) return undefined;
+		current = parent;
+	}
+}
+
+function isSameOrAncestor(ancestor: string, candidate: string): boolean {
+	const relative = path.relative(ancestor, candidate);
+	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 export function createTestProcess(): ClientProcess & {

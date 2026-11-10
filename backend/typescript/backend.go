@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -50,7 +51,7 @@ func (b *Backend) BuildSnapshot(ctx context.Context, repoRoot, workspaceRoot str
 	if err != nil {
 		return facts.Snapshot{}, err
 	}
-	return facts.Snapshot{Version: snapshot.Version, Schema: Schema(), Facts: items}, nil
+	return facts.Snapshot{Version: snapshot.Version, Schema: Schema(), Facts: items, InputPaths: snapshot.InputPaths}, nil
 }
 
 func (b *Backend) buildAnalysisSnapshot(ctx context.Context, repoRoot, workspaceRoot string, options backend.SnapshotOptions) (*analysis.Snapshot, error) {
@@ -66,6 +67,7 @@ func (b *Backend) buildAnalysisSnapshot(ctx context.Context, repoRoot, workspace
 	extracted, err := lintaiapi.BuildSnapshot(ctx, lintaiapi.BuildSnapshotRequest{
 		WorkspaceRoot:   workspaceRoot,
 		Files:           walked,
+		SourceLinks:     options.SourceLinks,
 		AmbientMatchers: convertAmbientMatchers(sources),
 		TsconfigFiles:   scope == backend.FileScopeTsconfig,
 	})
@@ -86,32 +88,47 @@ func (b *Backend) buildAnalysisSnapshot(ctx context.Context, repoRoot, workspace
 		return nil, err
 	}
 
-	version, err := snapshotVersion(workspaceRoot, slices.Concat(files, extracted.ConfigFiles))
+	inputPaths := make([]string, 0, len(extracted.Inputs))
+	for _, input := range extracted.Inputs {
+		inputPaths = append(inputPaths, input.Path)
+	}
+	version, err := snapshotVersionWithInputs(workspaceRoot, slices.Concat(files, extracted.ConfigFiles), extracted.Inputs)
 	if err != nil {
 		return nil, err
 	}
 
 	return &analysis.Snapshot{
-		Version:         version,
-		BackendID:       b.ID(),
-		WorkspaceRoot:   workspaceRoot,
-		Modules:         modules,
-		Functions:       functions,
-		ImportEdges:     importEdges,
-		CallEdges:       callEdges,
-		ExternalCalls:   convertExternalCalls(extracted.ExternalCalls),
-		CallsUnresolved: convertCallsUnresolved(extracted.CallsUnresolved),
-		ImportsOpaque:   convertImportsOpaque(extracted.ImportsOpaque),
-		FnRefs:          convertFnRefs(extracted.FnRefs),
-		TypeRefs:        typeRefs,
-		Accesses:        accesses,
-		AmbientSources:  convertAmbientSources(sources),
-		AmbientUses:     convertAmbientUses(extracted.AmbientUses),
-		GlobalRefs:      convertGlobalRefs(extracted.GlobalRefs),
-		Directives:      convertDirectives(extracted.Directives),
-		ParseErrors:     convertParseErrors(extracted.ParseErrors),
-		Types:           convertTypes(extracted.Types),
-		Adjustments:     adjustments,
+		Version:                     version,
+		BackendID:                   b.ID(),
+		WorkspaceRoot:               workspaceRoot,
+		Modules:                     modules,
+		Functions:                   functions,
+		ImportEdges:                 importEdges,
+		CallEdges:                   callEdges,
+		ExternalCalls:               convertExternalCalls(extracted.ExternalCalls),
+		CallsUnresolved:             convertCallsUnresolved(extracted.CallsUnresolved),
+		ImportsOpaque:               convertImportsOpaque(extracted.ImportsOpaque),
+		FnRefs:                      convertFnRefs(extracted.FnRefs),
+		TypeRefs:                    typeRefs,
+		Accesses:                    accesses,
+		AmbientSources:              convertAmbientSources(sources),
+		AmbientUses:                 convertAmbientUses(extracted.AmbientUses),
+		GlobalRefs:                  convertGlobalRefs(extracted.GlobalRefs),
+		Directives:                  convertDirectives(extracted.Directives),
+		ParseErrors:                 convertParseErrors(extracted.ParseErrors),
+		Types:                       convertTypes(extracted.Types),
+		Declarations:                convertDeclarations(extracted.Declarations),
+		Exports:                     convertExports(extracted.Exports),
+		ModuleExportsIncomplete:     convertModuleExportsIncomplete(extracted.ModuleExportsIncomplete),
+		FnSignatureConflicts:        append([]string(nil), extracted.FnSignatureConflicts...),
+		ExportSites:                 convertExportSites(extracted.ExportSites),
+		DeclarationSourceCandidates: convertDeclarationSources(extracted.DeclarationSourceCandidates),
+		DeclarationSources:          convertDeclarationSources(extracted.DeclarationSources),
+		DeclarationSourceOutcomes:   convertDeclarationSourceOutcomes(extracted.DeclarationSourceOutcomes),
+		SourceEntries:               convertSourceEntries(extracted.SourceEntries),
+		SourceBindings:              convertSourceBindings(extracted.SourceBindings),
+		InputPaths:                  inputPaths,
+		Adjustments:                 adjustments,
 	}, nil
 }
 
@@ -147,21 +164,142 @@ func convertFunctions(items []lintaiapi.Function) []analysis.Function {
 	result := make([]analysis.Function, 0, len(items))
 	for _, item := range items {
 		result = append(result, analysis.Function{
-			EntityID:       item.EntityID,
-			SemanticKey:    item.SemanticKey,
-			Name:           item.Name,
-			Kind:           item.Kind,
-			FilePath:       item.FilePath,
-			ContainerName:  item.ContainerName,
-			ContainsAwait:  item.ContainsAwait,
-			IsExported:     item.IsExported,
-			IsAsync:        item.IsAsync,
-			ParameterCount: item.ParameterCount,
-			ReturnType:     item.ReturnType,
+			EntityID:              item.EntityID,
+			SemanticKey:           item.SemanticKey,
+			Name:                  item.Name,
+			Kind:                  item.Kind,
+			FilePath:              item.FilePath,
+			ContainerName:         item.ContainerName,
+			ContainsAwait:         item.ContainsAwait,
+			IsExported:            item.IsExported,
+			IsAsync:               item.IsAsync,
+			ParameterCount:        item.ParameterCount,
+			SignatureObservations: convertSignatureObservations(item.SignatureObservations),
+			SignatureConflict:     item.SignatureConflict,
+			ReturnType:            item.ReturnType,
+			ParameterTypes:        append([]string(nil), item.ParameterTypes...),
+			Range:                 convertLocation(item.Range),
+			BodyStart:             item.BodyStart,
+			BodyEnd:               item.BodyEnd,
+		})
+	}
+	return result
+}
+
+func convertSignatureObservations(items []lintaiapi.FunctionSignatureObservation) []analysis.FunctionSignatureObservation {
+	result := make([]analysis.FunctionSignatureObservation, 0, len(items))
+	for _, item := range items {
+		result = append(result, analysis.FunctionSignatureObservation{
 			ParameterTypes: append([]string(nil), item.ParameterTypes...),
-			Range:          convertLocation(item.Range),
-			BodyStart:      item.BodyStart,
-			BodyEnd:        item.BodyEnd,
+			ParameterMarks: append([]string(nil), item.ParameterMarks...),
+			ReturnType:     item.ReturnType,
+			Complete:       item.Complete,
+		})
+	}
+	return result
+}
+
+func convertDeclarations(items []lintaiapi.DeclarationFact) []analysis.Declaration {
+	result := make([]analysis.Declaration, 0, len(items))
+	for _, item := range items {
+		types := make([]analysis.DeclarationType, 0, len(item.Types))
+		for _, value := range item.Types {
+			types = append(types, analysis.DeclarationType{Space: value.Space, Type: value.Type})
+		}
+		result = append(result, analysis.Declaration{
+			ID: item.ID, Name: item.Name, Kind: item.Kind, OriginKind: item.OriginKind, Origin: item.Origin,
+			Types: types, TypeObservations: convertDeclarationTypeObservations(item.TypeObservations),
+			Function: item.Function, Incomplete: append([]string(nil), item.Incomplete...), Range: convertLocation(item.Location),
+		})
+	}
+	return result
+}
+
+func convertExports(items []lintaiapi.ExportFact) []analysis.Export {
+	result := make([]analysis.Export, 0, len(items))
+	for _, item := range items {
+		reexports := make([]analysis.ExportReexport, 0, len(item.Reexports))
+		for _, value := range item.Reexports {
+			reexports = append(reexports, analysis.ExportReexport{Site: value.Site, Module: value.Module, SourceName: value.SourceName, Space: value.Space})
+		}
+		var location *diagnostics.SourceLocation
+		if item.Location != (lintaiapi.SourceLocation{}) {
+			converted := convertLocation(item.Location)
+			location = &converted
+		}
+		result = append(result, analysis.Export{
+			ID: item.ID, File: item.File, Name: item.Name, Space: item.Space,
+			Targets: append([]string(nil), item.Targets...), Via: append([]string(nil), item.Via...),
+			Reexports: reexports, Incomplete: append([]string(nil), item.Incomplete...), Range: location,
+		})
+	}
+	return result
+}
+
+func convertModuleExportsIncomplete(items []lintaiapi.ModuleExportsIncompleteFact) []analysis.ModuleExportsIncomplete {
+	result := make([]analysis.ModuleExportsIncomplete, 0, len(items))
+	for _, item := range items {
+		result = append(result, analysis.ModuleExportsIncomplete{File: item.File, Reason: item.Reason})
+	}
+	return result
+}
+
+func convertExportSites(items []lintaiapi.ExportSiteFact) []analysis.ExportSite {
+	result := make([]analysis.ExportSite, 0, len(items))
+	for _, item := range items {
+		result = append(result, analysis.ExportSite{ID: item.ID, Range: convertLocation(item.Location)})
+	}
+	return result
+}
+
+func convertDeclarationTypeObservations(items [][]lintaiapi.DeclarationType) [][]analysis.DeclarationType {
+	result := make([][]analysis.DeclarationType, 0, len(items))
+	for _, observation := range items {
+		converted := make([]analysis.DeclarationType, 0, len(observation))
+		for _, item := range observation {
+			converted = append(converted, analysis.DeclarationType{Space: item.Space, Type: item.Type})
+		}
+		result = append(result, converted)
+	}
+	return result
+}
+
+func convertDeclarationSources(items []lintaiapi.DeclarationSourceFact) []analysis.DeclarationSource {
+	result := make([]analysis.DeclarationSource, 0, len(items))
+	for _, item := range items {
+		result = append(result, analysis.DeclarationSource{CheckedDecl: item.CheckedDecl, SourceDecl: item.SourceDecl, Method: item.Method})
+	}
+	return result
+}
+
+func convertDeclarationSourceOutcomes(items []lintaiapi.DeclarationSourceOutcomeFact) []analysis.DeclarationSourceOutcome {
+	result := make([]analysis.DeclarationSourceOutcome, 0, len(items))
+	for _, item := range items {
+		result = append(result, analysis.DeclarationSourceOutcome{CheckedDecl: item.CheckedDecl, Outcome: item.Outcome})
+	}
+	return result
+}
+
+func convertSourceEntries(items []lintaiapi.SourceEntryFact) []analysis.SourceEntry {
+	result := make([]analysis.SourceEntry, 0, len(items))
+	for _, item := range items {
+		result = append(result, analysis.SourceEntry{
+			ID: item.ID, CheckedEntry: item.CheckedEntry, SourceEntry: item.SourceEntry, Tsconfig: item.Tsconfig,
+			Applied: item.Applied, Incomplete: append([]string(nil), item.Incomplete...),
+		})
+	}
+	return result
+}
+
+func convertSourceBindings(items []lintaiapi.SourceBindingFact) []analysis.SourceBinding {
+	result := make([]analysis.SourceBinding, 0, len(items))
+	for _, item := range items {
+		result = append(result, analysis.SourceBinding{
+			ID: item.ID, Entry: item.Entry, CheckedFile: item.CheckedFile, Name: item.Name, Space: item.Space,
+			SourceFile: item.SourceFile, SourceName: item.SourceName, Method: item.Method,
+			CheckedDeclarations: append([]string(nil), item.CheckedDeclarations...),
+			SourceDeclarations:  append([]string(nil), item.SourceDeclarations...),
+			Incomplete:          append([]string(nil), item.Incomplete...),
 		})
 	}
 	return result
@@ -414,18 +552,43 @@ func convertLocation(location lintaiapi.SourceLocation) diagnostics.SourceLocati
 }
 
 func snapshotVersion(root string, files []string) (string, error) {
-	sorted := make([]string, len(files))
-	copy(sorted, files)
-	sort.Strings(sorted)
+	return snapshotVersionWithInputs(root, files, nil)
+}
 
+func snapshotVersionWithInputs(root string, files []string, inputs []lintaiapi.SnapshotInput) (string, error) {
+	byPath := make(map[string]bool, len(files)+len(inputs))
+	for _, file := range files {
+		byPath[filepath.Clean(file)] = true
+	}
+	for _, input := range inputs {
+		path := filepath.Clean(input.Path)
+		if input.Exists || !byPath[path] {
+			byPath[path] = input.Exists
+		}
+	}
+	paths := make([]string, 0, len(byPath))
+	for file := range byPath {
+		paths = append(paths, file)
+	}
+	sort.Strings(paths)
 	hash := sha1.New()
-	for _, file := range sorted {
-		hash.Write([]byte(workspace.RelativePath(root, file)))
+	for _, file := range paths {
+		relative := workspace.RelativePath(root, file)
+		if strings.HasPrefix(relative, "../") || filepath.IsAbs(relative) {
+			relative = filepath.ToSlash(file)
+		}
+		hash.Write([]byte(relative))
 		hash.Write([]byte{0})
+		if !byPath[file] {
+			hash.Write([]byte{0})
+			hash.Write([]byte{0})
+			continue
+		}
 		source, err := workspace.ReadFile(file)
 		if err != nil {
 			return "", err
 		}
+		hash.Write([]byte{1})
 		hash.Write([]byte(source))
 		hash.Write([]byte{0})
 	}

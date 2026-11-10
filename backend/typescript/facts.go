@@ -45,13 +45,29 @@ func factsFromAnalysis(snapshot *analysis.Snapshot) ([]facts.Fact, error) {
 		if fn.ContainsAwait {
 			b.add("fn_awaits", id)
 		}
-		for index, typeID := range fn.ParameterTypes {
-			if typeID != "" {
-				b.add("fn_param", id, facts.Number(int64(index)), str(typeID))
+		if len(fn.SignatureObservations) == 0 {
+			for index, typeID := range fn.ParameterTypes {
+				if typeID != "" {
+					b.add("fn_param", id, facts.Number(int64(index)), str(typeID))
+				}
+			}
+			if fn.ReturnType != "" {
+				b.add("fn_returns", id, str(fn.ReturnType))
+			}
+		} else {
+			for _, observation := range fn.SignatureObservations {
+				for index, typeID := range observation.ParameterTypes {
+					if typeID != "" {
+						b.add("fn_param", id, facts.Number(int64(index)), str(typeID))
+					}
+				}
+				if observation.ReturnType != "" {
+					b.add("fn_returns", id, str(observation.ReturnType))
+				}
 			}
 		}
-		if fn.ReturnType != "" {
-			b.add("fn_returns", id, str(fn.ReturnType))
+		if fn.SignatureConflict {
+			b.add("fn_signature_conflict", id)
 		}
 		b.location(fn.SemanticKey, fn.Range)
 	}
@@ -153,6 +169,148 @@ func factsFromAnalysis(snapshot *analysis.Snapshot) ([]facts.Fact, error) {
 		if err := b.typeFacts(item); err != nil {
 			return nil, err
 		}
+	}
+	for _, item := range snapshot.Declarations {
+		id := str(item.ID)
+		kind, err := name(item.Kind)
+		if err != nil {
+			return nil, err
+		}
+		b.add("declaration", id, str(item.Name), kind)
+		if item.OriginKind != "" {
+			originKind, err := name(item.OriginKind)
+			if err != nil {
+				return nil, err
+			}
+			b.add("declaration_origin", id, originKind, str(item.Origin))
+		}
+		for _, value := range item.Types {
+			space, err := name(value.Space)
+			if err != nil {
+				return nil, err
+			}
+			b.add("declaration_type", id, space, str(value.Type))
+		}
+		if item.Function != "" {
+			b.add("declaration_fn", id, str(item.Function))
+		}
+		for _, reason := range item.Incomplete {
+			value, err := name(reason)
+			if err != nil {
+				return nil, err
+			}
+			b.add("declaration_incomplete", id, value)
+		}
+		b.location(item.ID, item.Range)
+	}
+	for _, item := range snapshot.Exports {
+		id := str(item.ID)
+		space, err := name(item.Space)
+		if err != nil {
+			return nil, err
+		}
+		b.add("module_export", id, str(item.File), str(item.Name), space)
+		for _, target := range item.Targets {
+			b.add("export_target", id, str(target))
+		}
+		for _, site := range item.Via {
+			b.add("export_via", id, str(site))
+		}
+		for _, value := range item.Reexports {
+			reexportSpace, err := name(value.Space)
+			if err != nil {
+				return nil, err
+			}
+			b.add("export_reexport", id, str(value.Site), str(value.Module), str(value.SourceName), reexportSpace)
+		}
+		for _, reason := range item.Incomplete {
+			value, err := name(reason)
+			if err != nil {
+				return nil, err
+			}
+			b.add("export_incomplete", id, value)
+		}
+		if item.Range != nil {
+			b.location(item.ID, *item.Range)
+		}
+	}
+	for _, item := range snapshot.ModuleExportsIncomplete {
+		reason, err := name(item.Reason)
+		if err != nil {
+			return nil, err
+		}
+		b.add("module_exports_incomplete", str(item.File), reason)
+	}
+	for _, item := range snapshot.DeclarationSourceCandidates {
+		method, err := name(item.Method)
+		if err != nil {
+			return nil, err
+		}
+		b.add("declaration_source_candidate", str(item.CheckedDecl), str(item.SourceDecl), method)
+	}
+	for _, item := range snapshot.DeclarationSources {
+		method, err := name(item.Method)
+		if err != nil {
+			return nil, err
+		}
+		b.add("declaration_source", str(item.CheckedDecl), str(item.SourceDecl), method)
+	}
+	for _, item := range snapshot.DeclarationSourceOutcomes {
+		outcome, err := name(item.Outcome)
+		if err != nil {
+			return nil, err
+		}
+		b.add("declaration_source_outcome", str(item.CheckedDecl), outcome)
+	}
+	for _, item := range snapshot.SourceEntries {
+		id := str(item.ID)
+		b.add("source_entry", id, str(item.CheckedEntry), str(item.SourceEntry))
+		if item.Tsconfig != "" {
+			b.add("source_entry_tsconfig", id, str(item.Tsconfig))
+		}
+		if item.Applied {
+			b.add("source_entry_applied", id)
+		} else {
+			b.add("source_entry_unapplied", id)
+		}
+		for _, reason := range item.Incomplete {
+			value, err := name(reason)
+			if err != nil {
+				return nil, err
+			}
+			b.add("source_entry_incomplete", id, value)
+		}
+	}
+	for _, item := range snapshot.SourceBindings {
+		id := str(item.ID)
+		space, err := name(item.Space)
+		if err != nil {
+			return nil, err
+		}
+		b.add("source_binding_attempt", id, str(item.Entry), str(item.CheckedFile), str(item.Name), space)
+		if item.SourceFile != "" {
+			method, err := name(item.Method)
+			if err != nil {
+				return nil, err
+			}
+			b.add("source_binding", id, str(item.SourceFile), str(item.SourceName), space, method)
+		}
+		for _, declaration := range item.CheckedDeclarations {
+			b.add("source_binding_checked_decl", id, str(declaration))
+		}
+		for _, declaration := range item.SourceDeclarations {
+			b.add("source_binding_source_decl", id, str(declaration))
+		}
+		for _, reason := range item.Incomplete {
+			value, err := name(reason)
+			if err != nil {
+				return nil, err
+			}
+			b.add("source_binding_incomplete", id, value)
+		}
+	}
+	for _, item := range snapshot.ExportSites {
+		b.location(item.ID, item.Range)
 	}
 	bodies := functionBodiesByFile(snapshot.Functions)
 	for _, access := range snapshot.Accesses {

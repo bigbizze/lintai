@@ -15,6 +15,8 @@ import (
 	"github.com/bigbizze/lintai/internal/tsgo/internal/ast"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/checker"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/jsnum"
+	"github.com/bigbizze/lintai/internal/tsgo/internal/scanner"
+	"github.com/bigbizze/lintai/internal/tsgo/internal/tspath"
 	"github.com/zeebo/xxh3"
 )
 
@@ -115,25 +117,21 @@ type TypeFact struct {
 
 // typeShape is the classification of one checker type.
 type typeShape struct {
-	kind       string
-	named      bool
-	originKind string
-	origin     string
-	name       string
-	nameDecl   *ast.Node
-	// localPos is the position of a type declared in a function body. It
-	// is part of the key only.
-	localPos string
-	args     []*checker.Type
-	argMarks []string
-	readonly bool
-	members  []*checker.Type
-	literal  *TypeLiteral
-	litKey   string
-	// paramName is the name of a type parameter, and paramPos is the
-	// position of its declaration in the file of origin.
+	kind           string
+	named          bool
+	originKind     string
+	origin         string
+	name           string
+	nameDecl       *ast.Node
+	declarationIDs []string
+	args           []*checker.Type
+	argMarks       []string
+	readonly       bool
+	members        []*checker.Type
+	literal        *TypeLiteral
+	litKey         string
+	// paramName is descriptive. Declaration IDs carry identity.
 	paramName  string
-	paramPos   string
 	props      []shapeProp
 	sigParams  []*checker.Type
 	sigMarks   []string
@@ -305,10 +303,9 @@ func hasKey[K comparable, V any](m map[K]V, key K) bool {
 }
 
 // typeLocation returns the location of the declaration name of a named
-// type that is declared in a workspace source file. A type that is reached
-// through a dist/ declaration file has the origin of its source file but
-// no declaration in it, so it has no location from that path; another
-// path to the same type can supply it.
+// type declared in a workspace source file. A generated declaration keeps
+// its own identity and location; optional source associations do not change
+// this field.
 func (e *extractor) typeLocation(t *checker.Type) *SourceLocation {
 	shape := e.typeShapeOf(t)
 	if !shape.named || shape.nameDecl == nil {
@@ -450,11 +447,11 @@ func (e *extractor) typeKey(t *checker.Type, stack []*checker.Type) typeKeyResul
 	q := jsonQuote
 	switch {
 	case shape.named:
-		result.key = jsonList(q("named"), q(shape.originKind), q(shape.origin), q(shape.name), q(shape.localPos), jsonList(keys(shape.args)...))
+		result.key = jsonList(q("named-v2"), jsonList(stringItems(shape.declarationIDs)...), jsonList(keys(shape.args)...))
 	case shape.kind == TypeKindLiteral:
 		result.key = shape.litKey
 	case shape.kind == TypeKindTypeParam:
-		result.key = jsonList(q("tparam"), q(shape.originKind), q(shape.origin), q(shape.paramPos), q(shape.paramName))
+		result.key = jsonList(q("tparam-v2"), jsonList(stringItems(shape.declarationIDs)...))
 	case shape.kind == TypeKindUnion || shape.kind == TypeKindIntersection:
 		parts := keys(shape.members)
 		slices.Sort(parts)
@@ -561,8 +558,14 @@ func (e *extractor) classifyType(t *checker.Type) *typeShape {
 		return e.otherShape(t)
 	}
 	shape := &typeShape{}
-	if alias := t.Alias(); alias != nil && e.nameShape(shape, alias.Symbol()) {
-		shape.args = alias.TypeArguments()
+	if alias := t.Alias(); alias != nil {
+		aliasSymbol := alias.Symbol()
+		if aliasSymbol != nil {
+			aliasSymbol = e.checker.SkipAlias(aliasSymbol)
+		}
+		if e.nameShape(shape, aliasSymbol) {
+			shape.args = alias.TypeArguments()
+		}
 	}
 	e.structureShape(shape, t)
 	return shape
@@ -694,8 +697,8 @@ func (e *extractor) typeParamShape(shape *typeShape, t *checker.Type) {
 		}
 		return
 	}
-	shape.originKind, shape.origin = e.declarationOrigin(declarations[0], false)
-	shape.paramPos = strconv.Itoa(declarations[0].Pos())
+	shape.declarationIDs = e.declarationIDs(declarations)
+	shape.originKind, shape.origin = e.declarationOrigin(declarations[0])
 	if t.AsTypeParameter().IsThisType() {
 		shape.paramName = "this"
 		return
@@ -746,13 +749,8 @@ func (e *extractor) setOther(shape *typeShape, t *checker.Type) {
 	shape.kind = TypeKindOther
 	shape.incomplete = []string{IncompleteUnsupported}
 	text := e.checker.TypeToStringEx(t, nil, checker.TypeFormatFlagsNoTruncation, nil)
-	originKind, origin, position := "", "", ""
-	if symbol := t.Symbol(); symbol != nil && len(symbol.Declarations()) > 0 {
-		decl := symbol.Declarations()[0]
-		originKind, origin = e.declarationOrigin(decl, false)
-		position = strconv.Itoa(decl.Pos())
-	}
-	shape.otherKey = jsonList(jsonQuote("other"), jsonQuote(text), jsonQuote(originKind), jsonQuote(origin), jsonQuote(position))
+	declarationIDs := e.typeDeclarationIDs(t)
+	shape.otherKey = jsonList(jsonQuote("other-v2"), jsonQuote(text), jsonList(stringItems(declarationIDs)...))
 	flags := t.Flags()
 	switch {
 	case flags&checker.TypeFlagsIndexedAccess != 0:
@@ -840,36 +838,18 @@ func (e *extractor) nameShape(shape *typeShape, symbol *ast.Symbol) bool {
 		return false
 	}
 	decl := symbol.Declarations()[0]
-	if parent := decl.Parent; parent != nil && !ast.IsSourceFile(parent) && parent.Kind != ast.KindModuleBlock {
-		// A type declared in a function body is not unique by name in its
-		// file. Its position keeps it apart from other local types with
-		// the same name.
-		shape.localPos = "@" + strconv.Itoa(decl.Pos())
-	}
 	shape.named = true
 	shape.name = name
 	shape.nameDecl = decl
-	shape.originKind, shape.origin = e.declarationOrigin(decl, true)
+	shape.declarationIDs = e.declarationIDs(symbol.Declarations())
+	shape.originKind, shape.origin = e.declarationOrigin(decl)
 	return true
 }
 
-// declarationOrigin returns the origin kind and the origin of a type
-// declaration. The origin is the module name that external_call uses, or
-// the workspace-relative path of the declaring source file. A declaration
-// file under dist/ whose source file is a workspace file has the origin of
-// the source file, as resolveDtsCalls does for calls, when mapDist is
-// true. A type parameter is keyed by a position in its file, so its origin
-// is not mapped.
-func (e *extractor) declarationOrigin(decl *ast.Node, mapDist bool) (string, string) {
+// declarationOrigin is descriptive metadata. It does not substitute a
+// generated declaration's path for an assumed source path.
+func (e *extractor) declarationOrigin(decl *ast.Node) (string, string) {
 	if kind, origin := e.externalModule(decl); origin != "" {
-		if mapDist && strings.HasSuffix(origin, ".d.ts") {
-			if mapped := mapDtsToSource(origin); mapped != "" {
-				absolute := normalizeSlash(filepath.Join(filepath.FromSlash(e.workspaceRoot), filepath.FromSlash(mapped)))
-				if _, ok := e.requestedFiles[absolute]; ok {
-					return OriginKindSourceFile, mapped
-				}
-			}
-		}
 		return kind, origin
 	}
 	file := ast.GetSourceFileOfNode(decl)
@@ -877,6 +857,61 @@ func (e *extractor) declarationOrigin(decl *ast.Node, mapDist bool) (string, str
 		return "", ""
 	}
 	return OriginKindSourceFile, e.relativePath(file.FileName().AsString())
+}
+
+func (e *extractor) declarationIDs(declarations []*ast.Node) []string {
+	ids := make([]string, 0, len(declarations))
+	for _, declaration := range declarations {
+		if id := e.declarationID(declaration); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	slices.Sort(ids)
+	return slices.Compact(ids)
+}
+
+func (e *extractor) declarationID(declaration *ast.Node) string {
+	if declaration == nil {
+		return ""
+	}
+	file := ast.GetSourceFileOfNode(declaration)
+	if file == nil {
+		return ""
+	}
+	pathKey := normalizeSlash(e.program.PathKeyForFileName(file.FileName()).AsString())
+	rootKey := normalizeSlash(e.program.PathKeyForFileName(tspath.RootedFilePathFromAbsolute(e.workspaceRoot)).AsString())
+	if isWithinRoot(rootKey, pathKey) {
+		if relative, err := filepath.Rel(filepath.FromSlash(rootKey), filepath.FromSlash(pathKey)); err == nil {
+			pathKey = filepath.ToSlash(relative)
+		}
+	}
+	start := scanner.GetTokenPosOfNode(declaration, file, false)
+	key := jsonList(jsonQuote("decl-v1"), jsonQuote(normalizeSlash(pathKey)), jsonQuote(declaration.Kind.String()), strconv.Itoa(start))
+	return "decl:" + hashKey(key)
+}
+
+func (e *extractor) typeDeclarationIDs(t *checker.Type) []string {
+	var declarations []*ast.Node
+	if t != nil {
+		if symbol := t.Symbol(); symbol != nil {
+			declarations = append(declarations, symbol.Declarations()...)
+		}
+		if alias := t.Alias(); alias != nil && alias.Symbol() != nil {
+			aliasSymbol := e.checker.SkipAlias(alias.Symbol())
+			if aliasSymbol != nil {
+				declarations = append(declarations, aliasSymbol.Declarations()...)
+			}
+		}
+	}
+	return e.declarationIDs(declarations)
+}
+
+func stringItems(items []string) []string {
+	result := make([]string, len(items))
+	for index, item := range items {
+		result[index] = jsonQuote(item)
+	}
+	return result
 }
 
 // sortedTypeFacts returns the recorded type facts sorted by ID.
@@ -918,6 +953,22 @@ func keepReachableTypes(snap *Snapshot) {
 		visit(fn.ReturnType)
 		for _, param := range fn.ParameterTypes {
 			visit(param)
+		}
+		for _, observation := range fn.SignatureObservations {
+			visit(observation.ReturnType)
+			for _, param := range observation.ParameterTypes {
+				visit(param)
+			}
+		}
+	}
+	for _, declaration := range snap.Declarations {
+		for _, value := range declaration.Types {
+			visit(value.Type)
+		}
+		for _, observation := range declaration.TypeObservations {
+			for _, value := range observation {
+				visit(value.Type)
+			}
 		}
 	}
 	snap.Types = slices.DeleteFunc(snap.Types, func(item TypeFact) bool {

@@ -431,3 +431,68 @@ export default rule("t.awaited").version(1)
 		t.Fatalf("fn_returns_awaited: got %v, want %v", got, want)
 	}
 }
+
+func TestExportedInfrastructureTypePolicyFindsKnexWithoutFlaggingContracts(t *testing.T) {
+	repoRoot, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspaceRoot := t.TempDir()
+	writeTestFile(t, workspaceRoot, "tsconfig.json", `{"compilerOptions":{"strict":true,"module":"preserve","moduleResolution":"bundler"},"include":["src/**/*.ts"]}`)
+	writeTestFile(t, workspaceRoot, "node_modules/knex/package.json", `{"name":"knex","types":"index.d.ts"}`)
+	writeTestFile(t, workspaceRoot, "node_modules/knex/index.d.ts", `export interface Knex { query(sql: string): Promise<unknown> }`)
+	writeTestFile(t, workspaceRoot, "node_modules/@echo/grpc/package.json", `{"name":"@echo/grpc","types":"index.d.ts"}`)
+	writeTestFile(t, workspaceRoot, "node_modules/@echo/grpc/index.d.ts", `export type EchoMessage = { eventVersionId: number; traceId: string }`)
+	writeTestFile(t, workspaceRoot, "src/common/validation.ts", `import type { Knex } from "knex";
+export type ValidationContext = { db: Knex; actorId: string };
+`)
+	writeTestFile(t, workspaceRoot, "src/common/left.ts", `export type { ValidationContext } from "./validation";`)
+	writeTestFile(t, workspaceRoot, "src/common/right.ts", `export type { ValidationContext } from "./validation";`)
+	writeTestFile(t, workspaceRoot, "src/common/event.ts", `export type EventDTO = { eventVersionId: number };`)
+	writeTestFile(t, workspaceRoot, "src/common/rpc.ts", `import type { EchoMessage } from "@echo/grpc";
+export type EventMessage = { payload: EchoMessage };
+`)
+	writeTestFile(t, workspaceRoot, "src/common/index.ts", `export type { ValidationContext } from "./left";
+export type { ValidationContext as ContextThroughRight } from "./right";
+export type { EventDTO } from "./event";
+export type { EventMessage } from "./rpc";
+`)
+	rule := `import { dl, rule } from "@lintai/sdk";
+export default rule("arch.public-api-infrastructure-types").version(1)
+	.program(dl` + "`" + `
+		Decl api_root(Export, File, Name, Type).
+		api_root(E, F, N, T) :- module_export(E, F, N, /type), glob(F, "src/common/index.ts"), export_target(E, D), declaration_type(D, /type, T).
+		Decl reaches_knex(Type).
+		reaches_knex(T) :- type_named(T, "knex", _), type_origin_kind(T, /package).
+		reaches_knex(T) :- type_child(T, Child), reaches_knex(Child).
+		Decl violation(Export, Name).
+		violation(Export, Name) :- api_root(Export, _, Name, Type), reaches_knex(Type).
+	` + "`" + `)
+	.report("violation")
+	.message((row) => row.Name);
+`
+	writeTestFile(t, workspaceRoot, "lintai-rules/public-api.ts", rule)
+	items, err := New(typescript.New()).Run(context.Background(), Options{
+		RepoRoot:      repoRoot,
+		AssetRoot:     filepath.Join(repoRoot, "packages", "client"),
+		WorkspaceRoot: workspaceRoot,
+		RuleGlobs:     []string{"lintai-rules/**/*.ts"},
+		Env:           map[string]any{},
+		Severity:      diagnostics.SeverityError,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, item := range items {
+		if item.RuleID != "arch.public-api-infrastructure-types" {
+			t.Fatalf("unexpected diagnostic: %+v", item)
+		}
+		got = append(got, item.Message)
+	}
+	sort.Strings(got)
+	want := []string{"ContextThroughRight", "ValidationContext"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("public API policy findings: got %v, want %v", got, want)
+	}
+}

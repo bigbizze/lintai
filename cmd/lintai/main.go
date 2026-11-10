@@ -117,6 +117,7 @@ func runFacts(ctx context.Context, args []string, stdout io.Writer) error {
 	var excludes stringList
 	flags.Var(&excludes, "exclude", "glob of workspace files to leave out of the snapshot (repeatable)")
 	files := flags.String("files", string(backend.FileScopeTsconfig), "files in the snapshot: tsconfig (files that tsc compiles) or walk (every walked file)")
+	sourceLinks := flags.String("source-links", "", "JSON source-entry associations, relative to --workspace-root")
 	var relations stringList
 	flags.Var(&relations, "relation", "base relation to print (repeatable; default: all)")
 	if err := flags.Parse(args); err != nil {
@@ -130,7 +131,7 @@ func runFacts(ctx context.Context, args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	snapshot, err := newBackend().BuildSnapshot(ctx, absoluteWorkspace, absoluteWorkspace, backend.SnapshotOptions{Excludes: excludes, Files: scope})
+	snapshot, err := newBackend().BuildSnapshot(ctx, absoluteWorkspace, absoluteWorkspace, backend.SnapshotOptions{Excludes: excludes, Files: scope, SourceLinks: *sourceLinks})
 	if err != nil {
 		return err
 	}
@@ -166,6 +167,7 @@ func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 	var excludes stringList
 	flags.Var(&excludes, "exclude", "glob of workspace files to leave out of the snapshot (repeatable)")
 	files := flags.String("files", string(backend.FileScopeTsconfig), "files in the snapshot: tsconfig (files that tsc compiles) or walk (every walked file)")
+	sourceLinks := flags.String("source-links", "", "JSON source-entry associations, relative to --workspace-root")
 	var severities stringList
 	flags.Var(&severities, "severity", "rule severity as <rule-id>=error|warning|off (repeatable; default: error)")
 	rulesLock := flags.String("rules-lock", "", "rules lock file to enforce (see lintai lock); a changed, new or removed rule is a rule error with phase integrity")
@@ -223,6 +225,7 @@ func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 		RuleGlobs:     ruleGlobs,
 		Excludes:      excludes,
 		Files:         scope,
+		SourceLinks:   *sourceLinks,
 		Env:           env,
 		Severity:      diagnostics.SeverityError,
 		RuleSeverity:  ruleSeverity,

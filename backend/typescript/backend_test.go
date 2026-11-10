@@ -168,6 +168,117 @@ func TestSnapshotVersionUsesDelimitersBetweenPathsAndContents(t *testing.T) {
 	}
 }
 
+func TestSnapshotVersionTracksAssociationConfigAndMissingInputs(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "tsconfig.json", `{"compilerOptions":{"strict":true,"module":"preserve","moduleResolution":"bundler"},"include":["src/**/*.ts"]}`)
+	writeWorkspaceFile(t, root, "dist/index.d.ts", `export declare const load: number;`)
+	writeWorkspaceFile(t, root, "src/index.ts", `export const load = 1;`)
+	writeWorkspaceFile(t, root, "src/app.ts", `import { load } from "../dist"; export const result = load;`)
+	linksPath := writeWorkspaceFile(t, root, "source-links.json", `{"version":1,"entries":[{"checkedEntry":"dist/index.d.ts","sourceEntry":"src/index.ts"}]}`)
+	options := backend.SnapshotOptions{Files: backend.FileScopeTsconfig, SourceLinks: "source-links.json"}
+	build := func() *analysis.Snapshot {
+		t.Helper()
+		snapshot, err := New().buildAnalysisSnapshot(context.Background(), root, root, options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return snapshot
+	}
+	initial := build()
+	mapPath := filepath.Join(root, "dist/index.d.ts.map")
+	if !slices.Contains(initial.InputPaths, mapPath) {
+		t.Fatalf("missing declaration map path was not included in snapshot inputs: %v", initial.InputPaths)
+	}
+	if err := os.WriteFile(mapPath, []byte(`{"version":3,"file":"index.d.ts","sources":[],"mappings":""}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mapCreated := build()
+	if initial.Version == mapCreated.Version {
+		t.Fatal("creating a previously missing declaration map did not invalidate the snapshot")
+	}
+	missingSource := filepath.Join(root, "src/missing.ts")
+	if err := os.WriteFile(linksPath, []byte(`{"version":1,"entries":[{"checkedEntry":"dist/index.d.ts","sourceEntry":"src/missing.ts"}]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	missing := build()
+	if mapCreated.Version == missing.Version || !slices.Contains(missing.InputPaths, missingSource) {
+		t.Fatalf("source-links changes or missing source were not retained: version=%s inputs=%v", missing.Version, missing.InputPaths)
+	}
+	writeWorkspaceFile(t, root, "src/missing.ts", `export const load = 2;`)
+	createdSource := build()
+	if missing.Version == createdSource.Version {
+		t.Fatal("creating a previously missing source entry did not invalidate the snapshot")
+	}
+}
+
+func TestSourceLinksFactsKeepUnappliedEntriesVisible(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "tsconfig.json", `{"compilerOptions":{"strict":true,"module":"preserve","moduleResolution":"bundler"},"include":["src/**/*.ts"]}`)
+	writeWorkspaceFile(t, root, "dist/index.d.ts", `export declare const load: number;`)
+	writeWorkspaceFile(t, root, "src/source.ts", `export const load = 1;`)
+	writeWorkspaceFile(t, root, "src/app.ts", `import { load } from "../dist"; export const result = load;`)
+	writeWorkspaceFile(t, root, "source-links.json", `{"version":1,"entries":[
+		{"checkedEntry":"dist/index.d.ts","sourceEntry":"src/source.ts"},
+		{"checkedEntry":"unused/dist/index.d.ts","sourceEntry":"unused/src/index.ts"}
+	]}`)
+	snapshot, err := New().BuildSnapshot(context.Background(), root, root, backend.SnapshotOptions{Files: backend.FileScopeTsconfig, SourceLinks: "source-links.json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries := make(map[string]string)
+	statuses := make(map[string][]string)
+	attempts := make(map[string]int)
+	for _, fact := range snapshot.Facts {
+		switch fact.Relation {
+		case "source_entry":
+			entries[fact.Values[1].String] = fact.Values[0].String
+		case "source_entry_applied", "source_entry_unapplied", "source_entry_incomplete":
+			statuses[fact.Values[0].String] = append(statuses[fact.Values[0].String], fact.Relation)
+		case "source_binding_attempt":
+			attempts[fact.Values[1].String]++
+		}
+	}
+	applied, unapplied := entries["dist/index.d.ts"], entries["unused/dist/index.d.ts"]
+	if applied == "" || unapplied == "" {
+		t.Fatalf("configured entries were not published: %v", entries)
+	}
+	if !slices.Equal(statuses[applied], []string{"source_entry_applied"}) || attempts[applied] == 0 {
+		t.Fatalf("applied entry facts: statuses=%v attempts=%d", statuses[applied], attempts[applied])
+	}
+	if !slices.Equal(statuses[unapplied], []string{"source_entry_unapplied"}) || attempts[unapplied] != 0 {
+		t.Fatalf("unapplied entry facts: statuses=%v attempts=%d", statuses[unapplied], attempts[unapplied])
+	}
+}
+
+func TestSnapshotTracksMissingPackageDirectoryAndDeclaration(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "tsconfig.json", `{"compilerOptions":{"strict":true,"module":"preserve","moduleResolution":"bundler"},"include":["src/**/*.ts"]}`)
+	writeWorkspaceFile(t, root, "src/app.ts", `import { value } from "latepkg"; export const result = value;`)
+	options := backend.SnapshotOptions{Files: backend.FileScopeTsconfig}
+	build := func() *analysis.Snapshot {
+		t.Helper()
+		snapshot, err := New().buildAnalysisSnapshot(context.Background(), root, root, options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return snapshot
+	}
+	// Without node_modules, resolution probes no file under it.
+	if before := build(); !slices.Contains(before.InputPaths, filepath.Join(root, "node_modules")) {
+		t.Fatalf("missing node_modules directory was not retained as an input: %v", before.InputPaths)
+	}
+	writeWorkspaceFile(t, root, "node_modules/latepkg/package.json", `{"types":"index.d.ts"}`)
+	declarationPath := filepath.Join(root, "node_modules/latepkg/index.d.ts")
+	withoutDeclaration := build()
+	if !slices.Contains(withoutDeclaration.InputPaths, declarationPath) {
+		t.Fatalf("missing package declaration candidate was not retained as an input: %v", withoutDeclaration.InputPaths)
+	}
+	writeWorkspaceFile(t, root, "node_modules/latepkg/index.d.ts", `export declare const value: string;`)
+	if after := build(); withoutDeclaration.Version == after.Version {
+		t.Fatal("creating the resolved package declaration did not change the snapshot version")
+	}
+}
+
 func TestBuildSnapshotExposesExpandedMetadataAndCapabilities(t *testing.T) {
 	t.Parallel()
 

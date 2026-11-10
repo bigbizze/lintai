@@ -74,6 +74,7 @@ func TestServerInitializeAndFileDiagnostics(t *testing.T) {
 		AssetRoot:     "/assets",
 		WorkspaceRoot: "/workspace",
 		RuleGlobs:     []string{"lintai-rules/**/*.ts"},
+		SourceLinks:   "source-links.json",
 		Env:           map[string]any{"mode": "test"},
 	})
 	writeRequest(t, input, 2, "diagnostics/file", FileDiagnosticsParams{File: "/src/example.ts"})
@@ -112,6 +113,9 @@ func TestServerInitializeAndFileDiagnostics(t *testing.T) {
 	}
 	if analyzer.calls[0].AssetRoot != "/assets" {
 		t.Fatalf("expected asset root to be propagated, got %q", analyzer.calls[0].AssetRoot)
+	}
+	if analyzer.calls[0].SourceLinks != "source-links.json" {
+		t.Fatalf("expected source-links to be propagated, got %q", analyzer.calls[0].SourceLinks)
 	}
 }
 

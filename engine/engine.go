@@ -25,7 +25,9 @@ type Options struct {
 	RuleGlobs     []string
 	Excludes      []string
 	Files         backend.FileScope
-	Env           map[string]any
+	// SourceLinks is an optional workspace-relative source association file.
+	SourceLinks string
+	Env         map[string]any
 	// Severity is the severity of a violation of a rule that RuleSeverity
 	// does not name. The default is error.
 	Severity diagnostics.Severity
@@ -69,6 +71,7 @@ type Result struct {
 	Diagnostics     []diagnostics.Diagnostic
 	SnapshotVersion string
 	RulesLoaded     int
+	InputPaths      []string
 	// Warnings are messages for the user that are not diagnostics, for
 	// example that setup() ran without a sandbox.
 	Warnings []string
@@ -140,7 +143,7 @@ func (e *Engine) analyze(ctx context.Context, options Options) (Result, runInfo,
 		lock = &loaded
 		run.lock = lock
 	}
-	snapshot, err := e.backend.BuildSnapshot(ctx, options.RepoRoot, options.WorkspaceRoot, backend.SnapshotOptions{Excludes: options.Excludes, Files: options.Files})
+	snapshot, err := e.backend.BuildSnapshot(ctx, options.RepoRoot, options.WorkspaceRoot, backend.SnapshotOptions{Excludes: options.Excludes, Files: options.Files, SourceLinks: options.SourceLinks})
 	if err != nil {
 		return Result{}, run, err
 	}
@@ -166,6 +169,7 @@ func (e *Engine) analyze(ctx context.Context, options Options) (Result, runInfo,
 		Diagnostics:     allDiagnostics,
 		SnapshotVersion: snapshot.Version,
 		RulesLoaded:     len(rulePaths),
+		InputPaths:      append([]string(nil), snapshot.InputPaths...),
 	}
 	if sandboxWarning != "" {
 		result.Warnings = append(result.Warnings, sandboxWarning)

@@ -24,7 +24,11 @@ afterEach(() => {
 	resetClientsForTest();
 });
 
-function createInitializeResult(ruleID: string): ReturnType<typeof createFramedResponse> {
+function createInitializeResult(
+	ruleID: string,
+	inputPaths?: string[],
+	file = "src/example.ts",
+): ReturnType<typeof createFramedResponse> {
 	return createFramedResponse({
 		jsonrpc: "2.0",
 		id: 1,
@@ -32,13 +36,14 @@ function createInitializeResult(ruleID: string): ReturnType<typeof createFramedR
 			rulesLoaded: 1,
 			diagnosticCount: 1,
 			snapshotVersion: `snap-${ruleID}`,
+			...(inputPaths === undefined ? {} : { inputPaths }),
 			diagnostics: [
 				{
 					rule_id: ruleID,
 					assertion_id: "default",
 					message: ruleID,
 					source_location: {
-						file: "src/example.ts",
+						file,
 						startLine: 1,
 						startColumn: 1,
 						endLine: 1,
@@ -502,6 +507,82 @@ test("rule file changes invalidate cached diagnostics and the next pass refreshe
 	assert.equal(client.getDiagnostics("src/example.ts")[0]?.rule_id, "arch.new");
 	assert.match(warnings.join("\n"), /rule files changed; refreshing diagnostics on next lint pass/);
 	client.dispose();
+});
+
+test("creation of a missing semantic input invalidates diagnostics and refreshes the source links snapshot", async () => {
+	const workspaceRoot = mkdtempSync(path.join(os.tmpdir(), "lintai-missing-semantic-input-"));
+	const mapDirectory = path.join(workspaceRoot, "packages/contracts/dist");
+	mkdirSync(mapDirectory, { recursive: true });
+	const child = createTestProcess();
+	const chunks = [
+		createInitializeResult("arch.old", [
+			path.join(workspaceRoot, "src/app.ts"),
+			path.join(mapDirectory, "index.d.ts.map"),
+		], "src/app.ts"),
+		createFramedResponse({
+			jsonrpc: "2.0",
+			id: 2,
+			result: {
+				rulesLoaded: 1,
+				diagnosticCount: 1,
+				snapshotVersion: "snap-new",
+				diagnostics: [
+					{
+						rule_id: "arch.new",
+						assertion_id: "default",
+						message: "new",
+						source_location: { file: "src/app.ts", startLine: 2, startColumn: 1, endLine: 2, endColumn: 2 },
+					},
+				],
+			},
+		}),
+	];
+	const listeners = new Map<string, (filename?: string) => void>();
+	const recursive = new Map<string, boolean>();
+	const initializeWrites: Buffer[] = [];
+	child.stdin.on("data", (chunk) => initializeWrites.push(Buffer.from(chunk)));
+	const client = new LintAIClient(
+		resolveBridgeOptions(
+			{
+				mode: "serve",
+				binary: "/tmp/lintai",
+				repoRoot: workspaceRoot,
+				workspaceRoot,
+				rules: ["lintai-rules/**/*.ts"],
+				sourceLinks: "source-links.json",
+			},
+			"/repo",
+			editorHost,
+		),
+		createTestDependencies({
+			spawnServe: () => child,
+			readServeSync: () => {
+				const chunk = chunks.shift();
+				if (!chunk) throw new Error("no response queued");
+				return chunk;
+			},
+			watchPath: (target, listener, options) => {
+				listeners.set(target, listener);
+				recursive.set(target, options?.recursive ?? true);
+				return { close() {} };
+			},
+			log: () => undefined,
+		}),
+	);
+	assert.equal(client.getDiagnostics("src/app.ts")[0]?.rule_id, "arch.old");
+	try {
+		const inputWrite = Buffer.concat(initializeWrites).toString("utf8");
+		assert.ok(inputWrite.includes(`"sourceLinks":${JSON.stringify(path.join(workspaceRoot, "source-links.json"))}`));
+		const mapWatcher = listeners.get(mapDirectory);
+		assert.ok(mapWatcher, "the client watches the directory containing the missing map");
+		assert.equal(recursive.get(mapDirectory), false, "input watchers do not watch subtrees");
+		mapWatcher("index.d.ts.map");
+		await new Promise((resolve) => setTimeout(resolve, 250));
+		assert.equal(client.getDiagnostics("src/app.ts")[0]?.rule_id, "arch.new");
+	} finally {
+		client.dispose();
+		rmSync(workspaceRoot, { recursive: true, force: true });
+	}
 });
 
 test("client cache reuses the same instance for the same resolved options", () => {

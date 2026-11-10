@@ -10,21 +10,111 @@ type Module struct {
 }
 
 type Function struct {
-	EntityID       string
-	SemanticKey    string
-	Name           string
-	Kind           string
-	FilePath       string
-	ContainerName  string
-	ContainsAwait  bool
-	IsExported     bool
-	IsAsync        bool
-	ParameterCount int
-	ReturnType     string
+	EntityID              string
+	SemanticKey           string
+	Name                  string
+	Kind                  string
+	FilePath              string
+	ContainerName         string
+	ContainsAwait         bool
+	IsExported            bool
+	IsAsync               bool
+	ParameterCount        int
+	ReturnType            string
+	ParameterTypes        []string
+	SignatureObservations []FunctionSignatureObservation
+	SignatureConflict     bool
+	Range                 diagnostics.SourceLocation
+	BodyStart             int
+	BodyEnd               int
+}
+
+type FunctionSignatureObservation struct {
 	ParameterTypes []string
-	Range          diagnostics.SourceLocation
-	BodyStart      int
-	BodyEnd        int
+	ParameterMarks []string
+	ReturnType     string
+	Complete       bool
+}
+
+type Declaration struct {
+	ID               string
+	Name             string
+	Kind             string
+	OriginKind       string
+	Origin           string
+	Types            []DeclarationType
+	TypeObservations [][]DeclarationType
+	Function         string
+	Incomplete       []string
+	Range            diagnostics.SourceLocation
+}
+
+type DeclarationType struct {
+	Space string
+	Type  string
+}
+
+type Export struct {
+	ID         string
+	File       string
+	Name       string
+	Space      string
+	Targets    []string
+	Via        []string
+	Reexports  []ExportReexport
+	Incomplete []string
+	Range      *diagnostics.SourceLocation
+}
+
+type ExportReexport struct {
+	Site       string
+	Module     string
+	SourceName string
+	Space      string
+}
+
+type ModuleExportsIncomplete struct {
+	File   string
+	Reason string
+}
+
+type ExportSite struct {
+	ID    string
+	Range diagnostics.SourceLocation
+}
+
+type DeclarationSource struct {
+	CheckedDecl string
+	SourceDecl  string
+	Method      string
+}
+
+type DeclarationSourceOutcome struct {
+	CheckedDecl string
+	Outcome     string
+}
+
+type SourceEntry struct {
+	ID           string
+	CheckedEntry string
+	SourceEntry  string
+	Tsconfig     string
+	Applied      bool
+	Incomplete   []string
+}
+
+type SourceBinding struct {
+	ID                  string
+	Entry               string
+	CheckedFile         string
+	Name                string
+	Space               string
+	SourceFile          string
+	SourceName          string
+	Method              string
+	CheckedDeclarations []string
+	SourceDeclarations  []string
+	Incomplete          []string
 }
 
 type ImportedSymbol struct {
@@ -177,26 +267,37 @@ type GlobalRef struct {
 }
 
 type Snapshot struct {
-	Version         string
-	BackendID       string
-	WorkspaceRoot   string
-	Modules         []Module
-	Functions       []Function
-	ImportEdges     []ImportEdge
-	CallEdges       []CallEdge
-	ExternalCalls   []ExternalCall
-	CallsUnresolved []CallUnresolved
-	ImportsOpaque   []ImportOpaque
-	FnRefs          []FnRef
-	TypeRefs        []TypeRef
-	Accesses        []Access
-	AmbientSources  []AmbientSource
-	AmbientUses     []AmbientUse
-	GlobalRefs      []GlobalRef
-	Directives      []ModuleDirective
-	ParseErrors     []ParseError
-	Types           []TypeFact
-	Adjustments     []ConfigAdjustment
+	Version                     string
+	BackendID                   string
+	WorkspaceRoot               string
+	Modules                     []Module
+	Functions                   []Function
+	ImportEdges                 []ImportEdge
+	CallEdges                   []CallEdge
+	ExternalCalls               []ExternalCall
+	CallsUnresolved             []CallUnresolved
+	ImportsOpaque               []ImportOpaque
+	FnRefs                      []FnRef
+	TypeRefs                    []TypeRef
+	Accesses                    []Access
+	AmbientSources              []AmbientSource
+	AmbientUses                 []AmbientUse
+	GlobalRefs                  []GlobalRef
+	Directives                  []ModuleDirective
+	ParseErrors                 []ParseError
+	Types                       []TypeFact
+	Declarations                []Declaration
+	Exports                     []Export
+	ModuleExportsIncomplete     []ModuleExportsIncomplete
+	FnSignatureConflicts        []string
+	ExportSites                 []ExportSite
+	DeclarationSourceCandidates []DeclarationSource
+	DeclarationSources          []DeclarationSource
+	DeclarationSourceOutcomes   []DeclarationSourceOutcome
+	SourceEntries               []SourceEntry
+	SourceBindings              []SourceBinding
+	InputPaths                  []string
+	Adjustments                 []ConfigAdjustment
 }
 
 // TypeLiteral is the value of a literal type. Kind is string, number,

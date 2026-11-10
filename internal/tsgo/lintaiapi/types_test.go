@@ -224,7 +224,8 @@ export function unwrap<T>(x: Unwrap<T>): T extends string ? 1 : 2 { return 1 as 
 	}
 
 	// A type that makes a new type at each level stops at the depth limit.
-	if len(snap.Types) > 200 {
+	// Exported type aliases are roots, so the bound includes their types.
+	if len(snap.Types) > 300 {
 		t.Fatalf("expected a bounded fact set, got %d types", len(snap.Types))
 	}
 	if deep := x.param("deep", 0); deep.Name != "Deep" || deep.Kind != TypeKindObject {
@@ -271,10 +272,9 @@ export function unwrap<T>(x: Unwrap<T>): T extends string ? 1 : 2 { return 1 as 
 	}
 }
 
-// A type from packages/core/dist/*.d.ts and the same type from
-// packages/core/src/*.ts are one entity, as calls through dist/ resolve to
-// the source function.
-func TestTypeFactsMapDistDeclarationsToSource(t *testing.T) {
+// Generated declarations and source declarations retain distinct identities
+// and descriptive origins unless TypeScript itself redirects the program.
+func TestTypeFactsKeepGeneratedAndSourceDeclarationIdentity(t *testing.T) {
 	snap := buildTestSnapshot(t, map[string]string{
 		"packages/core/src/result.ts":    "export type Result = { ok: boolean };\n",
 		"packages/core/dist/result.d.ts": "export type Result = { ok: boolean };\n",
@@ -286,7 +286,8 @@ export function fromDist(x: Built): void {}
 	})
 	x := newTypeIndex(t, snap)
 	source := x.param("fromSource", 0)
-	if source.Origin != "packages/core/src/result.ts" || source.ID != x.fn("fromDist").ParameterTypes[0] {
+	dist := x.param("fromDist", 0)
+	if source.Origin != "packages/core/src/result.ts" || dist.Origin != "packages/core/dist/result.d.ts" || source.ID == dist.ID {
 		t.Fatalf("source %+v dist %+v", source, x.param("fromDist", 0))
 	}
 }
@@ -359,6 +360,55 @@ func TestTypeFactsConflictAcrossConfigGroups(t *testing.T) {
 	y := newTypeIndex(t, strictFirst)
 	if !reflect.DeepEqual(r, y.param("fa", 0)) {
 		t.Fatalf("the group order changed R:\n%+v\n%+v", r, y.param("fa", 0))
+	}
+}
+
+func TestFunctionSignatureConflictsKeepCompleteObservations(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		"shared/api.ts":        `export const parse = (value: string | undefined) => value;`,
+		"loose/tsconfig.json":  `{"compilerOptions":{"strict":false},"include":["**/*.ts","../shared/**/*.ts"]}`,
+		"loose/index.ts":       `export { parse } from "../shared/api";`,
+		"loose/use.ts":         `import { parse } from "../shared/api"; export const loose = parse("x");`,
+		"strict/tsconfig.json": `{"compilerOptions":{"strict":true},"include":["**/*.ts","../shared/**/*.ts"]}`,
+		"strict/index.ts":      `export { parse } from "../shared/api";`,
+		"strict/use.ts":        `import { parse } from "../shared/api"; export const strict = parse("x");`,
+		"tsconfig.json":        `{"files":[],"references":[{"path":"./loose"},{"path":"./strict"}]}`,
+	}
+	snapshot, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{WorkspaceRoot: root, Files: writeWorkspace(t, root, files)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parse *Function
+	for index := range snapshot.Functions {
+		if snapshot.Functions[index].FilePath == "shared/api.ts" && snapshot.Functions[index].Name == "parse" {
+			parse = &snapshot.Functions[index]
+			break
+		}
+	}
+	if parse == nil || !parse.SignatureConflict || len(parse.SignatureObservations) != 2 {
+		t.Fatalf("expected two conflicting complete signatures, got %+v", parse)
+	}
+	for _, observation := range parse.SignatureObservations {
+		if !observation.Complete || len(observation.ParameterTypes) != 1 || observation.ReturnType == "" {
+			t.Fatalf("incomplete signature observation: %+v", observation)
+		}
+	}
+	if len(parse.ParameterTypes) != 0 || parse.ReturnType != "" {
+		t.Fatalf("a conflicting signature exposed a coherent first observation: %+v", parse)
+	}
+	if !slices.Contains(snapshot.FnSignatureConflicts, parse.SemanticKey) {
+		t.Fatalf("missing fn_signature_conflict outcome for %s: %v", parse.SemanticKey, snapshot.FnSignatureConflicts)
+	}
+	var declaration *DeclarationFact
+	for index := range snapshot.Declarations {
+		if snapshot.Declarations[index].Name == "parse" && snapshot.Declarations[index].Kind == "variable" {
+			declaration = &snapshot.Declarations[index]
+			break
+		}
+	}
+	if declaration == nil || !slices.Contains(declaration.Incomplete, AssociationConflict) || len(declaration.TypeObservations) != 2 {
+		t.Fatalf("expected the exported declaration type conflict, got %+v", declaration)
 	}
 }
 

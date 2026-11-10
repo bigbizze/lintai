@@ -1,9 +1,10 @@
 # PR3 semantic source association contract
 
-Status: finalized preflight contract; implementation pending. This file settles
-PR3 schema and behavior for the authorized implementation. It does not implement
-PR3 and does not specify PR4 or PR5. It supersedes provisional PR3 schema choices
-in `pr3-pr4.md` and `pr3-pr4-preparation.md` where those choices were left open.
+Status: implemented in PR3. This file settles the PR3 schema and behavior and
+records the clarifications made during implementation (sections 5, 6, 7 and 9).
+It does not specify PR4 or PR5. It supersedes provisional PR3 schema choices in
+`pr3-pr4.md` and `pr3-pr4-preparation.md` where those choices were left open.
+Section 11 lists the production tests that replaced the preflight probes.
 
 ## 1. Boundary and two-stage source model
 
@@ -231,7 +232,7 @@ Map outcome values are:
 | `/unavailable_source` | The map names a source that cannot be read/parsed. |
 | `/unsupported` | Unsupported map form, including non-null `sourcesContent`, or unsupported source declaration syntax. |
 | `/unresolved` | No usable anchor or no compatible declaration contains the mapped point. |
-| `/ambiguous` | More than one compatible source declaration remains for the checked declaration. |
+| `/ambiguous` | More than one distinct source segment starts at the generated anchor, or more than one compatible source declaration remains for the checked declaration. |
 | `/conflict` | Complete observations for the same declaration disagree. |
 
 Map outcomes do not become `declaration_incomplete`: the checked declaration/type
@@ -239,6 +240,12 @@ is known; only optional source association failed. When an ordinary extraction h
 no map and no matching source-entry request, emit no map-outcome fact. When
 `source-links` requests recovery for a checked declaration, a missing map is
 reported as `/missing_map` before the configured binding fallback.
+
+A binding whose checker symbol has no declarations has an unresolved target: its
+checked or source set is incomplete with `/unresolved`. A declaration whose syntax
+is not one of the declaration kinds in section 3 is kept as an endpoint and makes
+the set `/unsupported`. Only an observed source set is compared with precise map
+links; an attempt that observed no source set cannot be a map `/conflict`.
 
 For an unavailable or unmatched configured source, use
 `source_entry_incomplete(Entry, /unresolved)` and
@@ -285,9 +292,17 @@ does not expose an exact-anchor proof. Validate outside generated compiler code:
    multiple candidate IDs and emit `/ambiguous`; reject an unrelated nearby node
    and ambiguous same-name overloads.
 
-The preflight probe records mapper behavior only; it does not perform declaration
-matching or validation. It confirms that a query before the generated mapping can
-still return the nearby source point. The implementation must explicitly reject
+Identical repeated segments are one segment. Distinct segments at the anchor are
+`/ambiguous` even when every one of them falls inside the same source declaration:
+the mapper returns only one of them, so only one can pass the round-trip check,
+and the map gives no single anchor. The vendored generator emits such segments
+when a later mapping at the same generated position moves backward in the source.
+Candidates are kept for each segment whose source was read and whose declaration
+is compatible. A failure to read or parse a named source is reported for the
+first segment in map order that fails, before the ambiguity check.
+
+A query before the generated mapping can still return the nearby source point, so
+the exact-segment check above is required. The implementation explicitly rejects
 ambiguous compatible anchors and overloads. Non-null `sourcesContent` is
 `/unsupported` in v1 because the vendored mapper returns nil for it. Add a narrow
 adapter outside generated internals only if an adopting repository requires
@@ -354,10 +369,17 @@ Rules for loading and applying entries:
   records incomplete outcomes.
 - Resolve source exports through the applicable TypeScript checker. Match the
   public name and `/type` or `/value` space. Do not equate declarations by name.
-- If `sourceEntry` is not in the consumer's checked program, inspect it in an
-  auxiliary program using existing compiler construction, its selected tsconfig
-  and normal resolution. Never insert it into the consumer program. Reuse one
-  auxiliary program within a run only when its effective config and inputs agree.
+- If `sourceEntry` is in the consumer's checked program, resolve its exports with
+  that program's checker; `sourceTsconfig` then has no effect for that program.
+  If it is not, inspect it in an auxiliary program using existing compiler
+  construction, its selected tsconfig and normal resolution. Never insert it into
+  the consumer program. Reuse one auxiliary program within a run only when its
+  effective config and inputs agree; the implementation keys reuse by the
+  selected config path.
+- If the nearest config does not include the source entry and no referenced
+  config owns it, that readable config cannot compile the source: record
+  `/unsupported`. The same applies to an explicit `sourceTsconfig` that does not
+  include the source entry.
 - Publish only declaration endpoint metadata and the two binding membership sets
   needed for association. Do not merge auxiliary modules, functions, full type
   facts or type roots. A source association is not a type-retention edge.
@@ -440,6 +462,18 @@ Hash canonical input path, presence/absence and content into snapshot versioning
 Include the absolute normalized `sourceLinks` option in effective client identity.
 Track missing map/source/config candidates so creation invalidates the snapshot;
 watch the missing path and, when necessary, its nearest existing parent directory.
+
+Missing resolution inputs include directories. When module resolution finds no
+directory, such as `node_modules` or a package directory, it probes no file under
+it, so the absent directory itself is the input. Probes are tracked inside the
+workspace root and under any `node_modules` path. Files read by an auxiliary
+program are inputs of the snapshot. The client watches the nearest existing
+directory of each input without its subtree: creating a missing input first
+creates a direct child of that directory, and a later analysis reports the new
+inputs to watch. A recursive watch would cover whole trees, such as the
+filesystem root for a package.json probe above the workspace. Only `serve` mode
+receives input paths; a one-shot client refreshes only when the source-links
+file changes.
 Existing program inputs and tsconfig dependencies remain tracked. Do not persist
 auxiliary programs across runs. Source/build freshness and rules-lock verification
 remain separate.
@@ -480,46 +514,44 @@ and an OS time/RSS tool. Measure checked programs and auxiliary programs
 separately; verify identical auxiliary inputs reuse one program per run. Do not
 run arbitrary package builds or add a persistent auxiliary cache.
 
-## 11. Preflight probes and evidence
+## 11. Production coverage and compatibility
 
-No repository `AGENTS.md` was found under the worktree's parent. The worktree
-already contained an untracked root `node_modules` symlink; leave it untouched and
-unstaged.
+The two preflight readiness probes (`pr3_project_reference_probe_test.go` and
+`pr3_declaration_map_probe_test.go`) are removed. Production tests now cover the
+same behavior through `BuildSnapshot`:
 
-Two small vendored compiler API readiness probes were added for this preflight.
-They document compiler behavior, not production source-association behavior;
-production-path coverage must replace these readiness probes when the PR3
-implementation exists.
+- `TestProjectReferenceRedirectControlsTheCheckedDeclaration`: redirect enabled
+  and disabled, with no built output.
+- `TestDeclarationMapCreatesOnlyAnExactValidatedLink`,
+  `TestDeclarationMapRejectsNearbyUnrelatedAndAmbiguousAnchors` and
+  `TestDeclarationMapReportsMalformedUnavailableAndEmbeddedSource`: relative
+  source paths, exact and nearby anchors, unrelated declarations, two segments at
+  one anchor, nested compatible declarations, malformed maps, unavailable source
+  and non-null `sourcesContent`.
+- `TestSourceEntry*`, `TestUnavailableSourceEntryIsReportedAsUnresolved`,
+  `TestSourceTsconfigThatDoesNotOwnTheEntryIsUnsupported`,
+  `TestMapLinkOutsideConfiguredSourceSetMarksBindingConflict` and
+  `TestSourceLinksRejectInvalidConfiguration`: configured bindings, membership
+  sets, failure reasons, map/binding conflict and configuration errors.
+- `backend/typescript`: `TestSourceLinksFactsKeepUnappliedEntriesVisible`,
+  `TestSnapshotVersionTracksAssociationConfigAndMissingInputs` and
+  `TestSnapshotTracksMissingPackageDirectoryAndDeclaration`.
+- CLI, server and client option and error propagation, client input watching, and
+  the export/type acceptance policy in `engine`.
 
-- `internal/tsgo/lintaiapi/pr3_project_reference_probe_test.go` constructs a
-  referenced-project program from a source-only fixture with no built output. With
-  `UseSourceOfProjectReference=true`, the program contains
-  `contracts/src/index.ts`; with
-  `disableSourceOfProjectReferenceRedirect=true`, it does not. In both cases the
-  generated declaration is absent from the actual compiler program. The fixture
-  has no pre-construction filesystem check.
-- `internal/tsgo/lintaiapi/pr3_declaration_map_probe_test.go` uses the vendored
-  map generator/mapper in `TestDeclarationMapMapperBehaviorProbe`. It checks
-  relative `sources` path resolution, exact and nearby source anchors, an
-  unavailable source, and the non-null `sourcesContent` limitation. Source-map
-  line and UTF-16 column coordinates are computed from each byte anchor; these
-  mapper cases need no non-ASCII boundary fixture. It contains no test-only
-  declaration validator and makes no claim about production association
-  validation, which must reject unrelated and ambiguous compatible anchors.
+Compatibility notes:
 
-Command:
-
-```sh
-go test ./internal/tsgo/lintaiapi -run 'Test(DeclarationMapMapperBehavior|ProjectReferenceSourceRedirect)Probe' -count=1 -v
-```
-
-Result after the audit reductions: the mapper behavior probe and both
-project-reference subtests (`enabled`, `disabled`) passed; Go reported package
-time `0.289s`. `git diff --check` returned 0. Because the probe and spec files
-are untracked, `git diff --no-index --check /dev/null <file>` was also run for
-each of the three added files; each emitted no warnings (exit 1 is the normal
-different-files status). No full PR3 or PR4 test suite was run because this is a
-bounded preflight.
+- Type IDs change for package declarations, type parameters, unique symbols and
+  generated declarations, because declaration identity replaces `dist/` to `src/`
+  substitution. Rules that stored type IDs must not compare them across versions.
+- Snapshots carry the new declaration, export and association relations. Golden
+  fact files change accordingly.
+- `fn_param` and `fn_returns` are the union of complete observations across
+  programs. Combine them only with `not fn_signature_conflict(Fn)`.
+- `facts.Snapshot.InputPaths`, `engine.Result.InputPaths` and the server's
+  `inputPaths` list association inputs, including absent files and directories.
+- Without `--source-links` and without declaration maps on disk, no association
+  relation has rows.
 
 ## 12. Implementation sequence
 
