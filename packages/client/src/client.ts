@@ -265,6 +265,7 @@ export class LintAIClient {
 	private inputWatchGeneration = 0;
 	private inputSignatures = new Map<string, string>();
 	private inputCheckReset: ReturnType<typeof setImmediate> | undefined;
+	private inputRetryReset: ReturnType<typeof setImmediate> | undefined;
 	private ruleInvalidationTimer: ReturnType<typeof setTimeout> | undefined;
 	private inputInvalidationTimer: ReturnType<typeof setTimeout> | undefined;
 	private pendingRuleInvalidation = false;
@@ -348,12 +349,13 @@ export class LintAIClient {
 		}
 		const targetEpoch = this.analysisEpoch;
 		const startedAt = this.dependencies.now();
+		const inputsBefore = this.captureInputSignatures();
 		this.refreshInFlight = this.sendRequest<InitializeResult>("reanalyze", {})
 			.then((result) => {
 				if (this.isOutdated(targetEpoch, startedAt)) {
 					return;
 				}
-				this.setDiagnostics(result.diagnostics, startedAt, result.inputPaths);
+				this.setDiagnostics(result.diagnostics, startedAt, inputsBefore, result.inputPaths);
 			})
 			.catch((error) => {
 				if (this.isOutdated(targetEpoch, startedAt)) {
@@ -387,6 +389,10 @@ export class LintAIClient {
 		if (this.inputCheckReset) {
 			clearImmediate(this.inputCheckReset);
 			this.inputCheckReset = undefined;
+		}
+		if (this.inputRetryReset) {
+			clearImmediate(this.inputRetryReset);
+			this.inputRetryReset = undefined;
 		}
 		for (const watcher of this.ruleWatchers) {
 			watcher.close();
@@ -453,6 +459,7 @@ export class LintAIClient {
 				finishInitialization = resolve;
 			});
 			const startedAt = this.dependencies.now();
+			const inputsBefore = this.captureInputSignatures();
 			const resultValue = this.requestSync<InitializeResult>("initialize", {
 				repoRoot: this.options.repoRoot,
 				assetRoot: this.options.assetRoot,
@@ -473,9 +480,11 @@ export class LintAIClient {
 				...(this.options.setupSandbox === undefined ? {} : { setupSandbox: this.options.setupSandbox }),
 			});
 			this.attachStdoutListener();
-			this.setDiagnostics(resultValue.diagnostics, startedAt, resultValue.inputPaths);
+			const current = this.setDiagnostics(
+				resultValue.diagnostics, startedAt, inputsBefore, resultValue.inputPaths,
+			);
 			if (this.state === "starting") {
-				this.state = this.pendingRuleInvalidation ? "invalidated" : "ready";
+				this.state = !current || this.pendingRuleInvalidation ? "invalidated" : "ready";
 			}
 			finishInitialization();
 		} catch (error) {
@@ -648,7 +657,7 @@ export class LintAIClient {
 	}
 
 	private refreshInvalidatedDiagnosticsSync(): void {
-		if (this.state !== "invalidated") {
+		if (this.state !== "invalidated" || this.inputRetryReset) {
 			return;
 		}
 		const targetEpoch = this.analysisEpoch;
@@ -657,13 +666,16 @@ export class LintAIClient {
 			return;
 		}
 		const startedAt = this.dependencies.now();
+		const inputsBefore = this.captureInputSignatures();
 		try {
 			const result = this.requestSync<InitializeResult>("reanalyze", { reason: "rule_changed" });
 			if (targetEpoch !== this.analysisEpoch || this.state !== "invalidated") {
 				return;
 			}
-			this.setDiagnostics(result.diagnostics, startedAt, result.inputPaths);
-			if (this.state === "invalidated") {
+			const current = this.setDiagnostics(result.diagnostics, startedAt, inputsBefore, result.inputPaths);
+			if (!current) {
+				this.deferInputRetry();
+			} else if (this.state === "invalidated") {
 				this.state = "ready";
 			}
 		} catch (error) {
@@ -708,13 +720,16 @@ export class LintAIClient {
 	private reanalyzeSync(): void {
 		const targetEpoch = this.analysisEpoch;
 		const startedAt = this.dependencies.now();
+		const inputsBefore = this.captureInputSignatures();
 		this.lastDiagnosticsRequestAt = startedAt;
 		try {
 			const result = this.requestSync<InitializeResult>("reanalyze", { reason: "file_saved" });
 			if (targetEpoch !== this.analysisEpoch || this.state !== "ready") {
 				return;
 			}
-			this.setDiagnostics(result.diagnostics, startedAt, result.inputPaths);
+			if (!this.setDiagnostics(result.diagnostics, startedAt, inputsBefore, result.inputPaths)) {
+				this.deferInputRetry();
+			}
 		} catch (error) {
 			if (targetEpoch !== this.analysisEpoch || this.state !== "ready") {
 				return;
@@ -805,7 +820,12 @@ export class LintAIClient {
 		this.state = "fallback";
 	}
 
-	private setDiagnostics(diagnostics: Diagnostic[], analyzedAt: number, inputPaths?: string[]): void {
+	private setDiagnostics(
+		diagnostics: Diagnostic[],
+		analyzedAt: number,
+		inputsBefore: Map<string, string>,
+		inputPaths?: string[],
+	): boolean {
 		const indexed = indexDiagnostics(diagnostics);
 		this.diagnosticsAnalyzedAt = analyzedAt;
 		this.diagnosticsByFile = indexed.byFile;
@@ -813,10 +833,30 @@ export class LintAIClient {
 		this.analysisFailure = undefined;
 		this.updateInputWatchers(inputPaths ?? []);
 		this.recordInputSignatures();
+		for (const [input, signature] of this.inputSignatures) {
+			if (inputsBefore.get(input) !== signature) {
+				this.invalidateDiagnostics();
+				this.analysisFailure = "workspace inputs changed during analysis; retrying on the next lint pass";
+				return false;
+			}
+		}
+		return true;
 	}
 
 	private recordInputSignatures(): void {
-		this.inputSignatures = new Map(this.inputPaths.map((input) => [input, inputSignature(input)]));
+		this.inputSignatures = this.captureInputSignatures();
+	}
+
+	private captureInputSignatures(): Map<string, string> {
+		return new Map(this.inputPaths.map((input) => [input, inputSignature(input)]));
+	}
+
+	private deferInputRetry(): void {
+		if (this.inputRetryReset) return;
+		this.inputRetryReset = setImmediate(() => {
+			this.inputRetryReset = undefined;
+		});
+		this.inputRetryReset.unref();
 	}
 
 	// inputsChangedSinceCached compares the inputs of the cached diagnostics with
@@ -883,10 +923,13 @@ export class LintAIClient {
 			}
 		}
 		for (const [target, spec] of specs) {
+			const coversCurrentInput = (directory: string) =>
+				this.inputPaths.some((input) => isSameOrAncestor(directory, input));
 			const directoryChanged = (changed?: string) =>
-				!sameDirectory(spec.identity, directoryIdentity(target)) ||
+				(coversCurrentInput(target) && !sameDirectory(spec.identity, directoryIdentity(target))) ||
 				[...spec.children].some(([child, identity]) =>
-					(!changed || changed === child) && !sameDirectory(identity, directoryIdentity(child)),
+					(!changed || changed === child) && coversCurrentInput(child) &&
+					!sameDirectory(identity, directoryIdentity(child)),
 				);
 			const onError = (error: unknown) => {
 				if (this.state === "disposed" || generation !== this.inputWatchGeneration) return;
@@ -903,11 +946,13 @@ export class LintAIClient {
 				const watcher = this.dependencies.watchInputPath(
 					target,
 					(filename) => {
-						if (this.state === "disposed" || generation !== this.inputWatchGeneration) return;
+						if (this.state === "disposed") return;
 						const changed = filename && path.resolve(target, filename);
 						if (
 							directoryChanged(changed) ||
-							spec.inputs.some((input) => !changed || isSameOrAncestor(changed, input))
+							spec.inputs.some((input) =>
+								this.inputPaths.includes(input) && (!changed || isSameOrAncestor(changed, input)),
+							)
 						) {
 							this.scheduleInputInvalidation();
 						}
@@ -1331,7 +1376,7 @@ function directoryIdentity(directory: string): DirectoryIdentity | undefined {
 function inputSignature(file: string): string {
 	try {
 		const stats = statSync(file, { bigint: true, throwIfNoEntry: false });
-		return stats ? `${stats.dev}:${stats.ino}:${stats.mtimeNs}:${stats.size}` : "missing";
+		return stats ? `${stats.dev}:${stats.ino}:${stats.mtimeNs}:${stats.ctimeNs}:${stats.size}` : "missing";
 	} catch (error) {
 		return `error:${asError(error).message}`;
 	}
