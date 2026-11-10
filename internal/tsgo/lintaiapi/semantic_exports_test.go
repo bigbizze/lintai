@@ -2,6 +2,8 @@ package lintaiapi
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -151,11 +153,8 @@ func TestDeclarationTypeObservationsCompareOnlyObservedSpaces(t *testing.T) {
 		t.Fatalf("re-exports did not resolve to the same class: type=%+v value=%+v", typeOnly, both)
 	}
 	declaration := semanticDeclaration(t, snapshot, typeOnly.Targets[0])
-	if len(declaration.TypeObservations) != 2 ||
-		!slices.ContainsFunc(declaration.TypeObservations, func(observation []DeclarationType) bool {
-			return len(observation) == 1 && observation[0].Space == SpaceType
-		}) ||
-		!slices.ContainsFunc(declaration.TypeObservations, func(observation []DeclarationType) bool { return len(observation) == 2 }) ||
+	if !slices.ContainsFunc(declaration.Types, func(item DeclarationType) bool { return item.Space == SpaceType }) ||
+		!slices.ContainsFunc(declaration.Types, func(item DeclarationType) bool { return item.Space == SpaceValue }) ||
 		slices.Contains(declaration.Incomplete, AssociationConflict) {
 		t.Fatalf("matching type-space observations conflicted with an extra value-space observation: %+v", declaration)
 	}
@@ -394,5 +393,287 @@ func TestOnlyRetainedModulesRootExportsAndTypes(t *testing.T) {
 	}
 	if !slices.ContainsFunc(snapshot.Types, func(item TypeFact) bool { return item.Name == "Secret" }) {
 		t.Fatal("the retained public type lost its imported endpoint")
+	}
+}
+
+func TestExportedDestructuringRetainsBindingsAndStatementSites(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspace(t, root, map[string]string{
+		"tsconfig.json":      `{"compilerOptions":{"strict":true,"module":"preserve","moduleResolution":"bundler"},"include":["src/**/*.ts"]}`,
+		"checked/index.d.ts": `export declare const foo: number, nested: string, inner: boolean, first: number, rest: number[];`,
+		"src/index.ts": `export const { foo, child: { nested }, tuple: [inner] } = { foo: 1, child: { nested: "x" }, tuple: [true] };
+export const [first, , ...rest] = [1, 2, 3];`,
+		"src/app.ts":        `import { foo } from "../checked"; export const use = foo;`,
+		"source-links.json": `{"version":1,"entries":[{"checkedEntry":"checked/index.d.ts","sourceEntry":"src/index.ts"}]}`,
+	})
+	snapshot, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{WorkspaceRoot: root,
+		Files: []string{filepath.Join(root, "src/index.ts"), filepath.Join(root, "src/app.ts")}, SourceLinks: "source-links.json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var objectSite, arraySite string
+	for _, name := range []string{"foo", "nested", "inner", "first", "rest"} {
+		item := semanticExport(t, snapshot, "src/index.ts", name, SpaceValue)
+		if len(item.Targets) != 1 || len(item.Incomplete) != 0 || len(item.Via) != 1 {
+			t.Fatalf("%s lost its binding or statement site: %+v", name, item)
+		}
+		declaration := semanticDeclaration(t, snapshot, item.Targets[0])
+		if declaration.Kind != "variable" || len(declaration.Types) != 1 || declaration.Types[0].Space != SpaceValue {
+			t.Fatalf("%s lost its declared value type: %+v", name, declaration)
+		}
+		site := &objectSite
+		if name == "first" || name == "rest" {
+			site = &arraySite
+		}
+		if *site != "" && *site != item.Via[0] {
+			t.Fatalf("%s was not attributed to its containing statement: %+v", name, item)
+		}
+		*site = item.Via[0]
+		if !slices.ContainsFunc(snapshot.SourceBindings, func(binding SourceBindingFact) bool {
+			return binding.Name == name && binding.Method == "source_entry" && len(binding.CheckedDeclarations) == 1 &&
+				slices.Equal(binding.SourceDeclarations, item.Targets) && len(binding.Incomplete) == 0
+		}) {
+			t.Fatalf("%s did not match the checked and source binding: %+v", name, snapshot.SourceBindings)
+		}
+	}
+	if objectSite == arraySite {
+		t.Fatal("two export statements shared one syntax site")
+	}
+}
+
+func TestArbitraryExportNamesRemainDistinctFromStarSyntax(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspace(t, root, map[string]string{
+		"tsconfig.json":      `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler"},"include":["src/**/*.ts"]}`,
+		"checked/index.d.ts": `declare const v: number; export { v as "", v as "*", v as "\u0000" };`,
+		"src/base.ts":        `const v = 1; export { v as "", v as "*", v as "\u0000" };`,
+		"src/other.ts":       `const other = 2; export { other as "*" }; export const ordinary = 3;`,
+		"src/index.ts":       `export { "" as "", "*" as "*", "\u0000" as "\u0000" } from "./base"; export * from "./other";`,
+		"src/through.ts":     `export * from "./base";`,
+		"src/app.ts":         `import { "" as empty, "*" as star, "\u0000" as nul } from "../checked"; export const use = empty + star + nul;`,
+		"source-links.json":  `{"version":1,"entries":[{"checkedEntry":"checked/index.d.ts","sourceEntry":"src/base.ts"}]}`,
+	})
+	snapshot, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{WorkspaceRoot: root,
+		Files: []string{filepath.Join(root, "src/index.ts"), filepath.Join(root, "src/base.ts"), filepath.Join(root, "src/through.ts"), filepath.Join(root, "src/app.ts")}, SourceLinks: "source-links.json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"", "*", "\x00"} {
+		base := semanticExport(t, snapshot, "src/base.ts", name, SpaceValue)
+		item := semanticExport(t, snapshot, "src/index.ts", name, SpaceValue)
+		if len(base.Targets) != 1 || !slices.Equal(item.Targets, base.Targets) || len(item.Incomplete) != 0 ||
+			len(item.Reexports) != 1 || item.Reexports[0].Module != "src/base.ts" || item.Reexports[0].SourceName != name {
+			t.Fatalf("literal name %q collided with a star contribution: %+v, base=%+v", name, item, base)
+		}
+		through := semanticExport(t, snapshot, "src/through.ts", name, SpaceValue)
+		if !slices.Equal(through.Targets, base.Targets) || len(through.Incomplete) != 0 || len(through.Reexports) != 1 || through.Reexports[0].Module != "src/base.ts" {
+			t.Fatalf("star export lost literal name %q: %+v", name, through)
+		}
+		if !slices.ContainsFunc(snapshot.SourceBindings, func(binding SourceBindingFact) bool {
+			return binding.Name == name && binding.Method == "source_entry" && slices.Equal(binding.SourceDeclarations, base.Targets) && len(binding.Incomplete) == 0
+		}) {
+			t.Fatalf("literal name %q was not matched by source association: %+v", name, snapshot.SourceBindings)
+		}
+	}
+	ordinary := semanticExport(t, snapshot, "src/index.ts", "ordinary", SpaceValue)
+	if len(ordinary.Reexports) != 1 || ordinary.Reexports[0].Module != "src/other.ts" || ordinary.Reexports[0].SourceName != "*" {
+		t.Fatalf("star contribution lost its provenance: %+v", ordinary)
+	}
+}
+
+func TestCommonJSStaticBindingsAndDynamicInventory(t *testing.T) {
+	snapshot := buildTestSnapshot(t, map[string]string{
+		"tsconfig.json":  `{"compilerOptions":{"allowJs":true,"checkJs":true,"module":"commonjs"},"include":["src/**/*"]}`,
+		"src/index.js":   `exports.answer = 42; const key = Math.random() ? "first" : "second"; exports[key] = 7;`,
+		"src/dynamic.js": `const key = Math.random() ? "first" : "second"; exports[key] = 7; Object.assign(exports, { extra: 1 });`,
+		"src/barrel.ts":  `export * from "./dynamic";`,
+	})
+	answer := semanticExport(t, snapshot, "src/index.js", "answer", SpaceValue)
+	if len(answer.Targets) != 1 || len(answer.Via) != 1 || len(answer.Incomplete) != 0 {
+		t.Fatalf("checker-visible static CommonJS binding lost its declaration: %+v", answer)
+	}
+	declaration := semanticDeclaration(t, snapshot, answer.Targets[0])
+	if declaration.Kind != "property" || len(declaration.Types) != 1 || declaration.Types[0].Space != SpaceValue {
+		t.Fatalf("static CommonJS assignment lost its declared value type: %+v", declaration)
+	}
+	for _, file := range []string{"src/index.js", "src/dynamic.js", "src/barrel.ts"} {
+		if !slices.ContainsFunc(snapshot.ModuleExportsIncomplete, func(item ModuleExportsIncompleteFact) bool {
+			return item.File == file && item.Reason == AssociationUnsupported
+		}) {
+			t.Fatalf("dynamic CommonJS inventory for %s was reported as complete: %+v", file, snapshot.ModuleExportsIncomplete)
+		}
+	}
+	for _, name := range []string{"first", "second"} {
+		if _, found := findSemanticExport(snapshot, "src/index.js", name, SpaceValue); found {
+			t.Fatalf("dynamic write invented the binding %q", name)
+		}
+	}
+}
+
+func TestSourceAssociationKeepsStaticCommonJSBinding(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspace(t, root, map[string]string{
+		"tsconfig.json":     `{"compilerOptions":{"allowJs":true,"checkJs":true,"module":"commonjs"},"include":["src/**/*.js"]}`,
+		"checked/index.js":  `exports.answer = 42;`,
+		"src/index.js":      `exports.answer = 43;`,
+		"src/app.js":        `const checked = require("../checked"); exports.use = checked.answer;`,
+		"source-links.json": `{"version":1,"entries":[{"checkedEntry":"checked/index.js","sourceEntry":"src/index.js"}]}`,
+	})
+	snapshot, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{WorkspaceRoot: root,
+		Files: []string{filepath.Join(root, "src/app.js"), filepath.Join(root, "src/index.js")}, SourceLinks: "source-links.json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	public := semanticExport(t, snapshot, "src/index.js", "answer", SpaceValue)
+	if len(snapshot.SourceBindings) != 1 {
+		t.Fatalf("static CommonJS association lost its binding: %+v", snapshot.SourceBindings)
+	}
+	binding := snapshot.SourceBindings[0]
+	if binding.Name != "answer" || binding.Method != "source_entry" || len(binding.CheckedDeclarations) != 1 ||
+		!slices.Equal(binding.SourceDeclarations, public.Targets) || len(binding.Incomplete) != 0 {
+		t.Fatalf("static CommonJS association lost checked/source evidence: %+v", binding)
+	}
+	if len(snapshot.SourceEntries) != 1 || !slices.Contains(snapshot.SourceEntries[0].Incomplete, AssociationUnsupported) {
+		t.Fatalf("CommonJS source inventory was reported as complete: %+v", snapshot.SourceEntries)
+	}
+}
+
+func TestTypeOnlyValueBindingsKeepTheirValueDeclarations(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspace(t, root, map[string]string{
+		"tsconfig.json":      `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler"},"include":["src/**/*.ts"]}`,
+		"checked/base.d.ts":  `export declare const count: number; export declare function parse(value: string): number;`,
+		"checked/index.d.ts": `export type { count, parse } from "./base";`,
+		"src/base.ts":        `export const count = 1; export function parse(value: string): number { return value.length; }`,
+		"src/index.ts":       `export type { count, parse } from "./base";`,
+		"src/top.ts":         `export * from "./index";`,
+		"src/app.ts":         `import type { count, parse } from "../checked"; export type Values = [typeof count, typeof parse];`,
+		"source-links.json":  `{"version":1,"entries":[{"checkedEntry":"checked/index.d.ts","sourceEntry":"src/index.ts"}]}`,
+	})
+	snapshot, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{WorkspaceRoot: root,
+		Files: []string{filepath.Join(root, "src/app.ts"), filepath.Join(root, "src/index.ts"), filepath.Join(root, "src/top.ts")}, SourceLinks: "source-links.json"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"count", "parse"} {
+		item := semanticExport(t, snapshot, "src/index.ts", name, SpaceType)
+		top := semanticExport(t, snapshot, "src/top.ts", name, SpaceType)
+		if len(item.Targets) != 1 || len(item.Incomplete) != 0 || !slices.Equal(top.Targets, item.Targets) || len(top.Incomplete) != 0 {
+			t.Fatalf("type-only %s lost its resolved declaration: item=%+v top=%+v", name, item, top)
+		}
+		declaration := semanticDeclaration(t, snapshot, item.Targets[0])
+		if len(declaration.Types) != 1 || declaration.Types[0].Space != SpaceValue {
+			t.Fatalf("type-only %s changed the declaration's actual space: %+v", name, declaration)
+		}
+		if _, found := findSemanticExport(snapshot, "src/index.ts", name, SpaceValue); found {
+			t.Fatalf("type-only %s became a value-accessible export", name)
+		}
+		if !slices.ContainsFunc(snapshot.SourceBindings, func(binding SourceBindingFact) bool {
+			return binding.Name == name && binding.Space == SpaceType && binding.Method == "source_entry" &&
+				len(binding.CheckedDeclarations) == 1 && slices.Equal(binding.SourceDeclarations, item.Targets) && len(binding.Incomplete) == 0
+		}) {
+			t.Fatalf("type-only %s lost checked/source membership: %+v", name, snapshot.SourceBindings)
+		}
+	}
+}
+
+func TestReexportSiteIsStableAcrossCompilerGroups(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspace(t, root, map[string]string{
+		"shared/tsconfig.json": `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler"},"files":["index.ts","base.ts"]}`,
+		"shared/base.ts":       `export const value = 1;`,
+		"shared/index.ts":      `export { value } from "./base";`,
+		"app/tsconfig.json":    `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler"},"files":["main.ts","../shared/index.ts","../shared/base.ts"]}`,
+		"app/main.ts":          `import { value } from "../shared"; export const result = value;`,
+	})
+	snapshot, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{WorkspaceRoot: root,
+		Files: []string{filepath.Join(root, "app/main.ts"), filepath.Join(root, "shared/index.ts")}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item := semanticExport(t, snapshot, "shared/index.ts", "value", SpaceValue)
+	if len(item.Via) != 1 || len(item.Reexports) != 1 || len(item.Incomplete) != 0 {
+		t.Fatalf("one syntax occurrence acquired multiple sites: %+v", item)
+	}
+	if !slices.ContainsFunc(snapshot.ImportEdges, func(edge ImportEdge) bool {
+		return edge.FromPath == "shared/index.ts" && edge.Specifier == "./base" && edge.SemanticKey == item.Via[0] && edge.Range == item.Location
+	}) {
+		t.Fatalf("export site did not reuse the import site and location: export=%+v imports=%+v", item, snapshot.ImportEdges)
+	}
+}
+
+func TestStarCollisionsPropagateThroughCycles(t *testing.T) {
+	snapshot := buildTestSnapshot(t, map[string]string{
+		"src/one.ts":      `export const shared = 1;`,
+		"src/two.ts":      `export const shared = 2;`,
+		"src/a.ts":        `export * from "./b"; export * from "./one"; export * from "./two";`,
+		"src/b.ts":        `export * from "./a";`,
+		"src/forward.ts":  `export { shared as renamed } from "./b";`,
+		"src/override.ts": `export * from "./b"; export const shared = 3;`,
+	})
+	for _, item := range []struct{ file, name string }{{"src/a.ts", "shared"}, {"src/b.ts", "shared"}, {"src/forward.ts", "renamed"}} {
+		binding := semanticExport(t, snapshot, item.file, item.name, SpaceValue)
+		if len(binding.Targets) != 0 || !slices.Contains(binding.Incomplete, AssociationConflict) {
+			t.Fatalf("cycle hid a star collision at %s: %+v", item.file, binding)
+		}
+	}
+	override := semanticExport(t, snapshot, "src/override.ts", "shared", SpaceValue)
+	if len(override.Targets) != 1 || len(override.Incomplete) != 0 {
+		t.Fatalf("explicit declaration did not override the cycle: %+v", override)
+	}
+}
+
+func TestTypeOnlyStarsPropagateThroughCycles(t *testing.T) {
+	snapshot := buildTestSnapshot(t, map[string]string{
+		"src/leaf.ts":  `export class Widget {}`,
+		"src/a.ts":     `export * from "./b"; export type * from "./leaf";`,
+		"src/b.ts":     `export * from "./a";`,
+		"src/mixed.ts": `export * from "./b"; export * from "./leaf";`,
+	})
+	leaf := semanticExport(t, snapshot, "src/leaf.ts", "Widget", SpaceType)
+	for _, file := range []string{"src/a.ts", "src/b.ts", "src/mixed.ts"} {
+		item := semanticExport(t, snapshot, file, "Widget", SpaceType)
+		if len(leaf.Targets) != 1 || !slices.Equal(item.Targets, leaf.Targets) || len(item.Incomplete) != 0 {
+			t.Fatalf("type-only cycle lost its checked target at %s: %+v", file, item)
+		}
+		_, valueFound := findSemanticExport(snapshot, file, "Widget", SpaceValue)
+		if valueFound != (file == "src/mixed.ts") {
+			t.Fatalf("wrong value accessibility at %s: %t", file, valueFound)
+		}
+	}
+}
+
+// Run with -run '^$' -bench '^BenchmarkStarDiamonds$' -benchtime=1x.
+func BenchmarkStarDiamonds(b *testing.B) {
+	for _, depth := range []int{14, 16, 18, 20} {
+		b.Run(fmt.Sprintf("depth%d", depth), func(b *testing.B) {
+			root := b.TempDir()
+			write := func(name, contents string) {
+				b.Helper()
+				if err := os.WriteFile(filepath.Join(root, name), []byte(contents), 0o644); err != nil {
+					b.Fatal(err)
+				}
+			}
+			write("tsconfig.json", `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler"},"include":["*.ts"]}`)
+			write("a0.ts", `export const leaf = 1;`)
+			write("b0.ts", `export { leaf } from "./a0";`)
+			for level := 1; level <= depth; level++ {
+				body := fmt.Sprintf(`export * from "./a%d"; export * from "./b%d";`, level-1, level-1)
+				write(fmt.Sprintf("a%d.ts", level), body)
+				write(fmt.Sprintf("b%d.ts", level), body)
+			}
+			request := BuildSnapshotRequest{WorkspaceRoot: root, Files: []string{filepath.Join(root, fmt.Sprintf("a%d.ts", depth))}}
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				snapshot, err := BuildSnapshot(context.Background(), request)
+				if err != nil {
+					b.Fatal(err)
+				}
+				item, found := findSemanticExport(snapshot, fmt.Sprintf("a%d.ts", depth), "leaf", SpaceValue)
+				if !found || len(item.Targets) != 1 || len(item.Incomplete) != 0 {
+					b.Fatalf("diamond lost its one target: %+v", item)
+				}
+			}
+		})
 	}
 }

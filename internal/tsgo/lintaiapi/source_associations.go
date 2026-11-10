@@ -18,11 +18,12 @@ import (
 )
 
 type auxiliarySourceProgram struct {
-	program  *compiler.Program
-	checker  *checker.Checker
-	resolver module.Resolver
-	done     func()
-	inputs   []SnapshotInput
+	program              *compiler.Program
+	checker              *checker.Checker
+	resolver             module.Resolver
+	done                 func()
+	inputs               []SnapshotInput
+	semanticBindingCache *semanticBindingCache
 }
 
 type auxiliarySourceView struct {
@@ -115,7 +116,7 @@ func (a *auxiliarySourcePrograms) forEntry(entry configuredSourceEntry) (*auxili
 			return nil, AssociationUnsupported
 		}
 		typeChecker, done := program.GetTypeChecker(a.ctx)
-		item = &auxiliarySourceProgram{program: program, checker: typeChecker, resolver: resolver, done: done}
+		item = &auxiliarySourceProgram{program: program, checker: typeChecker, resolver: resolver, done: done, semanticBindingCache: newSemanticBindingCache()}
 		a.programs[cacheKey] = item
 		inputExtractor := &extractor{workspaceRoot: a.workspaceRoot, program: program, host: a.host}
 		inputExtractor.recordProgramInputs()
@@ -123,12 +124,12 @@ func (a *auxiliarySourcePrograms) forEntry(entry configuredSourceEntry) (*auxili
 		a.timing.auxiliaryProgram += time.Since(started)
 	}
 	file := item.program.GetSourceFile(tspath.RootedFilePathFromAbsolute(entry.SourcePath))
-	if file == nil || file.Symbol == nil || !ast.IsExternalModule(file) {
+	if file == nil || file.Symbol == nil || !ast.IsExternalOrCommonJSModule(file) {
 		return nil, AssociationUnsupported
 	}
 	ex := &extractor{
 		workspaceRoot: a.workspaceRoot, host: a.host, program: item.program, resolver: item.resolver, checker: item.checker,
-		declarations: make(map[string]*DeclarationFact), endpointOnly: true,
+		declarations: make(map[string]*DeclarationFact), semanticBindingCache: item.semanticBindingCache,
 	}
 	ex.inputs = append(ex.inputs, item.inputs...)
 	return &auxiliarySourceView{file: file, ex: ex}, ""
@@ -382,87 +383,34 @@ func bindingDeclarationEndpoints(e *extractor, binding moduleBinding) ([]string,
 // that program needs an auxiliary program.
 func (e *extractor) sourceViewInProgram(entry configuredSourceEntry) *auxiliarySourceView {
 	file := e.program.GetSourceFile(tspath.RootedFilePathFromAbsolute(entry.SourcePath))
-	if file == nil || file.IsDeclarationFile || file.Symbol == nil || !ast.IsExternalModule(file) {
+	if file == nil || file.IsDeclarationFile || file.Symbol == nil || !ast.IsExternalOrCommonJSModule(file) {
 		return nil
 	}
 	ex := &extractor{
 		workspaceRoot: e.workspaceRoot, host: e.host, program: e.program, resolver: e.resolver, checker: e.checker,
-		declarations: make(map[string]*DeclarationFact), endpointOnly: true,
+		declarations: make(map[string]*DeclarationFact), semanticBindingCache: e.bindingCache(),
 	}
 	return &auxiliarySourceView{file: file, ex: ex}
 }
 
 type moduleBinding struct {
-	name         string
-	space        string
-	symbol       *ast.Symbol
-	declarations []*ast.Node
-	complete     bool
-	ambiguous    bool
+	name             string
+	space            string
+	declarationSpace string
+	symbol           *ast.Symbol
+	declarations     []*ast.Node
+	complete         bool
+	ambiguous        bool
 }
 
 type bindingKey struct{ name, space string }
 
 func (e *extractor) moduleBindings(file *ast.SourceFile) []moduleBinding {
-	if e.checker == nil || file == nil || file.Symbol == nil {
-		return nil
-	}
-	exports := e.checker.GetExportsOfModule(file.Symbol)
-	slices.SortFunc(exports, func(left, right *ast.Symbol) int { return strings.Compare(left.Name(), right.Name()) })
-	var result []moduleBinding
-	for _, exported := range exports {
-		if exported == nil || exported.Name() == "" {
-			continue
-		}
-		symbol := e.checker.SkipAlias(exported)
-		spaces := e.effectiveBindingSpaces(file, exported)
-		if len(spaces) == 0 {
-			spaces = []string{SpaceValue}
-		}
-		for _, space := range spaces {
-			declarations := declarationsInSpace(symbol, space)
-			ambiguous := e.starBindingAmbiguous(file, exported.Name())
-			if ambiguous {
-				declarations = nil
-			}
-			result = append(result, moduleBinding{
-				name: exported.Name(), space: space, symbol: symbol,
-				declarations: declarations, complete: symbol != nil && len(declarations) > 0, ambiguous: ambiguous,
-			})
-		}
-	}
-	if !slices.ContainsFunc(result, func(binding moduleBinding) bool { return binding.name == "export=" && binding.space == SpaceValue }) {
-		for _, statement := range file.Statements.Nodes {
-			if statement.Kind != ast.KindExportAssignment || !statement.AsExportAssignment().IsExportEquals {
-				continue
-			}
-			expression := statement.AsExportAssignment().Expression
-			var symbol *ast.Symbol
-			if expression != nil {
-				symbol = e.checker.GetSymbolAtLocation(expression)
-			}
-			var declarations []*ast.Node
-			if symbol != nil {
-				symbol = e.checker.SkipAlias(symbol)
-				if symbol != nil {
-					declarations = symbol.Declarations()
-				}
-			}
-			if len(declarations) == 0 {
-				symbol = nil
-				declarations = []*ast.Node{statement}
-			}
-			result = append(result, moduleBinding{name: "export=", space: SpaceValue, symbol: symbol, declarations: declarations, complete: expression != nil})
-		}
-	}
-	return result
+	return e.checkedBindings(file).bindings
 }
 
 func (e *extractor) addDeclarationEndpoint(node *ast.Node, symbol *ast.Symbol, publicName string) (string, bool) {
-	previous := e.endpointOnly
-	e.endpointOnly = true
-	id, supported := e.addDeclaration(node, symbol, publicName, SpaceValue)
-	e.endpointOnly = previous
+	id, _, supported := e.addDeclarationMetadata(node, symbol, publicName)
 	return id, supported
 }
 

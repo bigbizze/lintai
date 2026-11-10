@@ -269,6 +269,8 @@ For `index.ts`, lintai records a `module_export` row for the name `CheckContext`
 
 A space is TypeScript's split between the type world and the value world. `/type` is the name used as a type, and `/value` is the name used as a runtime value. A class is both, so it has two exports: in type space its declared type is the instance type, and in value space it is the constructor.
 
+A type-only export can also name a value or function for use in a `typeof` query. That binding has a `/type` export, while its target declaration has a `/value` declaration type. The binding is still resolved when the checker finds its declaration.
+
 | Relation | Meaning |
 |---|---|
 | `declaration(Decl, Name, Kind)` | One actual declaration. `Name` is qualified when possible; an anonymous default declaration has the name `default`. `Kind` is `/function`, `/variable`, `/type_alias`, `/interface`, `/class`, `/enum`, `/namespace`, `/method`, `/property`, `/signature` or `/export_expression`. |
@@ -285,15 +287,19 @@ A space is TypeScript's split between the type world and the value world. `/type
 
 `export default` and `export =` use the public names `default` and `export=`. `export =` is in value space, and lintai does not invent named exports from the properties of the assigned value. `export const handler = () => ...` points at the `/variable` declaration, not at the arrow function; when a declaration is directly a function that lintai collected, `declaration_fn` connects the two. Overloads and merged declarations give several `export_target` rows. They form a set, so do not pair them up by order.
 
-When an export has a contributing syntax site, its `location` is the earliest such site, and the export can be the anchor of a diagnostic. Each site has its own location too. An export without a location cannot be used as an anchor. In `export { left as first, right as second } from "./pair"`, each name gets its own `export_reexport` row, `first` from `left` and `second` from `right`, so the two names never get mixed up. Each row is one step only.
+Destructuring exports give each bound name its own binding, with the containing statement as its site. Exported string names, including `""` and `"*"`, are kept as written. For a literal `"*"` source name, use the site's import-symbol facts to tell a named re-export from `export *`.
+
+When an export has a contributing syntax site, its `location` is the earliest such site, and the export can be the anchor of a diagnostic. Each site has its own location too. A re-export site ID uses its position in the file, so it can change when the file changes. An export without a location cannot be used as an anchor. In `export { left as first, right as second } from "./pair"`, each name gets its own `export_reexport` row, `first` from `left` and `second` from `right`, so the two names never get mixed up. Each row is one step only.
 
 To follow a chain into an internal module, join `Site` to `import_edge`, check `import_internal(Site)`, and match `To` to `module_export.File`. The compiler can spell `Module` differently from `File`, for example in capitalization. For named re-exports, match `SourceName` and `Space`; for `export *`, match the exporting binding's public `Name` and `Space`.
 
 For `export * as ns`, the site has an `import_symbol` row of kind `/namespace`, and the binding points to the whole namespace declaration, not a member. Only modules in the snapshot have `module_export` rows; package entries in `node_modules`, `.d.ts` files in `dist/`, and files read only to link declarations to source have none. The prelude predicate `export_from` gives the same step without the export id.
 
-`export *` follows TypeScript's rules: it skips `default`, a local export with the same name wins, and a name that two star sources both provide has no target. The declared type of each export is a starting point for type extraction, within the usual depth limit, so the normal `type_*` facts describe it.
+`export *` follows TypeScript's rules: it skips `default`, a local export with the same name wins, and competing declarations from different star sources leave the name without a target. Two paths to the same declaration do not conflict. The declared type of each export is a starting point for type extraction, within the usual depth limit, so the normal `type_*` facts describe it.
 
 Sometimes lintai cannot get the full list of names. If the module in `export * from "./missing"` does not resolve, lintai cannot know which names it would add. It then adds `module_exports_incomplete(File, /unresolved)` to that module, and to each module that star-exports it, and still lists the names that it does know. This matters for rules that rely on a name being absent, or on having seen every export. Such a rule must check `module_exports_incomplete` for every module whose names it uses, and report that it cannot decide instead of passing. When there is no marker, the list is complete only as far as lintai's model goes. That is not proof that the module is safe.
+
+For CommonJS, lintai keeps static exports that the checker exposes and it can model, but marks the inventory `/unsupported`: dynamic writes can add names that the checker does not list. Known bindings remain available.
 
 ### Observations across tsconfig files
 

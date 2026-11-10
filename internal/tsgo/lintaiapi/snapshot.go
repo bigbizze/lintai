@@ -382,7 +382,6 @@ type extractor struct {
 	ambientCount                map[string]int
 	globalRefCount              map[string]int
 	functions                   []Function
-	importSiteByNode            map[*ast.Node]string
 	declarations                map[string]*DeclarationFact
 	exports                     map[string]*ExportFact
 	moduleExportObservations    []ModuleExportObservation
@@ -416,10 +415,10 @@ type extractor struct {
 	timing                      *extractTiming
 	sourceEntries               []configuredSourceEntry
 	inputs                      []SnapshotInput
-	endpointOnly                bool
 	declarationNodes            map[string]*ast.Node
 	mapAttempted                map[string]struct{}
 	moduleExportIndex           map[*ast.SourceFile]map[string]*ast.Symbol
+	semanticBindingCache        *semanticBindingCache
 }
 
 type functionMeta struct {
@@ -682,41 +681,40 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 	defer func() { timing.walk += time.Since(walkStarted) }()
 
 	ex := &extractor{
-		workspaceRoot:    workspaceRoot,
-		host:             host,
-		program:          program,
-		resolver:         resolver,
-		checker:          typeChecker,
-		requestedFiles:   make(map[string]struct{}, len(requestedFiles)),
-		primaryFiles:     make(map[string]struct{}, len(group.PrimaryFiles)),
-		filesByPath:      make(map[string]*ast.SourceFile, len(requestedFiles)),
-		functionNodes:    make(map[*ast.Node]*Function),
-		functionKeys:     make(map[string]*Function),
-		functionSyms:     make(map[*ast.Symbol]*Function),
-		importSiteByNode: make(map[*ast.Node]string),
-		declarations:     make(map[string]*DeclarationFact),
-		exports:          make(map[string]*ExportFact),
-		functionCount:    make(map[string]int),
-		importCount:      make(map[string]int),
-		callCount:        make(map[string]int),
-		externalCount:    make(map[string]int),
-		unresolvedCount:  make(map[string]int),
-		opaqueCount:      make(map[string]int),
-		refCount:         make(map[string]int),
-		typeRefCount:     make(map[string]int),
-		ambientCount:     make(map[string]int),
-		globalRefCount:   make(map[string]int),
-		ambientDone:      make(map[*ast.Node]struct{}),
-		globalSyms:       make(map[string]*ast.Symbol),
-		ambient:          newAmbientIndex(ambientMatchers),
-		typeFacts:        make(map[string]*TypeFact),
-		typeIDs:          make(map[*checker.Type]string),
-		typeKeys:         make(map[typeKeyAt]typeKeyResult),
-		typeFactSeen:     make(map[*checker.Type]struct{}),
-		typeShapes:       make(map[*checker.Type]*typeShape),
-		typeTruncated:    make(map[*checker.Type]struct{}),
-		timing:           timing,
-		sourceEntries:    sourceEntries,
+		workspaceRoot:   workspaceRoot,
+		host:            host,
+		program:         program,
+		resolver:        resolver,
+		checker:         typeChecker,
+		requestedFiles:  make(map[string]struct{}, len(requestedFiles)),
+		primaryFiles:    make(map[string]struct{}, len(group.PrimaryFiles)),
+		filesByPath:     make(map[string]*ast.SourceFile, len(requestedFiles)),
+		functionNodes:   make(map[*ast.Node]*Function),
+		functionKeys:    make(map[string]*Function),
+		functionSyms:    make(map[*ast.Symbol]*Function),
+		declarations:    make(map[string]*DeclarationFact),
+		exports:         make(map[string]*ExportFact),
+		functionCount:   make(map[string]int),
+		importCount:     make(map[string]int),
+		callCount:       make(map[string]int),
+		externalCount:   make(map[string]int),
+		unresolvedCount: make(map[string]int),
+		opaqueCount:     make(map[string]int),
+		refCount:        make(map[string]int),
+		typeRefCount:    make(map[string]int),
+		ambientCount:    make(map[string]int),
+		globalRefCount:  make(map[string]int),
+		ambientDone:     make(map[*ast.Node]struct{}),
+		globalSyms:      make(map[string]*ast.Symbol),
+		ambient:         newAmbientIndex(ambientMatchers),
+		typeFacts:       make(map[string]*TypeFact),
+		typeIDs:         make(map[*checker.Type]string),
+		typeKeys:        make(map[typeKeyAt]typeKeyResult),
+		typeFactSeen:    make(map[*checker.Type]struct{}),
+		typeShapes:      make(map[*checker.Type]*typeShape),
+		typeTruncated:   make(map[*checker.Type]struct{}),
+		timing:          timing,
+		sourceEntries:   sourceEntries,
 	}
 	for _, file := range requestedFiles {
 		ex.requestedFiles[file] = struct{}{}
@@ -1381,6 +1379,9 @@ func (e *extractor) collectImport(node *ast.Node, moduleSpecifier *ast.Node, for
 	location := e.nodeLocation(file, moduleSpecifier)
 	baseKey := fmt.Sprintf("%s::import::%s", fromPath, specifier)
 	semanticKey := withOrdinal(baseKey, nextOrdinal(e.importCount, baseKey))
+	if ast.IsExportDeclaration(node) {
+		semanticKey = e.exportSiteID(file, node)
+	}
 	importedSymbols, hasDefaultImport, hasNamespaceImport, hasNamedImports := extractImportedSymbols(node, typeOnly)
 	e.imports = append(e.imports, ImportEdge{
 		EntityID:           "import:" + semanticKey,
@@ -1400,7 +1401,6 @@ func (e *extractor) collectImport(node *ast.Node, moduleSpecifier *ast.Node, for
 		Retained:           e.isRetainedTypeImport(node, typeOnly, importedSymbols),
 		Range:              location,
 	})
-	e.importSiteByNode[node] = semanticKey
 }
 
 // isRetainedTypeImport reports an import or re-export declaration that tsc

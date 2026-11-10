@@ -161,6 +161,22 @@ renamed exports; named/anonymous default declarations and expressions; named,
 renamed, type-only, namespace and star re-exports; overloads/merging; unused
 primitive aliases; and `export =`.
 
+Exported destructuring contributes each bound identifier, including identifiers
+in nested patterns, at the containing export statement. Public names can be
+any string, including the empty string and `"*"`; a literal name `"*"` is
+distinct from a star export in the syntax inventory.
+
+A type-only export of a value or function is accessible for a `typeof` query.
+Its `module_export` is in `/type` space, while its target declaration keeps its
+actual `/value` `declaration_type`. The target is resolved when the checker
+resolves it. A type-only class export continues to point to the class's type
+declaration. The same binding rules apply to configured source associations.
+
+CommonJS modules retain checker-visible static exports when their declarations
+can be modeled. Their inventories are marked `/unsupported` because dynamic
+CommonJS writes may add names the checker does not enumerate. An unsupported
+inventory does not erase known bindings.
+
 TypeScript defines star behavior: exclude `default`, honor explicit overrides,
 ambiguity and cycles, and do not invent ambiguous targets. Preserve every explicit
 known export row even if its target cannot resolve, with `export_incomplete`.
@@ -178,8 +194,9 @@ for an incomplete inventory rather than passing absence. The marker's absence is
 completeness only relative to this extraction model, not proof of general safety.
 Preserve unsupported/conflicting enumeration reasons in the same marker.
 
-`export_via` reuses current import/re-export statement entities where available;
-local export statements get deterministic site IDs from their actual syntax. For
+`export_via` reuses the import/re-export statement entity for the same syntax
+site. Its identity is independent of which compiler group collected the import;
+local export statements also get deterministic site IDs from their syntax. For
 ```ts
 export { left as first, right as second } from "./pair";
 ```
@@ -579,6 +596,9 @@ Compatibility notes:
 - Type IDs change for package declarations, type parameters, unique symbols and
   generated declarations, because declaration identity replaces `dist/` to `src/`
   substitution. Rules that stored type IDs must not compare them across versions.
+- Re-export import-site IDs now use their syntax position, so a stored site ID
+  from an earlier snapshot may change. The same statement uses one site ID
+  across compiler groups.
 - Snapshots carry the new declaration, export and association relations. Golden
   fact files change accordingly.
 - `fn_param` and `fn_returns` are the union of complete observations across
