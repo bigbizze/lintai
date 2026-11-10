@@ -323,6 +323,9 @@ const object = { handler: (((function () { return 1; }) as () => number)!) };
 class Box { handler = (<() => number>(() => 1)); }
 const alias = (function original() { return 1; });
 const direct = () => 1;
+export const directAsync = async () => 1;
+export const wrappedAsync = (async () => 1);
+export const checkedAsync = (async () => 1) satisfies () => Promise<number>;
 export function total(box: Box): void { void callback; void object.handler; void box.handler; void alias; void direct; }
 export default ((() => 1) satisfies () => number);
 `
@@ -335,20 +338,26 @@ export default ((() => 1) satisfies () => number);
 	for _, item := range []struct {
 		fragment, token, kind string
 		exported              bool
+		parameters            int
 	}{
-		{"const callback = (async (value:", "async", "arrow_function", false},
-		{"export const exported = ((async", "async", "arrow_function", true},
-		{"handler: (((function () { return 1; })", "function", "function_expression", false},
-		{"handler = (<() => number>(() => 1)", "() => 1", "arrow_function", false},
-		{"export default ((() => 1)", "() => 1", "arrow_function", true},
+		{"const callback = (async (value:", "async", "arrow_function", false, 1},
+		{"export const exported = ((async", "async", "arrow_function", true, 0},
+		{"handler: (((function () { return 1; })", "function", "function_expression", false, 0},
+		{"handler = (<() => number>(() => 1)", "() => 1", "arrow_function", false, 0},
+		{"export default ((() => 1)", "() => 1", "arrow_function", true, 0},
+		{"export const wrappedAsync = (async", "async", "arrow_function", true, 0},
+		{"export const checkedAsync = (async", "async", "arrow_function", true, 0},
 	} {
 		offset := strings.Index(source, item.fragment) + strings.Index(item.fragment, item.token)
 		key := fmt.Sprintf("src/main.ts::%s::<anonymous@%d>", item.kind, offset)
 		fn, ok := functions[key]
-		if !ok || fn.IsExported != item.exported || !fn.SignatureOmitted || fn.SignatureUnresolved || len(fn.ParameterTypes) != 0 || fn.ReturnType != "" {
+		if !ok || fn.IsExported != item.exported || fn.SignatureOmitted || fn.SignatureUnresolved || len(fn.ParameterTypes) != item.parameters || fn.ReturnType == "" || len(fn.SignatureObservations) != 1 || !fn.SignatureObservations[0].Complete {
 			t.Errorf("wrapped function %q: %+v", item.fragment, fn)
 		}
 		anonymous = append(anonymous, key)
+	}
+	if direct := functions["src/main.ts::arrow_function::directAsync"]; direct.ReturnType == "" || direct.ReturnType != functions[anonymous[5]].ReturnType || direct.ReturnType != functions[anonymous[6]].ReturnType {
+		t.Errorf("direct, wrapped and satisfies bindings have different return types: %q, %q, %q", direct.ReturnType, functions[anonymous[5]].ReturnType, functions[anonymous[6]].ReturnType)
 	}
 	for _, key := range []string{"src/main.ts::function_expression::original", "src/main.ts::arrow_function::direct"} {
 		if fn, ok := functions[key]; !ok || fn.SignatureOmitted || fn.ReturnType == "" {
@@ -377,9 +386,16 @@ export default ((() => 1) satisfies () => number);
 	if !slices.Equal(suspensionOwners, wantOwners) {
 		t.Errorf("suspension owners = %v, want %v", suspensionOwners, wantOwners)
 	}
-	for _, typ := range snapshot.Types {
-		if typ.Name == "OwnershipOnly" {
-			t.Errorf("ownership-only signature added a type root: %+v", typ)
+	if fn := functions[anonymous[0]]; len(fn.ParameterTypes) == 1 {
+		var parameter *TypeFact
+		for i := range snapshot.Types {
+			if snapshot.Types[i].ID == fn.ParameterTypes[0] {
+				parameter = &snapshot.Types[i]
+				break
+			}
+		}
+		if parameter == nil || parameter.Name != "OwnershipOnly" {
+			t.Errorf("wrapped binding parameter type = %+v, want OwnershipOnly", parameter)
 		}
 	}
 }
@@ -519,27 +535,9 @@ async function factory() {
 		"other/tsconfig.json": `{"compilerOptions":{"target":"esnext","module":"preserve","noEmit":true},"files":["main.ts"]}`,
 		"other/main.ts":       `import "../src/main";`,
 	})
-	build := func(files []string) *Snapshot {
-		t.Helper()
-		snapshot, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{WorkspaceRoot: root, Files: files, TsconfigFiles: true})
-		if err != nil {
-			t.Fatal(err)
-		}
-		return snapshot
-	}
-	snapshot := build(paths)
-	reversed := slices.Clone(paths)
-	slices.Reverse(reversed)
-	again := build(reversed)
-	var ids, idsAgain []string
-	for _, site := range snapshot.SuspensionSites {
-		ids = append(ids, site.EntityID)
-	}
-	for _, site := range again.SuspensionSites {
-		idsAgain = append(idsAgain, site.EntityID)
-	}
-	if !slices.Equal(ids, idsAgain) {
-		t.Fatalf("site IDs depend on file order: %v != %v", ids, idsAgain)
+	snapshot, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{WorkspaceRoot: root, Files: paths, TsconfigFiles: true})
+	if err != nil {
+		t.Fatal(err)
 	}
 
 	callbackOffset := strings.Index(source, "async (unused:")

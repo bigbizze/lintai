@@ -331,11 +331,16 @@ func TestStructuralTypeRules(t *testing.T) {
 	writeTestFile(t, workspaceRoot, "src/core/result.ts", "export type ActionResult<T> = { ok: true; value: T } | { ok: false; error: string };\n")
 	writeTestFile(t, workspaceRoot, "src/legacy/types.ts", "export type ActionResult<T> = { done: T };\n")
 	writeTestFile(t, workspaceRoot, "src/infra/db.ts", "export class Db { query(): number { return 1; } }\n")
-	writeTestFile(t, workspaceRoot, "src/actions/save.ts", `import type { ActionResult } from "../core/result";
+	const actionSource = `import type { ActionResult } from "../core/result";
 import type { ActionResult as Legacy } from "../legacy/types";
 export async function save(): Promise<ActionResult<number>> { return { ok: true, value: 1 }; }
 export async function legacy(): Promise<Legacy<number>> { return { done: 1 }; }
-`)
+export const wrongDirect = async () => 1;
+export const wrongWrapped = (async () => 2);
+export const wrongChecked = (async () => 3) satisfies () => Promise<number>;
+export default (async () => 4);
+`
+	writeTestFile(t, workspaceRoot, "src/actions/save.ts", actionSource)
 	writeTestFile(t, workspaceRoot, "src/domain/user.ts", `import type { Db } from "../infra/db";
 export interface Hidden { forbidden: Db }
 export function hidden(value: Hidden): void {}
@@ -405,8 +410,16 @@ export default rule("t.awaited").version(1)
 	for _, messages := range byRule {
 		sort.Strings(messages)
 	}
-	if got := byRule["arch.actions-return-action-result"]; len(got) != 1 || got[0] != "legacy must return Promise<ActionResult<T>>, but returns Promise<Legacy<number>>" {
-		t.Fatalf("actions rule: %+v", items)
+	wrappedName := fmt.Sprintf("<anonymous@%d>", strings.Index(actionSource, "async () => 2"))
+	checkedName := fmt.Sprintf("<anonymous@%d>", strings.Index(actionSource, "async () => 3"))
+	defaultName := fmt.Sprintf("<anonymous@%d>", strings.Index(actionSource, "async () => 4"))
+	wantActions := []string{
+		"legacy must return Promise<ActionResult<T>>, but returns Promise<Legacy<number>", "wrongDirect must return Promise<ActionResult<T>>, but returns Promise<number>",
+		wrappedName + " must return Promise<ActionResult<T>>, but returns Promise<number>", checkedName + " must return Promise<ActionResult<T>>, but returns Promise<number>", defaultName + " must return Promise<ActionResult<T>>, but returns Promise<number>",
+	}
+	sort.Strings(wantActions)
+	if got := byRule["arch.actions-return-action-result"]; !slices.Equal(got, wantActions) {
+		t.Fatalf("actions rule: got %v, want %v", got, wantActions)
 	}
 	// type_contains does not see the Db in a type parameter constraint,
 	// indexed access type, or omitted interface members, so the plain rule
@@ -420,7 +433,8 @@ export default rule("t.awaited").version(1)
 		t.Fatalf("strict domain rule: %v", got)
 	}
 	// fn_returns_awaited unwraps one lib Promise, not a union that has one.
-	want := []string{"Db.query:number", "constrained:void", "hidden:void", "legacy:Legacy<number>", "load:number", "maybe:Promise<number> | undefined", "picked:Db[K]", "plain:number", "save:ActionResult<number>", "sync:number"}
+	want := []string{"Db.query:number", "constrained:void", "hidden:void", "legacy:Legacy<number>", "load:number", "maybe:Promise<number> | undefined", "picked:Db[K]", "plain:number", "save:ActionResult<number>", "sync:number", "wrongDirect:number", wrappedName + ":number", checkedName + ":number", defaultName + ":number"}
+	sort.Strings(want)
 	if got := byRule["t.awaited"]; strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("fn_returns_awaited: got %v, want %v", got, want)
 	}
@@ -506,6 +520,57 @@ export async function ambiguous(value: string | undefined): Promise<ActionResult
 				t.Fatalf("diagnostics got %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestStrictRulesTreatUncertainCalleesAsIndeterminate(t *testing.T) {
+	repoRoot, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	writeTestFile(t, root, "src/pure/values.ts", `let callback = (() => 0);
+export function replace() { callback = () => Date.now(); }
+export function invoke() { return callback(); }
+export function escapeMutable() { return [1].map(callback); }
+export function applyMutable() { return callback.call(undefined); }
+export function inferred(callback = Date.now) { return callback(); }
+export function named(flag: boolean) { return (flag ? function first() { return 0; } : function second() { return 1; })(); }
+export function unnamed(flag: boolean) { return (flag ? () => 0 : () => 1)(); }
+export function literal() { return ((() => 0))(); }
+const stable = (() => 0);
+export function bound() { return (stable as () => number)(); }
+`)
+	writeTestFile(t, root, "lintai-rules/strict.ts", `import { dl, rule } from "@lintai/sdk";
+export default rule("test.strict").version(1)
+  .program(dl`+"`"+`
+    Decl selected(Fn, Name).
+    selected(Fn, Name) :- fn(Fn, _, Name), fn_exported(Fn), Name != "replace".
+    Decl ambient(Fn, Name).
+    ambient(Fn, Name) :- selected(Fn, Name), fn_reaches_ambient_strict(Fn, _).
+    Decl indeterminate(Fn, Name).
+    indeterminate(Fn, Name) :- selected(Fn, Name), fn_reaches_unresolved(Fn).
+  `+"`"+`)
+  .report("ambient", "indeterminate").message((row, ctx) => `+"`${row.Name}:${ctx.assertion_id}`"+`);
+`)
+	items, err := New(typescript.New()).Run(context.Background(), Options{
+		RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: root,
+		RuleGlobs: []string{"lintai-rules/*.ts"}, Files: backend.FileScopeWalk,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, item := range items {
+		if item.RuleID != "test.strict" {
+			t.Fatalf("unexpected diagnostic: %+v", item)
+		}
+		got = append(got, item.Message)
+	}
+	sort.Strings(got)
+	want := []string{"applyMutable:indeterminate", "escapeMutable:indeterminate", "inferred:ambient", "inferred:indeterminate", "invoke:indeterminate", "named:indeterminate", "unnamed:indeterminate"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("strict rule outcomes = %v, want %v", got, want)
 	}
 }
 

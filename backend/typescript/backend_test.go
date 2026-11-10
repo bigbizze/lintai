@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/bigbizze/lintai/backend"
+	"github.com/bigbizze/lintai/engine"
 	"github.com/bigbizze/lintai/facts"
 	"github.com/bigbizze/lintai/internal/analysis"
 )
@@ -46,7 +47,7 @@ func TestFilteredCallTargetsRemainUnresolved(t *testing.T) {
 	writeWorkspaceFile(t, root, "src/excluded/tsconfig.json", `{"files":["other.ts"]}`)
 	writeWorkspaceFile(t, root, "src/excluded/other.ts", `export const other = 1;`)
 	writeWorkspaceFile(t, root, "src/excluded/effect.ts", `export function effect() { return helper(); } function helper() { return 1; }`)
-	writeWorkspaceFile(t, root, "src/main.ts", `import { effect } from "./excluded/effect";
+	const mainSource = `import { effect } from "./excluded/effect";
 effect();
 export function run() {
   effect();
@@ -59,7 +60,10 @@ class C {
 }
 function kept() { return 1; }
 export function use() { return kept(); }
-`)
+export function escape() { return [1].map(effect); }
+class Escaping { value = [1].map(effect); }
+`
+	writeWorkspaceFile(t, root, "src/main.ts", mainSource)
 	build := func(scope backend.FileScope) facts.Snapshot {
 		t.Helper()
 		snapshot, err := New().BuildSnapshot(context.Background(), root, root, backend.SnapshotOptions{Files: scope})
@@ -114,8 +118,38 @@ export function use() { return kept(); }
 	if len(want) != 0 {
 		t.Errorf("missing original calls at lines %v", want)
 	}
-	if len(after["call_unresolved"]) != 4 || len(after["call_edge"]) != 1 || len(after["external_call"]) != 0 {
+	if len(after["call_unresolved"]) != 6 || len(after["call_edge"]) != 1 || len(after["external_call"]) != 2 {
 		t.Errorf("unexpected call outcomes: unresolved %v, edges %v, external %v", after["call_unresolved"], after["call_edge"], after["external_call"])
+	}
+	for _, check := range []struct {
+		line  int
+		owner string
+	}{
+		{14, "src/main.ts::function::escape"},
+		{15, ""},
+	} {
+		var matched bool
+		for site, call := range after["call_unresolved"] {
+			location := after["location"][site]
+			if int(location.Values[2].Number) != check.line {
+				continue
+			}
+			matched = true
+			column := strings.Index(strings.Split(mainSource, "\n")[check.line-1], "effect") + 1
+			if call.Values[1].String != check.owner || int(location.Values[3].Number) != column || int(location.Values[4].Number) != check.line || int(location.Values[5].Number) != column+len("effect") {
+				t.Errorf("escaping argument did not keep its owner and location: %v at %v", call, location)
+			}
+			if check.owner == "" {
+				if marker, ok := after["site_attribution_unsupported"][site]; !ok || marker.Values[1].String != "instance_construction" {
+					t.Errorf("escaping argument lost unsupported attribution: %v", call)
+				}
+			} else if owner, ok := after["site_in_fn"][site]; !ok || owner.Values[1].String != check.owner {
+				t.Errorf("escaping argument lost its function owner: %v", call)
+			}
+		}
+		if !matched {
+			t.Errorf("missing uncertainty at escaping argument on line %d", check.line)
+		}
 	}
 	for _, edge := range after["call_edge"] {
 		if edge.Values[1].String != "src/main.ts::function::use" || edge.Values[2].String != "src/main.ts::function::kept" {
@@ -135,14 +169,34 @@ export function use() { return kept(); }
 			}
 		}
 	}
-	if removedRefs != 2 || !unsupportedRef {
-		t.Errorf("expected ordinary and unsupported references before filtering, got %d, unsupported = %t", removedRefs, unsupportedRef)
+	if removedRefs != 4 || !unsupportedRef {
+		t.Errorf("expected ordinary and escaping references before filtering, got %d, unsupported = %t", removedRefs, unsupportedRef)
 	}
 	if len(after["fn_ref"]) != 0 {
 		t.Errorf("references to filtered functions survived: %v", after["fn_ref"])
 	}
 	if _, ok := after["module"]["src/excluded/effect.ts"]; ok {
 		t.Error("filtered target was added as a module")
+	}
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeWorkspaceFile(t, root, "lintai-rules/strict.ts", `import { dl, rule } from "@lintai/sdk";
+export default rule("test.filtered-callback").version(1)
+  .program(dl`+"`"+`Decl indeterminate(Fn, Name).
+    indeterminate(Fn, Name) :- fn(Fn, _, Name), Name = "escape", fn_reaches_unresolved(Fn).`+"`"+`)
+  .report("indeterminate").message((row) => row.Name);
+`)
+	items, err := engine.New(New()).Run(context.Background(), engine.Options{
+		RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: root,
+		RuleGlobs: []string{"lintai-rules/*.ts"}, Files: backend.FileScopeTsconfig,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].RuleID != "test.filtered-callback" || items[0].Message != "escape" {
+		t.Fatalf("filtered callback strict rule = %+v, want escape indeterminate", items)
 	}
 }
 

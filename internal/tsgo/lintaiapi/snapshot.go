@@ -99,6 +99,14 @@ type Access struct {
 
 type UnsupportedAttribution struct{ Site, Reason string }
 
+// An escaping callback needs an unresolved site if its collected target is
+// removed by tsconfig filtering. Keep this separate from ordinary references.
+type escapingCallback struct {
+	target string
+	call   CallUnresolved
+	reason string
+}
+
 type FunctionSignatureObservation struct {
 	ParameterTypes []string
 	ParameterMarks []string
@@ -342,6 +350,7 @@ type Snapshot struct {
 	TypeRefs                []TypeRef
 	AmbientUses             []AmbientUse
 	GlobalRefs              []GlobalRef
+	escapingCallbacks       []escapingCallback
 	Directives              []ModuleDirective
 	ParseErrors             []ParseError
 	// Types are the type entities that function parameter and return types
@@ -416,6 +425,7 @@ type extractor struct {
 	unresolved                  []CallUnresolved
 	opaque                      []ImportOpaque
 	refs                        []FnRef
+	escapingCallbacks           []escapingCallback
 	suspensionSites             []SuspensionSite
 	accesses                    []Access
 	unsupportedAttributions     []UnsupportedAttribution
@@ -572,6 +582,7 @@ func BuildSnapshot(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, er
 		keepRetainedSemantics(merged)
 		keepReachableTypes(merged)
 	}
+	merged.escapingCallbacks = nil
 	merged.ConfigFiles = configs.files()
 	merged.Inputs = append(merged.Inputs, configs.inputs()...)
 	merged.Inputs = append(merged.Inputs, trackedFS.snapshotInputs()...)
@@ -651,6 +662,19 @@ func keepModuleFiles(snap *Snapshot) {
 	snap.UnsupportedAttributions = slices.DeleteFunc(snap.UnsupportedAttributions, func(item UnsupportedAttribution) bool {
 		return removedSites[item.Site]
 	})
+	emittedEscapes := make(map[string]bool)
+	for _, item := range snap.escapingCallbacks {
+		call := item.call
+		if !keepSource(call.FromPath, call.FromSemanticKey, call.FromModule) || hasFunction(item.target) || emittedEscapes[call.EntityID] {
+			continue
+		}
+		emittedEscapes[call.EntityID] = true
+		snap.CallsUnresolved = append(snap.CallsUnresolved, call)
+		if item.reason != "" {
+			snap.UnsupportedAttributions = append(snap.UnsupportedAttributions, UnsupportedAttribution{Site: call.SemanticKey, Reason: item.reason})
+		}
+	}
+	snap.escapingCallbacks = nil
 	snap.FnSignatureConflicts = slices.DeleteFunc(snap.FnSignatureConflicts, func(id string) bool {
 		return !hasFunction(id)
 	})
@@ -856,6 +880,7 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 		CallsUnresolved:             ex.unresolved,
 		ImportsOpaque:               ex.opaque,
 		FnRefs:                      ex.refs,
+		escapingCallbacks:           ex.escapingCallbacks,
 		SuspensionSites:             ex.suspensionSites,
 		Accesses:                    ex.accesses,
 		UnsupportedAttributions:     ex.unsupportedAttributions,
@@ -1192,6 +1217,7 @@ func mergeSnapshot(into *Snapshot, partial *Snapshot) {
 	into.CallsUnresolved = mergeByEntityID(into.CallsUnresolved, partial.CallsUnresolved, func(item CallUnresolved) string { return item.EntityID })
 	into.ImportsOpaque = mergeByEntityID(into.ImportsOpaque, partial.ImportsOpaque, func(item ImportOpaque) string { return item.EntityID })
 	into.FnRefs = mergeByEntityID(into.FnRefs, partial.FnRefs, func(item FnRef) string { return item.EntityID })
+	into.escapingCallbacks = mergeByEntityID(into.escapingCallbacks, partial.escapingCallbacks, func(item escapingCallback) string { return item.call.EntityID + "\x00" + item.target })
 	into.SuspensionSites = mergeByEntityID(into.SuspensionSites, partial.SuspensionSites, func(item SuspensionSite) string { return item.EntityID })
 	into.Accesses = mergeByEntityID(into.Accesses, partial.Accesses, func(item Access) string { return item.EntityID })
 	into.UnsupportedAttributions = mergeByEntityID(into.UnsupportedAttributions, partial.UnsupportedAttributions, func(item UnsupportedAttribution) string { return item.Site })
@@ -1456,8 +1482,8 @@ func (e *extractor) collectFunction(node *ast.Node) *Function {
 		return nil
 	}
 	meta := functionMetaForNode(node)
-	omitted := meta == nil || meta.localName == "" || meta.nameNode == nil
-	if omitted {
+	positional := meta == nil || meta.localName == "" || meta.nameNode == nil
+	if positional {
 		kind := "function"
 		switch {
 		case ast.IsArrowFunction(node):
@@ -1475,9 +1501,8 @@ func (e *extractor) collectFunction(node *ast.Node) *Function {
 		}
 		meta = &functionMeta{localName: fmt.Sprintf("<anonymous@%d>", scanner.GetTokenPosOfNode(node, file, false)), kind: kind, nameNode: node, namingSource: node, lookupNodes: []*ast.Node{node}}
 	}
-	// A wrapper did not previously give the function a named identity. Use
-	// its binding for lookup and export status without changing that identity
-	// or collecting a signature for an ownership-only function.
+	// Keep existing positional identities for wrapped bindings, but use the
+	// binding to decide whether the function is an ownership-only callback.
 	var binding *functionMeta
 	if ast.IsFunctionExpressionOrArrowFunction(node) {
 		expression := node
@@ -1491,9 +1516,10 @@ func (e *extractor) collectFunction(node *ast.Node) *Function {
 			}
 		}
 	}
+	omitted := positional && binding == nil
 
 	containerName := ""
-	if !omitted {
+	if !positional {
 		containerName = containerNameForNode(node, meta.namingSource)
 	}
 	displayName := meta.localName
@@ -1511,7 +1537,7 @@ func (e *extractor) collectFunction(node *ast.Node) *Function {
 	}
 	baseKey := fmt.Sprintf("%s::%s::%s", nameRange.File, meta.kind, displayName)
 	semanticKey := baseKey
-	if !omitted {
+	if !positional {
 		semanticKey = withOrdinal(baseKey, nextOrdinal(e.functionCount, baseKey))
 	}
 	record := Function{
@@ -1719,7 +1745,7 @@ func (e *extractor) collectCall(source callSource, node *ast.Node) {
 			callee = e.externalBaseClass(workspaceClass)
 		}
 		calleeExternal := callee != nil && e.isExternalSymbol(callee)
-		if (declarationExternal && (calleeExternal || !isValueSignature(declaration))) || (declaration == nil && calleeExternal) {
+		if calleeExternal && (declarationExternal || declaration == nil) {
 			if external, ok := e.externalCallFor(source, callee, declaration, location); ok {
 				if e.invokesFunctionValue(node, external) {
 					e.recordUnresolvedCall(source, location)
@@ -1772,7 +1798,7 @@ func (e *extractor) invokesFunctionValue(node *ast.Node, external ExternalCall) 
 	if !ast.IsIdentifier(receiver) && !ast.IsPropertyAccessExpression(receiver) {
 		return true
 	}
-	return e.lookupFunction(e.checker.GetSymbolAtLocation(receiver)) == nil
+	return e.certainBindingTarget(e.checker.GetSymbolAtLocation(receiver)) == nil
 }
 
 // collectEscapingCallbacks records a call_unresolved row for each argument
@@ -1795,8 +1821,23 @@ func (e *extractor) collectEscapingCallbacks(source callSource, file *ast.Source
 			if symbol != nil && symbol.Flags()&ast.SymbolFlagsAlias != 0 {
 				symbol = e.checker.SkipAlias(symbol)
 			}
-			if symbol != nil && (e.lookupFunction(symbol) != nil || e.isExternalSymbol(symbol)) {
-				continue
+			if symbol != nil {
+				if target := e.lookupFunction(symbol); target != nil {
+					if e.certainBindingTarget(symbol) == nil {
+						e.recordUnresolvedCall(source, e.nodeLocation(file, value))
+					} else {
+						key := fmt.Sprintf("%s::escaping_callback::%d", source.siteKey(), scanner.GetTokenPosOfNode(value, file, false))
+						e.escapingCallbacks = append(e.escapingCallbacks, escapingCallback{
+							target: target.SemanticKey,
+							call:   CallUnresolved{EntityID: "call_unresolved:" + key, SemanticKey: key, FromSemanticKey: source.key, FromModule: source.module, FromPath: source.path, Range: e.nodeLocation(file, value)},
+							reason: source.reason,
+						})
+					}
+					continue
+				}
+				if e.isExternalSymbol(symbol) {
+					continue
+				}
 			}
 		}
 		valueType := e.checker.GetTypeAtLocation(value)
@@ -1876,7 +1917,7 @@ func (e *extractor) recordUnresolvedCall(source callSource, location SourceLocat
 // the base class of a super() call. It returns nil for other callees, for
 // example an element access or the result of another call.
 func (e *extractor) calleeSymbol(node *ast.Node) *ast.Symbol {
-	callee := ast.SkipParentheses(calleeOf(node))
+	callee := ast.SkipOuterExpressions(calleeOf(node), ast.OEKAll)
 	var symbol *ast.Symbol
 	switch {
 	case callee.Kind == ast.KindSuperKeyword:
@@ -1890,18 +1931,6 @@ func (e *extractor) calleeSymbol(node *ast.Node) *ast.Symbol {
 		symbol = e.checker.SkipAlias(symbol)
 	}
 	return symbol
-}
-
-// isValueSignature reports a signature that a type declares for a function
-// value: a function type, a constructor type, or a call or construct
-// signature of an interface or type literal. A call with such a signature
-// calls a value of that type, and the type does not tell which function.
-func isValueSignature(declaration *ast.Node) bool {
-	switch declaration.Kind {
-	case ast.KindFunctionType, ast.KindConstructorType, ast.KindCallSignature, ast.KindConstructSignature:
-		return true
-	}
-	return false
 }
 
 // isExternalDeclaration reports a declaration outside the workspace source
@@ -2076,11 +2105,9 @@ func calleeNameNode(node *ast.Node) *ast.Node {
 	return callee
 }
 
-// resolveCallTarget returns the collected function that a call resolves to.
-// When it finds none, it returns the declaration of the checker's resolved
-// signature, if there is one. A call links through a literal callee, the
-// checker's signature or the callee's own symbol, never through a name lookup,
-// so seen.add() on a Set does not link to a local add.
+// resolveCallTarget uses the value being called, not the signature alone, to
+// identify a workspace function. A signature can describe a mutable binding
+// or just one branch of a conditional expression.
 func (e *extractor) resolveCallTarget(node *ast.Node) (*Function, *ast.Node) {
 	expression := ast.SkipOuterExpressions(calleeOf(node), ast.OEKAll)
 	if expression != nil && ast.IsFunctionExpressionOrArrowFunction(expression) {
@@ -2088,24 +2115,54 @@ func (e *extractor) resolveCallTarget(node *ast.Node) (*Function, *ast.Node) {
 			return target, nil
 		}
 	}
+	// Other expression forms, including conditionals, do not identify one
+	// runtime value even when the checker selects a particular signature.
+	if expression == nil || !(ast.IsIdentifier(expression) || ast.IsPropertyAccessExpression(expression) || expression.Kind == ast.KindSuperKeyword) {
+		return nil, nil
+	}
+	symbol := e.calleeSymbol(node)
+	if symbol != nil && !e.isExternalSymbol(symbol) && mutableFunctionBinding(symbol) {
+		return nil, nil
+	}
+	if target := e.certainBindingTarget(symbol); target != nil {
+		return target, nil
+	}
 	var declaration *ast.Node
 	if signature := e.checker.GetResolvedSignature(node); signature != nil {
 		declaration = signature.Declaration()
-		target := e.lookupFunction(declaration)
-		if target == nil && declaration != nil {
-			target = e.lookupFunction(declaration.Symbol())
-		}
-		// A signature can select one branch of an ambiguous function value.
-		if target != nil && !target.SignatureOmitted {
-			return target, nil
-		}
-	}
-	if expression != nil && (ast.IsIdentifier(expression) || ast.IsPropertyAccessExpression(expression)) {
-		if target := e.lookupFunction(e.checker.GetSymbolAtLocation(expression)); target != nil {
-			return target, nil
+		// The signature of a class value identifies its constructor, including
+		// an inherited constructor. Other function-valued signatures do not.
+		if symbol != nil && symbol.Flags()&ast.SymbolFlagsClass != 0 && declaration != nil && ast.IsConstructorDeclaration(declaration) {
+			if target := e.lookupFunction(declaration); target != nil {
+				return target, nil
+			}
 		}
 	}
 	return nil, declaration
+}
+
+// A variable initializer or writable property does not fix the function
+// value at a later use. Aliases are resolved before making this decision.
+func mutableFunctionBinding(symbol *ast.Symbol) bool {
+	for _, declaration := range symbol.Declarations() {
+		if ast.IsVariableDeclaration(declaration) && !ast.IsVarConst(declaration) || ast.IsPropertyDeclaration(declaration) || ast.IsPropertyAssignment(declaration) {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *extractor) certainBindingTarget(symbol *ast.Symbol) *Function {
+	if symbol == nil {
+		return nil
+	}
+	if symbol.Flags()&ast.SymbolFlagsAlias != 0 {
+		symbol = e.checker.SkipAlias(symbol)
+	}
+	if symbol == nil || mutableFunctionBinding(symbol) {
+		return nil
+	}
+	return e.lookupFunction(symbol)
 }
 
 // externalCallFor returns the external call for a call of callee, a symbol
