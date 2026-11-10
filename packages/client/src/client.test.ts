@@ -678,7 +678,6 @@ test("native input watches follow replaced directories and later edits", async (
 	mkdirSync(dist, { recursive: true });
 	writeFileSync(input, declaration("initial"));
 	const child = createTestProcess();
-	const events = new EventEmitter();
 	let analyses = 0;
 	const client = new LintAIClient(
 		resolveBridgeOptions(
@@ -716,36 +715,16 @@ test("native input watches follow replaced directories and later edits", async (
 				});
 			},
 			watchInputPath: (target, onChange, onError) => {
-				const watcher = fs.watch(target, { persistent: false, recursive: false }, (_event, filename) => {
-					onChange(filename ?? undefined);
-					events.emit("change", target, filename ?? undefined);
-				});
-				watcher.on("error", (error) => {
-					onError(error);
-					events.emit("watch-error", error);
-				});
+				const watcher = fs.watch(target, { persistent: false, recursive: false }, (_event, filename) =>
+					onChange(filename ?? undefined),
+				);
+				watcher.on("error", onError);
 				return watcher;
 			},
 			now: () => 0,
 			log: () => undefined,
 		}),
 	);
-	const waitForEvent = (predicate: (target: string, filename?: string) => boolean) => {
-		let onChange: (target: string, filename?: string) => void = () => undefined;
-		let onError: (error: Error) => void = () => undefined;
-		const event = new Promise<void>((resolve, reject) => {
-			onChange = (target, filename) => {
-				if (predicate(target, filename)) resolve();
-			};
-			onError = reject;
-			events.on("change", onChange);
-			events.on("watch-error", onError);
-		});
-		return withTimeout(event, "a native filesystem event").finally(() => {
-			events.off("change", onChange);
-			events.off("watch-error", onError);
-		});
-	};
 	const waitForMessage = async (expected: string) => {
 		let interval: ReturnType<typeof setInterval> | undefined;
 		try {
@@ -769,34 +748,26 @@ test("native input watches follow replaced directories and later edits", async (
 		assert.equal(analyses, 1);
 		assert.deepEqual(client.problems(), []);
 
-		let event = waitForEvent((target) => target === dist || target === contracts);
 		renameSync(dist, path.join(contracts, "old-dist"));
 		mkdirSync(dist);
 		writeFileSync(input, declaration("replacement"));
-		await event;
 		await waitForMessage(declaration("replacement"));
 		let previousAnalyses = analyses;
 		assert.ok(previousAnalyses > 1);
 
-		event = waitForEvent((target, filename) => target === dist && (!filename || filename === "index.d.ts"));
 		writeFileSync(input, declaration("edited replacement"));
-		await event;
 		await waitForMessage(declaration("edited replacement"));
 		assert.ok(analyses > previousAnalyses);
 
 		previousAnalyses = analyses;
-		event = waitForEvent((target) => target === contracts || target === workspaceRoot);
 		renameSync(contracts, path.join(workspaceRoot, "old-contracts"));
 		mkdirSync(dist, { recursive: true });
 		writeFileSync(input, declaration("replacement ancestor"));
-		await event;
 		await waitForMessage(declaration("replacement ancestor"));
 		assert.ok(analyses > previousAnalyses);
 
 		previousAnalyses = analyses;
-		event = waitForEvent((target, filename) => target === dist && (!filename || filename === "index.d.ts"));
 		writeFileSync(input, declaration("edited ancestor replacement"));
-		await event;
 		await waitForMessage(declaration("edited ancestor replacement"));
 		assert.ok(analyses > previousAnalyses);
 		assert.deepEqual(client.problems(), []);

@@ -263,6 +263,8 @@ export class LintAIClient {
 	private readonly inputWatchers: FileWatcher[] = [];
 	private inputPaths: string[] = [];
 	private inputWatchGeneration = 0;
+	private inputSignatures = new Map<string, string>();
+	private inputCheckReset: ReturnType<typeof setImmediate> | undefined;
 	private ruleInvalidationTimer: ReturnType<typeof setTimeout> | undefined;
 	private inputInvalidationTimer: ReturnType<typeof setTimeout> | undefined;
 	private pendingRuleInvalidation = false;
@@ -283,6 +285,9 @@ export class LintAIClient {
 		const normalized = normalizeFile(file);
 		this.ensureStarted();
 
+		if (this.inputsChangedSinceCached()) {
+			this.invalidateDiagnostics();
+		}
 		if (this.state === "invalidated") {
 			this.refreshInvalidatedDiagnosticsSync();
 		}
@@ -378,6 +383,10 @@ export class LintAIClient {
 		if (this.inputInvalidationTimer) {
 			clearTimeout(this.inputInvalidationTimer);
 			this.inputInvalidationTimer = undefined;
+		}
+		if (this.inputCheckReset) {
+			clearImmediate(this.inputCheckReset);
+			this.inputCheckReset = undefined;
 		}
 		for (const watcher of this.ruleWatchers) {
 			watcher.close();
@@ -480,6 +489,7 @@ export class LintAIClient {
 	private getOneshotDiagnostics(file: string): Diagnostic[] {
 		if (!this.oneshotCache) {
 			this.oneshotCache = this.loadOneshotDiagnostics();
+			this.recordInputSignatures();
 		}
 		return this.oneshotCache.byFile.get(file) ?? [];
 	}
@@ -802,6 +812,32 @@ export class LintAIClient {
 		this.unlocated = indexed.unlocated;
 		this.analysisFailure = undefined;
 		this.updateInputWatchers(inputPaths ?? []);
+		this.recordInputSignatures();
+	}
+
+	private recordInputSignatures(): void {
+		this.inputSignatures = new Map(this.inputPaths.map((input) => [input, inputSignature(input)]));
+	}
+
+	// inputsChangedSinceCached compares the inputs of the cached diagnostics with
+	// the metadata recorded when the cache was filled. A native watcher can miss
+	// changes made just after it is installed, so this check does not depend on
+	// watcher events. It runs at most once per event loop turn, so a linter that
+	// asks for each file in one synchronous loop does not stat every input for
+	// each file.
+	private inputsChangedSinceCached(): boolean {
+		const cached = this.state === "ready" || (this.state === "fallback" && this.oneshotCache !== undefined);
+		if (!cached || this.inputCheckReset || this.inputSignatures.size === 0) {
+			return false;
+		}
+		this.inputCheckReset = setImmediate(() => {
+			this.inputCheckReset = undefined;
+		});
+		this.inputCheckReset.unref();
+		for (const [input, signature] of this.inputSignatures) {
+			if (inputSignature(input) !== signature) return true;
+		}
+		return false;
 	}
 
 	private updateInputWatchers(inputPaths: string[]): void {
@@ -1289,6 +1325,15 @@ function directoryIdentity(directory: string): DirectoryIdentity | undefined {
 		return stats.isDirectory() ? { dev: stats.dev, ino: stats.ino } : undefined;
 	} catch {
 		return undefined;
+	}
+}
+
+function inputSignature(file: string): string {
+	try {
+		const stats = statSync(file, { bigint: true, throwIfNoEntry: false });
+		return stats ? `${stats.dev}:${stats.ino}:${stats.mtimeNs}:${stats.size}` : "missing";
+	} catch (error) {
+		return `error:${asError(error).message}`;
 	}
 }
 
