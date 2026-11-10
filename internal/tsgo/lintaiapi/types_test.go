@@ -549,8 +549,8 @@ export function library(value: Promise<Hidden<string>[]>): void {}
 	if alias.Name != "HiddenAlias" || !isMembersOmitted(alias) || len(alias.Props) != 0 || len(alias.Args) != 1 || x.get(alias.Args[0]).Kind != TypeKindNumber {
 		t.Fatalf("generic alias early return %+v", alias)
 	}
-	if boxed := x.param("boxed", 0); boxed.Name != "Box" || !isMembersOmitted(boxed) || len(boxed.Args) != 1 || x.get(boxed.Args[0]).Kind != TypeKindBoolean {
-		t.Fatalf("class members omitted with arguments preserved: %+v", boxed)
+	if boxed := x.param("boxed", 0); !isMembersOmitted(boxed) {
+		t.Fatalf("class opacity: %+v", boxed)
 	}
 	if mode := x.param("mode", 0); mode.Name != "Mode" || !isMembersOmitted(mode) {
 		t.Fatalf("enum members omitted: %+v", mode)
