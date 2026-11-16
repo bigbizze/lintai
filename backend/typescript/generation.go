@@ -129,6 +129,16 @@ func (b *Backend) finishGeneration(generation *producerGeneration, workspaceRoot
 	if err != nil {
 		return err
 	}
+	// Compiler observations use the resolved plan root. Keep in-workspace
+	// input paths in the spelling supplied by the caller, including symlinked
+	// workspace roots.
+	for i := range snapshot.Inputs {
+		relative := relativeScopePath(plan.Root, snapshot.Inputs[i].Path)
+		if !filepath.IsAbs(filepath.FromSlash(relative)) {
+			snapshot.Inputs[i].Path = filepath.ToSlash(filepath.Join(requestedRoot, filepath.FromSlash(relative)))
+		}
+	}
+	snapshot.Inputs = uniqueSnapshotInputs(snapshot.Inputs)
 	addWatchHint := func(path string) {
 		relative := relativeScopePath(plan.Root, path)
 		if !filepath.IsAbs(filepath.FromSlash(relative)) {
@@ -155,6 +165,23 @@ func (b *Backend) finishGeneration(generation *producerGeneration, workspaceRoot
 	}
 	generation.inputRevision = revision
 	return nil
+}
+
+func uniqueSnapshotInputs(items []lintaiapi.SnapshotInput) []lintaiapi.SnapshotInput {
+	byPath := make(map[string]lintaiapi.SnapshotInput, len(items))
+	for _, item := range items {
+		current := byPath[item.Path]
+		current.Path = item.Path
+		current.Exists = current.Exists || item.Exists
+		current.OptionalMap = current.OptionalMap || item.OptionalMap
+		byPath[item.Path] = current
+	}
+	result := make([]lintaiapi.SnapshotInput, 0, len(byPath))
+	for _, item := range byPath {
+		result = append(result, item)
+	}
+	slices.SortFunc(result, func(left, right lintaiapi.SnapshotInput) int { return strings.Compare(left.Path, right.Path) })
+	return result
 }
 
 func validateConfigInput(path string, expectedPresent bool, expectedDigest string) (bool, int64, bool, error) {
