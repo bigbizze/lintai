@@ -25,6 +25,8 @@ type composedFacts struct {
 	sources       []parse.SourceUnit
 	schemaDecls   map[ast.PredicateSym]ast.Decl
 	anchors       map[string]facts.AnchorSupport
+	anchorOwners  map[string]string
+	producerFiles map[string]map[string]struct{}
 	reportable    map[facts.Predicate]map[string]struct{}
 	factCounts    map[ast.PredicateSym]int
 	analyzedFiles map[string]struct{}
@@ -139,6 +141,8 @@ func (e *Session) describeProducers() (producerCatalog, error) {
 func (catalog producerCatalog) collect(ctx context.Context, options Options, requestedByNamespace map[string]map[facts.Predicate]struct{}, current *composedFacts) (composedFacts, error) {
 	allFacts := make([]facts.Fact, 0)
 	anchors := make(map[string]facts.AnchorSupport)
+	anchorOwners := make(map[string]string)
+	producerFiles := make(map[string]map[string]struct{})
 	reportable := make(map[facts.Predicate]map[string]struct{})
 	factCounts := make(map[ast.PredicateSym]int)
 	analyzedFiles := make(map[string]struct{})
@@ -224,6 +228,7 @@ func (catalog producerCatalog) collect(ctx context.Context, options Options, req
 				return composedFacts{}, fmt.Errorf("entity %q has conflicting producer-owned reporting support", id)
 			}
 			anchors[id] = support
+			anchorOwners[id] = description.Namespace
 		}
 		for _, relation := range description.BaseRelations {
 			for _, row := range validated.Rows(relation.Predicate) {
@@ -242,8 +247,11 @@ func (catalog producerCatalog) collect(ctx context.Context, options Options, req
 				}
 			}
 		}
+		producerFiles[description.Namespace] = make(map[string]struct{})
 		for _, file := range validated.AnalyzedFiles() {
-			analyzedFiles[suppressions.NormalizePath(file)] = struct{}{}
+			file = suppressions.NormalizePath(file)
+			analyzedFiles[file] = struct{}{}
+			producerFiles[description.Namespace][file] = struct{}{}
 		}
 	}
 	base, err := facts.Store(allFacts)
@@ -260,7 +268,7 @@ func (catalog producerCatalog) collect(ctx context.Context, options Options, req
 		fileSet[file] = struct{}{}
 	}
 	return composedFacts{
-		base: base, sources: catalog.sources, schemaDecls: catalog.schemaDecls, anchors: anchors, reportable: reportable,
+		base: base, sources: catalog.sources, schemaDecls: catalog.schemaDecls, anchors: anchors, anchorOwners: anchorOwners, producerFiles: producerFiles, reportable: reportable,
 		factCounts: factCounts, analyzedFiles: fileSet, namespaces: usedNamespaces, snapshotID: snapshotID, watchHints: hints,
 	}, nil
 }

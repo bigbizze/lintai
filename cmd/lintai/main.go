@@ -380,7 +380,7 @@ func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 	flags.Var(&suppressRules, "suppress-rule", "record the error-severity violations of this rule in the suppressions file (repeatable)")
 	pruneSuppressions := flags.Bool("prune-suppressions", false, "lower or remove the suppressions that allow more violations than the run found")
 	suppressionsLocation := flags.String("suppressions-location", "", "suppressions file, relative to --workspace-root (default "+suppressions.DefaultFile+")")
-	passOnUnpruned := flags.Bool("pass-on-unpruned-suppressions", false, "do not report unused suppressions and do not exit with code 2 for them")
+	passOnUnpruned := flags.Bool("pass-on-unpruned-suppressions", false, "do not report unused suppressions and do not exit with code 1 for them")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -513,14 +513,10 @@ func suppressionsOutcome(result engine.Result, passOnUnpruned bool) error {
 	lines := make([]string, 0, len(result.UnusedSuppressions)+1)
 	lines = append(lines, fmt.Sprintf("lintai: %d unused suppressions in %s. The run found fewer violations than these entries allow:", len(result.UnusedSuppressions), result.SuppressionsPath))
 	for _, unused := range result.UnusedSuppressions {
-		entity := ""
-		if unused.Entity != "" {
-			entity = " entity " + unused.Entity
-		}
-		lines = append(lines, fmt.Sprintf("  %s %s%s: allows %d, found %d", unused.File, unused.RuleID, entity, unused.Allowed, unused.Found))
+		lines = append(lines, fmt.Sprintf("  %s %s/%s (%s): allows %d, found %d", unused.File, unused.RuleID, unused.Assertion.Name, unused.Description, unused.Allowed, unused.Found))
 	}
 	lines = append(lines, "Run lintai --prune-suppressions to remove them, or pass --pass-on-unpruned-suppressions to ignore them.")
-	return &exitError{code: exitUsage, message: strings.Join(lines, "\n")}
+	return &exitError{code: exitViolations, message: strings.Join(lines, "\n")}
 }
 
 func resolveAssetRoot(explicit, repoRoot string) (string, error) {
@@ -587,12 +583,13 @@ func runLock(ctx context.Context, args []string, stdout io.Writer) error {
 		WorkspaceRoot:        absoluteWorkspace,
 		RuleGlobs:            strings.Split(*rules, ","),
 		SuppressionsLocation: *suppressionsLocation,
+		RulesLock:            *lockFile,
 	})
 	if err != nil {
 		return err
 	}
 	path := engine.ResolveRulesLockPath(absoluteWorkspace, *lockFile)
-	if err := engine.WriteRulesLock(path, lock); err != nil {
+	if err := engine.WriteRulesLock(ctx, path, lock); err != nil {
 		return err
 	}
 	for _, item := range locked {

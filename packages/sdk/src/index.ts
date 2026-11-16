@@ -220,10 +220,18 @@ export class RuleDefinition<Env, Setup> {
 	}
 
 	suppression(assertion: string, options: SuppressionPolicy = {}): RuleDefinition<Env, Setup> {
-		const declaration: SuppressionDeclaration = {
-			assertion,
-			options: Object.freeze({ ...(options.by === undefined ? {} : { by: Object.freeze([...options.by]) }) }),
-		};
+		// Preserve invalid fields and values for the engine's program analysis.
+		const policy = options !== null && typeof options === "object" && !Array.isArray(options)
+			? Object.freeze({
+					...Object.fromEntries(Object.keys(options).filter((key) => key !== "by").map((key) => [key, null])),
+					...(options.by === undefined ? {} : {
+						by: Array.isArray(options.by)
+							? Object.freeze(options.by.map((value) => typeof value === "string" ? value : null))
+							: null,
+					}),
+				}) as SuppressionPolicy
+			: options;
+		const declaration: SuppressionDeclaration = { assertion, options: policy };
 		return new RuleDefinition({
 			...this.spec,
 			suppressionDeclarations: Object.freeze([...(this.spec.suppressionDeclarations ?? []), declaration]),

@@ -57,6 +57,8 @@ type violation struct {
 	typedRow    []facts.Value
 	columns     []string
 	explanation []string
+	by          []string
+	diagnostic  diagnostics.Diagnostic
 }
 
 type evalOptions struct {
@@ -383,7 +385,24 @@ func (plan *rulePlan) evaluate(base factstore.ReadOnlyFactStore, factCounts map[
 				row[argName] = decodeConstant(constant)
 			}
 			location := support.Location
-			item := violation{predicate: sym.Symbol, anchor: anchor, location: location, row: row, typedRow: typedRow, columns: append([]string(nil), argNames...)}
+			var by []string
+			for _, policy := range plan.suppressionRules {
+				if policy.assertion == sym.Symbol {
+					by = append([]string(nil), policy.by...)
+					break
+				}
+			}
+			for _, column := range by {
+				for i, name := range argNames {
+					if name == column {
+						if _, err := typedReason(typedRow[i]); err != nil {
+							return nil, failPhase("report", "%s: %v", column, err)
+						}
+						break
+					}
+				}
+			}
+			item := violation{predicate: sym.Symbol, anchor: anchor, location: location, row: row, typedRow: typedRow, columns: append([]string(nil), argNames...), by: by}
 			if options.explain {
 				item.explanation = explain(plan.info, store, atom)
 			}
@@ -529,7 +548,7 @@ func validateSuppressionPolicies(declarations []runtime.SuppressionDeclaration, 
 			return nil, failPhase("program_analysis", "suppression declaration names unknown or unreported predicate %q", declaration.Assertion)
 		}
 		options, ok := declaration.Options.(map[string]any)
-		if !ok && declaration.Options != nil {
+		if !ok {
 			return nil, failPhase("program_analysis", "suppression declaration for %q must be an options object", declaration.Assertion)
 		}
 		for key := range options {

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -64,7 +65,7 @@ func TestRuleBundleInvalidatedByResolutionConfigChange(t *testing.T) {
 	source := `import { dl, rule } from "@lintai/sdk";
 import { message } from "@fixture/policy";
 export default rule("fixture.alias").version(1)
-	.program(dl`+"`"+`Decl violation(Entity, Code). violation(Entity, Code) :- catalog.usable(Entity, Code).`+"`"+`)
+	.program(dl` + "`" + `Decl violation(Entity, Code). violation(Entity, Code) :- catalog.usable(Entity, Code).` + "`" + `)
 	.report("violation").message(() => message);
 `
 	rulePath := writeTestFile(t, workspace, "lintai-rules/alias.ts", source)
@@ -175,9 +176,8 @@ export default rule("fixture.locked-out").version(1)
 	.report("violation").message((row) => row.Entity);
 `
 	writeTestFile(t, workspace, "lintai-rules/locked-out.ts", source)
-	if err := WriteRulesLock(filepath.Join(workspace, DefaultRulesLockFile), RulesLock{
-		Version: RulesLockVersion,
-		Rules:   map[string]RulesLockRule{"lintai-rules/locked-out.ts": {Hash: "sha256:wrong"}},
+	if err := WriteRulesLock(context.Background(), filepath.Join(workspace, DefaultRulesLockFile), RulesLock{
+		Rules: map[string]RulesLockRule{"lintai-rules/locked-out.ts": {ID: "fixture.locked-out", Version: 1, Hash: "sha256:" + strings.Repeat("0", 64)}},
 	}); err != nil {
 		t.Fatal(err)
 	}
