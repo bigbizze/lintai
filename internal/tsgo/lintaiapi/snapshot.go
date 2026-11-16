@@ -21,6 +21,7 @@ import (
 	"github.com/bigbizze/lintai/internal/tsgo/internal/tspath"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/vfs"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/vfs/osvfs"
+	"github.com/bigbizze/lintai/internal/workspace"
 )
 
 const (
@@ -35,6 +36,11 @@ const (
 type BuildSnapshotRequest struct {
 	WorkspaceRoot   string
 	Files           []string
+	ExactFiles      []string
+	ScopeOptions    *workspace.ScopeOptions
+	ConfigPath      string
+	ConfigDigest    string
+	ConfigPresent   bool
 	SourceLinks     string
 	AmbientMatchers []AmbientMatcher
 	// TsconfigFiles limits the modules to the files that tsc compiles. A
@@ -44,7 +50,8 @@ type BuildSnapshotRequest struct {
 	// tsconfig does not contain is analyzed with a synthetic tsconfig.
 	// Files with no tsconfig.json are always analyzed with the synthetic
 	// tsconfig.
-	TsconfigFiles bool
+	TsconfigFiles    bool
+	beforeValidation func()
 }
 
 type SourceLocation struct {
@@ -381,6 +388,13 @@ type Snapshot struct {
 	// ConfigAdjustments are the compiler options that lintai changed because
 	// TypeScript 7 rejects them, sorted by config path and option.
 	ConfigAdjustments []ConfigAdjustment
+	// InputRevision is the digest of captured compiler inputs after validation.
+	InputRevision string
+	// Scope is a producer-owned canonical scope description for result identity.
+	Scope        any
+	ContextPaths []string
+	Validation   validationStats
+	capture      *resolutionInputFS
 }
 
 type configGroup struct {
@@ -497,6 +511,130 @@ type extractTiming struct {
 }
 
 func BuildSnapshot(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, error) {
+	var total validationStats
+	defer func() { printValidationTrace(validationStats{}, total) }()
+	for attempt := 0; attempt < 2; attempt++ {
+		attemptReq := req
+		var plan *workspace.ScopePlan
+		if req.ScopeOptions != nil {
+			var err error
+			plan, err = workspace.PlanSources(req.WorkspaceRoot, *req.ScopeOptions)
+			if err != nil {
+				return nil, err
+			}
+			attemptReq.WorkspaceRoot = plan.Root
+			attemptReq.Files = plan.Files
+			attemptReq.ExactFiles = plan.ExactFiles
+			// Keep an absolute source-links path in the same root spelling as the compiler inputs.
+			if filepath.IsAbs(req.SourceLinks) {
+				requestedRoot, err := normalizeAbsPath(req.WorkspaceRoot)
+				if err != nil {
+					return nil, err
+				}
+				relative := relativeScopePath(requestedRoot, req.SourceLinks)
+				if !filepath.IsAbs(filepath.FromSlash(relative)) {
+					attemptReq.SourceLinks = filepath.Join(plan.Root, filepath.FromSlash(relative))
+				}
+			}
+		}
+		snapshot, err := buildSnapshotAttempt(ctx, attemptReq)
+		if err != nil {
+			return nil, err
+		}
+		if req.beforeValidation != nil {
+			req.beforeValidation()
+		}
+		trace := validationStats{}
+		validationStarted := time.Now()
+		finishValidation := func() {
+			trace.elapsed = time.Since(validationStarted)
+			total.files += trace.files
+			total.bytes += trace.bytes
+			total.elapsed += trace.elapsed
+		}
+		stable := true
+		if snapshot.capture != nil {
+			var captureStats validationStats
+			stable, captureStats, err = snapshot.capture.validate()
+			trace.files += captureStats.files
+			trace.bytes += captureStats.bytes
+			if err != nil {
+				finishValidation()
+				return nil, err
+			}
+		}
+		if req.ConfigPath != "" {
+			configStable, bytesRead, fileRead, configErr := validateConfigInput(req.ConfigPath, req.ConfigPresent, req.ConfigDigest)
+			if fileRead {
+				trace.files++
+			}
+			trace.bytes += bytesRead
+			if configErr != nil {
+				finishValidation()
+				return nil, configErr
+			}
+			stable = stable && configStable
+		}
+		if plan != nil {
+			scopeStable, scopeErr := workspace.ValidateScope(plan)
+			if scopeErr != nil {
+				finishValidation()
+				return nil, scopeErr
+			}
+			stable = stable && scopeStable
+		}
+		finishValidation()
+		if stable {
+			capturedRevision := ""
+			if snapshot.capture != nil {
+				capturedRevision, err = snapshot.capture.revision()
+				if err != nil {
+					return nil, fmt.Errorf("input revision: %w", err)
+				}
+				snapshot.Inputs = uniqueSnapshotInputs(append(snapshot.Inputs, snapshot.capture.inputs()...))
+			}
+			if req.ConfigPath != "" {
+				snapshot.Inputs = uniqueSnapshotInputs(append(snapshot.Inputs, SnapshotInput{Path: normalizeSlash(req.ConfigPath), Exists: req.ConfigPresent}))
+			}
+			if plan != nil {
+				// Return in-workspace input paths through the requested root for callers watching them.
+				requestedRoot, err := normalizeAbsPath(req.WorkspaceRoot)
+				if err != nil {
+					return nil, err
+				}
+				for i := range snapshot.Inputs {
+					relative := relativeScopePath(plan.Root, snapshot.Inputs[i].Path)
+					if !filepath.IsAbs(filepath.FromSlash(relative)) {
+						snapshot.Inputs[i].Path = normalizeSlash(filepath.Join(requestedRoot, filepath.FromSlash(relative)))
+					}
+				}
+				snapshot.Inputs = uniqueSnapshotInputs(snapshot.Inputs)
+			}
+			if plan != nil {
+				capturedRevision = combineInputRevisions(capturedRevision, plan.Revision)
+				snapshot.Scope = scopeIdentity(plan, snapshot, req.TsconfigFiles)
+			}
+			if req.ConfigPath != "" {
+				configPath := normalizeIdentityPath(req.WorkspaceRoot, req.ConfigPath)
+				capturedRevision = combineInputRevisions(capturedRevision, configPath, req.ConfigPresent, req.ConfigDigest)
+			}
+			if capturedRevision == "" {
+				capturedRevision = combineInputRevisions()
+			}
+			snapshot.InputRevision = capturedRevision
+			snapshot.Validation = total
+			snapshot.capture = nil
+			return snapshot, nil
+		}
+		if attempt == 1 {
+			return nil, fmt.Errorf("inputs_changed: compiler inputs or source membership changed during collection")
+		}
+		total.retries++
+	}
+	return nil, fmt.Errorf("inputs_changed: compiler inputs or source membership changed during collection")
+}
+
+func buildSnapshotAttempt(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, error) {
 	started := time.Now()
 	timing := &extractTiming{}
 	workspaceRoot, err := normalizeAbsPath(req.WorkspaceRoot)
@@ -507,12 +645,6 @@ func BuildSnapshot(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, er
 	if err != nil {
 		return nil, err
 	}
-	if len(files) == 0 {
-		if req.SourceLinks == "" {
-			return &Snapshot{}, nil
-		}
-	}
-
 	trackedFS := trackResolutionInputs(osvfs.FS(), workspaceRoot)
 	host := compiler.NewCompilerHost(
 		bundled.WrapFS(trackedFS),
@@ -521,7 +653,12 @@ func BuildSnapshot(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, er
 		nil,
 		nil,
 	)
-	sourceEntries, sourceLinksFile, err := readSourceLinks(workspaceRoot, req.SourceLinks, host.FS().CaseSensitivity())
+	if len(files) == 0 {
+		if req.SourceLinks == "" {
+			return &Snapshot{capture: trackedFS}, nil
+		}
+	}
+	sourceEntries, sourceLinksFile, err := readSourceLinks(workspaceRoot, req.SourceLinks, host.FS())
 	if err != nil {
 		return nil, err
 	}
@@ -530,12 +667,21 @@ func BuildSnapshot(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, er
 	defer auxiliary.close()
 	entryResolutions := newSourceEntryResolutions()
 	configStarted := time.Now()
-	groups, err := discoverConfigGroups(workspaceRoot, files, configs)
+	groups, err := discoverConfigGroups(workspaceRoot, files, req.ExactFiles, configs)
 	if err != nil {
 		return nil, err
 	}
 	timing.config = time.Since(configStarted)
 	merged := &Snapshot{}
+	for _, group := range groups {
+		if group.ConfigPath == "" {
+			merged.ContextPaths = append(merged.ContextPaths, "synthetic")
+		} else {
+			merged.ContextPaths = append(merged.ContextPaths, group.ConfigPath)
+		}
+	}
+	slices.Sort(merged.ContextPaths)
+	merged.ContextPaths = slices.Compact(merged.ContextPaths)
 	for _, entry := range sourceEntries {
 		merged.Inputs = append(merged.Inputs,
 			SnapshotInput{Path: entry.CheckedPath, Exists: host.FS().FileExists(tspath.RootedFilePathFromAbsolute(entry.CheckedPath))},
@@ -595,11 +741,11 @@ func BuildSnapshot(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, er
 	merged.callDeclarationObservations = nil
 	merged.ConfigFiles = configs.files()
 	merged.Inputs = append(merged.Inputs, configs.inputs()...)
-	merged.Inputs = append(merged.Inputs, trackedFS.snapshotInputs()...)
 	if sourceLinksFile != "" {
 		merged.Inputs = append(merged.Inputs, SnapshotInput{Path: sourceLinksFile, Exists: true})
 	}
 	merged.ConfigAdjustments = configs.adjustments()
+	merged.capture = trackedFS
 	sortSnapshot(merged)
 	if os.Getenv("LINTAI_EXTRACT_TIMING") == "1" {
 		fmt.Fprintf(os.Stderr, "lintai: extract files=%d programs=%d auxiliary_programs=%d config_ms=%d program_ms=%d auxiliary_program_ms=%d walk_ms=%d types_ms=%d type_entities=%d declarations=%d exports=%d total_ms=%d\n",
@@ -1165,8 +1311,12 @@ func syntheticConfig(host compiler.CompilerHost, workspaceRoot string, files []s
 	return parsed, nil
 }
 
-func discoverConfigGroups(workspaceRoot string, files []string, configs *configCache) ([]configGroup, error) {
+func discoverConfigGroups(workspaceRoot string, files, exactFiles []string, configs *configCache) ([]configGroup, error) {
 	grouped := make(map[string][]string)
+	exact := make(map[string]struct{}, len(exactFiles))
+	for _, file := range exactFiles {
+		exact[normalizeSlash(file)] = struct{}{}
+	}
 	for _, file := range files {
 		configPath, err := configs.findNearestConfigPath(workspaceRoot, file)
 		if err != nil {
@@ -1195,6 +1345,21 @@ func discoverConfigGroups(workspaceRoot string, files []string, configs *configC
 			if err != nil {
 				return nil, err
 			}
+			rootFiles := slices.Clone(command.FileNames())
+			knownRoots := make(map[string]struct{}, len(rootFiles))
+			for _, file := range rootFiles {
+				knownRoots[normalizeSlash(file.AsString())] = struct{}{}
+			}
+			for _, file := range primaryFiles {
+				if _, isExact := exact[file]; !isExact {
+					continue
+				}
+				if _, exists := knownRoots[file]; exists {
+					continue
+				}
+				rootFiles = append(rootFiles, tspath.RootedFilePathFromAbsolute(file))
+			}
+			command = command.WithFileNames(rootFiles)
 			group.Config = command
 		}
 		groups = append(groups, group)
@@ -1207,11 +1372,13 @@ func (c *configCache) findNearestConfigPath(workspaceRoot string, file string) (
 	current := filepath.Dir(filepath.FromSlash(file))
 	for {
 		candidate := normalizeSlash(filepath.Join(current, "tsconfig.json"))
-		if _, err := os.Stat(candidate); err == nil {
+		_, statErr := os.Stat(candidate)
+		exists := c.host.FS().FileExists(tspath.RootedFilePathFromAbsolute(candidate))
+		if statErr == nil && exists {
 			c.candidates[candidate] = true
 			return candidate, nil
-		} else if !os.IsNotExist(err) {
-			return "", err
+		} else if statErr != nil && !os.IsNotExist(statErr) {
+			return "", statErr
 		}
 		// Creation of a checked candidate can change the selected config.
 		c.candidates[candidate] = false

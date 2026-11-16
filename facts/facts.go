@@ -59,9 +59,11 @@ type Schema struct {
 
 // Snapshot is a deterministic, versioned set of backend facts.
 type Snapshot struct {
-	Version string
-	Schema  Schema
-	Facts   []Fact
+	Version       string
+	InputRevision string
+	Scope         any
+	Schema        Schema
+	Facts         []Fact
 	// InputPaths are additional workspace dependencies whose changes may
 	// alter extracted facts, including paths that were absent at extraction.
 	InputPaths []string

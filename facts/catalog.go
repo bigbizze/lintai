@@ -84,6 +84,7 @@ type Batch struct {
 	Anchors       map[string]AnchorSupport
 	AnalyzedFiles []string
 	InputRevision string
+	Scope         any
 }
 
 // ValidatedFacts owns a defensive copy of a producer batch. Callers can only
@@ -93,6 +94,7 @@ type ValidatedFacts struct {
 	anchors       map[string]AnchorSupport
 	analyzedFiles []string
 	inputRevision string
+	scope         any
 	namespace     string
 }
 
@@ -131,6 +133,7 @@ func (v ValidatedFacts) Anchors() map[string]AnchorSupport {
 
 func (v ValidatedFacts) AnalyzedFiles() []string { return slices.Clone(v.analyzedFiles) }
 func (v ValidatedFacts) InputRevision() string   { return v.inputRevision }
+func (v ValidatedFacts) Scope() any              { return cloneCanonical(v.scope) }
 
 func (v ValidatedFacts) Facts() []Fact {
 	result := make([]Fact, 0)
@@ -155,6 +158,9 @@ func ValidateBatch(description ProducerDescription, requested []Predicate, batch
 	}
 	if _, err := canonical.Marshal(description.EffectiveConfiguration); err != nil {
 		return ValidatedFacts{}, fmt.Errorf("producer %q effective configuration: %w", description.Namespace, err)
+	}
+	if _, err := canonical.Marshal(batch.Scope); err != nil {
+		return ValidatedFacts{}, fmt.Errorf("producer %q scope: %w", description.Namespace, err)
 	}
 
 	metadata := make(map[Predicate]RelationDescription, len(description.BaseRelations)+len(description.Helpers))
@@ -191,6 +197,7 @@ func ValidateBatch(description ProducerDescription, requested []Predicate, batch
 		anchors:       make(map[string]AnchorSupport, len(batch.Anchors)),
 		analyzedFiles: slices.Clone(batch.AnalyzedFiles),
 		inputRevision: batch.InputRevision,
+		scope:         cloneCanonical(batch.Scope),
 		namespace:     description.Namespace,
 	}
 	for predicate := range batch.Relations {

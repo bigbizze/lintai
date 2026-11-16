@@ -212,7 +212,7 @@ func (catalog producerCatalog) collect(ctx context.Context, options Options, req
 		producerRecords = append(producerRecords, []any{
 			"producer-result-v2", description.Namespace, description.ImplementationID,
 			description.ImplementationStamp, description.ContractVersion, description.EffectiveConfiguration,
-			validated.InputRevision(), validated.AnalyzedFiles(), requestedNames,
+			validated.InputRevision(), validated.Scope(), requestedNames,
 		})
 	}
 	base, err := facts.Store(allFacts)

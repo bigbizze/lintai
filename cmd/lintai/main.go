@@ -9,6 +9,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 
 	"github.com/bigbizze/lintai/backend"
@@ -17,6 +19,8 @@ import (
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/engine"
 	"github.com/bigbizze/lintai/facts"
+	"github.com/bigbizze/lintai/internal/tsgo/lintaiapi"
+	"github.com/bigbizze/lintai/internal/workspace"
 	"github.com/bigbizze/lintai/server"
 	"github.com/bigbizze/lintai/suppressions"
 )
@@ -71,6 +75,8 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 			return err
 		case "facts":
 			return runFacts(ctx, args[1:], stdout)
+		case "scope":
+			return runScope(ctx, args[1:], stdout)
 		case "lock":
 			return runLock(ctx, args[1:], stdout)
 		case "rules":
@@ -114,51 +120,76 @@ func runFacts(ctx context.Context, args []string, stdout io.Writer) error {
 	flags.SetOutput(os.Stderr)
 	workspaceRoot := flags.String("workspace-root", ".", "workspace root to analyze")
 	flags.String("asset-root", "", "ignored; the npm launcher passes it to every command")
+	configPath := flags.String("config", "", "lintai.toml file (relative to the invocation directory)")
 	var excludes stringList
 	flags.Var(&excludes, "exclude", "glob of workspace files to leave out of the snapshot (repeatable)")
-	files := flags.String("files", string(typescript.FileScopeTsconfig), "files in the snapshot: tsconfig (files that tsc compiles) or walk (every walked file)")
+	var sources stringList
+	flags.Var(&sources, "source", "exact workspace source file to select (repeatable)")
+	files := flags.String("files", "", "files in the snapshot: tsconfig (files that tsc compiles) or walk (every walked file)")
 	sourceLinks := flags.String("source-links", "", "JSON source-entry associations, relative to --workspace-root")
 	var relations stringList
 	flags.Var(&relations, "relation", "qualified base relation to print (repeatable; default: all)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	scope, err := typescript.ParseFileScope(*files)
-	if err != nil {
-		return err
-	}
 	absoluteWorkspace, err := filepath.Abs(*workspaceRoot)
 	if err != nil {
 		return err
 	}
-	settings := typescript.Options{Excludes: excludes, Files: scope, SourceLinks: *sourceLinks}
-	producer := newBackend(settings)
-	description, err := producer.Describe()
+	settings, err := loadTypeScriptSettings(absoluteWorkspace, *configPath, *files, flagProvided(flags, "files"), *sourceLinks, flagProvided(flags, "source-links"), excludes, sources)
 	if err != nil {
 		return err
 	}
-	requested := make([]facts.Predicate, len(description.BaseRelations))
-	allowed := make([]string, len(description.BaseRelations))
-	for index, relation := range description.BaseRelations {
-		requested[index] = relation.Predicate
-		allowed[index] = relation.Predicate.Name
+	allAllowed := make(map[string]struct{})
+	lines := make([]string, 0)
+	for _, producerSettings := range settings {
+		producer := newBackend(producerSettings)
+		description, err := producer.Describe()
+		if err != nil {
+			return err
+		}
+		requested := make([]facts.Predicate, len(description.BaseRelations))
+		allowed := make([]string, len(description.BaseRelations))
+		for index, relation := range description.BaseRelations {
+			requested[index] = relation.Predicate
+			allowed[index] = relation.Predicate.Name
+			allAllowed[relation.Predicate.Name] = struct{}{}
+		}
+		batch, err := producer.Collect(ctx, backend.CollectionRequest{
+			RepoRoot: absoluteWorkspace, WorkspaceRoot: absoluteWorkspace, Predicates: requested,
+		})
+		if err != nil {
+			return err
+		}
+		validated, err := facts.ValidateBatch(description, requested, batch)
+		if err != nil {
+			return err
+		}
+		wanted := make([]string, 0, len(relations))
+		for _, relation := range relations {
+			if strings.HasPrefix(relation, description.Namespace+".") {
+				wanted = append(wanted, relation)
+			}
+		}
+		if len(relations) > 0 && len(wanted) == 0 {
+			continue
+		}
+		text, err := facts.FormatFacts(validated.Facts(), allowed, wanted)
+		if err != nil {
+			return err
+		}
+		if text != "" {
+			lines = append(lines, strings.Split(text, "\n")...)
+		}
 	}
-	batch, err := producer.Collect(ctx, backend.CollectionRequest{
-		RepoRoot: absoluteWorkspace, WorkspaceRoot: absoluteWorkspace, Predicates: requested,
-	})
-	if err != nil {
-		return err
+	for _, relation := range relations {
+		if _, ok := allAllowed[relation]; !ok {
+			return fmt.Errorf("unknown base relation %q", relation)
+		}
 	}
-	validated, err := facts.ValidateBatch(description, requested, batch)
-	if err != nil {
-		return err
-	}
-	text, err := facts.FormatFacts(validated.Facts(), allowed, relations)
-	if err != nil {
-		return err
-	}
-	if text != "" {
-		fmt.Fprintln(stdout, text)
+	if len(lines) > 0 {
+		slices.Sort(lines)
+		fmt.Fprintln(stdout, strings.Join(lines, "\n"))
 	}
 	return nil
 }
@@ -172,6 +203,155 @@ func runServe(ctx context.Context) error {
 	return instance.Serve(ctx, os.Stdin, os.Stdout)
 }
 
+func flagProvided(flags *flag.FlagSet, name string) bool {
+	provided := false
+	flags.Visit(func(item *flag.Flag) {
+		if item.Name == name {
+			provided = true
+		}
+	})
+	return provided
+}
+
+func loadTypeScriptSettings(workspaceRoot, explicitConfig, filesOverride string, filesSet bool, sourceLinksOverride string, sourceLinksSet bool, invocationExcludes, invocationSources []string) ([]typescript.Options, error) {
+	invocationDir, err := os.Getwd()
+	if err != nil {
+		return nil, err
+	}
+	configPath, optional, err := workspace.ResolveConfigPath(workspaceRoot, invocationDir, explicitConfig)
+	if err != nil {
+		return nil, err
+	}
+	config, err := workspace.LoadWorkspaceConfig(configPath, optional)
+	if err != nil {
+		return nil, err
+	}
+	producers := config.Producers
+	if len(producers) == 0 {
+		producers = map[string]workspace.ProducerConfig{"ts": {}}
+	}
+	namespaces := make([]string, 0, len(producers))
+	for namespace := range producers {
+		namespaces = append(namespaces, namespace)
+	}
+	sort.Strings(namespaces)
+	if len(namespaces) > 1 && (filesSet || sourceLinksSet) {
+		return nil, fmt.Errorf("TypeScript command-line scope flags are ambiguous with multiple TypeScript producers; configure them in lintai.toml")
+	}
+	settings := make([]typescript.Options, 0, len(namespaces))
+	for _, namespace := range namespaces {
+		producerConfig := producers[namespace]
+		implementation := producerConfig.Implementation
+		if implementation == "" && namespace == "ts" {
+			implementation = "lintai.typescript"
+		}
+		if implementation != "lintai.typescript" {
+			return nil, fmt.Errorf("unknown implementation %q for producer %q", implementation, namespace)
+		}
+		fileMode := producerConfig.Files
+		if fileMode == "" {
+			fileMode = string(typescript.FileScopeTsconfig)
+		}
+		if filesSet {
+			fileMode = filesOverride
+		}
+		scope, err := typescript.ParseFileScope(fileMode)
+		if err != nil {
+			return nil, err
+		}
+		sourceLinks := producerConfig.SourceLinks
+		if sourceLinksSet {
+			sourceLinks = sourceLinksOverride
+		}
+		sources := append(slices.Clone(config.Sources), invocationSources...)
+		settings = append(settings, typescript.Options{
+			Namespace: namespace, WorkspaceExcludes: slices.Clone(config.Exclude),
+			Includes: slices.Clone(config.Include), Sources: sources,
+			Excludes: slices.Clone(invocationExcludes), Files: scope, SourceLinks: sourceLinks,
+			ConfigPath: configPath, ConfigDigest: config.Digest, ConfigPresent: config.Path != "",
+		})
+	}
+	return settings, nil
+}
+
+func runScope(ctx context.Context, args []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("lintai scope", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	workspaceRoot := flags.String("workspace-root", ".", "workspace root to inspect")
+	configPath := flags.String("config", "", "lintai.toml file (relative to the invocation directory)")
+	explain := flags.Bool("explain", false, "explain the production source and compiler scope")
+	jsonOutput := flags.Bool("json", false, "print the scope explanation as JSON")
+	var excludes stringList
+	flags.Var(&excludes, "exclude", "exclude a workspace pattern at invocation priority (repeatable)")
+	var sources stringList
+	flags.Var(&sources, "source", "select an exact workspace source file (repeatable)")
+	files := flags.String("files", "", "files in scope: tsconfig or walk")
+	sourceLinks := flags.String("source-links", "", "JSON source-entry associations, relative to --workspace-root")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if !*explain {
+		return fmt.Errorf("lintai scope requires --explain")
+	}
+	root, err := filepath.Abs(*workspaceRoot)
+	if err != nil {
+		return err
+	}
+	settings, err := loadTypeScriptSettings(root, *configPath, *files, flagProvided(flags, "files"), *sourceLinks, flagProvided(flags, "source-links"), excludes, sources)
+	if err != nil {
+		return err
+	}
+	type producerScope struct {
+		Producer string                     `json:"producer"`
+		Files    string                     `json:"files"`
+		Scope    lintaiapi.ScopeExplanation `json:"scope"`
+	}
+	reports := make([]producerScope, 0, len(settings))
+	for _, item := range settings {
+		options := workspace.ScopeOptions{
+			Exclude: item.WorkspaceExcludes, Include: item.Includes,
+			Sources: item.Sources, InvocationExclude: item.Excludes,
+		}
+		report, err := lintaiapi.ExplainScope(ctx, lintaiapi.BuildSnapshotRequest{
+			WorkspaceRoot: root, ScopeOptions: &options, TsconfigFiles: item.Files == typescript.FileScopeTsconfig,
+		})
+		if err != nil {
+			return err
+		}
+		reports = append(reports, producerScope{Producer: item.Namespace, Files: string(item.Files), Scope: report})
+	}
+	if *jsonOutput {
+		encoder := json.NewEncoder(stdout)
+		encoder.SetIndent("", "  ")
+		return encoder.Encode(reports)
+	}
+	for index, report := range reports {
+		if index > 0 {
+			fmt.Fprintln(stdout)
+		}
+		fmt.Fprintf(stdout, "producer: %s\nfiles: %s\n", report.Producer, report.Files)
+		fmt.Fprintf(stdout, "exclude: %v\ninclude: %v\n", report.Scope.WorkspaceExclude, report.Scope.WorkspaceInclude)
+		fmt.Fprintf(stdout, "exact sources: %v\n", report.Scope.ExactSources)
+		fmt.Fprintf(stdout, "selected files: %d\n", len(report.Scope.Selected))
+		for _, item := range report.Scope.Selected {
+			fmt.Fprintf(stdout, "  %s", item.Path)
+			if item.Exact {
+				fmt.Fprint(stdout, " [exact]")
+			}
+			if len(item.IncludePatterns) > 0 {
+				fmt.Fprintf(stdout, " [include: %s]", strings.Join(item.IncludePatterns, ", "))
+			}
+			if len(item.ExcludePatterns) > 0 {
+				fmt.Fprintf(stdout, " [excluded then included: %s]", strings.Join(item.ExcludePatterns, ", "))
+			}
+			fmt.Fprintln(stdout)
+		}
+		fmt.Fprintf(stdout, "compiler eligible: %v\ncompiler excluded: %v\nconfigurations: %v\npruned boundaries: %v\n",
+			report.Scope.CompilerEligible, report.Scope.CompilerExcluded, report.Scope.Configurations, report.Scope.PrunedBoundaries)
+	}
+	return nil
+}
+
 func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 	flags := flag.NewFlagSet("lintai", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
@@ -179,6 +359,7 @@ func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 	workspaceRoot := flags.String("workspace-root", ".", "workspace root to analyze")
 	repoRoot := flags.String("repo-root", ".", "repository root containing scripts and packages")
 	assetRoot := flags.String("asset-root", "", "asset root containing lintai helper scripts")
+	configPath := flags.String("config", "", "lintai.toml file (relative to the invocation directory)")
 	rules := flags.String("rules", "lintai-rules/**/*.ts", "comma-separated list of rule globs, relative to --workspace-root")
 	envJSON := flags.String("env-json", "{}", "JSON object passed to every rule as env")
 	jsonOutput := flags.Bool("json", false, "emit diagnostics as JSON")
@@ -186,7 +367,9 @@ func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 	factLimit := flags.Int("fact-limit", engine.DefaultFactLimit, "maximum number of facts a rule may derive")
 	var excludes stringList
 	flags.Var(&excludes, "exclude", "glob of workspace files to leave out of the snapshot (repeatable)")
-	files := flags.String("files", string(typescript.FileScopeTsconfig), "files in the snapshot: tsconfig (files that tsc compiles) or walk (every walked file)")
+	var sources stringList
+	flags.Var(&sources, "source", "exact workspace source file to select (repeatable)")
+	files := flags.String("files", "", "files in the snapshot: tsconfig (files that tsc compiles) or walk (every walked file)")
 	sourceLinks := flags.String("source-links", "", "JSON source-entry associations, relative to --workspace-root")
 	var severities stringList
 	flags.Var(&severities, "severity", "rule severity as <rule-id>=error|warning|off (repeatable; default: error)")
@@ -215,11 +398,6 @@ func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 	if *factLimit <= 0 {
 		return fmt.Errorf("--fact-limit must be positive")
 	}
-	scope, err := typescript.ParseFileScope(*files)
-	if err != nil {
-		return err
-	}
-
 	absoluteWorkspace, err := filepath.Abs(*workspaceRoot)
 	if err != nil {
 		return err
@@ -237,8 +415,15 @@ func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 		return fmt.Errorf("invalid --env-json value: %w", err)
 	}
 	ruleGlobs := strings.Split(*rules, ",")
-	producerSettings := typescript.Options{Excludes: excludes, Files: scope, SourceLinks: *sourceLinks}
-	runner := engine.New(newBackend(producerSettings))
+	producerSettings, err := loadTypeScriptSettings(absoluteWorkspace, *configPath, *files, flagProvided(flags, "files"), *sourceLinks, flagProvided(flags, "source-links"), excludes, sources)
+	if err != nil {
+		return err
+	}
+	producers := make([]backend.Producer, 0, len(producerSettings))
+	for _, settings := range producerSettings {
+		producers = append(producers, newBackend(settings))
+	}
+	runner := engine.New(producers...)
 	result, err := runner.Analyze(ctx, engine.Options{
 		RepoRoot:      absoluteRepo,
 		AssetRoot:     absoluteAssetRoot,
