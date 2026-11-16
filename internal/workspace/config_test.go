@@ -3,6 +3,7 @@ package workspace
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -55,8 +56,11 @@ source_links = ""
 	for name, invalid := range map[string]string{
 		"duplicate key":          "[workspace]\nexclude = []\nexclude = []\n",
 		"empty array element":    "[workspace]\nexclude = [\"tmp/**\",,]\n",
+		"missing array comma":    "[workspace]\nexclude = ['src/a.ts' 'src/b.ts']\n",
 		"wrong value type":       "[workspace]\nexclude = \"tmp/**\"\n",
 		"unknown workspace key":  "[workspace]\nextend = []\n",
+		"incorrect key case":     "[workspace]\nEXCLUDE = []\n",
+		"unknown producer key":   "[producers.ts]\nextra = \"value\"\n",
 		"missing implementation": "[producers.catalog]\nfiles = \"walk\"\n",
 		"empty producers":        "[producers]\n",
 		"unknown table":          "[workspace.extra]\n",
@@ -65,8 +69,17 @@ source_links = ""
 			if err := os.WriteFile(configPath, []byte(invalid), 0o644); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := LoadWorkspaceConfig(configPath, false); err == nil {
+			_, err := LoadWorkspaceConfig(configPath, false)
+			if err == nil {
 				t.Fatal("invalid TOML configuration was accepted")
+			}
+			if want := map[string]string{
+				"unknown workspace key": "unknown workspace key",
+				"incorrect key case":    "unknown workspace key",
+				"unknown producer key":  "unknown producer key",
+				"unknown table":         "unsupported table",
+			}[name]; want != "" && !strings.Contains(err.Error(), want) {
+				t.Fatalf("error %q does not identify %s", err, want)
 			}
 		})
 	}
