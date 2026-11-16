@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -13,7 +14,6 @@ import (
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/engine"
 	"github.com/bigbizze/lintai/jsonrpc"
-	"github.com/bigbizze/lintai/suppressions"
 )
 
 const (
@@ -371,8 +371,8 @@ func classifyError(err error) *jsonrpc.ResponseError {
 	}
 }
 
-// normalizeWorkspacePath is the key of a file: forward slashes and no
-// leading slash. The suppressions file uses the same key.
+// normalizeWorkspacePath uses a workspace-relative key for diagnostics and
+// file requests, including requests with a leading slash.
 func normalizeWorkspacePath(path string) string {
-	return suppressions.NormalizePath(path)
+	return strings.TrimPrefix(filepath.ToSlash(path), "/")
 }

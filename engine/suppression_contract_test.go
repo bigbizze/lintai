@@ -62,6 +62,7 @@ func TestSuppressionProducerCoverage(t *testing.T) {
 	workspace := t.TempDir()
 	p := newParallelFixtureProducer()
 	support := p.anchors["catalog:item-b"]
+	support.Location.File = "../catalog/items.sql"
 	support.Tracking = nil
 	p.anchors["catalog:item-b"] = support
 	catalog := &coverageProducer{parallelFixtureProducer: p, revision: "catalog:1"}
@@ -87,6 +88,7 @@ func TestSuppressionProducerCoverage(t *testing.T) {
 	}
 	oneProducer := newParallelFixtureProducer()
 	nullSupport := oneProducer.anchors["catalog:item-b"]
+	nullSupport.Location.File = "../catalog/items.sql"
 	nullSupport.Tracking = nil
 	oneProducer.anchors["catalog:item-b"] = nullSupport
 	single := Open(Options{}, &coverageProducer{parallelFixtureProducer: oneProducer, revision: "catalog:1"}, secondCoverageProducer())
@@ -122,6 +124,23 @@ func TestSuppressionProducerCoverage(t *testing.T) {
 	}
 	if !foundNull || !foundKey {
 		t.Fatalf("missing producer support: %+v", saved)
+	}
+	options.SuppressAll = false
+	matched, err := session.Check(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matched.Suppressed) != 6 || len(matched.Diagnostics) != 0 {
+		t.Fatalf("saved dependency allowance did not match: %+v", matched)
+	}
+	var matchedDependency bool
+	for _, item := range matched.Suppressed {
+		if item.SourceLocation != nil && item.SourceLocation.File == "../catalog/items.sql" {
+			matchedDependency = true
+		}
+	}
+	if !matchedDependency {
+		t.Fatalf("dependency finding was not matched by its saved allowance: %+v", matched.Suppressed)
 	}
 	options.SuppressAll = false
 	options.Severity = diagnostics.SeverityWarning
@@ -166,10 +185,17 @@ func TestSuppressionProducerCoverage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var dependencyEntry bool
 	for _, entry := range after {
 		if entry.Rule == "fixture.catalog" {
-			t.Fatalf("own primary coverage did not prune: %+v", after)
+			if entry.File != "../catalog/items.sql" {
+				t.Fatalf("own primary coverage did not prune covered files: %+v", after)
+			}
+			dependencyEntry = true
 		}
+	}
+	if !dependencyEntry {
+		t.Fatalf("dependency allowance did not survive primary-file pruning: %+v", after)
 	}
 }
 

@@ -23,12 +23,26 @@ func TestCurrentFormatAndApproval(t *testing.T) {
 		`{}`, strings.Replace(source, `lintai.suppressions/4`, `lintai.suppressions/3`, 1),
 		strings.Replace(source, `"count":2`, `"count":0`, 1),
 		strings.Replace(source, `"key":{"scheme":"catalog/1","data":{"name":"x"}},`, ``, 1), strings.Replace(source, `"description":"item"`, `"description":"item","extra":true`, 1),
-		strings.Replace(source, `src/a.ts`, `../a.ts`, 1),
+		strings.Replace(source, `src/a.ts`, ``, 1), strings.Replace(source, `src/a.ts`, `.`, 1),
+		strings.Replace(source, `src/a.ts`, `..`, 1), strings.Replace(source, `src/a.ts`, `src/../a.ts`, 1),
+		strings.Replace(source, `src/a.ts`, `src\\a.ts`, 1),
 		strings.Replace(source, `"groups":[{`, `"groups":[{"namespace":"sql","key":{"scheme":"catalog/1","data":{"name":"x"}},"reasons":[["Reason",["n","clock"]]],"description":"other","count":1},{`, 1),
 	} {
 		if _, err := Parse("bad", []byte(bad)); err == nil {
 			t.Fatalf("accepted %s", bad)
 		}
+	}
+	for _, acceptedPath := range []string{"../a.ts", "/x/a.ts"} {
+		candidate := strings.Replace(source, `src/a.ts`, acceptedPath, 1)
+		if _, err := Parse("path", []byte(candidate)); err != nil {
+			t.Fatalf("rejected normalized path %q: %v", acceptedPath, err)
+		}
+	}
+	if got := NormalizePath("/x/a.ts"); got != "/x/a.ts" {
+		t.Fatalf("absolute path lost its leading slash: %q", got)
+	}
+	if NormalizePath("/x/a.ts") == NormalizePath("x/a.ts") {
+		t.Fatal("absolute and relative paths were conflated")
 	}
 	approved := file
 	changed := append(File(nil), file...)

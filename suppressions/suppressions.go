@@ -298,7 +298,7 @@ func validateData(v any) error {
 	}
 }
 func validPath(p string) bool {
-	return p != "" && p != "." && !strings.Contains(p, `\`) && !strings.HasPrefix(p, "/") && p != ".." && !strings.HasPrefix(p, "../") && path.Clean(p) == p
+	return p != "" && p != "." && p != ".." && !strings.Contains(p, `\`) && path.Clean(p) == p
 }
 func ResolvePath(root, name string) string {
 	if name == "" {
@@ -309,7 +309,7 @@ func ResolvePath(root, name string) string {
 	}
 	return filepath.Join(root, name)
 }
-func NormalizePath(p string) string { return strings.TrimPrefix(filepath.ToSlash(p), "/") }
+func NormalizePath(p string) string { return filepath.ToSlash(p) }
 func EntryID(e Entry) string {
 	b, _ := canonical.Marshal([]any{e.File, e.Rule, e.Assertion.Name, e.Assertion.Arity})
 	return string(b)
