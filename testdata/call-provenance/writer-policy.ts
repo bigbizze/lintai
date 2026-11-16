@@ -10,7 +10,7 @@ export default rule("arch.no-writer-write")
 		Decl policy_scope(File) descr [extensional()].
 		Decl owner_entry(File, Name) descr [extensional()].
 		Decl binding(Export).
-		binding(E) :- owner_entry(F, N), ts.module_export(E, F, N, /type).
+		binding(E) :- owner_entry(F, N), ts.module_path(M, F), ts.module_export(E, M, N, /type).
 		Decl has_binding().
 		has_binding() :- binding(_).
 		Decl has_target(Export).
@@ -21,19 +21,19 @@ export default rule("arch.no-writer-write")
 
 		Decl selection_issue(Reason).
 		selection_issue("missing export") :- owner_entry(_, _), !has_binding().
-		selection_issue("export inventory incomplete") :- owner_entry(F, _), ts.module_exports_incomplete(F, _).
+		selection_issue("export inventory incomplete") :- owner_entry(F, _), ts.module_path(M, F), ts.module_exports_incomplete(M, _).
 		selection_issue("export incomplete") :- binding(E), ts.export_incomplete(E, _).
 		selection_issue("missing export target") :- binding(E), !has_target(E).
 		selection_issue("missing or unsupported owner") :- binding(E), ts.export_target(E, D), !owner(D).
-		selection_issue("owner incomplete") :- owner(O), ts.declaration_incomplete(O, _).
+		selection_issue("owner incomplete") :- owner(O), ts.declaration_metadata_incomplete(O, _).
 		Decl selection_uncertain().
 		selection_uncertain() :- selection_issue(_).
 
 		# Select existing runtime sites by source file, including module-level calls.
 		Decl runtime_site(Site).
-		runtime_site(S) :- ts.call_edge(S, _, _).
+		runtime_site(S) :- ts.site_owner(S, _), ts.call_edge(S, _).
 		runtime_site(S) :- ts.external_call(S, _, _, _).
-		runtime_site(S) :- ts.call_unresolved(S, _).
+		runtime_site(S) :- ts.call_unresolved(S).
 		Decl selected(Site).
 		selected(S) :- runtime_site(S), ts.location(S, F, _, _, _, _), policy_scope(F).
 		Decl has_declaration(Site).
@@ -52,7 +52,7 @@ export default rule("arch.no-writer-write")
 			ts.declaration_member(D, O, "write"), owner(O).
 		Decl indeterminate(Anchor, File, Reason).
 		indeterminate(S, F, Reason) :- signature_issue(S, Reason), ts.location(S, F, _, _, _, _).
-		indeterminate(M, F, Reason) :- policy_scope(F), ts.module(M), ts.location(M, F, _, _, _, _), selection_issue(Reason).
+		indeterminate(M, F, Reason) :- policy_scope(F), ts.module_path(M, F), selection_issue(Reason).
 	`)
 	.report("forbidden", "indeterminate")
 	.message((row, ctx) => {

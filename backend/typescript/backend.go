@@ -25,6 +25,9 @@ type Backend struct {
 	// TypeScript 7, once per config and adjustment set. Nil discards them.
 	Log io.Writer
 
+	collectMu        sync.Mutex
+	previousSnapshot *lintaiapi.Snapshot
+
 	reportedMu sync.Mutex
 	reported   map[string]string
 }
@@ -62,7 +65,7 @@ func (b *Backend) Describe() (facts.ProducerDescription, error) {
 		"files":            string(b.settings.Files),
 		"sourceLinks":      b.settings.SourceLinks,
 	}
-	return facts.DescribeSchema(b.namespace, "lintai.typescript", "typescript-producer-type-observations-1", "ts-vocabulary/1", configuration, Schema())
+	return facts.DescribeSchema(b.namespace, "lintai.typescript", "typescript-producer-semantic-ownership-1", "ts-vocabulary/2", configuration, Schema())
 }
 
 func (b *Backend) Collect(ctx context.Context, request backend.CollectionRequest) (facts.Batch, error) {
@@ -95,7 +98,13 @@ func (b *Backend) Collect(ctx context.Context, request backend.CollectionRequest
 	for predicate := range requested {
 		relations = append(relations, strings.TrimPrefix(predicate.Name, b.namespace+"."))
 	}
-	snapshot, err := b.buildSnapshot(ctx, request.RepoRoot, request.WorkspaceRoot, relations)
+	snapshot, sources, _, err := b.buildLintaiSnapshotForRelations(ctx, request.RepoRoot, request.WorkspaceRoot, relations)
+	if err != nil {
+		return facts.Batch{}, err
+	}
+	adjustments := convertAdjustments(request.WorkspaceRoot, snapshot.ConfigAdjustments)
+	b.reportAdjustments(adjustments)
+	items, err := factsFromSnapshot(snapshot, sources, adjustments, b.namespace)
 	if err != nil {
 		return facts.Batch{}, err
 	}
@@ -106,7 +115,7 @@ func (b *Backend) Collect(ctx context.Context, request backend.CollectionRequest
 	for predicate := range requested {
 		batch.Relations[predicate] = []facts.Row{}
 	}
-	for _, item := range snapshot.Facts {
+	for _, item := range items {
 		predicate := facts.Predicate{Name: b.namespace + "." + item.Relation, Arity: len(item.Values)}
 		if _, wanted := requested[predicate]; !wanted {
 			continue
@@ -120,16 +129,13 @@ func (b *Backend) Collect(ctx context.Context, request backend.CollectionRequest
 				return facts.Batch{}, fmt.Errorf("TypeScript entity %s argument %s is not a string", predicate, argument.Name)
 			}
 			id := values[index].String
-			if id == "" && (argument.Name == "Caller" || argument.Name == "From" || argument.Name == "Owner") {
-				id = "unsupported"
-			}
 			values[index].String = producerEntityIDIn(b.namespace, id)
 		}
 		batch.Relations[predicate] = append(batch.Relations[predicate], facts.Row(values))
 	}
 	locationPredicate := facts.Predicate{Name: b.namespace + ".location", Arity: 6}
 	if _, ok := metadata[locationPredicate]; ok {
-		for _, item := range snapshot.Facts {
+		for _, item := range items {
 			if item.Relation != facts.LocationRelation || len(item.Values) != 6 {
 				continue
 			}
@@ -139,16 +145,23 @@ func (b *Backend) Collect(ctx context.Context, request backend.CollectionRequest
 				continue
 			}
 			toInt := func(value facts.Value) int { return int(value.Number) }
-			batch.Anchors[id] = facts.AnchorSupport{
-				Location:    diagnostics.SourceLocation{File: file, StartLine: toInt(item.Values[2]), StartColumn: toInt(item.Values[3]), EndLine: toInt(item.Values[4]), EndColumn: toInt(item.Values[5])},
-				Description: "TypeScript source entity " + id,
+			support := snapshot.Tracking[item.Values[0].String]
+			description := support.Description
+			if description == "" {
+				description = "TypeScript " + strings.SplitN(item.Values[0].String, ":", 2)[0]
 			}
+			anchor := facts.AnchorSupport{
+				Location:    diagnostics.SourceLocation{File: file, StartLine: toInt(item.Values[2]), StartColumn: toInt(item.Values[3]), EndLine: toInt(item.Values[4]), EndColumn: toInt(item.Values[5])},
+				Description: description,
+			}
+			if support.Data != nil {
+				anchor.Tracking = &facts.TrackingKey{Scheme: "lintai.typescript.subject/1", Data: support.Data}
+			}
+			batch.Anchors[id] = anchor
 		}
 	}
-	for _, item := range snapshot.Facts {
-		if item.Relation == "module" && len(item.Values) > 0 && item.Values[0].Kind == facts.StringKind {
-			batch.AnalyzedFiles = append(batch.AnalyzedFiles, item.Values[0].String)
-		}
+	for _, module := range snapshot.Modules {
+		batch.AnalyzedFiles = append(batch.AnalyzedFiles, module.Path)
 	}
 	batch.InputRevision = snapshot.InputRevision
 	batch.Scope = snapshot.Scope
@@ -169,7 +182,7 @@ func (b *Backend) buildSnapshot(ctx context.Context, repoRoot, workspaceRoot str
 	}
 	adjustments := convertAdjustments(workspaceRoot, snapshot.ConfigAdjustments)
 	b.reportAdjustments(adjustments)
-	items, err := factsFromSnapshot(snapshot, sources, adjustments)
+	items, err := factsFromSnapshot(snapshot, sources, adjustments, b.namespace)
 	if err != nil {
 		return facts.Snapshot{}, err
 	}
@@ -185,6 +198,8 @@ func (b *Backend) buildLintaiSnapshot(ctx context.Context, repoRoot, workspaceRo
 }
 
 func (b *Backend) buildLintaiSnapshotForRelations(ctx context.Context, repoRoot, workspaceRoot string, relations []string) (*lintaiapi.Snapshot, []ambient.Source, string, error) {
+	b.collectMu.Lock()
+	defer b.collectMu.Unlock()
 	options := b.settings
 	scope, err := ParseFileScope(string(options.Files))
 	if err != nil {
@@ -195,7 +210,7 @@ func (b *Backend) buildLintaiSnapshotForRelations(ctx context.Context, repoRoot,
 		Exclude: options.WorkspaceExcludes, Include: options.Includes,
 		Sources: options.Sources, InvocationExclude: options.Excludes,
 	}
-	extracted, err := lintaiapi.BuildSnapshot(ctx, lintaiapi.BuildSnapshotRequest{
+	extracted, err := lintaiapi.BuildSnapshotReusingTracking(ctx, lintaiapi.BuildSnapshotRequest{
 		WorkspaceRoot:      workspaceRoot,
 		ScopeOptions:       &scopeOptions,
 		ConfigPath:         options.ConfigPath,
@@ -205,10 +220,11 @@ func (b *Backend) buildLintaiSnapshotForRelations(ctx context.Context, repoRoot,
 		AmbientMatchers:    convertAmbientMatchers(sources),
 		RequestedRelations: relations,
 		TsconfigFiles:      scope == FileScopeTsconfig,
-	})
+	}, b.previousSnapshot)
 	if err != nil {
 		return nil, nil, "", err
 	}
+	b.previousSnapshot = extracted
 	return extracted, sources, extracted.InputRevision, nil
 }
 

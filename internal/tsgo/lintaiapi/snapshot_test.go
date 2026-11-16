@@ -2,6 +2,7 @@ package lintaiapi
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,67 +11,106 @@ import (
 	"testing"
 )
 
-func TestBuildSnapshotStableSemanticKeysAcrossTrivia(t *testing.T) {
-	firstRoot := t.TempDir()
-	firstFiles := writeWorkspace(t, firstRoot, map[string]string{
-		"src/service/effect.ts": `export async function effect() {
-	await Promise.resolve(1);
-	return 1;
+// V32, V33, V40: keys come from source syntax and no-change collection reuses them.
+func TestTrackingKeysAndReuse(t *testing.T) {
+	root := t.TempDir()
+	source := `import { value } from "./dep";
+export function named() { return 1; }
+class Sample {
+  static run() {} run() {} #run() {}
+  get size() { return 1; } set size(v: number) {}
 }
-`,
-		"src/pure/helper.ts": `import { effect } from "../service/effect";
-
-type Value = Promise<number>;
-
-export function helper(): Value {
-	return effect();
-}
-`,
-	})
-	secondRoot := t.TempDir()
-	secondFiles := writeWorkspace(t, secondRoot, map[string]string{
-		"src/service/effect.ts": `// leading comment
-
-export async function effect() {
-	// interior comment
-	await Promise.resolve(1);
-
-	return 1;
-}
-`,
-		"src/pure/helper.ts": `// import comment
-import { effect } from "../service/effect";
-
-// type comment
-type Value = Promise<number>;
-
-export function helper(): Value {
-	// call comment
-	return effect();
-}
-`,
-	})
-
-	firstSnapshot, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{
-		WorkspaceRoot: firstRoot,
-		Files:         firstFiles,
-	})
+export const result = [1].map((x) => x);
+`
+	files := writeWorkspace(t, root, map[string]string{"src/main.ts": source, "src/dep.ts": "export const value = 1;"})
+	request := BuildSnapshotRequest{WorkspaceRoot: root, Files: files}
+	first, err := BuildSnapshotReusingTracking(context.Background(), request, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondSnapshot, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{
-		WorkspaceRoot: secondRoot,
-		Files:         secondFiles,
-	})
+	second, err := BuildSnapshotReusingTracking(context.Background(), request, first)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	assertEqualKeys(t, moduleKeys(firstSnapshot), moduleKeys(secondSnapshot))
-	assertEqualKeys(t, functionKeys(firstSnapshot), functionKeys(secondSnapshot))
-	assertEqualKeys(t, importKeys(firstSnapshot), importKeys(secondSnapshot))
-	assertEqualKeys(t, callKeys(firstSnapshot), callKeys(secondSnapshot))
-	assertEqualKeys(t, typeRefKeys(firstSnapshot), typeRefKeys(secondSnapshot))
+	if first.trackingKeyBuilds == 0 || second.trackingKeyBuilds != 0 {
+		t.Fatalf("key builds cold=%d unchanged=%d", first.trackingKeyBuilds, second.trackingKeyBuilds)
+	}
+	t.Logf("tracking key constructions: cold=%d, no-change=%d", first.trackingKeyBuilds, second.trackingKeyBuilds)
+	data := func(s *Snapshot, id string) string {
+		value := s.Tracking[id].Data
+		if value == nil {
+			return ""
+		}
+		encoded, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(encoded)
+	}
+	named := func(s *Snapshot) string {
+		for _, fn := range s.Functions {
+			if fn.Name == "named" {
+				return data(s, fn.SemanticKey)
+			}
+		}
+		t.Fatal("missing named function")
+		return ""
+	}
+	importKey := func(s *Snapshot) string {
+		for _, edge := range s.ImportEdges {
+			if edge.Specifier == "./dep" {
+				return data(s, edge.SemanticKey)
+			}
+		}
+		t.Fatal("missing import")
+		return ""
+	}
+	if named(first) == "" || importKey(first) == "" {
+		t.Fatal("missing named or module-reference key")
+	}
+	var distinct = make(map[string]bool)
+	anonymous := false
+	for _, fn := range first.Functions {
+		if strings.HasPrefix(fn.Name, "Sample.") {
+			distinct[data(first, fn.SemanticKey)] = true
+		}
+		if strings.HasPrefix(fn.Name, "<anonymous@") {
+			anonymous = true
+			if data(first, fn.SemanticKey) != "" {
+				t.Fatal("anonymous function received a key")
+			}
+		}
+		for _, signature := range fn.SignatureObservations {
+			if data(first, SignatureID(fn.SemanticKey, signature)) != "" {
+				t.Fatal("signature received a key")
+			}
+		}
+	}
+	if !anonymous || len(distinct) != 5 || distinct[""] {
+		t.Fatalf("member placement, privacy or accessor keys collided: %v", distinct)
+	}
+	for _, typ := range first.Types {
+		if data(first, typ.ID) != "" {
+			t.Fatal("type received a key")
+		}
+	}
+	for _, site := range first.Sites {
+		if strings.HasPrefix(first.Tracking[site.ID].Description, "site") && site.ID != first.ImportEdges[0].SemanticKey && data(first, site.ID) != "" {
+			t.Fatal("ordinary site received a key")
+		}
+	}
+	changed := strings.Replace(source, "{ value }", "{ value as renamed }", 1)
+	changed = strings.Replace(changed, "return 1;", "return 2;", 1)
+	if err := os.WriteFile(filepath.Join(root, "src/main.ts"), []byte(changed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	third, err := BuildSnapshotReusingTracking(context.Background(), request, second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if named(first) != named(third) || importKey(first) != importKey(third) {
+		t.Fatal("body edit or import binding change altered its tracking key")
+	}
 }
 
 func TestBuildSnapshotUsesNearestTsConfigForAliasImports(t *testing.T) {

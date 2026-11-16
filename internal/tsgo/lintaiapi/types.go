@@ -2,11 +2,11 @@ package lintaiapi
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"maps"
 	"math"
-	"path/filepath"
 	"reflect"
 	"slices"
 	"strconv"
@@ -15,9 +15,6 @@ import (
 	"github.com/bigbizze/lintai/internal/tsgo/internal/ast"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/checker"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/jsnum"
-	"github.com/bigbizze/lintai/internal/tsgo/internal/scanner"
-	"github.com/bigbizze/lintai/internal/tsgo/internal/tspath"
-	"github.com/zeebo/xxh3"
 )
 
 const (
@@ -341,7 +338,7 @@ func (e *extractor) typeID(t *checker.Type) string {
 }
 
 func hashKey(key string) string {
-	sum := xxh3.HashString128(key).Bytes()
+	sum := sha256.Sum256([]byte(key))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -876,16 +873,7 @@ func (e *extractor) declarationID(declaration *ast.Node) string {
 	if file == nil {
 		return ""
 	}
-	pathKey := normalizeSlash(e.program.PathKeyForFileName(file.FileName()).AsString())
-	rootKey := normalizeSlash(e.program.PathKeyForFileName(tspath.RootedFilePathFromAbsolute(e.workspaceRoot)).AsString())
-	if isWithinRoot(rootKey, pathKey) {
-		if relative, err := filepath.Rel(filepath.FromSlash(rootKey), filepath.FromSlash(pathKey)); err == nil {
-			pathKey = filepath.ToSlash(relative)
-		}
-	}
-	start := scanner.GetTokenPosOfNode(declaration, file, false)
-	key := jsonList(jsonQuote("decl-v1"), jsonQuote(normalizeSlash(pathKey)), jsonQuote(declaration.Kind.String()), strconv.Itoa(start))
-	return "decl:" + hashKey(key)
+	return e.sourceNodeID("decl", "declaration-v1", declaration)
 }
 
 func (e *extractor) typeDeclarationIDs(t *checker.Type) []string {

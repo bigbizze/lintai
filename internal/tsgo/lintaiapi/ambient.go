@@ -1,7 +1,6 @@
 package lintaiapi
 
 import (
-	"fmt"
 	"slices"
 
 	"github.com/bigbizze/lintai/internal/tsgo/internal/ast"
@@ -412,14 +411,13 @@ func (e *extractor) matchGlobalRef(node *ast.Node, currentFunction *functionStat
 	if currentFunction != nil && currentFunction.record != nil {
 		functionKey = currentFunction.record.SemanticKey
 	}
-	baseKey := fmt.Sprintf("%s::global::%s", state.relative, name)
-	semanticKey := withOrdinal(baseKey, nextOrdinal(e.globalRefCount, baseKey))
+	semanticKey := e.registerSite(node, e.callSourceFor(node, currentFunction))
 	if currentFunction != nil {
 		e.markUnsupported(semanticKey, currentFunction.reason)
 	}
 	start := scanner.GetTokenPosOfNode(node, state.file, false)
 	e.globalRefs = append(e.globalRefs, GlobalRef{
-		EntityID:            "global:" + semanticKey,
+		EntityID:            semanticKey,
 		SemanticKey:         semanticKey,
 		Name:                name,
 		FilePath:            state.relative,
@@ -490,18 +488,13 @@ func (e *extractor) recordAmbient(state *ambientFileState, matcher *AmbientMatch
 		functionKey = currentFunction.record.SemanticKey
 	}
 	for _, site := range sites {
-		keyText := "*"
-		if site.hasKey {
-			keyText = site.key
-		}
-		baseKey := fmt.Sprintf("%s::ambient::%s.%s::%s", state.relative, matcher.Source, matcher.Capability, keyText)
-		semanticKey := withOrdinal(baseKey, nextOrdinal(e.ambientCount, baseKey))
+		semanticKey := e.registerSite(site.node, e.callSourceFor(site.node, currentFunction))
 		if currentFunction != nil {
 			e.markUnsupported(semanticKey, currentFunction.reason)
 		}
 		start := scanner.GetTokenPosOfNode(site.node, state.file, false)
 		e.ambientUses = append(e.ambientUses, AmbientUse{
-			EntityID:            "ambient:" + semanticKey,
+			EntityID:            semanticKey,
 			SemanticKey:         semanticKey,
 			Source:              matcher.Source,
 			Capability:          matcher.Capability,

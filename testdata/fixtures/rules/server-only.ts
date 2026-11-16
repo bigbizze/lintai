@@ -4,7 +4,7 @@ export default rule("arch.server-only")
 	.version(1)
 	.program(dl`
 		Decl server_module(Module, File).
-		server_module(Module, File) :- ts.module(Module), ts.location(Module, File, _, _, _, _), lintai.glob(File, "src/server/**").
+		server_module(Module, File) :- ts.module_path(Module, File), lintai.glob(File, "src/server/**").
 
 		Decl imports_marker(Module).
 		imports_marker(Module) :- server_module(Module, File), ts.import_edge(_, File, "server-only", _).

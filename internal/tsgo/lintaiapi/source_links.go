@@ -232,5 +232,5 @@ func sourceEntryID(checkedEntry, sourceEntry, sourceConfig string) string {
 
 func sourceBindingID(entryID, checkedFile, name, space string) string {
 	key := jsonList(jsonQuote("source-binding-v1"), jsonQuote(entryID), jsonQuote(checkedFile), jsonQuote(name), jsonQuote(space))
-	return "source-binding:" + hashKey(key)
+	return "binding:" + hashKey(key)
 }

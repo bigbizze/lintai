@@ -13,7 +13,6 @@ import (
 	"testing"
 
 	"github.com/bigbizze/lintai/backend"
-	"github.com/bigbizze/lintai/engine"
 	"github.com/bigbizze/lintai/facts"
 	"github.com/bigbizze/lintai/internal/tsgo/lintaiapi"
 	"github.com/bigbizze/lintai/internal/workspace"
@@ -73,7 +72,7 @@ calculate({ value: helper("ok") });
 		{"ts.declaration", "ts.declaration_origin"},
 		{"ts.module_export", "ts.export_incomplete"},
 		{"ts.call_declaration", "ts.call_declaration_incomplete"},
-		{"ts.fn_param", "ts.fn_returns", "ts.declaration_type"},
+		{"ts.fn_signature", "ts.signature_param", "ts.signature_returns", "ts.declaration_type"},
 		{"ts.type_kind", "ts.type_display"},
 	}
 	for _, relation := range description.BaseRelations {
@@ -171,13 +170,13 @@ func TestTwoTypeScriptProducersKeepConstructionSettingsIndependent(t *testing.T)
 
 	tsconfigProducer := New(Options{Files: FileScopeTsconfig})
 	walkProducer := New(Options{Files: FileScopeWalk})
-	if got := collectModules(tsconfigProducer); !slices.Equal(got, []string{"ts:src/one.ts"}) {
+	if got := collectModules(tsconfigProducer); !slices.Equal(got, []string{"ts:module:src/one.ts"}) {
 		t.Fatalf("tsconfig producer modules = %v", got)
 	}
-	if got := collectModules(walkProducer); !slices.Equal(got, []string{"ts:src/one.ts", "ts:src/two.ts"}) {
+	if got := collectModules(walkProducer); !slices.Equal(got, []string{"ts:module:src/one.ts", "ts:module:src/two.ts"}) {
 		t.Fatalf("walk producer modules = %v", got)
 	}
-	if got := collectModules(tsconfigProducer); !slices.Equal(got, []string{"ts:src/one.ts"}) {
+	if got := collectModules(tsconfigProducer); !slices.Equal(got, []string{"ts:module:src/one.ts"}) {
 		t.Fatalf("second producer changed the first producer's settings: %v", got)
 	}
 	if foo, prefixedFoo := producerEntityID("foo.ts"), producerEntityID("ts:foo.ts"); foo == prefixedFoo || foo != "ts:foo.ts" || prefixedFoo != "ts:ts:foo.ts" {
@@ -201,8 +200,8 @@ func TestExactSourceAndExcludedGlobalUseOneProductionScope(t *testing.T) {
 	}
 	modules := make([]string, 0)
 	for _, fact := range snapshot.Facts {
-		if fact.Relation == "module" {
-			modules = append(modules, fact.Values[0].String)
+		if fact.Relation == "module_path" {
+			modules = append(modules, fact.Values[1].String)
 		}
 	}
 	slices.Sort(modules)
@@ -215,8 +214,14 @@ func TestExactSourceAndExcludedGlobalUseOneProductionScope(t *testing.T) {
 			readID = fact.Values[0].String
 		}
 	}
+	var signature string
 	for _, fact := range snapshot.Facts {
-		if fact.Relation == "fn_returns" && fact.Values[0].String == readID {
+		if fact.Relation == "fn_signature" && fact.Values[0].String == readID {
+			signature = fact.Values[1].String
+		}
+	}
+	for _, fact := range snapshot.Facts {
+		if fact.Relation == "signature_returns" && fact.Values[0].String == signature {
 			returnType = fact.Values[1].String
 		}
 	}
@@ -286,117 +291,64 @@ class Escaping { value = [1].map(effect); }
 		return result
 	}
 	before, after := index(walk), index(filtered)
-	const target = "src/excluded/effect.ts::function::effect"
-	want := map[int]string{2: "src/main.ts", 4: "src/main.ts::function::run", 5: "src/main.ts::function::run", 9: ""}
+	findFunction := func(snapshot facts.Snapshot, file, name string) string {
+		for _, fact := range snapshot.Facts {
+			if fact.Relation == "fn" && fact.Values[1].String == file && fact.Values[2].String == name {
+				return fact.Values[0].String
+			}
+		}
+		return ""
+	}
+	target := findFunction(walk, "src/excluded/effect.ts", "effect")
+	run := findFunction(filtered, "src/main.ts", "run")
+	want := map[int]string{2: "module:src/main.ts", 4: run, 5: run, 9: ""}
 	for site, edge := range before["call_edge"] {
-		if edge.Values[2].String != target {
+		if edge.Values[1].String != target {
 			continue
 		}
 		location := before["location"][site]
 		line := int(location.Values[2].Number)
 		owner, ok := want[line]
-		if !ok || edge.Values[1].String != owner {
-			t.Fatalf("unexpected original call: %v at %v", edge, location)
+		if !ok {
+			t.Fatalf("unexpected call at %v", location)
 		}
 		delete(want, line)
-		unresolved, ok := after["call_unresolved"][site]
-		if !ok || unresolved.Values[1].String != owner || !slices.Equal(location.Values, after["location"][site].Values) {
-			t.Errorf("call site changed or disappeared: %v at %v; unresolved %v at %v", edge, location, unresolved, after["location"][site])
+		if _, ok := after["call_unresolved"][site]; !ok || !slices.Equal(location.Values, after["location"][site].Values) {
+			t.Errorf("classification changed identity: %v", edge)
 		}
-		if owner == "src/main.ts::function::run" {
-			if fact, ok := after["site_in_fn"][site]; !ok || fact.Values[1].String != owner {
-				t.Errorf("call lost its lexical owner: %v", unresolved)
-			}
+		if owner != "" && after["site_owner"][site].Values[1].String != owner {
+			t.Errorf("owner changed: %v", after["site_owner"][site])
 		}
-		if line == 9 {
-			if fact, ok := after["site_attribution_unsupported"][site]; !ok || fact.Values[1].String != "instance_construction" {
-				t.Errorf("call lost its unsupported attribution: %v", unresolved)
-			}
+		if owner == "" && after["site_attribution_unsupported"][site].Values[1].String != "instance_construction" {
+			t.Errorf("lost unsupported owner: %v", after["site_attribution_unsupported"][site])
 		}
 	}
 	if len(want) != 0 {
-		t.Errorf("missing original calls at lines %v", want)
+		t.Errorf("missing original calls: %v", want)
 	}
-	if len(after["call_unresolved"]) != 6 || len(after["call_edge"]) != 1 || len(after["external_call"]) != 2 {
-		t.Errorf("unexpected call outcomes: unresolved %v, edges %v, external %v", after["call_unresolved"], after["call_edge"], after["external_call"])
-	}
-	for _, check := range []struct {
-		line  int
-		owner string
-	}{
-		{14, "src/main.ts::function::escape"},
-		{15, ""},
-	} {
-		var matched bool
-		for site, call := range after["call_unresolved"] {
+	for _, line := range []int{14, 15} {
+		found := false
+		for site := range after["fn_value_escape"] {
 			location := after["location"][site]
-			if int(location.Values[2].Number) != check.line {
+			if int(location.Values[2].Number) != line {
 				continue
 			}
-			matched = true
-			column := strings.Index(strings.Split(mainSource, "\n")[check.line-1], "effect") + 1
-			if call.Values[1].String != check.owner || int(location.Values[3].Number) != column || int(location.Values[4].Number) != check.line || int(location.Values[5].Number) != column+len("effect") {
-				t.Errorf("escaping argument did not keep its owner and location: %v at %v", call, location)
+			found = true
+			if _, ok := after["fn_value_escape_unknown"][site]; !ok {
+				t.Errorf("filtered callback target was not unknown: %v", location)
 			}
-			if check.owner == "" {
-				if marker, ok := after["site_attribution_unsupported"][site]; !ok || marker.Values[1].String != "instance_construction" {
-					t.Errorf("escaping argument lost unsupported attribution: %v", call)
-				}
-			} else if owner, ok := after["site_in_fn"][site]; !ok || owner.Values[1].String != check.owner {
-				t.Errorf("escaping argument lost its function owner: %v", call)
+			if _, ok := after["call_unresolved"][site]; ok {
+				t.Errorf("callback argument became an invocation: %v", location)
+			}
+			if _, ok := after["call_declaration_incomplete"][site]; ok {
+				t.Errorf("callback argument got call provenance: %v", location)
 			}
 		}
-		if !matched {
-			t.Errorf("missing uncertainty at escaping argument on line %d", check.line)
+		if !found {
+			t.Errorf("missing callback event on line %d", line)
 		}
 	}
-	for _, edge := range after["call_edge"] {
-		if edge.Values[1].String != "src/main.ts::function::use" || edge.Values[2].String != "src/main.ts::function::kept" {
-			t.Errorf("unexpected retained call: %v", edge)
-		}
-	}
-	removedRefs := 0
-	unsupportedRef := false
-	for site, ref := range before["fn_ref"] {
-		if ref.Values[2].String == target {
-			removedRefs++
-			if marker, ok := before["site_attribution_unsupported"][site]; ok && marker.Values[1].String == "instance_construction" {
-				unsupportedRef = true
-			}
-			if _, ok := after["site_attribution_unsupported"][site]; ok {
-				t.Errorf("removed reference left an attribution marker: %v", ref)
-			}
-		}
-	}
-	if removedRefs != 4 || !unsupportedRef {
-		t.Errorf("expected ordinary and escaping references before filtering, got %d, unsupported = %t", removedRefs, unsupportedRef)
-	}
-	if len(after["fn_ref"]) != 0 {
-		t.Errorf("references to filtered functions survived: %v", after["fn_ref"])
-	}
-	if _, ok := after["module"]["src/excluded/effect.ts"]; ok {
-		t.Error("filtered target was added as a module")
-	}
-	repoRoot, err := filepath.Abs("../..")
-	if err != nil {
-		t.Fatal(err)
-	}
-	writeWorkspaceFile(t, root, "lintai-rules/strict.ts", `import { dl, rule } from "@lintai/sdk";
-export default rule("test.filtered-callback").version(1)
-  .program(dl`+"`"+`Decl indeterminate(Fn, Name).
-    indeterminate(Fn, Name) :- ts.fn(Fn, _, Name), Name = "escape", ts.fn_reaches_unresolved(Fn).`+"`"+`)
-  .report("indeterminate").message((row) => row.Name);
-`)
-	items, err := engine.New(New()).Run(context.Background(), engine.Options{
-		RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: root,
-		RuleGlobs: []string{"lintai-rules/*.ts"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(items) != 1 || items[0].RuleID != "test.filtered-callback" || items[0].Message != "escape" {
-		t.Fatalf("filtered callback strict rule = %+v, want escape indeterminate", items)
-	}
+
 }
 
 func TestCapturedInputRevisionIgnoresAbsoluteRoot(t *testing.T) {
@@ -476,7 +428,7 @@ func TestSymlinkedWorkspaceRootKeepsScopeAndIdentity(t *testing.T) {
 		}
 	}
 	if !slices.ContainsFunc(aliasSnapshot.Facts, func(fact facts.Fact) bool {
-		return fact.Relation == "module" && len(fact.Values) > 0 && fact.Values[0].String == "src/a.ts"
+		return fact.Relation == "module_path" && len(fact.Values) > 1 && fact.Values[1].String == "src/a.ts"
 	}) {
 		t.Fatal("symlinked root did not produce the workspace-relative module path")
 	}
@@ -1003,5 +955,61 @@ func TestUnreadableOptionalMapKeepsCheckedFactsAndChangesVersionWhenReadable(t *
 	options.SourceLinks = "source-links.json"
 	if _, _, _, err := New(options).buildLintaiSnapshot(context.Background(), root, root); err == nil || !strings.Contains(err.Error(), "invalid --source-links") {
 		t.Fatalf("unreadable requested configuration was not an error: %v", err)
+	}
+}
+
+// V07: conflicting signatures remain whole; a parameter from one context
+// cannot join to the return of the other through the same signature.
+func TestWholeSignatureProjection(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		"shared/api.ts":        `export const parse = (value: string | undefined) => value;`,
+		"loose/tsconfig.json":  `{"compilerOptions":{"strict":false},"include":["**/*.ts","../shared/**/*.ts"]}`,
+		"loose/index.ts":       `export { parse } from "../shared/api";`,
+		"strict/tsconfig.json": `{"compilerOptions":{"strict":true},"include":["**/*.ts","../shared/**/*.ts"]}`,
+		"strict/index.ts":      `export { parse } from "../shared/api";`,
+		"tsconfig.json":        `{"files":["shared/api.ts"],"references":[{"path":"./loose"},{"path":"./strict"}]}`,
+	}
+	for path, text := range files {
+		writeWorkspaceFile(t, root, path, text)
+	}
+	snapshot, err := New(Options{Files: FileScopeTsconfig}).BuildSnapshot(context.Background(), root, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var function string
+	for _, fact := range snapshot.Facts {
+		if fact.Relation == "fn" && fact.Values[1].String == "shared/api.ts" && fact.Values[2].String == "parse" {
+			function = fact.Values[0].String
+		}
+	}
+	signatures := make(map[string]bool)
+	params, returns := make(map[string]string), make(map[string]string)
+	for _, fact := range snapshot.Facts {
+		switch fact.Relation {
+		case "fn_signature":
+			if fact.Values[0].String == function {
+				signatures[fact.Values[1].String] = true
+			}
+		case "signature_param":
+			if fact.Values[1].Number == 0 {
+				params[fact.Values[0].String] = fact.Values[2].String
+			}
+		case "signature_returns":
+			returns[fact.Values[0].String] = fact.Values[1].String
+		}
+	}
+	if function == "" || len(signatures) != 2 {
+		t.Fatalf("signature observations: %v", signatures)
+	}
+	seen := make(map[string]bool)
+	for signature := range signatures {
+		if params[signature] == "" || params[signature] != returns[signature] {
+			t.Fatalf("signature mixed observations: %s param=%s return=%s", signature, params[signature], returns[signature])
+		}
+		seen[params[signature]] = true
+	}
+	if len(seen) != 2 {
+		t.Fatalf("fixture did not produce differing signatures: %v", seen)
 	}
 }

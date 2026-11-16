@@ -339,6 +339,26 @@ export function task(): number { return 2; }`,
 		t.Fatalf("missing actual checker observation for %s", call)
 		return callDeclarationObservation{}
 	}
+	// V09, V10, V12: classification changes keep the syntax identity, and
+	// retracting a conflicting context restores the surviving observation.
+	taskSite := observationAt(partials[0], "task()").Site
+	if taskSite != observationAt(partials[1], "task()").Site {
+		t.Fatal("runtime target changed source identity")
+	}
+	combined := &Snapshot{}
+	mergeSnapshot(combined, partials[0])
+	mergeSnapshot(combined, partials[1])
+	finalizeCallTargets(combined)
+	if !slices.Contains(combined.CallTargetConflicts, taskSite) {
+		t.Fatalf("missing target conflict for %s", taskSite)
+	}
+	surviving := &Snapshot{}
+	mergeSnapshot(surviving, partials[0])
+	finalizeCallTargets(surviving)
+	if slices.Contains(surviving.CallTargetConflicts, taskSite) {
+		t.Fatalf("removed context left a conflict for %s", taskSite)
+	}
+
 	merged := &Snapshot{}
 	for _, partial := range []*Snapshot{partials[0], partials[1], absent, partials[0]} {
 		mergeSnapshot(merged, partial)
@@ -357,8 +377,8 @@ export function task(): number { return 2; }`,
 	}{
 		{call: "capability.write()", conflict: true},
 		{call: "uncertainMember.write()", conflict: true, incomplete: true},
-		{call: "uncertain()", conflict: true, different: true, incomplete: true},
-		{call: "task()", conflict: true, different: true},
+		{call: "uncertain()", conflict: true, incomplete: true},
+		{call: "task()", conflict: true},
 		{call: "stable()"},
 		{call: "Math.abs(-1)"},
 	} {
@@ -457,20 +477,14 @@ export function task(): number { return 2; }`,
 			}
 		}
 	})
-	// Both ordinary escaped parameters and the callback whose collected target
-	// was filtered out remain unsupported, without conflicts between values.
-	escapes := 0
-	for _, call := range merged.CallsUnresolved {
-		if strings.Contains(call.SemanticKey, "::escaping_callback::") || strings.Contains(call.FromSemanticKey, "escaped") {
-			escapes++
-			if !slices.Contains(merged.CallDeclarationIncomplete, CallDeclarationIncompleteFact{Site: call.SemanticKey, Reason: "unsupported"}) ||
-				slices.Contains(merged.CallDeclarationIncomplete, CallDeclarationIncompleteFact{Site: call.SemanticKey, Reason: "conflict"}) {
-				t.Fatalf("escaped value lost unsupported outcome or gained conflict: %+v", call)
-			}
-		}
+	// A callback argument is transfer evidence, never an invocation.
+	if len(merged.FunctionEscapes) == 0 {
+		t.Fatal("missing direct callback evidence")
 	}
-	if escapes != 3 {
-		t.Fatalf("want two parameter escapes and one materialized filtered escape, got %d", escapes)
+	for _, escape := range merged.FunctionEscapes {
+		if slices.ContainsFunc(merged.CallsUnresolved, func(call CallUnresolved) bool { return call.SemanticKey == escape.Site }) || slices.ContainsFunc(merged.CallDeclarationIncomplete, func(item CallDeclarationIncompleteFact) bool { return item.Site == escape.Site }) {
+			t.Fatalf("callback argument became an invocation: %+v", escape)
+		}
 	}
 	for i, fact := range merged.CallDeclarations {
 		semanticDeclaration(t, merged, fact.Declaration)

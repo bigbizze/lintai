@@ -8,7 +8,6 @@ import (
 
 	"github.com/bigbizze/lintai/internal/tsgo/internal/ast"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/checker"
-	"github.com/bigbizze/lintai/internal/tsgo/internal/scanner"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/tspath"
 )
 
@@ -636,6 +635,8 @@ func (e *extractor) addDeclarationMetadata(node *ast.Node, symbol *ast.Symbol, p
 	if id == "" {
 		return "", nil, false
 	}
+	e.trackNull(id, "declaration", node)
+	e.trackNamed(id, "declaration", node)
 	name := publicName
 	if symbol != nil {
 		if qualified := qualifiedSymbolName(symbol); qualified != "" {
@@ -651,6 +652,15 @@ func (e *extractor) addDeclarationMetadata(node *ast.Node, symbol *ast.Symbol, p
 	if fact == nil {
 		fact = &DeclarationFact{ID: id, Name: name, Kind: kind, OriginKind: originKind, Origin: origin, Location: location}
 		e.declarations[id] = fact
+	} else {
+		old := jsonList(jsonQuote(fact.Name), jsonQuote(fact.Kind), jsonQuote(fact.OriginKind), jsonQuote(fact.Origin))
+		current := jsonList(jsonQuote(name), jsonQuote(kind), jsonQuote(originKind), jsonQuote(origin))
+		if old != current {
+			fact.Incomplete = sortedUnique(append(fact.Incomplete, AssociationConflict))
+			if current < old {
+				fact.Name, fact.Kind, fact.OriginKind, fact.Origin = name, kind, originKind, origin
+			}
+		}
 	}
 	if e.declarationNodes == nil {
 		e.declarationNodes = make(map[string]*ast.Node)
@@ -671,7 +681,13 @@ func (e *extractor) addDeclaration(node *ast.Node, symbol *ast.Symbol, publicNam
 	if file := ast.GetSourceFileOfNode(node); e.operations.sourceRecovery && file != nil && file.IsDeclarationFile {
 		e.recoverDeclarationMap(node, false, fact.Name)
 	}
+	if e.operations.declarationTypes {
+		fact.TypeSubjects = sortedUnique(append(fact.TypeSubjects, space))
+	}
 	if !supported {
+		if e.operations.declarationTypes {
+			fact.TypeIncomplete = append(fact.TypeIncomplete, DeclarationTypeUncertainty{space, AssociationUnsupported})
+		}
 		return id, false
 	}
 	function := e.functionNodes[node]
@@ -696,9 +712,10 @@ func (e *extractor) addDeclaration(node *ast.Node, symbol *ast.Symbol, publicNam
 				}
 			}
 			fact.TypesComplete = false
-			fact.Incomplete = append(fact.Incomplete, AssociationUnresolved)
+			fact.TypeIncomplete = append(fact.TypeIncomplete, DeclarationTypeUncertainty{space, AssociationUnresolved})
 			return id, true
 		}
+		fact.TypeIncomplete = append(fact.TypeIncomplete, DeclarationTypeUncertainty{space, AssociationUnresolved})
 		return id, true
 	}
 	var typeValue *checker.Type
@@ -710,22 +727,17 @@ func (e *extractor) addDeclaration(node *ast.Node, symbol *ast.Symbol, publicNam
 	}
 	if typeValue == nil {
 		fact.TypesComplete = false
-		fact.Incomplete = append(fact.Incomplete, AssociationUnresolved)
+		fact.TypeIncomplete = append(fact.TypeIncomplete, DeclarationTypeUncertainty{space, AssociationUnresolved})
 		return id, true
 	}
 	e.addDeclarationType(fact, space, e.emitFunctionType(typeValue, node))
-	if function != nil {
-		if slices.ContainsFunc(function.SignatureObservations, func(item FunctionSignatureObservation) bool { return !item.Complete }) {
-			fact.Incomplete = append(fact.Incomplete, AssociationUnresolved)
-		}
-	}
 	return id, true
 }
 
 func (e *extractor) addDeclarationType(fact *DeclarationFact, space string, typeID string) {
 	if typeID == "" {
 		fact.TypesComplete = false
-		fact.Incomplete = append(fact.Incomplete, AssociationUnresolved)
+		fact.TypeIncomplete = append(fact.TypeIncomplete, DeclarationTypeUncertainty{space, AssociationUnresolved})
 		return
 	}
 	item := DeclarationType{Space: space, Type: typeID}
@@ -739,6 +751,7 @@ func (e *extractor) addDeclarationType(fact *DeclarationFact, space string, type
 
 func (e *extractor) addExport(moduleIdentity string, file string, name string, space string, targetIDs []string, complete bool, reasons []string, contributions []syntaxExportContribution) {
 	id := exportEntityID(moduleIdentity, name, space)
+	e.trackExport(id, name, space)
 	fact := e.exports[id]
 	if fact == nil {
 		fact = &ExportFact{ID: id, File: file, Name: name, Space: space}
@@ -771,8 +784,7 @@ func (e *extractor) addExport(moduleIdentity string, file string, name string, s
 }
 
 func (e *extractor) exportSiteID(file *ast.SourceFile, node *ast.Node) string {
-	position := scanner.GetTokenPosOfNode(node, file, false)
-	return e.relativePath(file.FileName().AsString()) + "::export-site::" + strconv.Itoa(position)
+	return e.sourceNodeID("site", "site-v1", node)
 }
 
 func (e *extractor) addExportSite(site string, node *ast.Node) {
@@ -788,11 +800,8 @@ func (e *extractor) addExportSite(site string, node *ast.Node) {
 			return
 		}
 	}
-	locationNode := node
-	if ast.IsExportDeclaration(node) && node.ModuleSpecifier() != nil && ast.IsStringLiteralLike(node.ModuleSpecifier()) {
-		locationNode = node.ModuleSpecifier()
-	}
-	e.exportSites = append(e.exportSites, ExportSiteFact{ID: site, Location: e.nodeLocation(file, locationNode)})
+	e.registerSite(node, e.callSourceFor(node, nil))
+	e.exportSites = append(e.exportSites, ExportSiteFact{ID: site, Location: e.nodeLocation(file, node)})
 }
 
 func (e *extractor) exportSiteLocation(site string) (SourceLocation, bool) {
@@ -1309,17 +1318,7 @@ func finalizeSemanticObservations(snapshot *Snapshot) {
 		}
 	}
 	snapshot.FnSignatureConflicts = sortedUnique(snapshot.FnSignatureConflicts)
-	conflictedFunctions := make(map[string]struct{}, len(snapshot.FnSignatureConflicts))
-	for _, function := range snapshot.FnSignatureConflicts {
-		conflictedFunctions[function] = struct{}{}
-	}
-	for index := range snapshot.Declarations {
-		if snapshot.Declarations[index].Function != "" {
-			if _, conflict := conflictedFunctions[snapshot.Declarations[index].Function]; conflict {
-				snapshot.Declarations[index].Incomplete = sortedUnique(append(snapshot.Declarations[index].Incomplete, AssociationConflict))
-			}
-		}
-	}
+
 	snapshot.SourceBindings = mergeSourceBindingObservations(snapshot.SourceBindings)
 	snapshot.DeclarationSourceCandidates = uniqueDeclarationSources(snapshot.DeclarationSourceCandidates)
 	snapshot.DeclarationSources, snapshot.DeclarationSourceOutcomes = finalizeDeclarationSourceObservations(snapshot.DeclarationSources, snapshot.DeclarationSourceOutcomes)
@@ -1532,6 +1531,17 @@ func mergeDeclarationObservations(items []DeclarationFact) []DeclarationFact {
 		current.Types = sortedDeclarationTypes(append(current.Types, item.Types...))
 		current.TypeObservations = append(current.TypeObservations, item.TypeObservations...)
 		current.Incomplete = sortedUnique(append(current.Incomplete, item.Incomplete...))
+		current.TypeSubjects = sortedUnique(append(current.TypeSubjects, item.TypeSubjects...))
+		current.TypeIncomplete = append(current.TypeIncomplete, item.TypeIncomplete...)
+		current.FunctionIncomplete = sortedUnique(append(current.FunctionIncomplete, item.FunctionIncomplete...))
+		currentMetadata := jsonList(jsonQuote(current.Name), jsonQuote(current.Kind), jsonQuote(current.OriginKind), jsonQuote(current.Origin))
+		itemMetadata := jsonList(jsonQuote(item.Name), jsonQuote(item.Kind), jsonQuote(item.OriginKind), jsonQuote(item.Origin))
+		if currentMetadata != itemMetadata {
+			current.Incomplete = sortedUnique(append(current.Incomplete, AssociationConflict))
+			if itemMetadata < currentMetadata {
+				current.Name, current.Kind, current.OriginKind, current.Origin = item.Name, item.Kind, item.OriginKind, item.Origin
+			}
+		}
 		current.TypesComplete = current.TypesComplete || item.TypesComplete
 		current.FunctionObservations = append(current.FunctionObservations, item.FunctionObservations...)
 		if len(item.FunctionObservations) == 0 && item.Function != "" {
@@ -1542,8 +1552,22 @@ func mergeDeclarationObservations(items []DeclarationFact) []DeclarationFact {
 	result := make([]DeclarationFact, 0, len(byID))
 	for _, item := range byID {
 		item.TypeObservations = uniqueDeclarationSets(item.TypeObservations)
-		if item.TypesComplete && declarationSetsDisagree(item.TypeObservations) {
-			item.Incomplete = sortedUnique(append(item.Incomplete, AssociationConflict))
+		for _, space := range item.TypeSubjects {
+			var observed [][]DeclarationType
+			for _, observation := range item.TypeObservations {
+				var values []DeclarationType
+				for _, value := range observation {
+					if value.Space == space {
+						values = append(values, value)
+					}
+				}
+				if len(values) > 0 {
+					observed = append(observed, values)
+				}
+			}
+			if declarationSetsDisagree(observed) {
+				item.TypeIncomplete = append(item.TypeIncomplete, DeclarationTypeUncertainty{space, AssociationConflict})
+			}
 		}
 		if len(item.FunctionObservations) == 0 && item.Function != "" {
 			item.FunctionObservations = append(item.FunctionObservations, item.Function)
@@ -1556,7 +1580,7 @@ func mergeDeclarationObservations(items []DeclarationFact) []DeclarationFact {
 			item.Function = item.FunctionObservations[0]
 		default:
 			item.Function = ""
-			item.Incomplete = sortedUnique(append(item.Incomplete, AssociationConflict))
+			item.FunctionIncomplete = sortedUnique(append(item.FunctionIncomplete, AssociationConflict))
 		}
 		result = append(result, item)
 	}
