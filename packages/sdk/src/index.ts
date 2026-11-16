@@ -20,9 +20,18 @@ export type SuspensionKind = "await" | "for_await" | "await_using";
 /** Reasons in `site_attribution_unsupported`. Pass these strings to `dl.name`. */
 export type SiteAttributionUnsupportedReason = "instance_construction" | "unsupported_context";
 
-export type RowValue = string | number;
+export type RowValue = FactValue;
 
 export type Row = Record<string, RowValue>;
+
+export type SuppressionPolicy = {
+	readonly by?: readonly string[];
+};
+
+export type SuppressionDeclaration = {
+	readonly assertion: string;
+	readonly options: SuppressionPolicy;
+};
 
 export type MessageContext = {
 	assertion_id: string;
@@ -154,6 +163,7 @@ type RuleSpec<Env, Setup> = {
 	programValue?: ProgramInput<Env, Setup>;
 	reportPredicates?: readonly string[];
 	expectNonEmptyPredicates?: readonly string[];
+	suppressionDeclarations?: readonly SuppressionDeclaration[];
 	messageFn?: (row: Row, ctx: MessageContext) => string;
 };
 
@@ -165,6 +175,7 @@ export class RuleDefinition<Env, Setup> {
 	readonly programValue?: RuleSpec<Env, Setup>["programValue"];
 	readonly reportPredicates?: readonly string[];
 	readonly expectNonEmptyPredicates?: readonly string[];
+	readonly suppressionDeclarations?: readonly SuppressionDeclaration[];
 	readonly messageFn?: RuleSpec<Env, Setup>["messageFn"];
 
 	constructor(private readonly spec: RuleSpec<Env, Setup>) {
@@ -175,6 +186,7 @@ export class RuleDefinition<Env, Setup> {
 		this.programValue = spec.programValue;
 		this.reportPredicates = spec.reportPredicates;
 		this.expectNonEmptyPredicates = spec.expectNonEmptyPredicates;
+		this.suppressionDeclarations = spec.suppressionDeclarations;
 		this.messageFn = spec.messageFn;
 	}
 
@@ -205,6 +217,17 @@ export class RuleDefinition<Env, Setup> {
 
 	expectNonEmpty(...predicates: string[]): RuleDefinition<Env, Setup> {
 		return new RuleDefinition({ ...this.spec, expectNonEmptyPredicates: predicates });
+	}
+
+	suppression(assertion: string, options: SuppressionPolicy = {}): RuleDefinition<Env, Setup> {
+		const declaration: SuppressionDeclaration = {
+			assertion,
+			options: Object.freeze({ ...(options.by === undefined ? {} : { by: Object.freeze([...options.by]) }) }),
+		};
+		return new RuleDefinition({
+			...this.spec,
+			suppressionDeclarations: Object.freeze([...(this.spec.suppressionDeclarations ?? []), declaration]),
+		});
 	}
 
 	message(messageFn: (row: Row, ctx: MessageContext) => string): RuleDefinition<Env, Setup> {

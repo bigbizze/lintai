@@ -180,7 +180,12 @@ func TestCatalogRejectsMissingCoverageAndForeignOwnership(t *testing.T) {
 	// ownership fail before rule evaluation; an empty relation entry remains
 	// successful empty coverage.
 	repoRoot, _ := filepath.Abs("..")
-	options := engine.Options{RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: t.TempDir(), Env: map[string]any{}}
+	workspace := t.TempDir()
+	writeCatalogRule(t, workspace, `Decl violation(Entity). violation(Entity) :- catalog.item(Entity).`, "violation")
+	options := engine.Options{
+		RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: workspace,
+		RuleGlobs: []string{"lintai-rules/**/*.ts"}, Env: map[string]any{},
+	}
 	duplicate := fakeProducer("catalog", "item")
 	if _, err := engine.New(duplicate, duplicate).Analyze(context.Background(), options); err == nil || !strings.Contains(err.Error(), "registered more than once") {
 		t.Fatalf("expected duplicate-namespace failure, got %v", err)

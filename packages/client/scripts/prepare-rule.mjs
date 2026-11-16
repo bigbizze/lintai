@@ -116,7 +116,7 @@ for (const payload of payloads) {
 		}
 
 		const setupFn = moduleValue.rule.setupFn;
-		const setup = setupFn
+		const setup = payload.runSetup && setupFn
 			? await setupFn({
 					env,
 					workspaceRoot: payload.workspaceRoot,

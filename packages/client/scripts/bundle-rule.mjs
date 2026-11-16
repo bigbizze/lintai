@@ -146,10 +146,13 @@ for (const request of requests) {
 					rule: rule && {
 						id: rule.id,
 						versionValue: rule.versionValue,
+						hasSetup: typeof rule.setupFn === "function",
+						hasConfig: Boolean(ruleModule.config),
 						programValue: rule.programValue,
 						factsFn: rule.factsFn,
 						reportPredicates: rule.reportPredicates ? [...rule.reportPredicates] : [],
 						expectNonEmptyPredicates: rule.expectNonEmptyPredicates ? [...rule.expectNonEmptyPredicates] : [],
+					suppressionDeclarations: rule.suppressionDeclarations ? [...rule.suppressionDeclarations] : [],
 						messageFn: rule.messageFn,
 					},
 				};
