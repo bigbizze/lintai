@@ -19,7 +19,6 @@ test("oneshot forwards suppression options and handles policy exit codes", () =>
 			mode: "oneshot",
 			workspaceRoot: "/workspace",
 			suppressionsLocation: "counts.json",
-			passOnUnprunedSuppressions: true,
 			ruleWorkers: 2,
 		},
 		"/workspace",
@@ -38,7 +37,6 @@ test("oneshot forwards suppression options and handles policy exit codes", () =>
 		createTestDependencies({
 			spawnSync: (_binary, args) => {
 				assert.equal(args[args.indexOf("--suppressions-location") + 1], "/workspace/counts.json");
-				assert.ok(args.includes("--pass-on-unpruned-suppressions"));
 				assert.equal(args[args.indexOf("--rule-workers") + 1], "2");
 				return { status: 1, stdout: JSON.stringify([diagnostic]), stderr: "unused suppressions" };
 			},
@@ -93,7 +91,6 @@ test("serve forwards suppression initialization parameters", () => {
 			mode: "serve",
 			workspaceRoot: "/workspace",
 			suppressionsLocation: "counts.json",
-			passOnUnprunedSuppressions: true,
 			ruleWorkers: 2,
 		},
 		"/workspace",
@@ -116,7 +113,6 @@ test("serve forwards suppression initialization parameters", () => {
 		const frame = child.stdin.read().toString();
 		const request = JSON.parse(frame.slice(frame.indexOf("\r\n\r\n") + 4));
 		assert.equal(request.params.suppressionsLocation, "/workspace/counts.json");
-		assert.equal(request.params.passOnUnprunedSuppressions, true);
 		assert.equal(request.params.ruleWorkers, 2);
 	} finally {
 		client.dispose();

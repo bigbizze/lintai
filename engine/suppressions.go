@@ -377,10 +377,8 @@ func applySuppressions(options Options, state suppressionsState, run runInfo, ev
 		a, b := result.UnusedSuppressions[i], result.UnusedSuppressions[j]
 		return fmt.Sprint(a.File, a.RuleID, a.Assertion.Name, a.Description) < fmt.Sprint(b.File, b.RuleID, b.Assertion.Name, b.Description)
 	})
-	if !options.PassOnUnprunedSuppressions {
-		for _, unused := range result.UnusedSuppressions {
-			result.Diagnostics = append(result.Diagnostics, unusedSuppressionDiagnostic(filepath.Base(state.path), unused, run.snapshotVersion, run.producerNames))
-		}
+	for _, unused := range result.UnusedSuppressions {
+		result.Diagnostics = append(result.Diagnostics, unusedSuppressionDiagnostic(filepath.Base(state.path), unused, run.snapshotVersion, run.producerNames))
 	}
 	sortDiagnostics(result.Diagnostics)
 	return write, nil

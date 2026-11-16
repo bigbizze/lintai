@@ -68,9 +68,6 @@ type InitializeParams struct {
 	// SuppressionsLocation is the path of the suppressions file. The
 	// default is lintai-suppressions.json at the workspace root.
 	SuppressionsLocation string `json:"suppressionsLocation,omitempty"`
-	// PassOnUnprunedSuppressions leaves out the unused_suppression
-	// diagnostics.
-	PassOnUnprunedSuppressions bool `json:"passOnUnprunedSuppressions,omitempty"`
 }
 
 type FileDiagnosticsParams struct {
@@ -220,8 +217,7 @@ func (s *Server) handleInitialize(ctx context.Context, rawParams json.RawMessage
 		RulesLock:     params.RulesLock,
 		SetupSandbox:  sandbox,
 
-		SuppressionsLocation:       params.SuppressionsLocation,
-		PassOnUnprunedSuppressions: params.PassOnUnprunedSuppressions,
+		SuppressionsLocation: params.SuppressionsLocation,
 	}
 	s.mu.Lock()
 	s.options = options

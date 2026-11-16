@@ -170,7 +170,7 @@ A few boundaries matter when choosing a policy:
 
 You do not need to fix every existing violation before adopting a rule. Run your normal lintai command with `--suppress-all` to record existing error violations in `lintai-suppressions.json`, then commit that file. Later runs can report new violations while you work through the existing ones.
 
-After fixing violations, use `--prune-suppressions` to remove stale entries. Review changes to the suppression file as you would changes to a rule. See [bulk suppressions](specs/bulk-suppressions.md) for details.
+After fixing violations, use `--prune-suppressions` to remove stale entries. Review changes to the suppression file as you would changes to a rule. See [bulk suppressions](docs/api.md#bulk-suppressions) for details.
 
 ## Further reading
 

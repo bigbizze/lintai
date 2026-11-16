@@ -37,7 +37,6 @@ export type LintaiOptions = {
 	ruleWorkers?: number;
 	rulesLock?: string;
 	suppressionsLocation?: string;
-	passOnUnprunedSuppressions?: boolean;
 	setupSandbox?: SetupSandbox;
 };
 
@@ -59,7 +58,6 @@ export type ResolvedBridgeOptions = {
 	ruleWorkers?: number;
 	rulesLock?: string;
 	suppressionsLocation?: string;
-	passOnUnprunedSuppressions?: boolean;
 	setupSandbox?: SetupSandbox;
 };
 
@@ -494,9 +492,6 @@ export class LintAIClient {
 				...(this.options.suppressionsLocation === undefined
 					? {}
 					: { suppressionsLocation: this.options.suppressionsLocation }),
-				...(this.options.passOnUnprunedSuppressions === undefined
-					? {}
-					: { passOnUnprunedSuppressions: this.options.passOnUnprunedSuppressions }),
 				...(this.options.setupSandbox === undefined
 					? {}
 					: { setupSandbox: this.options.setupSandbox }),
@@ -554,7 +549,6 @@ export class LintAIClient {
 				...(this.options.suppressionsLocation === undefined
 					? []
 					: ["--suppressions-location", this.options.suppressionsLocation]),
-				...(this.options.passOnUnprunedSuppressions ? ["--pass-on-unpruned-suppressions"] : []),
 				...(this.options.setupSandbox === undefined
 					? []
 					: ["--setup-sandbox", this.options.setupSandbox]),
@@ -1149,9 +1143,6 @@ export function resolveBridgeOptions(
 		...(options.suppressionsLocation === undefined
 			? {}
 			: { suppressionsLocation: path.resolve(workspaceRoot, options.suppressionsLocation) }),
-		...(options.passOnUnprunedSuppressions === undefined
-			? {}
-			: { passOnUnprunedSuppressions: options.passOnUnprunedSuppressions }),
 		...(options.setupSandbox === undefined ? {} : { setupSandbox: options.setupSandbox }),
 	};
 }

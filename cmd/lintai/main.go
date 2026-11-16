@@ -402,7 +402,6 @@ func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 	flags.Var(&suppressRules, "suppress-rule", "record the error-severity violations of this rule in the suppressions file (repeatable)")
 	pruneSuppressions := flags.Bool("prune-suppressions", false, "lower or remove the suppressions that allow more violations than the run found")
 	suppressionsLocation := flags.String("suppressions-location", "", "suppressions file, relative to --workspace-root (default "+suppressions.DefaultFile+")")
-	passOnUnpruned := flags.Bool("pass-on-unpruned-suppressions", false, "do not report unused suppressions and do not exit with code 1 for them")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -468,7 +467,6 @@ func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 		SuppressAll:                *suppressAll,
 		SuppressRules:              suppressRules,
 		PruneSuppressions:          *pruneSuppressions,
-		PassOnUnprunedSuppressions: *passOnUnpruned,
 	})
 	if err != nil {
 		return err
@@ -497,7 +495,7 @@ func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 	if err := diagnosticsOutcome(result.Diagnostics); err != nil {
 		return err
 	}
-	return suppressionsOutcome(result, *passOnUnpruned)
+	return suppressionsOutcome(result)
 }
 
 // diagnosticsOutcome returns a rule error when a rule could not run, and a
@@ -526,8 +524,8 @@ func diagnosticsOutcome(items []diagnostics.Diagnostic) error {
 // suppressionsOutcome returns a policy failure (exit 1) when the
 // suppressions file allows more violations than the run found.
 // diagnosticsOutcome runs first so execution failures take priority.
-func suppressionsOutcome(result engine.Result, passOnUnpruned bool) error {
-	if passOnUnpruned || len(result.UnusedSuppressions) == 0 {
+func suppressionsOutcome(result engine.Result) error {
+	if len(result.UnusedSuppressions) == 0 {
 		return nil
 	}
 	lines := make([]string, 0, len(result.UnusedSuppressions)+1)
@@ -535,7 +533,7 @@ func suppressionsOutcome(result engine.Result, passOnUnpruned bool) error {
 	for _, unused := range result.UnusedSuppressions {
 		lines = append(lines, fmt.Sprintf("  %s %s/%s (%s): allows %d, found %d", unused.File, unused.RuleID, unused.Assertion.Name, unused.Description, unused.Allowed, unused.Found))
 	}
-	lines = append(lines, "Run lintai --prune-suppressions to remove them, or pass --pass-on-unpruned-suppressions to ignore them.")
+	lines = append(lines, "Run lintai --prune-suppressions to remove them.")
 	return &exitError{code: exitViolations, message: strings.Join(lines, "\n")}
 }
 
