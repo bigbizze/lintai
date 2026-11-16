@@ -12,9 +12,18 @@ const (
 // Options are TypeScript producer settings and are fixed when the producer
 // instance is constructed.
 type Options struct {
-	Excludes    []string
-	Files       FileScope
-	SourceLinks string
+	Namespace string
+	// WorkspaceExcludes and Includes come from lintai.toml. Excludes and
+	// Sources are invocation-level additions.
+	WorkspaceExcludes []string
+	Includes          []string
+	Sources           []string
+	Excludes          []string
+	Files             FileScope
+	SourceLinks       string
+	ConfigPath        string
+	ConfigDigest      string
+	ConfigPresent     bool
 }
 
 func ParseFileScope(value string) (FileScope, error) {

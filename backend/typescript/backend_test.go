@@ -2,6 +2,8 @@ package typescript
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"slices"
@@ -12,6 +14,7 @@ import (
 	"github.com/bigbizze/lintai/engine"
 	"github.com/bigbizze/lintai/facts"
 	"github.com/bigbizze/lintai/internal/tsgo/lintaiapi"
+	"github.com/bigbizze/lintai/internal/workspace"
 )
 
 func hasSnapshotInput(snapshot *lintaiapi.Snapshot, path string) bool {
@@ -94,6 +97,61 @@ func TestTwoTypeScriptProducersKeepConstructionSettingsIndependent(t *testing.T)
 	}
 	if foo, prefixedFoo := producerEntityID("foo.ts"), producerEntityID("ts:foo.ts"); foo == prefixedFoo || foo != "ts:foo.ts" || prefixedFoo != "ts:ts:foo.ts" {
 		t.Fatalf("producer-local entity IDs are not uniquely namespaced: %q and %q", foo, prefixedFoo)
+	}
+}
+
+func TestExactSourceAndExcludedGlobalUseOneProductionScope(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "tsconfig.json", `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler"},"files":["src/main.ts","src/globals.ts"]}`)
+	writeWorkspaceFile(t, root, "src/main.ts", `export function read() { return hiddenGlobal.secret; }`)
+	writeWorkspaceFile(t, root, "src/globals.ts", `declare global { var hiddenGlobal: { secret: string }; } export {};`)
+	writeWorkspaceFile(t, root, "src/extra.ts", `export const selected = 1;`)
+	options := Options{
+		Files: FileScopeTsconfig, WorkspaceExcludes: []string{"src/globals.ts", "src/extra.ts"},
+		Sources: []string{"src/extra.ts"},
+	}
+	snapshot, err := New(options).BuildSnapshot(context.Background(), root, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	modules := make([]string, 0)
+	for _, fact := range snapshot.Facts {
+		if fact.Relation == "module" {
+			modules = append(modules, fact.Values[0].String)
+		}
+	}
+	slices.Sort(modules)
+	if !slices.Equal(modules, []string{"src/extra.ts", "src/main.ts"}) {
+		t.Fatalf("exact and ordinary primary modules = %v", modules)
+	}
+	var readID, returnType string
+	for _, fact := range snapshot.Facts {
+		if fact.Relation == "fn" && fact.Values[2].String == "read" {
+			readID = fact.Values[0].String
+		}
+	}
+	for _, fact := range snapshot.Facts {
+		if fact.Relation == "fn_returns" && fact.Values[0].String == readID {
+			returnType = fact.Values[1].String
+		}
+	}
+	if readID == "" || !slices.ContainsFunc(snapshot.Facts, func(fact facts.Fact) bool {
+		return fact.Relation == "type_kind" && fact.Values[0].String == returnType && fact.Values[1].String == "string"
+	}) {
+		t.Fatalf("excluded global declaration did not affect selected code's inferred return type")
+	}
+	if !slices.Contains(snapshot.InputPaths, filepath.Join(root, "src/globals.ts")) {
+		t.Fatal("compiler-read excluded global was absent from captured dependency inputs")
+	}
+	scopeOptions := workspace.ScopeOptions{Exclude: options.WorkspaceExcludes, Sources: options.Sources}
+	explanation, err := lintaiapi.ExplainScope(context.Background(), lintaiapi.BuildSnapshotRequest{
+		WorkspaceRoot: root, ScopeOptions: &scopeOptions, TsconfigFiles: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(explanation.CompilerEligible, modules) || !slices.Equal(explanation.ExactSources, []string{"src/extra.ts"}) {
+		t.Fatalf("scope explanation differs from production modules: %+v modules=%v", explanation, modules)
 	}
 }
 
@@ -256,27 +314,46 @@ export default rule("test.filtered-callback").version(1)
 	}
 }
 
-func TestSnapshotVersionIgnoresFileOrderAndAbsoluteRoot(t *testing.T) {
+func TestCapturedInputRevisionIgnoresAbsoluteRoot(t *testing.T) {
 	t.Parallel()
 
 	rootOne := t.TempDir()
 	rootTwo := t.TempDir()
 
-	firstOne := writeWorkspaceFile(t, rootOne, "src/a.ts", "export const alpha = 1;\n")
-	secondOne := writeWorkspaceFile(t, rootOne, "src/b.ts", "export const beta = 2;\n")
-	firstTwo := writeWorkspaceFile(t, rootTwo, "src/a.ts", "export const alpha = 1;\n")
-	secondTwo := writeWorkspaceFile(t, rootTwo, "src/b.ts", "export const beta = 2;\n")
+	writeWorkspaceFile(t, rootOne, "src/a.ts", "export const alpha = 1;\n")
+	writeWorkspaceFile(t, rootOne, "src/b.ts", "export const beta = 2;\n")
+	configContents := []byte("[workspace]\nexclude = []\n")
+	configDigest := sha256.Sum256(configContents)
+	configOne := writeWorkspaceFile(t, rootOne, "lintai.toml", string(configContents))
+	writeWorkspaceFile(t, rootTwo, "src/a.ts", "export const alpha = 1;\n")
+	writeWorkspaceFile(t, rootTwo, "src/b.ts", "export const beta = 2;\n")
+	configTwo := writeWorkspaceFile(t, rootTwo, "lintai.toml", string(configContents))
 
-	left, err := snapshotVersion(rootOne, []string{secondOne, firstOne})
+	options := func(path string) Options {
+		return Options{Files: FileScopeWalk, ConfigPath: path, ConfigPresent: true, ConfigDigest: hex.EncodeToString(configDigest[:])}
+	}
+	left, err := New(options(configOne)).BuildSnapshot(context.Background(), rootOne, rootOne)
 	if err != nil {
 		t.Fatal(err)
 	}
-	right, err := snapshotVersion(rootTwo, []string{firstTwo, secondTwo})
+	right, err := New(options(configTwo)).BuildSnapshot(context.Background(), rootTwo, rootTwo)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if left != right {
-		t.Fatalf("expected stable hash across order and roots, got %q != %q", left, right)
+	if left.InputRevision != right.InputRevision {
+		t.Fatalf("expected stable input revision across roots, got %q != %q", left.InputRevision, right.InputRevision)
+	}
+	if !slices.Contains(left.InputPaths, configOne) || !slices.Contains(right.InputPaths, configTwo) {
+		t.Fatalf("lintai.toml was missing from producer input evidence: left=%v right=%v", left.InputPaths, right.InputPaths)
+	}
+	for _, snapshot := range []facts.Snapshot{left, right} {
+		seen := make(map[string]struct{}, len(snapshot.InputPaths))
+		for _, path := range snapshot.InputPaths {
+			if _, exists := seen[path]; exists {
+				t.Fatalf("captured input %q was published more than once: %v", path, snapshot.InputPaths)
+			}
+			seen[path] = struct{}{}
+		}
 	}
 }
 
@@ -358,25 +435,42 @@ func listTree(t *testing.T, root string) []string {
 	return result
 }
 
-func TestSnapshotVersionUsesDelimitersBetweenPathsAndContents(t *testing.T) {
+func TestMetadataPreservingInputEditChangesCapturedRevision(t *testing.T) {
 	t.Parallel()
-
-	rootOne := t.TempDir()
-	rootTwo := t.TempDir()
-
-	ab := writeWorkspaceFile(t, rootOne, "ab", "cd")
-	abc := writeWorkspaceFile(t, rootTwo, "abc", "d")
-
-	left, err := snapshotVersion(rootOne, []string{ab})
+	root := t.TempDir()
+	file := writeWorkspaceFile(t, root, "src/main.ts", "export const value = 1;\n")
+	build := func() facts.Snapshot {
+		t.Helper()
+		result, err := New(Options{Files: FileScopeWalk}).BuildSnapshot(context.Background(), root, root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	before := build()
+	info, err := os.Stat(file)
 	if err != nil {
 		t.Fatal(err)
 	}
-	right, err := snapshotVersion(rootTwo, []string{abc})
+	if err := os.WriteFile(file, []byte("export const value = 2;\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(file, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	updatedInfo, err := os.Stat(file)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if left == right {
-		t.Fatalf("expected different hashes for path/content boundary cases, got %q", left)
+	after := build()
+	if before.InputRevision == after.InputRevision {
+		t.Fatalf("metadata-preserving content edit kept revision %q", before.InputRevision)
+	}
+	if !info.ModTime().Equal(updatedInfo.ModTime()) {
+		t.Fatal("test edit did not preserve the file modification time")
+	}
+	if after.InputRevision == "" {
+		t.Fatal("captured input revision was empty")
 	}
 }
 
