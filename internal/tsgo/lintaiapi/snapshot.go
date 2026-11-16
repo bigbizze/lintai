@@ -522,8 +522,20 @@ func BuildSnapshot(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, er
 			if err != nil {
 				return nil, err
 			}
+			attemptReq.WorkspaceRoot = plan.Root
 			attemptReq.Files = plan.Files
 			attemptReq.ExactFiles = plan.ExactFiles
+			// Keep an absolute source-links path in the same root spelling as the compiler inputs.
+			if filepath.IsAbs(req.SourceLinks) {
+				requestedRoot, err := normalizeAbsPath(req.WorkspaceRoot)
+				if err != nil {
+					return nil, err
+				}
+				relative := relativeScopePath(requestedRoot, req.SourceLinks)
+				if !filepath.IsAbs(filepath.FromSlash(relative)) {
+					attemptReq.SourceLinks = filepath.Join(plan.Root, filepath.FromSlash(relative))
+				}
+			}
 		}
 		snapshot, err := buildSnapshotAttempt(ctx, attemptReq)
 		if err != nil {
@@ -583,6 +595,20 @@ func BuildSnapshot(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, er
 			}
 			if req.ConfigPath != "" {
 				snapshot.Inputs = uniqueSnapshotInputs(append(snapshot.Inputs, SnapshotInput{Path: normalizeSlash(req.ConfigPath), Exists: req.ConfigPresent}))
+			}
+			if plan != nil {
+				// Return in-workspace input paths through the requested root for callers watching them.
+				requestedRoot, err := normalizeAbsPath(req.WorkspaceRoot)
+				if err != nil {
+					return nil, err
+				}
+				for i := range snapshot.Inputs {
+					relative := relativeScopePath(plan.Root, snapshot.Inputs[i].Path)
+					if !filepath.IsAbs(filepath.FromSlash(relative)) {
+						snapshot.Inputs[i].Path = normalizeSlash(filepath.Join(requestedRoot, filepath.FromSlash(relative)))
+					}
+				}
+				snapshot.Inputs = uniqueSnapshotInputs(snapshot.Inputs)
 			}
 			if plan != nil {
 				capturedRevision = combineInputRevisions(capturedRevision, plan.Revision)

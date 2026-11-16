@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -354,6 +355,82 @@ func TestCapturedInputRevisionIgnoresAbsoluteRoot(t *testing.T) {
 			}
 			seen[path] = struct{}{}
 		}
+	}
+}
+
+func TestSymlinkedWorkspaceRootKeepsScopeAndIdentity(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeWorkspaceFile(t, root, "tsconfig.json", `{"files":["src/a.ts"]}`)
+	writeWorkspaceFile(t, root, "src/a.ts", "export const alpha = 1;\n")
+	writeWorkspaceFile(t, root, "source-links.json", `{"version":1,"entries":[]}`)
+	alias := filepath.Join(t.TempDir(), "workspace")
+	if err := os.Symlink(root, alias); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+	options := Options{Files: FileScopeTsconfig, Sources: []string{"src/a.ts"}, SourceLinks: filepath.Join(root, "source-links.json")}
+	realSnapshot, err := New(options).BuildSnapshot(context.Background(), root, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	options.SourceLinks = filepath.Join(alias, "source-links.json")
+	aliasSnapshot, err := New(options).BuildSnapshot(context.Background(), alias, alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if realSnapshot.InputRevision != aliasSnapshot.InputRevision || !reflect.DeepEqual(realSnapshot.Scope, aliasSnapshot.Scope) {
+		t.Fatalf("symlinked root changed scope or input revision: %q != %q", realSnapshot.InputRevision, aliasSnapshot.InputRevision)
+	}
+	if len(realSnapshot.Facts) != len(aliasSnapshot.Facts) {
+		t.Fatalf("symlinked root changed fact count: %d != %d", len(realSnapshot.Facts), len(aliasSnapshot.Facts))
+	}
+	for _, fact := range realSnapshot.Facts {
+		if !slices.ContainsFunc(aliasSnapshot.Facts, func(other facts.Fact) bool { return reflect.DeepEqual(fact, other) }) {
+			t.Fatalf("symlinked root lost fact: %+v", fact)
+		}
+	}
+	if !slices.ContainsFunc(aliasSnapshot.Facts, func(fact facts.Fact) bool {
+		return fact.Relation == "module" && len(fact.Values) > 0 && fact.Values[0].String == "src/a.ts"
+	}) {
+		t.Fatal("symlinked root did not produce the workspace-relative module path")
+	}
+	scopeOptions := workspace.ScopeOptions{Sources: options.Sources}
+	explanation, err := lintaiapi.ExplainScope(context.Background(), lintaiapi.BuildSnapshotRequest{
+		WorkspaceRoot: alias, ScopeOptions: &scopeOptions, TsconfigFiles: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(explanation.CompilerEligible, []string{"src/a.ts"}) || !slices.Equal(explanation.ExactSources, []string{"src/a.ts"}) {
+		t.Fatalf("symlinked root scope explanation = %+v", explanation)
+	}
+	if got := workspace.RelativePath(alias, filepath.Join(root, "src/a.ts")); got != "src/a.ts" {
+		t.Fatalf("relative path from symlinked root = %q", got)
+	}
+	if !slices.Contains(aliasSnapshot.InputPaths, filepath.Join(alias, "src/a.ts")) {
+		t.Fatalf("symlinked root input paths = %v", aliasSnapshot.InputPaths)
+	}
+	plan, err := workspace.PlanSources(alias, workspace.ScopeOptions{Sources: []string{filepath.Join(alias, "src/a.ts")}})
+	if err != nil {
+		t.Fatalf("absolute exact source through symlinked root: %v", err)
+	}
+	if valid, err := workspace.ValidateScope(plan); err != nil || !valid {
+		t.Fatalf("validate scope with absolute exact source: valid=%t err=%v", valid, err)
+	}
+	other := t.TempDir()
+	writeWorkspaceFile(t, other, "tsconfig.json", `{"files":["src/a.ts"]}`)
+	writeWorkspaceFile(t, other, "src/a.ts", "export const alpha = 1;\n")
+	writeWorkspaceFile(t, other, "source-links.json", `{"version":1,"entries":[]}`)
+	if err := os.Remove(alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(other, alias); err != nil {
+		t.Fatal(err)
+	}
+	if valid, err := workspace.ValidateScope(plan); err != nil || valid {
+		t.Fatalf("retargeted workspace validation: valid=%t err=%v", valid, err)
 	}
 }
 

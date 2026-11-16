@@ -33,10 +33,7 @@ func ExplainScope(ctx context.Context, req BuildSnapshotRequest) (ScopeExplanati
 	if err != nil {
 		return ScopeExplanation{}, err
 	}
-	root, err := normalizeAbsPath(req.WorkspaceRoot)
-	if err != nil {
-		return ScopeExplanation{}, err
-	}
+	root := plan.Root
 	trackedFS := trackResolutionInputs(osvfs.FS(), root)
 	host := compiler.NewCompilerHost(bundled.WrapFS(trackedFS), bundled.LibPath(), nil, nil, nil)
 	configs := newConfigCache(host)

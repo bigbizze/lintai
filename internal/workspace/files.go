@@ -39,14 +39,15 @@ type ScopeMatch struct {
 // canonical absolute paths; membership is the directory evidence used to
 // detect a newly eligible file on validation.
 type ScopePlan struct {
-	Root       string
-	Files      []string
-	ExactFiles []string
-	Pruned     []string
-	Membership []DirectoryMembership
-	Matches    []ScopeMatch
-	Revision   string
-	Options    ScopeOptions
+	Root          string
+	Files         []string
+	ExactFiles    []string
+	Pruned        []string
+	Membership    []DirectoryMembership
+	Matches       []ScopeMatch
+	Revision      string
+	Options       ScopeOptions
+	requestedRoot string
 }
 
 // PlanSources applies built-in, configured and invocation selection layers,
@@ -57,6 +58,7 @@ func PlanSources(root string, options ScopeOptions) (*ScopePlan, error) {
 		return nil, fmt.Errorf("resolve workspace root: %w", err)
 	}
 	absoluteRoot = filepath.Clean(absoluteRoot)
+	requestedRoot := absoluteRoot
 	if resolved, err := filepath.EvalSymlinks(absoluteRoot); err == nil {
 		absoluteRoot = resolved
 	}
@@ -70,7 +72,19 @@ func PlanSources(root string, options ScopeOptions) (*ScopePlan, error) {
 	if err := validatePatterns(options); err != nil {
 		return nil, err
 	}
-	plan := &ScopePlan{Root: filepath.Clean(absoluteRoot), Options: cloneScopeOptions(options)}
+	// Store in-workspace absolute sources relative to the requested or resolved
+	// root so they can be replanned and hashed independently of the root spelling.
+	options = cloneScopeOptions(options)
+	for i, name := range options.Sources {
+		if filepath.IsAbs(name) {
+			if withinRoot(requestedRoot, name) {
+				options.Sources[i] = relativeSlash(requestedRoot, name)
+			} else if withinRoot(absoluteRoot, name) {
+				options.Sources[i] = relativeSlash(absoluteRoot, name)
+			}
+		}
+	}
+	plan := &ScopePlan{Root: filepath.Clean(absoluteRoot), Options: options, requestedRoot: requestedRoot}
 	exact, err := resolveExactSources(absoluteRoot, options.Sources)
 	if err != nil {
 		return nil, err
@@ -165,14 +179,14 @@ func PlanSources(root string, options ScopeOptions) (*ScopePlan, error) {
 	return plan, nil
 }
 
-// ValidateScope replans with the same production selector and compares the
-// complete selection and traversed directory memberships.
+// ValidateScope also checks the requested root, which may be a retargeted
+// symlink, as well as the selection and traversed directory memberships.
 func ValidateScope(plan *ScopePlan) (bool, error) {
-	current, err := PlanSources(plan.Root, plan.Options)
+	current, err := PlanSources(plan.requestedRoot, plan.Options)
 	if err != nil {
 		return false, err
 	}
-	return current.Revision == plan.Revision, nil
+	return current.Root == plan.Root && current.Revision == plan.Revision, nil
 }
 
 // ListSourceFiles preserves the small helper used by callers and tests while
@@ -455,7 +469,21 @@ func relativeSlash(root, path string) string {
 	return filepath.ToSlash(relative)
 }
 
-func RelativePath(root, path string) string { return relativeSlash(root, path) }
+func RelativePath(root, path string) string {
+	if withinRoot(root, path) {
+		return relativeSlash(root, path)
+	}
+	if absolute, err := filepath.Abs(root); err == nil {
+		root = absolute
+	}
+	if resolved, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolved
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		path = resolved
+	}
+	return relativeSlash(root, path)
+}
 
 func ReadFile(path string) (string, error) {
 	raw, err := os.ReadFile(path)
