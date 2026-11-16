@@ -17,9 +17,9 @@ The goal is architectural and semantic simplification. A benchmark score, a part
 
 The only current consumer is the owner's experimental branch in one repository. **Backward compatibility is not a requirement anywhere in this design.** Old rules, IDs, command formats, Go interfaces, saved allowances, and lock files do not constrain the result. Keep a present capability because it is useful and correct, never merely because an old consumer expects it.
 
-This specification fixes the configuration, fact inventory, argument roles, callback meaning, analysis identity, result identity, relation coverage, reporting, and execution contracts. Revision 6 closes a saved-policy recovery gap: an explicit recording or justified prune can replace invalid selected entries without being blocked by the matching error it removes. The exception is limited to the actual replacement/deletion set, followed by full proposed-file validation and existing lock approval. Ordinary checks still fail on invalid saved policy. Named-subject defaults, syntax/subject choice, the single assertion policy, native syntax fingerprints, counted groups, content validation and mandatory parallel rule evaluation remain in force. Requirements here take precedence over earlier plans and prompts. The Phase A report remains evidence for the diagnosis, not competing implementation authority.
+This specification fixes the configuration, fact inventory, argument roles, callback meaning, analysis identity, result identity, relation coverage, reporting, and execution contracts. Requirements here take precedence over earlier plans and prompts. The Phase A report remains evidence for the diagnosis, not competing implementation authority.
 
-The change repairs entries in the current supported suppression schema; it does not import an obsolete format or preserve old identities. There is still no compatibility or migration work. Source-based analysis IDs, the base-relation/helper inventory, saved-file schemas, matching policies and parallel-evaluation requirements are unchanged from revision 5.
+**Owner decision (revision 6, amended):** the suppression design is simplified. Each producer supplies at most one fixed tracking key per anchor; rules cannot choose between syntax and subject forms. The native-AST syntax fingerprint, per-assertion anchor/mode selection, mixed keyed/count recording, recording-mode overrides, saved-form authority, overlap ambiguity and the invalid-entry recovery exception are removed. Findings are grouped by `(file, rule, assertion, namespace, anchor key, optional reasons)` and compared by count. Anchors without a key fall back to a per-assertion count. Counted groups, content validation and mandatory parallel rule evaluation remain in force. Source-based analysis IDs and the base-relation/helper inventory are unchanged from revision 5. There is still no compatibility or migration work.
 
 **MUST** marks a completion requirement. Examples illustrate the specified contract; they are not descriptions of already implemented behavior. This document was produced from source inspection and the earlier review, not from running the replacement.
 
@@ -75,7 +75,7 @@ These are responsibility boundaries, not instructions to create one package or i
 | Inputs actually consumed and whether reuse is valid | The operation/producer that consumed them |
 | TypeScript evidence and reconciliation | The TypeScript producer |
 | Public vocabulary and entity/report argument roles | The validated producer catalog |
-| An anchor's location, available tracking forms/default and readable description | Its producer; constructed from that producer's captured inputs |
+| An anchor's location, tracking key and readable description | Its producer; constructed from that producer's captured inputs |
 | New recording policy and saved matching scope | One per-assertion declaration guides recording; saved entries and the final coordinator govern matching |
 | Rule discovery, artifacts, integrity and metadata | The rule catalog |
 | One rule's generated program and mutable execution | Its rule run |
@@ -145,7 +145,7 @@ A parse-error site uses the synthetic kind name `parse_error` and the diagnostic
 
 These IDs are stable for the same captured source across compiler interpretations. **They are not promised to survive arbitrary edits.** Prepending text can change source IDs. They are used for fact joins and current diagnostic anchors, never as the saved suppression-matching key.
 
-Sections 4.7 and 12 define separate tracking data for matching allowances across specified edits. That data groups findings with the same matching information; it does not claim to identify an individual physical occurrence through all edits. There is no fuzzy matching, previous-position map, version-control history dependency, AST differencing service, or occurrence-number identity.
+Sections 4.7 and 12 define a separate producer-owned tracking key for matching allowances across ordinary edits. The key groups findings with the same matching information; it does not claim to identify an individual physical occurrence through all edits. There is no fuzzy matching, previous-position map, version-control history dependency, AST differencing service, or occurrence-number identity.
 
 ### 3.5 One lexical-owner relation
 
@@ -199,23 +199,18 @@ ProducerBatch
 AnchorSupport
   location: Location
   description: nonempty string
-  tracking: TrackingSupport or null
+  tracking: TrackingKey or null
 
-TrackingSupport
-  defaultForm: "syntax" | "subject"
-  syntax: TrackingDescriptor or null
-  subject: TrackingDescriptor or null
-
-TrackingDescriptor
+TrackingKey
   scheme: nonempty string
   data: CanonicalData
 ```
 
 `implementationStamp` identifies the actual extraction implementation and relevant pinned dependencies. `contractVersion` identifies the meaning of the vocabulary. `effectiveConfiguration` is normalized, fully defaulted JSON data, not a second parser or mutable options object. Worker counts and logging settings are not semantic configuration.
 
-`CanonicalData` is immutable JSON-shaped data: null, boolean, string, safe integer, array, or string-keyed object. Integers lie in `[-(2^53-1), 2^53-1]`; floats or wider numeric data use an explicit producer-defined tagged string representation. Ordering and hashing use section 5.1, not insertion order. Each descriptor's `scheme` names the producer's matching contract; changing its matching meaning changes the scheme. The engine treats `data` as structured opaque producer data and does not parse source syntax.
+`CanonicalData` is immutable JSON-shaped data: null, boolean, string, safe integer, array, or string-keyed object. Integers lie in `[-(2^53-1), 2^53-1]`; floats or wider numeric data use an explicit producer-defined tagged string representation. Ordering and hashing use section 5.1, not insertion order. A key's `scheme` names the producer's matching contract; changing its matching meaning changes the scheme. The engine treats `data` as structured opaque producer data and does not parse source syntax.
 
-Tracking has only the two fixed forms above, not an extensible strategy registry. A non-null support has at least one non-null form; `defaultForm` declares its producer's preferred policy. It may name an unavailable form when that policy cannot be established for this anchor; default keyed recording then fails instead of widening. An explicitly chosen different form can still be used if available. A completely untrackable anchor uses `tracking: null`. A null form or null tracking never means an absent reporting location. The engine can handle a non-TypeScript producer offering only a logical subject descriptor without an AST.
+Each anchor has exactly one fixed key or `null`. There is no form choice, strategy registry or per-rule selection. `tracking: null` means the anchor's findings group only by file/rule/assertion count; it never means an absent reporting location. The engine can handle a non-TypeScript producer whose key is a logical object name without an AST.
 
 An argument's role is `value`, `path`, or `entity`. Its reporting support is `none`, `required`, or `optional`. Only entity arguments can supply report support. A relation descriptor supplies all argument kinds, including allowed closed name values. There is one authoritative implementation registry that produces the Mangle declarations and inventory documentation; no independently maintained schema copy is returned in a batch.
 
@@ -235,7 +230,7 @@ There is no separate complete flag or second list of supplied predicates. The re
 
 Collection completeness is not complete semantic knowledge. A completely collected relation can honestly contain unknown, unsupported, or conflicting evidence. Those are data. An I/O failure that prevents producing the promised relation is an error, not an empty answer or an uncertainty fact invented to conceal the failure. Preserve explicitly optional source-association outcomes where the domain itself defines them.
 
-For identical configuration, scope, and captured inputs, each requested relation and its complete supported anchor records (locations, descriptions, default form, both form descriptors and explicit nulls) MUST match that relation under full collection. This remains true for enumeration, negation, aggregation, recursion, and additional observations about an already selected ID.
+For identical configuration, scope, and captured inputs, each requested relation and its complete supported anchor records (locations, descriptions and tracking key or explicit null) MUST match that relation under full collection. This remains true for enumeration, negation, aggregation, recursion, and additional observations about an already selected ID.
 
 ### 4.3 Validation and immutability
 
@@ -246,7 +241,7 @@ Before evaluation, the core validates:
 - Every entity value has the producer's own namespace and a nonempty local key. This revision does not permit foreign-entity fields in producer rows.
 - Required report positions have a location. Optional positions either have the canonical location or explicitly have none.
 - Supplied anchors have the producer's namespace and one consistent complete `AnchorSupport` record. The same ID cannot acquire different tracking information through a different relation.
-- Descriptions are nonempty strings. A non-null tracking support has a valid `defaultForm`, exactly the two form slots, and at least one available descriptor. Each available descriptor has a nonempty scheme and valid immutable canonical data. Equal descriptors on different anchors are allowed: they express a matching group, not unique entity identity. An unavailable selected form stays unavailable; validation does not silently choose another.
+- Descriptions are nonempty strings. A non-null tracking key has a nonempty scheme and valid immutable canonical data. Equal keys on different anchors are allowed: they express a matching group, not unique entity identity.
 - Physical ranges have positive 1-based line/UTF-16-column coordinates, ordered start/end, and an exclusive end. Zero-width ranges are allowed.
 - The analyzed-file set is normalized and independent of incidental anchor discovery.
 
@@ -268,7 +263,7 @@ For source sites, the canonical range is the source expression represented by th
 
 A type's optional location is the canonical minimum of eligible physical declaration ranges of that type across its contributing observations; anonymous types need not be locatable. Compute this from the type's defined domain, not from whichever collector ran first.
 
-`ts.location` remains a queryable relation over physically locatable primary modules/functions/sites, retained declarations, exports and their syntax sites, observed signatures, and eligible named types in the full configured domain. Source-entry and binding-attempt configuration IDs have no location unless this specification explicitly supplies one; it currently does not. Normal diagnostic formatting does not request the broad location relation. Additional demand cannot change an already eligible anchor's location, available tracking forms, default or description.
+`ts.location` remains a queryable relation over physically locatable primary modules/functions/sites, retained declarations, exports and their syntax sites, observed signatures, and eligible named types in the full configured domain. Source-entry and binding-attempt configuration IDs have no location unless this specification explicitly supplies one; it currently does not. Normal diagnostic formatting does not request the broad location relation. Additional demand cannot change an already eligible anchor's location, tracking key or description.
 
 ### 4.5 Analysis coverage and pruning are separate
 
@@ -290,24 +285,17 @@ Cancellation or input instability publishes no replacement. The retained server 
 
 Producer collection is initially serialized. The composed snapshot identifies a vector of validated producer generations; it does not promise an atomic transaction across future remote systems. No cross-producer read scheduling is introduced.
 
-### 4.7 Producer-owned tracking support
+### 4.7 Producer-owned tracking key
 
-A producer supplies a location, a readable description, and the supported matching forms for each reportable anchor. The forms answer different questions:
+A producer supplies a location, a readable description and at most one tracking key for each reportable anchor. The key answers one question: which findings concern the same named or otherwise explicitly identified subject across ordinary edits? It does not replace the current analysis entity ID and does not prove the reason for a finding is unchanged; the assertion and any selected reason columns supply that part of the policy in section 12.
 
-- **Syntax:** which findings concern the same represented source construct or producer-defined record contents, under the stated formatting rules?
-- **Subject:** which findings concern the same named or otherwise explicitly identified subject, even when some of its contents change?
+Build keys from captured producer inputs before freezing the batch and dispatching rules. The generic engine MUST NOT interpret TypeScript ASTs, request `site_owner` on a rule's behalf, or use a reporting relation's name to invent an anchor kind. A source expression that supplies call, ambient-use and other evidence has one consistent support record. Rules cannot select or alter the key.
 
-Neither form replaces the current analysis entity ID. Neither proves that the reason for a finding is unchanged. The assertion and any selected reason columns provide that part of the policy in section 12.
+Tracking is reporting support, not another Datalog vocabulary. Keys are a deterministic function of the producer's inputs, so the input revision and implementation stamp cover them; they are not hashed separately into the snapshot ID. Construction must not trigger unrelated type expansion, map recovery, extra producer collection or source reads after publication. A producer that later changes how it computes keys changes its scheme; saved allowances using the old key stop matching and the user re-records. No compatibility is promised.
 
-Build tracking support from captured producer inputs before freezing the batch and dispatching rules. The generic engine MUST NOT interpret TypeScript ASTs, request `site_owner` on a rule's behalf, or use a reporting relation's name to invent an anchor kind. A source expression that supplies call, ambient-use and other evidence has one consistent support record containing the same available forms and default. Rules can select different forms from that record without changing it.
+#### 4.7.1 TypeScript keys
 
-A producer is not required to fabricate both forms. It supplies the forms whose meanings it can define and the default form prescribed for that anchor category. If neither is available, use `tracking: null`. If the prescribed default is unavailable but another form is defined, retain the available form; default recording still fails, while an explicit selection of the available form can succeed. An explicitly requested unavailable form never silently changes to another form or to a count allowance. Absence of tracking does not prevent ordinary reporting.
-
-Tracking is reporting support, not another Datalog vocabulary. The complete support, including available forms and the default, participates in the snapshot identity. Tracking construction must not trigger unrelated type expansion, map recovery, extra producer collection or source reads after publication.
-
-#### 4.7.1 TypeScript records, names and scope paths
-
-The built-in schemes are `lintai.typescript.syntax/1` and `lintai.typescript.subject/1`. Each descriptor's `data` has exactly this shape:
+The built-in scheme is `lintai.typescript.subject/1`. Its `data` has exactly this shape:
 
 ```text
 {
@@ -318,102 +306,35 @@ The built-in schemes are `lintai.typescript.syntax/1` and `lintai.typescript.sub
 }
 ```
 
-`memberPlacement` is `"static"`, `"instance"`, or `"none"`. Class members and directly bound class-field initializer functions use their syntactically established placement; other containers use `"none"`. This distinguishes, for example, a static method from an instance method with the same name. Getter and setter syntax kinds remain distinct.
+`memberPlacement` is `"static"`, `"instance"`, or `"none"`. Class members and directly bound class-field initializer functions use their syntactically established placement; other containers use `"none"`. Getter and setter syntax kinds remain distinct. The file and producer namespace are supplied by the group, not repeated here. `kind` is the source node's symbolic syntax kind, or the fixed `module`/`export_binding` kind; it never depends on which fact relation exposed the anchor.
 
-The file is supplied by the final group's canonical diagnostic file, not repeated here. The coordinator also supplies the producer namespace. `kind` is the source node's symbolic syntax kind, or the fixed `module`/`export_binding` kind. It never depends on which fact relation exposed the anchor. Function and declaration views of the same syntax retain their different categories.
+`scope` is the enclosing syntactic container path, outermost first, excluding the anchor's own node and the source-file root. Include namespace/module declarations, classes, function-like scopes, object-literal member containers and lexical blocks that introduce scopes. Do not include a container's body, signature, source offsets, sibling number, inferred target or checker identity.
 
-`scope` is the enclosing syntactic container path, outermost first, excluding the anchor's own node and the source-file root. Include namespace/module declarations, classes, function-like scopes, object-literal member containers, and lexical blocks that introduce scopes. Do not include a container's body, signature, source offsets, sibling number, inferred target or checker identity.
+A name descriptor is `['name', text]` (parser-decoded, no case folding or normalization), `['private', textWithoutHash]` (distinct from a same-spelled public name), `['computed', computedNameSourceText]` for a computed property name (not evaluated), or null. Constructors use `['name', 'constructor']`. A function/class/object without its own name takes the name of an immediate identifier variable binding or statically named property initializer when that association is unambiguous; parentheses may be stripped solely to establish it. Do not follow assignments, data flow, destructuring, checker aliases or return values.
 
-A name descriptor is one of:
+| Anchor | Key |
+|---|---|
+| Primary module | `subject: ['module']`, empty scope, kind `module`. |
+| Named or directly bound function, method, class, variable or other source-backed declaration | `subject: ['named', nameDescriptor, memberPlacement]`. Body, parameters, return annotation, initializer and local variables are excluded. |
+| Export binding | `subject: ['export_binding', publicName, space]`, with the binding's module as its file context. |
+| Literal module reference | `subject: ['module_reference', syntacticForm, decodedSpecifier]`, where the form is `static`, `reexport`, `dynamic`, `require`, `import_equals` or `import_type`, determined from the source construct. Binding names/order, type-only markers and attributes are excluded. |
+| Anonymous function/declaration, ordinary invocation/access/callback/directive/suspension/function-reference site, nonliteral load | `null`. |
+| Observed signature or structural type | `null`. Do not use position-sensitive type IDs or type-display text. |
+| Parse-error site, unavailable source node or ambiguous name/scope | `null`. Do not infer a key from a recovery span. |
 
-- `['name', text]` for a statically named identifier or property; use the parser's decoded name, without case folding or Unicode normalization.
-- `['private', textWithoutHash]` for a private name, distinct from a same-spelled public name.
-- `['computed', syntaxFingerprint]` for a computed property name; do not evaluate it to guess a static value.
-- null when no supported name exists.
+Scope names are not unique historical identities. Repeated scopes, overloads and same-named declarations in the same scope intentionally share a counted group. Adding an occurrence index or hashing an enclosing body to separate them is prohibited. A changed name, member placement, private/public naming, declaration kind, specifier, syntactic form or named enclosing scope changes the key.
 
-A string/numeric property name uses its parser-provided static name text. The full syntax form separately preserves its spelling. Constructors use `['name', 'constructor']` with the constructor syntax kind. For a function/class/object without its own syntactic name, an immediate identifier variable binding or statically named property initializer supplies a name when that association is unambiguous; parentheses may be stripped solely to establish that immediate association. Do not follow assignments, data flow, destructuring, checker aliases or return values to invent a name. A named function expression uses its own name. Member placement follows the node or the immediate class-field binding, as applicable.
+A named key deliberately survives body, initializer and signature edits: an allowance means the recorded assertion/reason/count is permitted for that subject, not that its implementation survived. A module-reference key deliberately survives binding and type-only changes. A rule needing a narrower distinction selects a stable reason column (section 12.2). Source-entry/binding configuration entities have no reporting location and therefore no key. Dependency declarations with captured physical source can carry keys without gaining primary-file pruning coverage.
 
-Scope names are not unique historical identities. Repeated scopes, overloaded declarations and anonymous structures that remain indistinguishable intentionally form counted groups. Adding an occurrence index or hashing an enclosing body to separate them is prohibited. Inserting a statement inside a named function does not rename the unchanged sites elsewhere in that function.
+A future producer supplies its own scheme and key, for example `schema.object.kind` for a SQL object. No TypeScript shape is required.
 
-#### 4.7.2 Syntax fingerprint from the native parsed structure
+#### 4.7.2 Consistency, descriptions and cost
 
-Use the pinned TypeScript parser's native syntax representation. Do not build a second parser, normalize source text by collapsing whitespace, or reconstruct punctuation that the native structure already makes unnecessary.
+Every eligible relation and compiler context must supply the same description and key for an anchor. Do not derive a different key from call versus ambient evidence or choose metadata by worker order.
 
-A node fingerprint is the full SHA-256 digest, using section 5.1, of a record equivalent to:
+Descriptions are nonempty, deterministic review text: category, readable scope/name and a concise source preview. Escape control characters. Exclude absolute line numbers and position hashes. Saved previews may become stale and do not determine matching.
 
-```text
-['ts-native-syntax-v1', symbolicNodeKind,
-  [[fieldRole, projectedValue], ...],
-  relevantAttachedDirectives]
-```
-
-Field roles and their order are fixed for the pinned syntax adapter. A projected value is an explicitly typed scalar syntax value, a child digest, an ordered list of child digests, or an explicit absent-slot marker. Lists retain order and omitted elements. A child occupies its named syntactic role: do not serialize only the non-null children returned by a generic traversal. This distinction must survive:
-
-```ts
-for (; ready; ) {}  // ready is the condition
-for (;; ready) {}  // ready is the incrementor
-```
-
-Preserve node kinds, child roles, optional slots, operators, syntactic modifiers, optional-chain/type-only markers, and other syntax-bearing flags stored outside ordinary child traversal. Preserve complete identifier and raw literal payloads where syntax is represented: string/numeric/bigint/regex literals, template fragments and JSX text. In particular, literal contents `"a b"` and `"a  b"` differ. Do not substitute type-display text, inferred names or checker state. Ordinary identifiers are not renamed or sorted. If the native node stores a decoded literal instead of its raw spelling, obtain that literal's lexeme from its captured token span before discarding positions. This does not authorize rescanning an entire subtree to reconstruct punctuation.
-
-Remove source positions, parent pointers, parser/checker allocation identity, caches, semantic flags and ordinary comment/whitespace trivia. Preserve parenthesized-expression nodes and distinctions that the parser creates because of automatic semicolon insertion. A return expression and a bare return followed by a different statement cannot collide. Compiler-recognized directives and attached JSDoc/type annotations that affect interpretation remain represented by directive kind and significant text without absolute offsets.
-
-Commas, braces and other punctuation implied by node kind, field roles and lists need no synthetic token entries. A native trailing-comma formatting flag is omitted; an omitted array element is not. Do not rescan the entire node to recreate missing punctuation. Raw literal spelling and retained native syntax distinctions may change the fingerprint even where a developer considers the edit equivalent. All implementations of this scheme use the same projection policy; punctuation retention is not an undocumented implementation option.
-
-Implement this as one syntax projection with ordinary local helpers over the native nodes, not a second persistent AST. Memoize subtree digests within the captured source generation and share them among descriptors. Do not repeatedly hash a whole function for each report or enclosing ancestor. Where syntax recovery or an unhandled syntax-bearing field prevents a reliable projection, the syntax form is unavailable rather than an incomplete fingerprint presented as complete. Add a focused fixture when extending supported syntax.
-
-The descriptor's syntax subject contains the full digest. Shortened descriptions and previews never supply hash input. No source position, whole-file hash or occurrence ordinal is added as a tie-breaker.
-
-#### 4.7.3 Available forms and defaults by anchor category
-
-The following table fixes TypeScript's forms and defaults. `syntax` and `subject` are matching choices, not different analysis identities.
-
-| Anchor | Syntax form | Subject form | Default for newly recorded keyed groups |
-|---|---|---|---|
-| Primary module | Unavailable; do not fingerprint a whole file merely to offer this choice. | `['module']`, empty scope and kind `module`. | `subject`. |
-| Named or directly bound function implementation | Full represented-node fingerprint, including body and signature. | `['named', nameDescriptor, memberPlacement]`; category/kind/scope distinguish the declaration. Body, parameter list, return annotation and local variables are not included. | `subject`. |
-| Named or directly bound source-backed declaration | Full represented declaration-node fingerprint, including initializer/body where present. | The same named-subject record. A class/interface/type alias/variable keeps its syntax kind and name without fingerprinting its contents. | `subject`. |
-| Genuinely anonymous function/declaration without a supported name | Full represented-node fingerprint. | Unavailable. | `syntax`. |
-| Source site representing a supported literal module reference | Full represented construct: import/export binding syntax or literal-loading invocation. | `['module_reference', syntacticForm, decodedSpecifier]`; enclosing scope and source-node kind remain in the descriptor. Binding names/order, type-only markers and attributes are deliberately excluded from this broader subject. | `syntax`. |
-| Other syntax site, including ordinary invocation, access, callback argument, directive, suspension or function reference | Fingerprint of the represented node. A call includes arguments, not just the callee; a callback argument includes the argument expression. | Unavailable in this revision. Do not invent callee-name or access-prefix allowances. | `syntax`. |
-| Export binding | `['export_syntax', publicName, space, sortedContributingSyntaxFingerprints]`; each contribution is `[canonicalSourceFile, syntaxFingerprint]`. Available only when at least one actual contributing syntax construct exists and all required contributions are representable. | `['export_binding', publicName, space]`, with the binding's module as its file context. | `syntax` when actual contribution syntax exists; `subject` only for a binding defined without a separate syntax construct. |
-| Observed signature or structural type | Unavailable in this revision. Do not use position-sensitive type IDs or type-display text as a substitute. | Unavailable. | No default; `tracking: null`. It remains reportable. |
-| Synthetic parse-error site, unavailable source node or ambiguous subject identity | Unavailable where required syntax cannot be established. | Unavailable where the name/scope cannot be established. | Retain the category's preferred form; it is not substituted when unavailable. Use null tracking if both forms are unavailable. |
-| Future producer anchor | Producer-defined syntax/content descriptor, or unavailable. | Producer-defined named/logical subject descriptor, or unavailable. | Producer-declared preferred form; no tracking when neither form exists. No TypeScript shape is required. |
-
-A named subject is a syntactic/static/computed name or the immediate binding described in 4.7.1. It is not merely a convenient display string. Private/public names and static/instance members are distinct. Declarations with the same scope, syntax kind and name, including overloads that cannot otherwise be distinguished under this policy, share a counted subject group. A changed name, member placement, declaration kind or named enclosing scope changes that subject.
-
-Module-reference subject forms are `static`, `reexport`, `dynamic`, `require`, `import_equals`, or `import_type`, determined from the source construct rather than enabled relations. Use decoded string-literal content as the specifier. No-substitution template literals may be treated as literal arguments only where the pinned source collector represents that form; do not evaluate arbitrary expressions. A syntactic direct `require("x")` has the `require` subject whether or not a rule later establishes a module-loading interpretation. The descriptor describes syntax, not resolution. Nonliteral loads and ordinary calls have no specifier subject. A rule must still obtain the evidence its policy needs from facts.
-
-Subject matching for a module reference deliberately permits binding additions/reordering, type-only/value-form changes and attribute changes when the syntactic form and specifier stay the same. A rule distinguishing any of those uses syntax matching or selects a stable reason column. The default remains syntax: the producer does not choose a broad import policy on behalf of all rules.
-
-Named function/declaration subject matching deliberately survives ordinary body/initializer/signature edits. An allowance means the recorded assertion/reason/count is permitted for that named subject, not that its original implementation survived. Fixing one failure and creating another within the same subject/assertion/reason and count can remain covered. Choose syntax or more specific reasons when that is not the intended approval.
-
-An export's subject form approves the public name/space group, not unchanged export syntax or target evidence. Export descriptions identify the binding, not whichever contributing location sorts first. A change to contributing syntax may leave a subject allowance valid while changing its syntax descriptor. An inability to project existing export syntax is not permission to change its default from syntax to subject.
-
-Defaults are the category policies in the table, not a search for whichever form happens to work. If the preferred form is unavailable, keep its slot null and do not change the default. Another independently valid form remains available to an explicit selection. Both slots null are represented by `tracking: null`. Normally named function/declaration anchors offer both forms, and truly anonymous ones offer syntax only. A rule requiring stricter syntax can request it even when subject is the default. No implicit cross-form fallback is permitted.
-
-Source-entry/binding configuration entities currently have no reporting location and therefore no tracking support. Dependency declarations with captured physical source can use the source-backed forms without gaining primary-file pruning coverage. Parsing recovery affecting required names/scopes makes subject tracking unavailable; recovery affecting a required syntax projection makes that form unavailable. Do not infer a reliable descriptor from a recovery span.
-
-#### 4.7.4 Consistency, descriptions and stability limits
-
-Every eligible relation and compiler context must supply the same complete support for an anchor: description, default form, each available descriptor, and explicit unavailability. Do not derive a different kind from call versus ambient evidence or choose metadata by worker order. A descriptor cannot require some unrelated rule to request another relation first.
-
-Descriptions are nonempty, deterministic review text: category, readable scope/name and a concise source preview. Escape control characters. Exclude absolute line numbers and position hashes. Saved previews may become stale and do not determine matching. Recording labels the selected form and reason fields so a subject allowance is not presented as approval of unchanged syntax.
-
-Both forms omit source positions and ordering identities. Moving unchanged syntax within the same file and scope path, or inserting unrelated source outside it, preserves its descriptors. Reordering siblings does not renumber groups. Syntax matching additionally preserves the ordinary formatting/comment invariance defined in 4.7.2; changes to retained syntax data change that fingerprint. Subject matching preserves edits to contents deliberately omitted by its definition, including named function bodies and import binding lists. Changes to its defining name/specifier/kind/scope change it.
-
-A declaration's body can change its inferred meaning without changing its subject. An unchanged local subtree can also acquire a different meaning through dependencies. Neither form is a semantic-equivalence proof. Assertion identity and selected reasons define the additional policy. No history reconstruction, fuzzy name matching, sibling counters or guarantee across rename/move-to-another-scope is added.
-
-#### 4.7.5 Construction cost and reuse
-
-Construct support for eligible anchors when creating or replacing a producer result, even when no finding will ultimately be reported or no suppression file exists. The contract requires complete available support independent of rule demand; it does not require rebuilding it for every check.
-
-A valid no-change check MUST reuse the current immutable support. A completed-result read performs no tracking work. Within new collection, reuse each syntax-node digest for all relevant parent projections/anchors and build each scope/name description from the same captured source. A subject default does not permit dropping an otherwise specified syntax form according to which rule ran.
-
-Record descriptor construction counts, distinct syntax nodes fingerprinted, memoized subtree reuse, tracking-construction elapsed time and retained tracking storage where the measurement is meaningful. State whether storage is estimated or measured and account for shared data rather than summing overlapping buffers. Do not require a universal one-pass or linear-time claim without measuring the actual scope-path and descriptor work.
-
-No lazy source-reading callback, extra evaluation phase, per-rule AST traversal or mutable worker-side tracking cache is introduced. These counters expose unnecessary work; they do not establish a benchmark gate or authorize a new tracking scheduler.
+Construct keys for eligible anchors when creating or replacing a producer result, independent of rule demand. A valid no-change check MUST reuse the current immutable support; a completed-result read performs no tracking work. Record key construction count with the other cheap counters in section 14. No lazy source-reading callback, per-rule AST traversal or mutable worker-side tracking cache is introduced.
 
 ## 5. Result identity and input validity
 
@@ -437,27 +358,25 @@ The core derives each producer's snapshot input from this fixed record:
 
 ```text
 [
-  'producer-result-v1',
+  'producer-result-v2',
   namespace,
   implementationID,
   implementationStamp,
   contractVersion,
-  canonicalDescription,       # roles, representations, helpers and meanings
   effectiveConfiguration,
   inputRevision,
-  sortedAnalyzedFiles,
-  sortedRequestedRelationsAndRows,
-  sortedEligibleAnchorSupport
+  scope,
+  sortedRequestedRelationNames
 ]
 ```
 
-`sortedEligibleAnchorSupport` contains `[entityID, canonicalLocation, description, trackingOrNull]` for each eligible owned anchor, sorted by entity ID. A non-null tracking support is encoded as `[defaultForm, syntaxDescriptorOrNull, subjectDescriptorOrNull]`; a descriptor is `[scheme, canonicalData]`. A change to either form, the default, description or availability changes the snapshot record even when query rows and locations do not. This prevents retained findings from using stale support. The saved suppression group contains only its explicitly selected form/descriptor and excludes description and source offsets. Both choices are authoritative data with different purposes, not competing hashes.
+The record identifies a result by its inputs, not its outputs. Rows, anchor locations, descriptions and tracking keys are not serialized into the ID: they MUST be a deterministic function of the fields above, which V04 (requested versus full collection) and warm-equals-fresh checks enforce. `implementationStamp` and `contractVersion` cover the description and the tracking scheme; `inputRevision` covers the analyzed files. A producer with non-file inputs supplies an opaque revision token here as its own validity claim. A producer bug that breaks determinism is caught by those checks, not by the ID.
 
 The composed snapshot ID is the digest of `['lintai-facts-v1', sortedProducerRecords]`. An analysis with no producer facts uses the empty producer list. Registration order, request order, worker count, elapsed time, temporary directories, watcher handles, and map iteration do not enter this identity.
 
-Changing scope/configuration, namespace, semantics, covered predicates, returned rows, complete eligible anchor support, or a producer input revision changes the record. An unrelated rule can change the aggregate snapshot ID by requesting additional coverage; it cannot change the earlier rule's rows or result meaning. Restamp retained findings with current composed provenance during assembly.
+Changing scope/configuration, namespace, implementation or contract, requested relation names, or a producer input revision changes the record. An unrelated rule can change the aggregate snapshot ID by requesting additional coverage; it cannot change the earlier rule's rows or result meaning. Hashing the ID costs time proportional to the configuration and input revision, not to the number of facts. Restamp retained findings with current composed provenance during assembly.
 
-The snapshot ID does not identify final diagnostics. Rule artifacts, generated programs, explicit environment/setup, execution options, and the pure-runtime contract determine rule execution in addition to the facts. The rule's complete per-assertion suppression declaration is also an input to raw finding construction and plan validity; saved entries and invocation recording overrides are final policy inputs, not extraction inputs. Severity and saved suppression policy are applied afterward. Do not use a matching snapshot ID alone as permission to reuse findings.
+The snapshot ID does not identify final diagnostics. Rule artifacts, generated programs, explicit environment/setup, execution options, and the pure-runtime contract determine rule execution in addition to the facts. The rule's per-assertion `by` declaration is also an input to raw finding construction and plan validity; saved entries are final policy inputs, not extraction inputs. Severity and saved suppression policy are applied afterward. Do not use a matching snapshot ID alone as permission to reuse findings.
 
 No public per-relation revision hierarchy or historical outcome cache is required. The session can retain the one current analysis together with the authoritative values that established it.
 
@@ -481,7 +400,7 @@ Size, inode/device, modification time and change time can identify a possible ch
 
 The initial implementation retains the content/presence/membership contract. Metadata may trigger invalidation or help avoid unnecessary parsing after a content comparison; it cannot silently replace that comparison on an ordinary mutable filesystem. A future stronger version-token or filesystem-specific fast path requires an explicit validity argument, race handling and content fallback, and a specification decision. This is not a request to build such a subsystem now.
 
-Record validation file reads, bytes read, content hashes, metadata probes, directory/membership checks and validation elapsed time in the small real-work trace. Include final validation and retries rather than counting only cache hits. A completed-result read performs none of this work. A metadata-preserving content change must still be detected by the content path.
+Bundled compiler library files are covered by the implementation stamp and are not reread or rehashed. Record one validation line per check in the small real-work trace: files read, bytes read, retries and elapsed milliseconds, including final validation and retries. A completed-result read performs none of this work. A metadata-preserving content change must still be detected by the content path.
 
 ## 6. Workspace configuration and source scope
 
@@ -784,7 +703,7 @@ Removing the entire Date interface is an intentional new design decision. Do not
 
 Canonicalize complete typed report tuples before anchor resolution, declared reason-column validation, explanation generation and message calls. Reason values come from typed tuples, never messages or mutable callback state. Order predicates by qualified/local predicate identity and rows by complete typed canonical bytes. Stateful messages and the first report/message failure are therefore independent of store iteration and worker scheduling.
 
-Copy the reported typed tuples and assertion column names into detached immutable outcomes as required by section 12.2.1. Retain only this reported data and required immutable support, not the full evaluation store. Saved grouping and recording-mode resolution happen in the coordinator; a worker does not read saved allowances. A count-recording override does not suppress validation of a reason column declared by the rule.
+Copy the reported typed tuples and assertion column names into detached immutable outcomes as required by section 12.2. Retain only this reported data and required immutable support, not the full evaluation store. Saved grouping happens in the coordinator; a worker does not read saved allowances.
 
 A rule produces either its complete raw findings or one structured error with phase. Do not publish a prefix of findings from a rule whose later message failed. Phase names include `integrity`, `setup`, `program`, `program_parse`, `program_analysis`, `evaluation`, `premise`, `report`, and `message`; configuration/producer failures are analysis-level errors. Old wording is not a requirement.
 
@@ -814,7 +733,7 @@ This is an invocation/session execution setting, not a producer option and not a
 
 | State | Concurrency contract |
 |---|---|
-| Catalog, completed base index and canonical anchor index | Shared only after validation/construction, including both tracking forms and defaults; all reachable evaluation reads are safe concurrently. |
+| Catalog, completed base index and canonical anchor index | Shared only after validation/construction, including tracking keys; all reachable evaluation reads are safe concurrently. |
 | Compiled code and eligible Mangle plans | Shared only where genuinely immutable during execution. Any mutable dependency structure belongs to one run. |
 | Goja runtime, generated extra facts and per-run compiler scratch | Exclusively owned by that rule job after preparation hands it off. No module-local state is shared with another job or later execution. |
 | Derived facts, helper evaluation, counters, explanation state and provisional findings | Private to the rule job, including when multiple rules use the same helper definitions or identical generated programs. |
@@ -881,7 +800,7 @@ A valid no-change check MUST reuse extraction, fact indexes and unchanged compil
 
 If generation/execution is needed, create a fresh pure runtime and keep generation and messages in that execution together. An old runtime is never retained as a shortcut. If actual generated program text or supplied facts differ, their plan cannot be reused merely because the bundle was unchanged.
 
-Current severity and suppression settings are always assembled anew from complete raw outcomes. Reuse must retain current tracking support, typed reported values/column names and assertion policies, not occurrence-numbered matching results or prior write actions. A valid no-change check reuses the tracking support and subtree results; reading a completed result computes no tracking. Changing only a saved allowance or invocation recording override reassembles policy without recomputing valid extraction or evaluation. A previously disabled rule becoming enabled needs its own preparation and facts. A changed fact limit or explanation setting requires new raw rule execution; extraction and eligible compiled plans can still be reused. A changed lock approval is checked before reusing or executing the affected work. Changing only `RuleWorkers` does not invalidate otherwise reusable facts, compilation or completed raw outcomes; it controls the next execution that is actually required.
+Current severity and suppression settings are always assembled anew from complete raw outcomes. Reuse must retain current tracking support, typed reported values/column names and assertion policies, not occurrence-numbered matching results or prior write actions. A valid no-change check reuses the tracking support; reading a completed result computes no tracking. Changing only a saved allowance reassembles policy without recomputing valid extraction or evaluation. A previously disabled rule becoming enabled needs its own preparation and facts. A changed fact limit or explanation setting requires new raw rule execution; extraction and eligible compiled plans can still be reused. A changed lock approval is checked before reusing or executing the affected work. Changing only `RuleWorkers` does not invalidate otherwise reusable facts, compilation or completed raw outcomes; it controls the next execution that is actually required.
 
 ### 11.3 Changed inputs
 
@@ -913,112 +832,62 @@ The normal CLI, serve, embedding API and host adapters all use this session. The
 
 ## 12. Findings, suppression policy, current enforcement, and saved files
 
-Backward compatibility is absent. Current enforcement still matters: changing saved formats is not permission to approve findings silently, hide malformed inputs, or overwrite a concurrent edit. Newly recorded allowances must remain useful through the edits their chosen policy permits. This is a property of the new product, not compatibility with old IDs.
+Backward compatibility is absent. Current enforcement still matters: changing saved formats is not permission to approve findings silently, hide malformed inputs, or overwrite a concurrent edit.
 
-### 12.1 Analysis identity, matching policy and counted groups
+### 12.1 Groups and counts
 
-An **analysis entity ID** joins evidence in a captured result. A **tracking descriptor** defines a syntax or subject group across specified edits. A **description** explains an approval to a person. Do not use one string for all three purposes.
+An **analysis entity ID** joins evidence in a captured result. A **tracking key** (section 4.7) groups findings across ordinary edits. A **description** explains an approval to a person. Do not use one string for all three purposes.
 
-Keyed allowances use this complete canonical record:
+Every eligible finding belongs to exactly one group, identified by this canonical record:
 
 ```text
 [
-  'lintai-suppression-group-v2',
+  'lintai-suppression-group-v3',
   normalizedDiagnosticFile,
   ruleID,
   [assertionPredicateName, assertionArity],
   anchorProducerNamespace,
-  selectedAnchorForm,          # 'syntax' or 'subject', never 'default'
-  [descriptor.scheme, descriptor.data],
-  orderedDiscriminatorFields
+  [key.scheme, key.data] or null,
+  orderedReasonFields
 ]
 ```
 
-`orderedDiscriminatorFields` is `[[columnName, typedFactValue], ...]` in the declared/saved order, or `[]`. Types use section 5.1: names, strings, integers and floats remain distinct. The selected form and full scheme/data are part of equality even if two forms happen to contain the same data. A digest may index/display the record but is not another independently editable authority.
+`orderedReasonFields` is `[[columnName, typedFactValue], ...]` in the declared order, or `[]`. Types use section 5.1. A finding whose anchor has `tracking: null` uses a null key; all such findings for the same file/rule/assertion/namespace/reasons share one counted group. Because each finding has one fixed key, groups cannot overlap and no finding can match two saved groups.
 
-The record excludes position-derived entity IDs, source coordinates, snapshot/input revisions, source order, worker order, messages, explanations and descriptions. File/rule/assertion/namespace, descriptor contents and reason values are not shortened. There are no occurrence-number suffixes, previous-line maps or fallback schemes.
+The record excludes position-derived entity IDs, source coordinates, snapshot/input revisions, source and worker order, messages, explanations and descriptions. There are no occurrence-number suffixes or previous-line maps.
 
-Every distinct reported tuple counts as one finding after Datalog duplicate elimination. Do not merge distinct tuples because their messages are equal. Indistinguishable matching records share a count, not invented individual histories. For allowance `A > 0` and current count `C`:
+Every distinct reported tuple counts as one finding after Datalog duplicate elimination. For saved count `A > 0` and current count `C`:
 
 | Condition | Effect |
 |---|---|
-| `C = A` | Suppress the group. |
-| `0 <= C < A` | Suppress the remaining findings and report unused quantity `A - C` only within valid pruning coverage. |
-| `C > A`, or no allowance exists | Report all current findings in the group. Do not guess which occurrence is new. |
+| `C <= A` | Suppress the group. Report unused quantity `A - C` only within valid pruning coverage. |
+| `C > A`, or no saved entry | Report all current findings in the group. Do not guess which occurrence is new. |
 
-Subject groups are intentionally broader than syntax groups. Replacing one issue with another in the same subject/assertion/selected reasons while keeping the count unchanged can remain covered. Syntax groups also cannot distinguish replacement by structurally identical syntax at constant count. Count-only entries are broader still. The approval describes these groups; it does not prove that one original physical finding survived.
+Replacing one finding with another in the same group at constant count stays covered. The approval describes the group; it does not prove that one original physical finding survived.
 
-### 12.2 One declarative per-assertion policy
+### 12.2 One per-assertion reason policy
 
-Provide one SDK operation, not separate key, mode and anchor-selection APIs:
-
-```ts
-.suppression("violation", {
-  mode: "keyed",
-  anchor: "subject",
-  by: ["Reason"],
-})
-
-.suppression("incomplete_type", {
-  mode: "count",
-})
-```
-
-The metadata has this closed shape:
+The only SDK operation is:
 
 ```ts
-type SuppressionPolicy =
-  | {
-      mode?: "keyed";
-      anchor?: "default" | "syntax" | "subject";
-      by?: readonly string[];
-    }
-  | {
-      mode: "count";
-    };
+.suppression("violation", { by: ["ForbiddenSource"] })
 ```
 
-No declaration, or `{}`, means `{ mode: "keyed", anchor: "default", by: [] }`. `anchor: "default"` resolves separately for each finding using its producer's `defaultForm`; it is never written as the saved anchor form. Named TypeScript functions/declarations therefore use subject matching by default; imports and ordinary sites use syntax. An explicit form bypasses the default but must actually be supplied by the producer. A policy cannot replace producer data or manufacture tracking for an untrackable anchor.
+The metadata shape is `{ by?: readonly string[] }`. No declaration, or `{}`, means `by: []`. Each reported predicate has at most one declaration. Reject unknown fields, duplicate declarations, an unknown/unreported predicate, missing/ambiguous argument names, duplicate `by` columns, or selecting the first anchor column. Validate against the actual generated program as a `program_analysis` error. The assertion name/arity is always part of the group and cannot be omitted.
 
-`mode: "count"` declares that newly recorded allowances for that assertion should use file/rule/assertion counts. It accepts neither `anchor` nor `by`, even if their values would otherwise be defaults. Reject meaningless combinations rather than silently discarding them. There is no count-by-reason mode in this revision.
+`by` selects exact typed values from named columns of the reported tuple. For `violation(Anchor, ForbiddenSource)`, selecting `ForbiddenSource` separates `/clock` from `/network`. Do not hash all columns automatically, use a message as a key, or introduce a callback. Presentation text such as `type_display` is not a semantic identity; use stable classification columns.
 
-Each reported predicate has at most one policy declaration. Reject unknown fields, invalid enum values, duplicate declarations, an unknown/unreported predicate, missing/ambiguous argument names, duplicate `by` columns, or selecting the first anchor column. An empty `by` array is valid and means no reason partition. Validate against the actual generated program as a `program_analysis` error; duplicate rule metadata or malformed construction also fails explicitly. The assertion name/arity is always included and cannot be omitted by policy.
+After canonical report-row ordering, validate selected values directly from the typed tuple, before message conversion. A selected value must be a string, name, signed integer or finite float accepted by section 5.1; anything else is a `report` error, not stringified. This validation occurs whether or not a suppression file exists. The completed outcome retains reported column names once and each finding's detached immutable typed tuple, anchor support and policy, never the evaluation store.
 
-`by` selects exact typed values from named columns of the reported tuple. For `violation(Anchor, ForbiddenSource)`, selecting `ForbiddenSource` separates `/clock` from `/network`. Without that selection, the count covers both under the same anchor/assertion group. Do not hash all columns automatically, use a message as a key, or introduce a callback that can read ambient state. A rule selecting display text or position-derived IDs may make its keys fragile; the engine does not guess a role from arbitrary strings. Use stable policy reasons. In the action-return example, `Reason` is a classification; `Returned` from `type_display` is presentation, not a semantic type identity.
-
-The operation configures **new recording**, not a reinterpretation of existing saved entries. An existing syntax group stays syntax-based when a rule changes its default to subject. A count entry stays count-based when the default becomes keyed. Existing discriminator lists remain exactly as saved. Changing those approvals requires an explicit recording/edit operation and, when enabled, lock approval.
-
-Record the policy through the single rule catalog, include it in immutable rule metadata, compiled-plan validity and lock-covered rule artifacts. There are no `.suppressionKey` or `.suppressionMode` aliases. No fingerprint-expression language, extra VM or producer-specific code enters the engine.
-
-#### 12.2.1 Typed report data and policy validation
-
-After canonical report-row ordering, validate the rule's declared `by` values directly from the typed tuple, before message-value conversion. A selected value must be a string, name, signed integer or finite float accepted by section 5.1. A compound/time/unsupported selected value is a `report` error; do not stringify it. This validation occurs even without a suppression file or when a command overrides recording to count mode. Rule execution must not acquire different semantics because a saved file exists.
-
-The completed rule outcome retains its reported predicates' column names once, and each finding's detached immutable typed tuple (or equivalent owned column values), anchor support and declared policy. These are already reported data, not the derived store or proof graph. This lets the coordinator apply the exact discriminator list in a saved entry even if the current recording default changed. Never retain a live runtime or whole evaluation store merely to obtain those values later.
-
-A saved discriminator referring to a currently active assertion must resolve to distinct non-anchor columns. A removed/ambiguous name, selection of the anchor column, or a currently unsupported selected value produces `suppression_policy_mismatch`. Malformed saved typed values are instead rejected by section 12.3's schema validation; they do not qualify for the recovery exception. A matching error identifies its exact outer entry `(file, rule, assertion.name, assertion.arity)` and affected group(s). An ordinary check fails and does not write; it never ignores the discriminator or replaces it with an empty list. Only an explicit write that discards the affected entry under section 12.4.1 may supersede that entry's matching error. Entries for disabled/unvisited rules or assertions outside this completed check are not treated as proved unused. Rule outcomes stay available for diagnosis or a permitted replacement when final policy is invalid; invalid saved policy does not retroactively invalidate otherwise successful raw evaluation.
-
-#### 12.2.2 Recording precedence
-
-Resolve the recording mode for each selected assertion in this order:
-
-1. Explicit invocation `--suppression-mode keyed|count` or request `suppressionMode` override.
-2. That assertion's declared mode.
-3. The keyed default.
-
-The invocation override is optional; parser defaults must not mask assertion defaults. It affects recording only, not ordinary saved matching, producer demand or raw evaluation. Unknown values, or a mode override without a recording action, are usage errors. Repeated scalar occurrences use the last value. There is no new TOML key.
-
-When the resolved mode is keyed and the assertion declares a keyed policy, use its `anchor` and `by`. When an explicit keyed override applies to a declared count policy, use `anchor: "default"` and `by: []`; count policies cannot contain hidden keyed settings. A count override deliberately bypasses keyed grouping for that recording, but does not disable validation of the rule's declared reason columns.
-
-`--suppress-all` and repeated `--suppress-rule ID` can prepare one atomic update containing keyed entries for some assertions and count entries for others. The preview/output identifies each selected form, reasons, and every broad count entry. No finding lacking a selected descriptor is silently converted to count mode. A rule reporting untrackable types/signatures can declare count mode without forcing unrelated rules to abandon their keyed approvals.
+Record the policy through the single rule catalog, include it in immutable rule metadata, compiled-plan validity and lock-covered rule artifacts. There are no alias APIs.
 
 ### 12.3 Saved format and atomic recording
 
-Use only `lintai.suppressions/3`. The form chosen at recording is stored explicitly; no saved `default` form exists:
+Use only `lintai.suppressions/4`:
 
 ```json
 {
-  "format": "lintai.suppressions/3",
+  "format": "lintai.suppressions/4",
   "entries": [
     {
       "file": "src/db/users.ts",
@@ -1026,95 +895,52 @@ Use only `lintai.suppressions/3`. The form chosen at recording is stored explici
       "assertion": {"name": "violation", "arity": 3},
       "groups": [
         {
-          "match": {
-            "namespace": "ts",
-            "anchor": {
-              "form": "subject",
-              "scheme": "lintai.typescript.subject/1",
-              "data": {
-                "category": "site",
-                "kind": "ImportDeclaration",
-                "scope": [],
-                "subject": ["module_reference", "static", "knex"]
-              }
-            },
-            "discriminator": [["Target", ["s", "database"]]]
+          "namespace": "ts",
+          "key": {
+            "scheme": "lintai.typescript.subject/1",
+            "data": {
+              "category": "site",
+              "kind": "ImportDeclaration",
+              "scope": [],
+              "subject": ["module_reference", "static", "knex"]
+            }
           },
-          "description": "subject import from knex; Target=database",
+          "reasons": [["Target", ["s", "database"]]],
+          "description": "import from knex; Target=database",
           "count": 2
+        },
+        {
+          "namespace": "ts",
+          "key": null,
+          "reasons": [],
+          "description": "untracked anchors",
+          "count": 1
         }
       ]
-    },
-    {
-      "file": "src/api.ts",
-      "rule": "architecture.surface",
-      "assertion": {"name": "incomplete_type", "arity": 2},
-      "count": 1
     }
   ]
 }
 ```
 
-The outer tuple is `(file, rule, assertion.name, assertion.arity)`. Each entry has exactly one of nonempty `groups` or positive safe-integer `count`. Assertion names are nonempty valid reported predicate names and arities are positive safe integers. A group contains one `match`, nonempty readable `description`, and positive safe-integer `count`. `match` contains a valid namespace, `anchor.form` equal to `syntax` or `subject`, a nonempty scheme, valid immutable `CanonicalData`, and an ordered list of unique nonempty discriminator-column names with valid typed values. No saved `default` form, anchor-ID field or duplicate discriminator name is accepted. Check column roles against the current assertion when applicable under 12.2.1. Reject unsupported formats, unknown fields, malformed types/descriptors, duplicate outer entries, duplicate canonical groups and invalid paths. Sort entries/groups canonically. Remove zero counts and empty entries rather than serializing them. There is one current reader, not old-format compatibility.
+The outer tuple is `(file, rule, assertion.name, assertion.arity)` with a nonempty `groups` list. A group has a valid namespace, a key that is null or `{scheme, data}` with nonempty scheme and valid `CanonicalData`, an ordered list of unique nonempty reason names with valid typed values, a nonempty `description`, and a positive safe-integer `count`. Reject unsupported formats, unknown fields, malformed values, duplicate outer entries, duplicate canonical groups and invalid paths. Sort canonically and remove zero counts and empty entries. There is one current reader.
 
-The group description is review text generated from the chosen form, producer description and selected reasons. Escape control characters and show complete matching data separately where a preview is shortened. If one group has several valid descriptions, select their canonical minimum, independent of source or worker order. Description-only edits change no authority. Do not silently rewrite a saved description during an ordinary check.
+A saved reason column that no longer resolves to a distinct non-anchor column of the active assertion, or whose value is unsupported, is a plain `suppression_policy_mismatch` error identifying the entry. Ordinary checks fail and do not write. Re-recording the entry replaces it (below).
 
-A count-only entry approves all eligible findings for that exact file/rule/assertion, across namespaces, anchor forms and reasons. This deliberate breadth is shown in the recording preview. It uses the same fail-closed comparison as keyed groups. An outer entry cannot combine keyed groups with a count allowance.
+Recording prepares the whole proposed update from successful current **raw eligible findings**, before saved allowances are applied. For each selected outer entry with current findings, replace the entire entry with groups computed from those findings and the rule's current `by` policy. Re-recording a rule replaces all of that rule's entries for the selected files; any old error in a replaced entry is discarded with it. Entries without current findings are preserved; pruning is separate. Validate the complete proposed file before writing; an error in any preserved entry blocks the update and nothing is written.
 
-In keyed recording, resolve each finding's explicit or default form and obtain that exact descriptor. If it is unavailable, return `suppression_tracking_unavailable`, identify the rule/assertion/anchor/form, and write nothing. There is no fallback to another form, source position, function-name guess, occurrence index or count allowance. Named-subject data under section 4.7 is an explicit supported descriptor, not a fallback. Count recording requires no tracking because its broader mode has been explicitly chosen in rule metadata or the invocation.
+A missing default suppression file means no allowances. A supplied unreadable/invalid file is an error. An explicitly selected missing file is an error unless the operation is creating allowances.
 
-Prepare the entire proposed update first from successful current **raw eligible findings**, before saved allowances are applied; do not use only the findings left visible by the old policy. Replace selected outer entries that have current findings with their newly resolved groups or counts, preserve untouched entries, and show changes of mode/form/reasons. Entries with no current finding are not deleted by recording; pruning is a separate covered operation. Section 12.4.1 permits replacement of selected entries with invalid saved matching, but grants no exception to validation of their replacements or untouched entries. Validate the whole proposed file and matching against current findings before writing. No partial write is made when one assertion fails. Do not recreate previous approvals or automatically regenerate the lock.
+### 12.4 Applying saved policy, pruning, and guarded writes
 
-A missing default suppression file means no allowances. A supplied unreadable/invalid file is an error. An explicitly selected missing file is an error unless the operation is creating allowances. The completed analysis may report an untrackable anchor normally even when keyed recording cannot be performed.
+Only error-severity architecture findings are suppression candidates. Rule/producer execution errors are never suppressible. Workers produce completed immutable outcomes; the coordinator alone reads saved policy, groups findings, applies current severity/allowances and performs writes.
 
-### 12.4 Applying saved policies, pruning, and guarded writes
+For an ordinary check, compute each finding's group record using the saved entry's reason list for that outer tuple (or the current policy where no entry exists) and look it up directly. Apply section 12.1's count rule. Changing a rule's `by` policy does not reinterpret saved entries; it takes effect when the rule is re-recorded.
 
-Only error-severity architecture findings are suppression candidates. Rule/producer execution errors are never suppressible. Workers produce completed immutable outcomes; the coordinator alone reads saved policy, groups findings, applies current severity/allowances and performs any writes.
+Unused allowances are reported only for completed eligible rules/assertions and their primary-file coverage. A finding at a dependency location can match an allowance, but adds no pruning authority. Excluded, unvisited/deleted files, disabled/failed rules and incomplete inventories do not establish that an issue was fixed. A requested prune reduces unused counts or removes zero-finding groups only within that coverage; it never raises permission. Ordinary checks do not edit files.
 
-For an ordinary check, **the saved entry's matching policy is authoritative**:
+A selected rule failure blocks its requested write; record-all/prune-all is blocked by any rule error. Configuration, producer, cancellation, input-instability and saved-format errors block writes. A failed operation leaves the original file unchanged.
 
-- A count entry counts all eligible current findings for its exact outer tuple, regardless of the rule's current recording preference.
-- For a keyed group, select the saved `anchor.form` from each eligible finding's producer support, not the current default. Compare scheme/data and namespace exactly. Select the saved discriminator column names from that finding's immutable typed report tuple and compare the complete canonical record. A null/unavailable selected form cannot match it; do not substitute another available form.
-- A current finding with no matching approved group is reported. An approved group with no current members is unused only where this check has pruning authority. A matching group uses section 12.1's count rule.
-
-Saved keyed entries may contain several forms or discriminator lists, but a current finding must not consume more than one group. If it exactly matches multiple saved groups, return `suppression_match_ambiguous`, identifying the outer entry and every conflicting group. An ordinary check fails. A write is blocked unless it removes that entire old entry through the narrowly scoped replacement in section 12.4.1. Do not assign a finding greedily by file order, count, narrower-looking descriptor, or worker completion. This catches, for example, overlapping syntax and subject approvals manually combined into one entry. Validate a proposed recording against the same non-overlap rule before publication. Implement a small direct matcher; no permission lattice or identity-history service is needed.
-
-A changed recording declaration does not broaden/narrow saved approvals on its own. A saved discriminator that cannot be evaluated produces the policy error defined in 12.2.1; it cannot silently disappear. Explicitly replacing the whole selected entry under section 12.4.1 is a new recording decision, not reinterpretation of that old discriminator. Changing messages or previews never changes matching. Direct lookup and grouping can be indexed by canonical records, but the full structured policy determines correctness.
-
-Unused allowances are reported only for completed eligible rules/assertions and their primary file coverage. A finding at a supported dependency location can match an allowance, but its location adds no pruning authority. Newly excluded, unvisited/deleted files, disabled/failed rules and incomplete inventories do not establish that an old issue was fixed. Leave those entries for explicit action. A requested prune reduces unused counts or removes zero groups; it never raises permission. Ordinary checks do not edit files.
-
-Indistinguishable occurrences use group counts. Two allowed occurrences becoming one leaves one unused quantity; three under an allowance of two reports all three. This applies to both identical syntax and same-subject groups. Replacing one indistinguishable failure without increasing the count stays within that approval. Do not present it as detection of historical identity.
-
-A selected rule failure blocks its requested allowance write; record-all/prune-all is blocked by any rule error. An unidentified rule-loading failure blocks operations whose inventory cannot be established. Configuration, producer, cancellation, input-instability, saved-format and keyed-recording errors retain their write-blocking behavior. `suppression_policy_mismatch` and `suppression_match_ambiguous` also block writes except for old entries actually discarded under section 12.4.1. Such an error in any preserved entry blocks the entire update. Integrity checks and concurrent-edit protection always remain in force. A failed operation leaves the original file unchanged. Mixed keyed/count recording does not weaken these rules.
-
-Serialize writes within the session. Verify that suppression contents still match the contents read for the prepared update, then atomically replace the file. A detected edit returns `suppression_changed` without writing. This protects against detected stale writes and torn output, not an arbitrary writer racing after comparison. Do not build a transactional filesystem service or claim compare-and-swap behavior that is absent.
-
-#### 12.4.1 Replacing an invalid selected entry
-
-A saved matching error MUST NOT prevent an explicit operation from replacing the very entry that caused it, when the replacement can be computed without interpreting that invalid matching policy. This is a narrow exception for `suppression_policy_mismatch` and `suppression_match_ambiguous` on structurally valid entries in the current schema. It is not a general ignore-errors mode or a new repair command.
-
-The replacement unit is the whole outer entry `(file, rule, assertion.name, assertion.arity)`, not an individual conflicting group and not every entry belonging to a selected rule. Determine the actual replacement/deletion set from the requested operation and successful raw outcomes before deciding which old matching errors can be superseded. Merely naming a rule, selecting a file, or invoking record-all/prune-all does not place every existing entry in that set.
-
-| Operation | Entry that can be discarded without interpreting its old matching policy |
-|---|---|
-| Record selected findings, including `--suppress-rule ID` or `--suppress-all` | A selected outer entry with current raw eligible findings from its successfully completed rule/assertion. Rebuild the entire entry from those findings and the current recording policy. All old groups in that entry are discarded together. |
-| Prune | A selected outer entry within the completed eligible rule/assertion's primary-file pruning coverage, with **zero raw eligible findings for that exact outer tuple**. Delete the whole entry: no interpretation of its invalid discriminator or overlapping groups is needed to establish zero occurrences. |
-| Record an entry with no current findings | Preserve it, as section 12.3 requires. Recording is not deletion; any detected saved matching error there still blocks the update. A separate covered prune can remove it when its zero-finding condition is established. |
-| Prune an invalid entry with current findings, or an entry without valid pruning coverage | No recovery exception. Ordinary pruning cannot guess which overlapping group to keep or how many findings belong to an unevaluable discriminator. Re-record a selected entry with current findings instead. |
-
-Valid entries still use the ordinary recording and pruning behavior. The zero-finding condition above is the only exceptional invalid-entry prune in this revision; do not implement a general solver for ambiguous allowances. Dependency-location findings can be explicitly recorded under the existing rules, but an empty dependency location does not acquire primary-file pruning authority.
-
-Implement the update as one coordinator-owned operation:
-
-1. **Validate the inputs and obtain raw outcomes.** The supplied file must parse and satisfy the current saved-file schema, and its outer entries must be uniquely identifiable. Rule integrity, current policy preparation, required producer collection and relevant rule execution must succeed under the existing rules. Do not turn malformed JSON, duplicate entries, unsupported formats, a failed rule, or unavailable tracking required by the new recording into repairable old-policy errors.
-2. **Build the concrete proposed replacements/deletions.** Use current raw eligible findings, current recording choices and explicit coverage. Do not consult old suppressed/unsuppressed status to decide which findings to record. An invalid old entry supplies neither counts nor matching data to its replacement. Preserve every entry outside this set, including its counts, forms, reasons and description; canonical serialization may change ordering/whitespace, not its values.
-3. **Scope the exception exactly.** Only the two named matching errors whose affected old outer entries are all in that concrete set may be superseded. An error in a preserved entry, an error not localizable to that set, or an operation-specific failure constructing a replacement blocks the whole write. Continue the validation an ordinary check would perform on preserved active entries; do not hide an unrelated error by validating only the selected rule. Disabled/unvisited assertions retain their existing treatment, not invented successful coverage.
-4. **Validate the complete candidate.** Run schema, active saved-policy, tracking/typed-value and non-overlap checks on the full proposed file against the same current raw outcomes. No exception applies to errors in the candidate. A replacement that is itself ambiguous or refers to an invalid reason still fails. The exception discards old policy; it never treats that policy as valid or applies it temporarily.
-5. **Approve and commit normally.** Apply section 12.5's lock checks to the proposed policy, retain all other integrity prerequisites, recheck the input suppression contents, and commit one atomic replacement. Cancellation, input instability, a failed approval or a concurrent file edit writes nothing. No automatic lock regeneration or new approval is implied.
-
-Show the replaced/deleted outer entries and the old matching errors removed by the update in the recording/pruning result. After a successful commit, final policy status is computed from the validated candidate, not from the superseded old matching errors. Do not return a stale mismatch/ambiguity failure for a successfully repaired file; remaining findings, unused allowances and unrelated errors still determine the normal result. If validation or commit fails, retain the original file and report the unresolved failure.
-
-For example, a valid rule changes its reported column and keyed recording policy from `Reason` to `Why`. An ordinary check of an old `Reason` entry fails with `suppression_policy_mismatch`. If `--suppress-rule` selects that rule and current findings exist for the entry, recording builds a complete `Why` entry from the new raw tuples and can replace the old one. An invalid entry in another file/assertion that the operation preserves still blocks the write, even if it belongs to the same rule. An enforced lock can still reject either unapproved rule code or the new allowance; recovery bypasses neither.
+Serialize writes within the session. Verify that suppression contents still match the contents read for the prepared update, then atomically replace the file. A detected edit returns `suppression_changed` without writing. Do not build a transactional filesystem service.
 
 ### 12.5 Rules-lock approval
 
@@ -1122,7 +948,7 @@ Use only this current shape, with no older readers:
 
 ```json
 {
-  "format": "lintai.rules-lock/3",
+  "format": "lintai.rules-lock/4",
   "rules": [
     {"path": "lintai-rules/example.ts", "id": "architecture.example",
      "version": 1, "artifact_hash": "sha256:..."}
@@ -1131,23 +957,19 @@ Use only this current shape, with no older readers:
 }
 ```
 
-`artifact_hash` covers actual bundled rule inputs, imported SDK code and relevant resolution/tool identity, including the complete per-assertion suppression policy. `approved_suppressions` uses section 12.3's exact current entry schema. Descriptions remain visible but do not affect matching or strength.
+`artifact_hash` covers actual bundled rule inputs, imported SDK code and relevant resolution/tool identity, including the per-assertion `by` policy. `approved_suppressions` uses section 12.3's entry schema. Descriptions do not affect matching or approval.
 
-With lock enforcement, changed/new/missing rule artifacts fail integrity before affected setup/evaluation. Increased counts, new canonical keyed matches, changed outer tuples, or a conversion between keyed and count forms require approval. A saved syntax-to-subject change, selected-form change or changed discriminator is a different canonical match even where its preview looks similar. The producer's current default is not used to reinterpret an approved group.
+With lock enforcement, changed/new/missing rule artifacts fail integrity before affected setup/evaluation. Every saved group must appear in the approved set with no greater count; a new group record or increased count requires approval. Lower counts and deleted groups do not increase authority. A proposed write under an enforced lock passes this check before replacement; an unapproved proposal produces an integrity error and writes nothing. To grant approval, record without enforcing the prior lock and then explicitly regenerate it. Checking, recording and pruning never silently regenerate the lock.
 
-For keyed entries, every current canonical match must appear in the approved set with no greater count. For count entries, the exact outer tuple must be approved with no smaller allowance. Both directions of keyed/count conversion require approval; do not infer an ordering between their scopes and fail-closed behavior. Lower counts and deleted entries within the same form do not increase authority. Descriptions alone change no authority. Exact approval comparison does not excuse ambiguous matches: section 12.4 still applies.
-
-A proposed write under an enforced lock passes these checks before replacement, including a write that replaces invalid entries under section 12.4.1. Superseding an old matching error grants no lock approval and bypasses no rule-artifact integrity check. An unapproved proposal produces an integrity error and writes nothing. To grant new approval, explicitly record without enforcing the prior lock and then explicitly regenerate the lock. Checking, recording and pruning do not silently regenerate it. A prior lock may continue to approve a larger allowance after a prune until deliberately regenerated.
-
-Arbitrary setup-read data is not approved by a code lock. Lintai's executable and configuration remain reviewed project inputs, not a security boundary against their author. Replace experimental files directly. There is no migration of old entity/descriptor formats, compatibility alias, scheme fallback or old approval importer.
+Arbitrary setup-read data is not approved by a code lock. There is no migration of old formats, alias or approval importer.
 
 ### 12.6 Findings, diagnostics and adapter surface
 
-The result carries `SnapshotID`, ordered per-rule outcomes, presented diagnostics, primary coverage and watch hints. A raw finding carries rule ID, assertion name/arity, current anchor/location, message, detached typed reported values and an immutable reference to eligible anchor support. The rule outcome supplies column names and the validated suppression policy once per assertion. Explanation remains optional. These fields must not keep a whole derived store/runtime alive.
+The result carries `SnapshotID`, ordered per-rule outcomes, presented diagnostics, primary coverage and watch hints. A raw finding carries rule ID, assertion name/arity, current anchor/location, message, detached typed reported values and an immutable reference to its anchor support. These fields must not keep a derived store/runtime alive.
 
-The coordinator derives groups under the relevant recording or saved policy. It can expose a group digest, selected form, description, reasons and counts for inspection. The digest indexes the structured group; it is not a new entity identity or separately editable authority. Adapters may present the result but cannot invent grouping, hide unlocated errors or maintain their own matcher.
+The coordinator derives groups. It may expose a group digest, key, description, reasons and counts for inspection; the digest is not separately editable authority. Adapters may present the result but cannot invent grouping or maintain their own matcher.
 
-The check command exits `0` when no unsuppressed error-severity finding or failure remains (warnings alone still exit `0`); `1` for policy findings, including unused allowances under current policy; `2` for invalid arguments/configuration/saved formats, unavailable keyed recording, unresolved saved-policy mismatch or ambiguous suppression matching; and `3` for integrity/setup/rule/producer/cancellation/input-instability failure. Execution failure takes precedence over policy findings. A successfully committed recovery under section 12.4.1 uses the candidate's final status; superseded old matching errors are reported as repaired, not retained as exit-code failures. Recording errors do not retroactively turn a successful rule outcome into an evaluator error. Old formatting is not a compatibility target.
+The check command exits `0` when no unsuppressed error-severity finding or failure remains (warnings alone still exit `0`); `1` for policy findings, including unused allowances; `2` for invalid arguments/configuration/saved formats or `suppression_policy_mismatch`; and `3` for integrity/setup/rule/producer/cancellation/input-instability failure. Execution failure takes precedence over policy findings.
 
 ## 13. Implementation work packages
 
@@ -1163,7 +985,7 @@ Read the actual branch head and report changes from the reviewed commit. Invento
 
 Implement the contract in sections 3–5: static descriptions, namespaced structured Mangle binding, one metadata registry, exact relation coverage, owned location/description/tracking validation, immutable batches and per-rule views. Move TypeScript settings to construction. Adapt the existing external-backend tests to the production composition path using small data-returning fakes.
 
-**Exit:** fake alone, TypeScript plus fake, and two fake namespaces with colliding local names work; missing coverage and invalid ownership fail. `lintai.glob` works without TypeScript. Test two TypeScript instances through the Go API to expose global state. Include fake anchors with both forms, one available form, an unavailable preferred form, explicit null tracking, and conflicting complete support for the same ID. No production second producer or plugin loader.
+**Exit:** fake alone, TypeScript plus fake, and two fake namespaces with colliding local names work; missing coverage and invalid ownership fail. `lintai.glob` works without TypeScript. Test two TypeScript instances through the Go API to expose global state. Include fake anchors with a key, explicit null tracking, and conflicting complete support for the same ID. No production second producer or plugin loader.
 
 ### R2 — Delete the copied model
 
@@ -1173,21 +995,21 @@ Remove `internal/analysis` and the mechanical converters. Retain actual normaliz
 
 ### R3 — Scope and captured inputs
 
-Implement `lintai.toml`, exact overrides/errors, one production selector and scope explanation. Establish compiler contexts and primary/dependency roles. Capture actual read/probe/membership evidence, validate before publication, and implement result identity. Retain content-based validity rather than a metadata-equality shortcut, deduplicate reads within validation phases, and record actual validation I/O. No `.gitignore` matcher or hidden filtering of compiler reads.
+Implement `lintai.toml`, exact overrides/errors, one production selector and scope explanation. Establish compiler contexts and primary/dependency roles. Capture actual read/probe/membership evidence, validate before publication, and implement result identity. Retain content-based validity rather than a metadata-equality shortcut, deduplicate reads within validation phases, and record the one-line validation trace from section 5.3.1. No `.gitignore` matcher or hidden filtering of compiler reads.
 
-**Exit:** configuration cases, excluded globals, exact sources, source-membership changes, same-files/different-scope identity, and controlled mid-analysis-change cases pass. Changing tracking data alone invalidates the appropriate snapshot. Metadata-preserving edits are detected, and completed-result reads perform no validation I/O.
+**Exit:** configuration cases, excluded globals, exact sources, source-membership changes, same-files/different-scope identity, and controlled mid-analysis-change cases pass. Metadata-preserving edits are detected, and completed-result reads perform no validation I/O. **Early warm-check observation:** on the lintai repository itself, record wall time and validation bytes for a cold check, a no-change check and a one-file-edit check. If the no-change check is not clearly cheaper than cold (roughly under 20% of cold time), raise an owner question before R4 builds on this design. This is one recorded observation, not a performance gate.
 
 ### R4 — Rebuild TypeScript semantic ownership
 
-Implement identity-first entities and one site-owner relation; explicit collectors; separated metadata/type/source uncertainty; grouped signatures; direct callback evidence; deterministic whole-observation reconciliation; explicit declaration/type domains; and structural type visits owned by checker observations instead of each root. Implement section 4.7's native syntax-field projection, scope/name descriptors, supported syntax/subject forms and category defaults from captured source; never derive them from enabled relations. Do not reconstruct omitted punctuation or introduce a second AST. Use Appendix A's unchanged schema, without old aliases or arities.
+Implement identity-first entities and one site-owner relation; explicit collectors; separated metadata/type/source uncertainty; grouped signatures; direct callback evidence; deterministic whole-observation reconciliation; explicit declaration/type domains; and structural type visits owned by checker observations instead of each root. Implement section 4.7's scope/name keys and null cases from captured source; never derive them from enabled relations. Use Appendix A's unchanged schema, without old aliases or arities.
 
-**Exit:** source sites retain identity across classification changes; invalid signature combinations disappear; callback arguments are not invocations; metadata requests do not force unrelated type expansion; repeated roots avoid repeated structural work; removing conflict support restores the surviving result. Named subject tracking survives body edits; explicit syntax matching still detects retained syntax changes. Import subject matching is optional and deliberately broader. Static/instance/private/accessor distinctions remain. Unavailable forms are explicit and never substituted. Signatures/types without a supported scheme return null. No-change checks reuse descriptors, and tracking construction costs are recorded. This package cannot be satisfied by renaming the broad extractor.
+**Exit:** source sites retain identity across classification changes; invalid signature combinations disappear; callback arguments are not invocations; metadata requests do not force unrelated type expansion; repeated roots avoid repeated structural work; removing conflict support restores the surviving result. Named keys survive body edits; import keys survive binding changes. Static/instance/private/accessor distinctions remain. Anonymous sites, signatures and types return null. No-change checks reuse keys, and key construction counts are recorded. This package cannot be satisfied by renaming the broad extractor.
 
 ### R5 — Rule catalog, private execution and required parallel evaluation
 
 Consolidate discovery, artifacts, integrity and metadata loading. Retain code/eligible compiled plans; use fresh per-execution state. Implement dependency closure, pure-runtime restrictions, deterministic report order, the single declarative per-assertion suppression policy, detached typed report outcomes and structured failures. Implement the single rule-run function and the mandatory bounded production worker loop from section 10.5. Design exclusive runtime/compiler/derived-state ownership before enabling concurrent dispatch. Implement and validate `RuleWorkers`, its automatic default, the one-worker path, actual overlapping multi-worker execution, isolated errors and joined cancellation. Release completed-job runtime/derived state promptly and account for queued preparation and explanation memory under section 10.5.5. This work is required regardless of performance measurements.
 
-**Exit:** listing avoids setup/extraction; unchanged artifacts are not rebuilt; lock errors precede affected execution; generated-program changes invalidate plans; stateful messages see deterministic rows. Real evaluator jobs demonstrably overlap with an explicit worker bound greater than one and never exceed that bound. One-worker and multi-worker completed results agree, including errors, limits, explanations and reporting. An ordinary failed job does not cancel independent jobs; external cancellation stops queued dispatch, joins active work and publishes/writes nothing. Mandatory race tests exercise shared facts/helpers and actual rule runtimes. No worker mutates tracking support, evaluates saved matching policy or numbers suppression occurrences. Report tuples/column names are detached before releasing evaluation state. Completed outcomes do not retain derived stores. R5 is not complete with only a concurrency-ready interface or sequential implementation.
+**Exit:** listing avoids setup/extraction; unchanged artifacts are not rebuilt; lock errors precede affected execution; generated-program changes invalidate plans; stateful messages see deterministic rows. Real evaluator jobs demonstrably overlap with an explicit worker bound greater than one and never exceed that bound. One-worker and multi-worker completed results agree, including errors, limits, explanations and reporting. An ordinary failed job does not cancel independent jobs; external cancellation stops queued dispatch, joins active work and publishes/writes nothing. Mandatory race tests exercise shared facts/helpers and actual rule runtimes. No worker mutates tracking support, evaluates saved policy or numbers suppression occurrences. Report tuples/column names are detached before releasing evaluation state. Completed outcomes do not retain derived stores. R5 is not complete with only a concurrency-ready interface or sequential implementation.
 
 ### R6 — Session and real callers
 
@@ -1197,13 +1019,13 @@ Implement `Open/Check/Close`, retained current state, conservative context repla
 
 ### R7 — Current reporting, saved formats and consumer rewrite
 
-Implement explicit per-rule coverage, structured groups/counts, selected syntax/subject forms, optional reasons and the unified `.suppression(...)` policy. Implement per-assertion recording with invocation overrides, atomic mixed keyed/count updates, saved-policy-authoritative matching, ambiguity rejection, readable descriptions and current saved-file/approval schemas. Implement section 12.4.1's exact replacement-set recovery using raw outcomes, whole-candidate validation and unchanged approval/write guards. Update in-repository rules, examples, SDK uses, CLI surfaces and host adapters directly. Replace old-format fixtures instead of converting them. Documentation describes only the new interface.
+Implement explicit per-rule coverage, counted groups keyed by section 12.1's record, optional `by` reasons, whole-entry re-recording, covered pruning, readable descriptions and current saved-file/approval schemas with atomic guarded writes. Update in-repository rules, examples, SDK uses, CLI surfaces and host adapters directly. Replace old-format fixtures instead of converting them. Documentation describes only the new interface.
 
-**Exit:** named-function subject allowances survive ordinary body edits; syntax-specific allowances behave more narrowly; import subject/syntax choices and stable reasons behave as declared. Mixed assertion policies record atomically. Existing saved forms/reasons are never reinterpreted by changed defaults; invalid or overlapping saved matching fails ordinary checks. Explicit re-recording can replace the affected selected entry, while preserved-entry errors, invalid candidates and failed approval/write guards block the entire update. Pruning never guesses ambiguous counts. Counted duplicates remain fail-closed; unavailable requested forms never silently fall back. Auxiliary locations do not grant prune authority; excluded sources are not considered fixed; concurrent saved-file edits and unknown formats fail; current interfaces agree. No rule/suppression migration command, old reader, compatibility alias or fallback remains.
+**Exit:** named-function allowances survive ordinary body edits; reasons separate groups as declared; null-key anchors count per assertion. A saved reason column that no longer resolves fails ordinary checks and re-recording replaces it; preserved-entry errors and failed approval/write guards block the entire update. Counted duplicates remain fail-closed. Auxiliary locations do not grant prune authority; excluded sources are not considered fixed; concurrent saved-file edits and unknown formats fail; current interfaces agree. No rule/suppression migration command, old reader, compatibility alias or fallback remains.
 
 ### R8 — Integrated architecture review
 
-First perform a read-only semantic trace of source → observations → public facts → rule → reporting for representative cases. Then perform a simplification review looking for duplicated models, repeated validation, competing scope/freshness authority, unnecessary hashes/caches, hidden type/map effects and temporary adapters. Check that parallel rule evaluation uses actual independent state and shared read-only facts, not a whole-evaluation lock or a separately maintained concurrent analyzer. Trace subject and syntax allowances through ordinary edits, changed defaults, mixed recording, invalid-entry replacement, saved matching, lock approval and pruning. Check both that selected invalid entries can be replaced and that the exception cannot hide preserved-entry or candidate errors. Reject occurrence-number identity, label-only matching, multiple overlapping policy APIs, punctuation reconstruction maintained as a second AST, needless descriptor rebuilding, or an undeclared metadata-validity shortcut.
+First perform a read-only semantic trace of source → observations → public facts → rule → reporting for representative cases. Then perform a simplification review looking for duplicated models, repeated validation, competing scope/freshness authority, unnecessary hashes/caches, hidden type/map effects and temporary adapters. Check that parallel rule evaluation uses actual independent state and shared read-only facts, not a whole-evaluation lock or a separately maintained concurrent analyzer. Trace keyed and null-key allowances through ordinary edits, re-recording, saved matching, lock approval and pruning. Reject occurrence-number identity, label-only matching, multiple policy APIs, needless key rebuilding, or an undeclared metadata-validity shortcut.
 
 For each retained abstraction, name the actual distinction it owns. Delete or combine those that only coordinate responsibilities that should have one owner. Implement accepted corrections and rerun the affected tests.
 
@@ -1226,7 +1048,7 @@ Use small adversarial fixtures and existing meaningful tests. These checks are a
 | V01 | Two producers with identical local names/keys compose under distinct namespaces; duplicate namespaces, foreign definitions and missing coverage fail. |
 | V02 | Qualified base/helpers work without user `Use`; unknown namespaces fail; a rule cannot define producer facts; generic `lintai.glob` works without TypeScript. |
 | V03 | Relation entry present-empty is successful; omitted-required is an error; a no-rule run claims no analyzed-file coverage. |
-| V04 | Request subsets and full collection give identical requested rows and complete eligible anchor support: both form descriptors, preferred form, explicit unavailability and descriptions; include same-ID enrichment, negation, enumeration and expectation-only dependencies. |
+| V04 | Request subsets and full collection give identical requested rows and complete eligible anchor support: tracking keys, explicit nulls and descriptions; include same-ID enrichment, negation, enumeration and expectation-only dependencies. |
 | V05 | Adding an unrelated rule does not change another rule's fact view, limit accounting, reporting support or pruning authority. Aggregate provenance may change. |
 | V06 | A source invocation has the same ID when compiler contexts resolve it differently. A callback has a separate argument-site identity and never consumes call-classification counters. |
 | V07 | Complete incompatible signatures cannot yield an invented mixed signature through one signature join. Partial slots, zero arity, optional/rest, omitted and unresolved evidence remain distinct. |
@@ -1254,34 +1076,24 @@ Use small adversarial fixtures and existing meaningful tests. These checks are a
 | V29 | One-worker and multi-worker runs with shared helpers, conflicting evidence, identical programs, stateful messages, limits and failures agree on raw typed rows, tracking support, resolved policies, group counts, errors, explanations, coverage, final decisions and snapshot ID. |
 | V30 | Cancellation with active and queued jobs stops dispatch after observation, joins/releases active work and produces no replacement or writes. Session close cannot leave a worker accessing disposed state. |
 | V31 | CLI, serve, embedding and host options reach the production worker bound. Omitted/zero, one, greater-than-one, invalid and no-job cases behave as specified. Changing only the bound preserves valid reuse. |
-| V32 | Unrelated import/comment insertion and same-scope source movement preserve matching data despite changed analysis IDs/locations. Named function/declaration defaults additionally survive ordinary body/initializer edits when subject/assertion/reasons/count stay the same. |
-| V33 | Syntax matching detects retained changes to import bindings/type-only form, callee arguments, function bodies and literal contents. Subject matching follows its narrower name/specifier fields instead; default sites remain syntax-based. Formatting differences intentionally omitted by the native projection preserve its digest. |
-| V34 | Two identical approved findings becoming one leave one unused allowance; adding a third reports the complete over-limit group. Inserting it first does not transfer an ordinal key. Constant-count replacement is explicitly within the counted group policy. |
-| V35 | Distinct assertions and selected reason values cannot consume one another's keyed allowance. Without selected reasons, the documented syntax/subject assertion count is the approval. Presentation type text is not misrepresented as a stable semantic type key. |
-| V36 | One source site has identical available forms/defaults through call and ambient relations. Relation demand and compiler-context order do not change support. Workers never build or mutate tracking. |
-| V37 | Structured scope/name data distinguishes private/public, static/instance and getter/setter subjects. Delimiters, long previews, nested expressions and duplicate anonymous scopes never introduce string-concatenation collisions or ordinal matching. |
-| V38 | Module/export/default and signature/type/null behavior follows section 4.7. A missing requested form refuses keyed recording atomically. An available nondefault form requires explicit selection; a declared or invocation count mode can record untrackable anchors without changing their identity. |
-| V39 | The single `.suppression(...)` API validates modes/forms/columns. Count policies reject `anchor`/`by`; keyed policies accept empty reasons; duplicate/unknown/anchor-column selections fail. Typed reasons distinguish names/strings and integer/float values; no callback or implicit message hashing exists. |
-| V40 | Saved entries retain their selected form and discriminator list when recording preferences change. Lock comparison requires approval for changed forms, matches or modes, and ignores descriptions. An invalid saved selector or multiple matching groups fails ordinary checks; only the explicit whole-entry replacement/deletion contract can supersede that old matching error. |
+| V32 | Unrelated import/comment insertion and same-scope source movement preserve keys despite changed analysis IDs/locations. Named function/declaration keys survive ordinary body/initializer edits; import keys survive binding/type-only changes while specifier and form stay fixed. |
+| V33 | Rename, static/instance change, private/public change, getter/setter change, changed specifier or new named enclosing scope changes the key. Structured scope/name data has no string-concatenation collisions or ordinal matching. |
+| V34 | Two identical approved findings becoming one leave one unused allowance; adding a third reports the complete over-limit group. Constant-count replacement stays within the group. |
+| V35 | Distinct assertions and selected `by` reason values cannot consume one another's allowance. Null-key anchors (anonymous sites, signatures, types) group by file/rule/assertion count. |
+| V36 | One source site has an identical key through call and ambient relations. Relation demand and compiler-context order do not change support. Workers never build or mutate tracking. |
+| V37 | `.suppression(...)` accepts only `by`; duplicate/unknown/anchor-column selections fail. Typed reasons distinguish names/strings and integer/float values; no callback or message hashing exists. |
+| V38 | A saved reason column that no longer resolves fails ordinary checks with `suppression_policy_mismatch`; re-recording the rule replaces its selected entries from raw findings. An error in a preserved entry blocks the whole write. Prune removes only zero-finding groups within primary coverage. |
+| V39 | Lock comparison requires approval for new groups or increased counts and ignores descriptions; unapproved writes leave the original bytes unchanged and no lock is regenerated. |
+| V40 | A no-change check reuses tracking support; completed-result reads perform no tracking work. A changed generation builds keys before workers, not per report. |
 | V41 | A completed rule releases runtime/derived/explanation work before unrelated slow jobs finish. Peak process memory and active jobs are observed; no global row pool changes per-rule errors. |
-| V42 | Validation counts include actual content reads/hashes, metadata probes, membership checks and retries. Equal or preserved stat metadata does not bypass the content check; result reads do not repeat validation. |
-| V43 | Named/binding function and declaration subject defaults survive logging, local-variable and unrelated body edits. Explicit syntax mode changes. Rename, static/instance change, private/public change or new named enclosing scope changes the subject. Truly anonymous anchors default to syntax. |
-| V44 | Literal import subject mode survives binding additions/reordering and type-only changes while the specifier/form stays fixed. Syntax mode remains narrower. A changed specifier reopens either applicable group; requesting a nonexistent callee-name subject fails explicitly. |
-| V45 | One `--suppress-all` operation mixes declared keyed and count assertions atomically. Invocation keyed/count overrides, undeclared defaults and override-on-count behavior follow precedence; no failed assertion causes a partial write. |
-| V46 | A saved syntax allowance stays syntax-based after a default changes to subject, and a count entry stays count-based after a keyed default. Saved discriminator columns remain authoritative. An explicit re-record shows and approves the new policy rather than mutating the prior one silently. |
-| V47 | Native AST projection distinguishes optional-field roles, array holes, optional chaining, type-only markers, operators, modifiers, literals/JSX and parse-sensitive line breaks. Formatting-only trailing comma edits are ignored; omitted punctuation is not reconstructed. |
-| V48 | A no-change check reuses tracking support; completed-result reads perform no tracking work. Trace distinct nodes hashed, subtree reuse, descriptor counts/time and meaningful storage. A changed generation computes needed support before workers, not per report. |
-| V49 | Rename a valid reported reason/policy column from `Reason` to `Why`: ordinary checking fails with `suppression_policy_mismatch`; recording the affected rule replaces only its actual selected entries from current raw findings. The repaired file checks normally, with untouched entries unchanged and no stale error exit. |
-| V50 | Overlapping saved syntax/subject groups fail with `suppression_match_ambiguous`; re-recording their entire selected outer entry can replace them. A matching error in any preserved entry, including a different entry of the same selected rule, blocks all writes. A still-invalid candidate also blocks the update. |
-| V51 | A covered successful assertion with zero raw eligible findings permits prune to remove its selected invalid entry. Recording alone preserves zero-finding entries; prune cannot repair an invalid entry with surviving findings or without coverage. No guess about overlaps/discriminator values is used. |
-| V52 | Recovery retains current-format parsing, required rule/producer success, tracking validation, enforced-lock approval, cancellation and concurrent-edit guards. Every rejected update leaves the original bytes unchanged. Unapproved replacements and unapproved changed rule artifacts still fail; no lock is regenerated. |
+| V42 | The validation trace records files read, bytes read, retries and elapsed time. Equal or preserved stat metadata does not bypass the content check; result reads do not repeat validation. R3's cold/no-change/one-edit observation is recorded. |
 
 
 Keep source-association, overload/member, configuration-context and linear-reachability regressions where they test real behavior. Update their assertions to the specified vocabulary directly. Do not regenerate all goldens to conceal errors and do not require corrected behavior to match an old defect.
 
 Run focused Go/package checks during work and the supported repository CI-equivalent checks at integration. Parallel-rule race tests are mandatory and must exercise actual shared-helper and rule-worker paths, not unrelated trivial functions. Record commands and real outcomes; do not claim execution from source inspection.
 
-Record a small before/after trace of bundle builds, Goja/Mangle compilation, program builds, type-structure visits, store construction and repeat checks. Add per-rule created facts, peak active jobs and peak process memory, including preparation and explanations. Record validation reads/bytes, content hashes, metadata probes, membership checks, retries and elapsed time separately from extraction. Include tracking descriptor builds, distinct native nodes fingerprinted, subtree-digest reuse, construction time and meaningful retained-storage measurements. A no-change result must not be counted as a new descriptor build. Identify methods and shared/process-wide measurements; do not infer byte bounds from fact counts or sum shared buffers as distinct allocations.
+Record a small before/after trace of bundle builds, Goja/Mangle compilation, program builds, type-structure visits, store construction and repeat checks. Add per-rule created facts, peak active jobs and peak process memory, including preparation and explanations. Record the one-line validation trace (files, bytes, retries, milliseconds) separately from extraction. Include tracking key build counts. A no-change result must not be counted as a new key build. Identify methods and shared/process-wide measurements; do not infer byte bounds from fact counts or sum shared buffers as distinct allocations.
 
 Demonstrate removal of known redundant operations. Timings and resource use are evidence, not frozen thresholds or an architecture-selection rule. No synthetic application, workload calibration or benchmark gate is introduced. Do not claim an unrun private workload became faster.
 
@@ -1291,7 +1103,7 @@ The tests below use the production rule-run function and worker dispatch. They m
 
 **Real overlap and bounds.** Use deterministic test synchronization inside the real evaluation path to hold one evaluator job while another enters evaluation. Verify at least two active evaluations with an explicit bound greater than one, and verify the active count never exceeds the effective bound with more queued rules than workers. A test hook at dispatch alone or a mocked evaluator is insufficient. Use a bounded test timeout to detect deadlock; do not infer overlap from a claimed speedup or a short sleep. This is an architectural test, not a performance benchmark.
 
-**Equivalent complete results.** Evaluate the same captured fact inputs and generated rule programs with one worker and with multiple workers under controlled variations in completion order. Include shared prelude relations, duplicate generated programs with independent runtimes, conflicting TypeScript evidence, multiple report rows and stateful message callbacks. Compare complete semantic outcomes, both tracking forms/defaults, detached typed tuples, resolved recording/saved policies, counted groups, explanations and final reporting decisions, not just finding counts. Include a mixed keyed/count recording and explicit syntax/subject choices. Execution timings and nonsemantic counters may differ.
+**Equivalent complete results.** Evaluate the same captured fact inputs and generated rule programs with one worker and with multiple workers under controlled variations in completion order. Include shared prelude relations, duplicate generated programs with independent runtimes, conflicting TypeScript evidence, multiple report rows and stateful message callbacks. Compare complete semantic outcomes, tracking keys, detached typed tuples, saved policy, counted groups, explanations and final reporting decisions, not just finding counts. Execution timings and nonsemantic counters may differ.
 
 **Failure isolation and accounting.** Run successful rules beside a rule that exceeds its created-fact limit and a rule whose message fails after earlier rows were processed. Verify that successful independent rules still finish, failed rules publish no partial findings or pruning authority, each limit/error is unchanged by other workers, and write eligibility follows section 12. Shared base facts, complete anchor support and compiled artifacts remain unchanged after both success and failure. Completed/failed workers release their runtime, derived store and temporary explanation state while an independently held slow rule is still running.
 
@@ -1299,29 +1111,19 @@ The tests below use the production rule-run function and worker dispatch. They m
 
 **Race and integration checks.** Run the applicable packages with Go's race detector using the repository's supported toolchain, with actual concurrent reads of the base index and shared-helper plans and independent Goja/message execution. Test reused immutable plans across checks as well as the first run. Verify CLI/serve/embedding option wiring and that host adapters forward the bound to this same path. Race freedom alone is not proof of correct rule semantics; it accompanies the outcome and ownership checks above.
 
-### 14.2 Required edit-policy, native-syntax and cost checks
+### 14.2 Required suppression checks
 
-Use the complete production path: captured source, producer support, real evaluated rows, saved allowances, lock approval, an edit, and another check. Do not prove matching with only a hash helper and handcrafted labels. Inspect reported/suppressed findings and unused counts, not just exit status.
+Use the production path: captured source, producer support, real evaluated rows, saved allowances, an edit and another check. Do not prove matching with only a hash helper and handcrafted labels. One fixture may cover several V-IDs; record which.
 
-**Named subjects and precise syntax.** Record an assertion on a named function using the default, add logging, rename a local variable and fix an unrelated statement. If the named subject/assertion/reasons/count remain, the group remains. Run the same edits with explicit syntax matching and require the retained syntax changes to reopen it. Rename/move the function to a different named scope, change member placement or private/public naming, and require the subject to change. Test a directly bound arrow, a genuinely anonymous callback, getters/setters and duplicate named declarations. Do not infer exact historical identity among grouped declarations.
+**Named and import keys.** Record an assertion on a named function, edit its body and confirm the group remains; rename it or change member placement and confirm it reopens. Record a literal import, reorder its bindings and confirm the group remains; change the specifier and confirm it reopens. An anonymous callback falls back to the per-assertion count.
 
-**Imports and site limits.** Compare default syntax with explicitly selected subject tracking for a literal import. Add/reorder bindings and change type-only form; only the subject approval can persist solely on specifier/form. Change the specifier and require a different subject. Change a call argument with the same callee and require a syntax change. Explicit subject tracking for an ordinary call is unavailable, not an improvised callee-name group. An expression reported through two relation families retains the same complete support.
+**Counts and reasons.** Approve two indistinguishable findings, remove one and observe one unused quantity; add a third and report all three. Change a reason from `/clock` to `/network` with `by: ["ForbiddenSource"]` and confirm the groups are separate.
 
-**Native projection.** Exercise `for (; ready; ) {}` versus `for (;; ready) {}`, omitted array elements, optional chaining, parenthesized expressions, operators, type-only syntax, modifiers, literal whitespace/escapes, templates/JSX, relevant directives and return/newline parsing. The projection keeps child roles and missing slots, but does not reconstruct commas/braces. A formatting-only trailing comma does not change it. Unknown required native structure yields unavailable syntax tracking rather than a silently weak digest.
+**Re-recording, lock and writes.** Rename a `by` column from `Reason` to `Why`: an ordinary check fails with `suppression_policy_mismatch`; `--suppress-rule` replaces the entry and a later check succeeds. An invalid preserved entry blocks the write. With an enforced lock, an unapproved new group fails and an approved one succeeds. A concurrent suppression-file edit returns `suppression_changed` without writing.
 
-**Counts and reasons.** Approve two indistinguishable findings, remove one and observe one unused quantity. Separately add a third before them and report the entire group of three. Replacing one indistinguishable occurrence at constant count remains within the stated policy. For an unchanged named anchor, change a dependency reason from `/clock` to `/network`: `.suppression("violation", { by: ["ForbiddenSource"] })` separates those approvals; the empty-reason default intentionally does not. Do not use `type_display` in an example and claim it is semantic type identity. Changing only wording never creates a key; assertions stay separate.
+**Producer neutrality and reuse.** A fake producer supplies a non-TypeScript key and a null case; no TypeScript interpretation appears in the core. Full/requested collection and warm/fresh checks agree on keys and descriptions. A no-change check reuses keys.
 
-**One policy and mixed recording.** Combine a named-function subject/default assertion, a syntax-sensitive import assertion, an import-subject assertion with stable reasons, and an untrackable type assertion declaring count mode. Record them through one production action and verify one atomic mixed update. Exercise mode overrides and malformed policy combinations. An explicit keyed override on the untrackable assertion refuses the entire update; it does not write the other entries first. A default selecting an unavailable form fails without substituting a nondefault available form.
-
-**Saved approval meaning.** After recording syntax, change only the declaration's recording preference to subject. Existing saved matching remains syntax. Likewise retain an existing count allowance when the rule now prefers keyed recording. Change `by` preferences and confirm saved discriminator names/values are not dropped. An ordinary check with a missing/unsupported saved selector fails explicitly. Deliberately create overlapping syntax/subject groups matching one finding and require `suppression_match_ambiguous`, not greedy assignment. Explicit re-recording shows the changed matching scope, replaces only its actual outer entries under section 12.4.1, validates the whole candidate and passes the full lock comparison before any write. A keyed/count or syntax/subject change is not a description-only update.
-
-**Targeted recovery.** Record keyed findings using `Reason`, then change the valid rule's report declaration and suppression policy to `Why`. Confirm an ordinary check fails with `suppression_policy_mismatch` while complete raw outcomes remain available. Run `--suppress-rule` for that rule: when integrity prerequisites allow it, the relevant entries are rebuilt from raw findings with `Why`, unrelated entries retain all their values, and a later check succeeds without a stale mismatch. Repeat with overlapping saved groups and verify complete-entry replacement, not greedy group selection. Test an additional invalid preserved entry in another rule and then in another file of the selected rule; either blocks the entire write.
-
-**Recovery limits and approval.** With no current findings for the erroneous outer entry, recording preserves it; only a separately requested prune with successful primary coverage may remove it without evaluating the invalid discriminator. Prune with surviving findings or absent coverage must fail or preserve the entry under the existing scope rules, never invent a match count. Exercise malformed/duplicate saved entries, unavailable requested tracking, failed rule/producer work, a replacement that still matches ambiguously, cancellation and a concurrent suppression-file change. Each applicable failure leaves the original bytes untouched. With an enforced lock, first ensure renamed rule code is explicitly approved so the allowance-replacement check is actually reached; an unapproved new `Why` allowance still fails, and an approved replacement succeeds. Separately verify that unapproved changed code fails before execution. Repeat the successful and refused recording cases with one and several rule workers; recovery uses the same coordinator and has the same outcome.
-
-**Producer neutrality and support reuse.** Use a fake producer supplying only a logical subject descriptor, another with syntax only, and an explicit null case. No TypeScript-specific interpretation appears in the core. Full/requested collection and warm/fresh checks agree on every form, availability, default and description. Change only one form/default and require snapshot/support refresh, while existing saved explicit forms are not reinterpreted. Valid no-change checks reuse tracking and subtree work; result reads build nothing. Record the tracking cost of a new generation even if no rule ultimately reports a finding.
-
-**Input and memory costs.** Keep controlled metadata-preserving edits, missing-input creation and mid-collection changes on the real content-validity path. Record all validation work, including retries. Observe completed/blocked jobs to establish prompt release of runtime/derived state without a fixed RSS threshold. Retaining the detached report tuples required for saved matching must not retain the store that produced them. Tracking/storage observations are evidence, not a new benchmark gate.
+**Input and memory costs.** Keep controlled metadata-preserving edits, missing-input creation and mid-collection changes on the real content-validity path. Observe completed/blocked jobs to establish prompt release of runtime/derived state without a fixed RSS threshold. Retaining detached report tuples must not retain the store that produced them.
 
 ## 15. Completion and explicit limits
 
@@ -1341,12 +1143,11 @@ Do not mark the work complete while any of these remains:
 - Different scopes sharing identity solely because their compiler read sets happen to match.
 - Missing coverage interpreted as empty or reporting locations interpreted as checked files.
 - Position-based entity IDs, ordinal suffixes, truncated previews or message text used as supposedly edit-stable suppression identity.
-- Allowances that cross assertion/reason boundaries contrary to their declared grouping policy, or silently use a broad fallback when tracking is unavailable.
-- Tracking forms/defaults that change with relation demand or are populated by workers through shared mutation.
-- Named-function/declaration default approvals tied to full body contents instead of their specified named subject.
-- Rule recording defaults silently broadening saved matching, unavailable-form fallback, or overlapping saved approvals assigned greedily.
-- A selected entry's old matching error preventing an otherwise valid full replacement, or a recovery exception hiding a preserved-entry error, an invalid candidate, failed lock approval or missing prune coverage.
-- Multiple suppression-policy APIs, a parallel reconstructed syntax tree, or repeated tracking builds on a valid unchanged check.
+- Allowances that cross assertion/reason boundaries contrary to their declared grouping policy.
+- Tracking keys that change with relation demand or are populated by workers through shared mutation.
+- Named-function/declaration approvals tied to full body contents instead of their specified named key.
+- Rule policy changes silently reinterpreting saved entries.
+- Rule-selectable tracking forms, syntax fingerprints, multiple suppression-policy APIs, or repeated tracking builds on a valid unchanged check.
 - Unvalidated metadata equality treated as a universal unchanged-content proof.
 - Completed outcomes retaining entire derived stores/runtimes solely because another worker is still active.
 - A needless full rebuild on a validated unchanged check.
@@ -1636,33 +1437,27 @@ All-pairs closures can grow quadratically. Target-oriented helpers such as reach
 | Source IDs and saved allowances have different jobs | Source-position IDs remain analysis identity. Producer tracking plus assertion/reason data defines counted allowance groups; old allowances are not imported and no key map is implemented. |
 | Known external declaration is not a collected implementation | Callback unknown is defined against an established collected implementation; known external functions are an explicit test. |
 | Coverage needs a concrete representation | Relation-map entries establish produced/empty coverage; primary-file coverage and per-rule completion remain separate. |
-| Result identity needs exact contents | One canonical composite fact-snapshot hash includes catalog descriptions, effective configuration, captured input revisions, primary scope, requested rows and complete eligible anchor support, including tracking. Freshness stays a separate check. |
+| Result identity should not cost a pass over every fact (owner decision) | The snapshot ID hashes inputs only: namespace, implementation, contract, configuration, scope, input revision and requested relation names. Output determinism is enforced by V04 and warm-equals-fresh checks rather than by hashing rows and anchors. Freshness stays a separate check. |
 | Public ownership has repeated special cases | One `site_owner` relation replaces repeated caller fields and empty owner strings. Event relations carry event evidence. |
 | Literal payloads can have the same string representation | `type_literal` carries its literal kind explicitly; ordinary string and bigint values cannot be confused by a value join. |
 | Date/timezone handling was still open | No Date API in the pure VM; no current-time or host-zone Mangle operations; explicit data and pure UTC functions remain usable. |
 | Architecture, not benchmark-driven development | Required deletions/ownership tests, no calibrated fixture or frozen time budget. Reuse counts show removed waste without choosing the architecture. |
 | Parallel rule evaluation is an architectural constraint, not optional optimization | Required bounded production workers, one shared rule-run implementation, private mutable execution state, immutable shared inputs, deterministic coordination, isolated errors, joined cancellation, and real-overlap/race acceptance. Parallel TypeScript extraction remains optional. |
-| Named functions must remain editable under a named-subject allowance | Named/binding functions and declarations default to subject matching; body edits do not reopen unchanged assertion/reason/count groups. Explicit syntax remains available. No backward-compatibility claim is involved. |
+| Named functions must remain editable under an allowance | Named/binding functions and declarations key on their named subject; body edits do not reopen unchanged assertion/reason/count groups. |
 | Source-order occurrence suffixes can move an approval to a different finding | No occurrence identities. Identical matching records share a count; over-limit groups are reported in full and constant-count replacement is an explicit limitation. |
-| A readable label is not a sufficient fingerprint | Matching records use full structured data and complete syntax digests; descriptions are separate review annotations. |
+| A readable label is not a sufficient key | Matching records use full structured key data; descriptions are separate review annotations. |
 | An unchanged anchor may fail for a different reason | Assertion name/arity is always included. One `.suppression(...)` policy can select typed semantic reasons; presentation/type-display text is not advertised as semantic identity. |
-| Not all anchors support both tracking forms or any tracking | Fixed syntax/subject slots can be unavailable. Selection never falls back; a per-assertion count policy or invocation override supplies an explicit broader recording choice. |
 | Worker count multiplies derived work, not a byte guarantee | Document memory components, retain per-rule limits, release completed execution state and trace created facts/peak process memory without a shared race-dependent quota. |
-| Content validation can be expensive; ctime is not a universal version token | Trace validation I/O, keep content/presence/membership validity, deduplicate by phase and do not enable metadata-only reuse implicitly. |
-| A layer rule may care about the imported module rather than the binding list | Imports default to syntax, with an explicitly selectable literal-specifier subject. The selected form is saved and lock-approved. |
-| Separate key/mode/anchor APIs would describe one policy repeatedly | Use only `.suppression(assertion, policy)`, a closed declarative keyed/count union. No old aliases or selector callbacks. |
-| One untrackable assertion must not force all rules into broad counts | Assertion recording defaults can differ; one atomic recording can contain keyed and count entries. Missing requested tracking still fails without partial writes. |
-| Changing a default must not rewrite the meaning of approval | Saved form and discriminator list govern ordinary matching. Detached typed reported values permit exact saved matching without retaining evaluation state. Ambiguous overlaps fail ordinary checks. |
-| A saved matching error must not block the operation that explicitly replaces it | Re-record whole selected outer entries from successful raw findings; allow covered zero-finding deletion by prune. Supersede only the two matching errors on actual discarded entries, validate the full candidate, preserve unrelated entries and retain approval/atomic-write guards. No repair flag, importer or migration tool. |
-| Native ASTs do not need a second punctuation-complete representation | Hash syntax kinds, field roles, ordered lists, missing slots and stored syntax payloads. Omit implied punctuation and formatting-only trailing commas. |
-| Tracking work has a lifetime and a cost | Reuse immutable support on no-change checks; memoize native subtrees for changed capture; trace actual construction, reuse and storage. No lazy worker mutation or tracking scheduler. |
+| Content validation can be expensive; ctime is not a universal version token | Keep content/presence/membership validity, skip bundled library files, deduplicate by phase, record one validation line per check, and observe warm-check cost in R3. No implicit metadata-only reuse. |
+| Tracking work has a lifetime and a cost | Reuse immutable keys on no-change checks; count key builds. No lazy worker mutation or tracking scheduler. |
+| Suppression was over-specified for its value (owner decision) | One producer-owned key per anchor or null; null falls back to a per-assertion count. Only `.suppression(assertion, { by })`. Removed: syntax fingerprints, form selection, keyed/count modes and overrides, mixed recording, overlap ambiguity and invalid-entry recovery. Re-recording replaces a rule's entries. Producers changing key computation require re-recording; no compatibility promise. |
 
 
 ## Appendix D. Source basis and implementation report
 
 This is a new design specification. The source files below establish the starting behavior; they do not imply the new behavior already exists. Links are pinned to the reviewed commit or dependency version.
 
-- **S1 — Prior specification and diagnosis:** `lintai-refactor-implementation-r5.md`, earlier architecture-led implementation revisions, and `lintai-phase-a-architecture-review.md`, supplied with this conversation. Revision 6 incorporates the feedback about recovering through ordinary recording/pruning when the discarded saved entry itself has invalid matching policy. It defines exact replacement scope, limited zero-finding pruning, full candidate validation and unchanged lock/write guards. It is not a new source audit or a claim of implementation. All other revision-5 contracts remain in force unless explicitly changed here. Earlier recommendations are superseded where they differ. The older attached benchmark-led revision prompt is not adopted.
+- **S1 — Prior specification and diagnosis:** `lintai-refactor-implementation-r5.md`, earlier architecture-led implementation revisions, and `lintai-phase-a-architecture-review.md`, supplied with this conversation. Revision 6, as amended by owner decision, replaces the revision-5 suppression design with one producer-owned key per anchor and counted groups, removing syntax fingerprints, form selection, mixed recording and the invalid-entry recovery exception. It is not a new source audit or a claim of implementation. All other revision-5 contracts remain in force unless explicitly changed here. Earlier recommendations are superseded where they differ. The older attached benchmark-led revision prompt is not adopted.
 - **S2 — Current schema/projection and helpers:** `backend/typescript/schema.mg`, `backend/typescript/facts.go`, and `backend/typescript/prelude.mg` at the reviewed lintai commit. These were reopened when completing the target inventory.
 - **S3 — Mangle namespace processing:** pinned `google/mangle` mirror, `packages/packages.go`, version `v0.7.0`, and lintai's `engine/program.go` analysis path. Structured package processing must be respected rather than assumed absent.
 - **S4 — Time built-ins:** pinned Mangle `functional/functional.go`, plus the primary Mangle basic-types documentation describing current-time and civil-time functions.
@@ -1681,5 +1476,5 @@ https://mangle.readthedocs.io/en/stable/basictypes.html
 
 Each implementation package reports its contract, actual changed/deleted files, tests and real command outcomes, intentional semantic changes, and any contradiction requiring owner review. Do not report an unrun test as passed.
 
-The final report contains the integrated ownership map, deleted/reduced representations and repeated work, complete verification results, remaining semantic limits, and evidence that the normal CLI/server/client path uses the new session and bounded rule workers. Include real-overlap and worker-bound observations, sequential/parallel comparisons including suppression grouping, failure/cancellation checks, actual race-test results, named-subject/syntax/null-tracking/duplicate-count tests, mixed recording and saved-policy tests including targeted recovery and its refusal/approval cases, and the memory, validation-I/O and tracking-cost/reuse observations required above. It contains no consumer-migration success claim because no migration is required or implemented.
+The final report contains the integrated ownership map, deleted/reduced representations and repeated work, complete verification results, remaining semantic limits, and evidence that the normal CLI/server/client path uses the new session and bounded rule workers. Include real-overlap and worker-bound observations, sequential/parallel comparisons including suppression grouping, failure/cancellation checks, actual race-test results, named-key/null-key/duplicate-count tests, re-recording and saved-policy tests, and the memory, validation-I/O and tracking reuse observations required above. It contains no consumer-migration success claim because no migration is required or implemented.
 
