@@ -190,6 +190,18 @@ func TestCatalogRejectsMissingCoverageAndForeignOwnership(t *testing.T) {
 	if _, err := engine.New(missing).Analyze(context.Background(), options); err == nil || !strings.Contains(err.Error(), "omitted requested predicate") {
 		t.Fatalf("expected missing-coverage failure, got %v", err)
 	}
+	unlisted := fakeProducer("catalog", "item")
+	unlisted.description.Schema.Declarations += `Decl unlisted(Entity) descr [extensional(), arg(Entity, "entity id")].`
+	if _, err := engine.New(unlisted).Analyze(context.Background(), options); err == nil || !strings.Contains(err.Error(), "absent from BaseRelations") {
+		t.Fatalf("expected catalog extensional predicate mismatch, got %v", err)
+	}
+	undeclared := fakeProducer("catalog", "item")
+	undeclaredRelation := undeclared.description.BaseRelations[0]
+	undeclaredRelation.Predicate = facts.Predicate{Name: "catalog.undeclared", Arity: 1}
+	undeclared.description.BaseRelations = append(undeclared.description.BaseRelations, undeclaredRelation)
+	if _, err := engine.New(undeclared).Analyze(context.Background(), options); err == nil || !strings.Contains(err.Error(), "no extensional catalog declaration") {
+		t.Fatalf("expected catalog base relation mismatch, got %v", err)
+	}
 	foreign := fakeProducer("catalog", "item")
 	foreign.rows[facts.Predicate{Name: "catalog.item", Arity: 1}] = []facts.Row{{facts.String("other:foreign")}}
 	foreign.anchors["other:foreign"] = facts.AnchorSupport{Location: diagnostics.SourceLocation{File: "src/file.ts", StartLine: 1, StartColumn: 1, EndLine: 1, EndColumn: 2}, Description: "foreign"}
@@ -289,7 +301,7 @@ func TestNamespaceBindingRejectsAliasesAndRuleOwnedPackages(t *testing.T) {
 		message string
 	}{
 		{"unknown namespace", `Decl violation(Entity). violation(Entity) :- unknown.item(Entity).`, "unknown.item"},
-		{"unqualified alias", `Decl violation(Entity). violation(Entity) :- item(Entity).`, "namespace-qualified"},
+		{"unqualified alias", `Decl violation(Entity). violation(Entity) :- item(Entity).`, "item"},
 		{"user Package", `Package custom! Decl violation(Entity). violation(Entity) :- catalog.item(Entity).`, "owned by the producer catalog"},
 		{"user Use", `Use catalog! Decl violation(Entity). violation(Entity) :- catalog.item(Entity).`, "owned by the producer catalog"},
 		{"producer redefinition", `Decl catalog.item(Entity). catalog.item(Entity) :- catalog.present(Entity). Decl violation(Entity). violation(Entity) :- catalog.item(Entity).`, "cannot redeclare base relation"},
@@ -309,6 +321,20 @@ func TestNamespaceBindingRejectsAliasesAndRuleOwnedPackages(t *testing.T) {
 				t.Fatalf("expected program preparation error containing %q, got %+v", item.message, result.Diagnostics)
 			}
 		})
+	}
+	workspace := t.TempDir()
+	producer := fakeProducer("catalog", "item")
+	setFakeRow(producer, "item", "catalog:users")
+	writeCatalogRule(t, workspace, `Decl item(Entity). item(Entity) :- catalog.item(Entity). Decl violation(Entity). violation(Entity) :- item(Entity).`, "violation")
+	result, err := engine.New(producer).Analyze(context.Background(), engine.Options{
+		RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: workspace,
+		RuleGlobs: []string{"lintai-rules/**/*.ts"}, Env: map[string]any{}, Severity: diagnostics.SeverityError,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.Diagnostics) != 1 || result.Diagnostics[0].RuleID != "fixture.catalog" || result.Diagnostics[0].EntityIdentity == nil || result.Diagnostics[0].EntityIdentity.SemanticKey != "catalog:users" {
+		t.Fatalf("rule-local predicate sharing a producer name did not prepare and run: %+v", result.Diagnostics)
 	}
 }
 

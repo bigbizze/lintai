@@ -92,6 +92,9 @@ func TestTwoTypeScriptProducersKeepConstructionSettingsIndependent(t *testing.T)
 	if got := collectModules(tsconfigProducer); !slices.Equal(got, []string{"ts:src/one.ts"}) {
 		t.Fatalf("second producer changed the first producer's settings: %v", got)
 	}
+	if foo, prefixedFoo := producerEntityID("foo.ts"), producerEntityID("ts:foo.ts"); foo == prefixedFoo || foo != "ts:foo.ts" || prefixedFoo != "ts:ts:foo.ts" {
+		t.Fatalf("producer-local entity IDs are not uniquely namespaced: %q and %q", foo, prefixedFoo)
+	}
 }
 
 func TestFilteredCallTargetsRemainUnresolved(t *testing.T) {

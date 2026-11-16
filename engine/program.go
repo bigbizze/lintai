@@ -65,9 +65,6 @@ func evaluateProgram(base factstore.ReadOnlyFactStore, catalog []parse.SourceUni
 	if perr := bindRuleUnit(&unit, output.Text, namespaces); perr != nil {
 		return nil, perr
 	}
-	if perr := rejectUnqualifiedProducerPredicates(unit, schemaDecls); perr != nil {
-		return nil, perr
-	}
 	if perr := checkReservedPredicates(unit, schemaDecls); perr != nil {
 		return nil, perr
 	}
@@ -332,54 +329,6 @@ func bindRuleUnit(unit *parse.SourceUnit, source string, namespaces []string) *p
 		for _, declaration := range useUnit.Decls {
 			if declaration.DeclaredAtom.Predicate == symbols.Use {
 				unit.Decls = append(unit.Decls, declaration)
-			}
-		}
-	}
-	return nil
-}
-
-func rejectUnqualifiedProducerPredicates(unit parse.SourceUnit, schemaDecls map[ast.PredicateSym]ast.Decl) *phaseError {
-	locals := make(map[string][]string)
-	for predicate := range schemaDecls {
-		namespace, local, qualified := strings.Cut(predicate.Symbol, ".")
-		if qualified {
-			locals[local] = append(locals[local], namespace+"."+local)
-		}
-	}
-	check := func(predicate ast.PredicateSym) *phaseError {
-		if strings.Contains(predicate.Symbol, ".") {
-			return nil
-		}
-		if candidates := locals[predicate.Symbol]; len(candidates) > 0 {
-			sort.Strings(candidates)
-			return failPhase("program_analysis", "producer predicate %s/%d must be namespace-qualified as %s", predicate.Symbol, predicate.Arity, strings.Join(slices.Compact(candidates), " or "))
-		}
-		return nil
-	}
-	for _, declaration := range unit.Decls {
-		if isPackageDecl(declaration) {
-			continue
-		}
-		if perr := check(declaration.DeclaredAtom.Predicate); perr != nil {
-			return perr
-		}
-	}
-	for _, clause := range unit.Clauses {
-		if perr := check(clause.Head.Predicate); perr != nil {
-			return perr
-		}
-		for _, premise := range clause.Premises {
-			var predicate ast.PredicateSym
-			switch typed := premise.(type) {
-			case ast.Atom:
-				predicate = typed.Predicate
-			case ast.NegAtom:
-				predicate = typed.Atom.Predicate
-			default:
-				continue
-			}
-			if perr := check(predicate); perr != nil {
-				return perr
 			}
 		}
 	}

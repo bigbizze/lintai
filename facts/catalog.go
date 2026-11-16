@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 
+	"codeberg.org/TauCeti/mangle-go/parse"
+	"codeberg.org/TauCeti/mangle-go/symbols"
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/internal/canonical"
 )
@@ -171,6 +173,9 @@ func ValidateBatch(description ProducerDescription, requested []Predicate, batch
 		localNames[local] = struct{}{}
 		metadata[relation.Predicate] = relation
 	}
+	if err := validateExtensionalCatalog(description); err != nil {
+		return ValidatedFacts{}, err
+	}
 	wanted := make(map[Predicate]struct{}, len(requested))
 	for _, predicate := range requested {
 		if _, ok := metadata[predicate]; !ok {
@@ -264,6 +269,40 @@ func ValidateBatch(description ProducerDescription, requested []Predicate, batch
 	sort.Strings(result.analyzedFiles)
 	result.analyzedFiles = slices.Compact(result.analyzedFiles)
 	return result, nil
+}
+
+func validateExtensionalCatalog(description ProducerDescription) error {
+	declarations, err := parse.Unit(strings.NewReader(description.Schema.Declarations))
+	if err != nil {
+		return fmt.Errorf("producer %q catalog declarations: %w", description.Namespace, err)
+	}
+	extensional := make(map[Predicate]struct{})
+	for _, declaration := range declarations.Decls {
+		if declaration.DeclaredAtom.Predicate == symbols.Package || declaration.DeclaredAtom.Predicate == symbols.Use || !declaration.IsExtensional() {
+			continue
+		}
+		local := declaration.DeclaredAtom.Predicate
+		predicate := Predicate{Name: description.Namespace + "." + local.Symbol, Arity: local.Arity}
+		if _, duplicate := extensional[predicate]; duplicate {
+			return fmt.Errorf("producer %q catalog declares extensional predicate %s more than once", description.Namespace, predicate)
+		}
+		extensional[predicate] = struct{}{}
+	}
+	baseRelations := make(map[Predicate]struct{}, len(description.BaseRelations))
+	for _, relation := range description.BaseRelations {
+		baseRelations[relation.Predicate] = struct{}{}
+	}
+	for predicate := range extensional {
+		if _, exists := baseRelations[predicate]; !exists {
+			return fmt.Errorf("producer %q catalog declares extensional predicate %s absent from BaseRelations", description.Namespace, predicate)
+		}
+	}
+	for predicate := range baseRelations {
+		if _, exists := extensional[predicate]; !exists {
+			return fmt.Errorf("producer %q BaseRelations predicate %s has no extensional catalog declaration", description.Namespace, predicate)
+		}
+	}
+	return nil
 }
 
 func validateRelation(namespace string, relation RelationDescription) error {

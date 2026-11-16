@@ -34,6 +34,8 @@ type Backend struct {
 
 var _ backend.Producer = (*Backend)(nil)
 
+func producerEntityID(localID string) string { return "ts:" + localID }
+
 func New(settings ...Options) *Backend {
 	selected := Options{Files: FileScopeTsconfig}
 	if len(settings) > 0 {
@@ -109,11 +111,7 @@ func (b *Backend) Collect(ctx context.Context, request backend.CollectionRequest
 			if id == "" && (argument.Name == "Caller" || argument.Name == "From" || argument.Name == "Owner") {
 				id = "unsupported"
 			}
-			if !strings.HasPrefix(id, "ts:") {
-				values[index].String = "ts:" + id
-			} else {
-				values[index].String = id
-			}
+			values[index].String = producerEntityID(id)
 		}
 		batch.Relations[predicate] = append(batch.Relations[predicate], facts.Row(values))
 	}
@@ -123,10 +121,7 @@ func (b *Backend) Collect(ctx context.Context, request backend.CollectionRequest
 			if item.Relation != facts.LocationRelation || len(item.Values) != 6 {
 				continue
 			}
-			id := item.Values[0].String
-			if !strings.HasPrefix(id, "ts:") {
-				id = "ts:" + id
-			}
+			id := producerEntityID(item.Values[0].String)
 			file := item.Values[1].String
 			if strings.HasPrefix(file, "bundled://") {
 				continue
