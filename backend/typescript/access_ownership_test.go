@@ -39,15 +39,15 @@ func TestImportMetaSyntaxAndOwnership(t *testing.T) {
 		"const other = [import.meta?.env, import.meta[\"env\"], (import.meta).env];\n"
 	root := t.TempDir()
 	writeWorkspaceFile(t, root, "src/main.ts", source)
-	snapshot, err := New().buildAnalysisSnapshot(context.Background(), root, root, backend.SnapshotOptions{Files: backend.FileScopeWalk})
+	snapshot, sources, version, err := New().buildLintaiSnapshot(context.Background(), root, root, backend.SnapshotOptions{Files: backend.FileScopeWalk})
 	if err != nil {
 		t.Fatal(err)
 	}
-	items, err := factsFromAnalysis(snapshot)
+	items, err := factsFromSnapshot(snapshot, sources, convertAdjustments(root, snapshot.ConfigAdjustments))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := facts.Validate(facts.Snapshot{Version: snapshot.Version, Schema: Schema(), Facts: items}); err != nil {
+	if err := facts.Validate(facts.Snapshot{Version: version, Schema: Schema(), Facts: items}); err != nil {
 		t.Fatal(err)
 	}
 	rows := make(map[string]map[string]facts.Fact)

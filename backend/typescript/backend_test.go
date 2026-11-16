@@ -11,8 +11,12 @@ import (
 	"github.com/bigbizze/lintai/backend"
 	"github.com/bigbizze/lintai/engine"
 	"github.com/bigbizze/lintai/facts"
-	"github.com/bigbizze/lintai/internal/analysis"
+	"github.com/bigbizze/lintai/internal/tsgo/lintaiapi"
 )
+
+func hasSnapshotInput(snapshot *lintaiapi.Snapshot, path string) bool {
+	return slices.ContainsFunc(snapshot.Inputs, func(input lintaiapi.SnapshotInput) bool { return input.Path == path })
+}
 
 func TestBuildSnapshotExposesStableFunctionKeysAndCalls(t *testing.T) {
 	repoRoot, err := filepath.Abs("../..")
@@ -21,7 +25,7 @@ func TestBuildSnapshotExposesStableFunctionKeysAndCalls(t *testing.T) {
 	}
 	workspaceRoot := filepath.Join(repoRoot, "testdata/fixtures/workspace")
 
-	snapshot, err := New().buildAnalysisSnapshot(context.Background(), repoRoot, workspaceRoot, backend.SnapshotOptions{})
+	snapshot, _, _, err := New().buildLintaiSnapshot(context.Background(), repoRoot, workspaceRoot, backend.SnapshotOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -235,11 +239,11 @@ func TestLegacyTsconfigIsAdjusted(t *testing.T) {
 	workspaceRoot := filepath.Join(repoRoot, "testdata/fixtures/legacy-tsconfig")
 	before := listTree(t, workspaceRoot)
 	for _, files := range []backend.FileScope{backend.FileScopeTsconfig, backend.FileScopeWalk} {
-		snapshot, err := New().buildAnalysisSnapshot(context.Background(), repoRoot, workspaceRoot, backend.SnapshotOptions{Files: files})
+		snapshot, _, _, err := New().buildLintaiSnapshot(context.Background(), repoRoot, workspaceRoot, backend.SnapshotOptions{Files: files})
 		if err != nil {
 			t.Fatalf("%s: %v", files, err)
 		}
-		var alias *analysis.ImportEdge
+		var alias *lintaiapi.ImportEdge
 		for index := range snapshot.ImportEdges {
 			if snapshot.ImportEdges[index].Specifier == "@/lib/helper" {
 				alias = &snapshot.ImportEdges[index]
@@ -248,8 +252,9 @@ func TestLegacyTsconfigIsAdjusted(t *testing.T) {
 		if alias == nil || !alias.Internal || alias.ToPath != "src/lib/helper.ts" {
 			t.Fatalf("%s: expected @/lib/helper to resolve to src/lib/helper.ts, got %+v", files, alias)
 		}
-		got := make([]string, 0, len(snapshot.Adjustments))
-		for _, item := range snapshot.Adjustments {
+		adjustments := convertAdjustments(workspaceRoot, snapshot.ConfigAdjustments)
+		got := make([]string, 0, len(adjustments))
+		for _, item := range adjustments {
 			got = append(got, item.Config+" "+item.Option+" "+item.Action)
 		}
 		want := []string{
@@ -272,7 +277,7 @@ func TestLegacyTsconfigIsAdjusted(t *testing.T) {
 func TestWalkModeWritesNothingIntoTheWorkspace(t *testing.T) {
 	root := t.TempDir()
 	writeWorkspaceFile(t, root, "src/a.ts", "export const a = 1;\n")
-	snapshot, err := New().buildAnalysisSnapshot(context.Background(), root, root, backend.SnapshotOptions{Files: backend.FileScopeWalk})
+	snapshot, _, _, err := New().buildLintaiSnapshot(context.Background(), root, root, backend.SnapshotOptions{Files: backend.FileScopeWalk})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,37 +336,37 @@ func TestSnapshotVersionTracksAssociationConfigAndMissingInputs(t *testing.T) {
 	writeWorkspaceFile(t, root, "src/app.ts", `import { load } from "../dist"; export const result = load;`)
 	linksPath := writeWorkspaceFile(t, root, "source-links.json", `{"version":1,"entries":[{"checkedEntry":"dist/index.d.ts","sourceEntry":"src/index.ts"}]}`)
 	options := backend.SnapshotOptions{Files: backend.FileScopeTsconfig, SourceLinks: "source-links.json"}
-	build := func() *analysis.Snapshot {
+	build := func() (*lintaiapi.Snapshot, string) {
 		t.Helper()
-		snapshot, err := New().buildAnalysisSnapshot(context.Background(), root, root, options)
+		snapshot, _, version, err := New().buildLintaiSnapshot(context.Background(), root, root, options)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return snapshot
+		return snapshot, version
 	}
-	initial := build()
+	initial, initialVersion := build()
 	mapPath := filepath.Join(root, "dist/index.d.ts.map")
-	if !slices.Contains(initial.InputPaths, mapPath) {
-		t.Fatalf("missing declaration map path was not included in snapshot inputs: %v", initial.InputPaths)
+	if !hasSnapshotInput(initial, mapPath) {
+		t.Fatalf("missing declaration map path was not included in snapshot inputs: %v", initial.Inputs)
 	}
 	if err := os.WriteFile(mapPath, []byte(`{"version":3,"file":"index.d.ts","sources":[],"mappings":""}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	mapCreated := build()
-	if initial.Version == mapCreated.Version {
+	_, mapCreatedVersion := build()
+	if initialVersion == mapCreatedVersion {
 		t.Fatal("creating a previously missing declaration map did not invalidate the snapshot")
 	}
 	missingSource := filepath.Join(root, "src/missing.ts")
 	if err := os.WriteFile(linksPath, []byte(`{"version":1,"entries":[{"checkedEntry":"dist/index.d.ts","sourceEntry":"src/missing.ts"}]}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	missing := build()
-	if mapCreated.Version == missing.Version || !slices.Contains(missing.InputPaths, missingSource) {
-		t.Fatalf("source-links changes or missing source were not retained: version=%s inputs=%v", missing.Version, missing.InputPaths)
+	missing, missingVersion := build()
+	if mapCreatedVersion == missingVersion || !hasSnapshotInput(missing, missingSource) {
+		t.Fatalf("source-links changes or missing source were not retained: version=%s inputs=%v", missingVersion, missing.Inputs)
 	}
 	writeWorkspaceFile(t, root, "src/missing.ts", `export const load = 2;`)
-	createdSource := build()
-	if missing.Version == createdSource.Version {
+	_, createdSourceVersion := build()
+	if missingVersion == createdSourceVersion {
 		t.Fatal("creating a previously missing source entry did not invalidate the snapshot")
 	}
 }
@@ -410,26 +415,26 @@ func TestSnapshotTracksMissingPackageDirectoryAndDeclaration(t *testing.T) {
 	writeWorkspaceFile(t, root, "tsconfig.json", `{"compilerOptions":{"strict":true,"module":"preserve","moduleResolution":"bundler"},"include":["src/**/*.ts"]}`)
 	writeWorkspaceFile(t, root, "src/app.ts", `import { value } from "latepkg"; export const result = value;`)
 	options := backend.SnapshotOptions{Files: backend.FileScopeTsconfig}
-	build := func() *analysis.Snapshot {
+	build := func() (*lintaiapi.Snapshot, string) {
 		t.Helper()
-		snapshot, err := New().buildAnalysisSnapshot(context.Background(), root, root, options)
+		snapshot, _, version, err := New().buildLintaiSnapshot(context.Background(), root, root, options)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return snapshot
+		return snapshot, version
 	}
 	// Without node_modules, resolution probes no file under it.
-	if before := build(); !slices.Contains(before.InputPaths, filepath.Join(root, "node_modules")) {
-		t.Fatalf("missing node_modules directory was not retained as an input: %v", before.InputPaths)
+	if before, _ := build(); !hasSnapshotInput(before, filepath.Join(root, "node_modules")) {
+		t.Fatalf("missing node_modules directory was not retained as an input: %v", before.Inputs)
 	}
 	writeWorkspaceFile(t, root, "node_modules/latepkg/package.json", `{"types":"index.d.ts"}`)
 	declarationPath := filepath.Join(root, "node_modules/latepkg/index.d.ts")
-	withoutDeclaration := build()
-	if !slices.Contains(withoutDeclaration.InputPaths, declarationPath) {
-		t.Fatalf("missing package declaration candidate was not retained as an input: %v", withoutDeclaration.InputPaths)
+	withoutDeclaration, withoutDeclarationVersion := build()
+	if !hasSnapshotInput(withoutDeclaration, declarationPath) {
+		t.Fatalf("missing package declaration candidate was not retained as an input: %v", withoutDeclaration.Inputs)
 	}
 	writeWorkspaceFile(t, root, "node_modules/latepkg/index.d.ts", `export declare const value: string;`)
-	if after := build(); withoutDeclaration.Version == after.Version {
+	if _, afterVersion := build(); withoutDeclarationVersion == afterVersion {
 		t.Fatal("creating the resolved package declaration did not change the snapshot version")
 	}
 }
@@ -477,7 +482,7 @@ export function mirror(config: LocalConfig): DbConfig {
 }
 `)
 
-	snapshot, err := New().buildAnalysisSnapshot(context.Background(), root, root, backend.SnapshotOptions{})
+	snapshot, _, _, err := New().buildLintaiSnapshot(context.Background(), root, root, backend.SnapshotOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -568,7 +573,7 @@ func TestBuildSnapshotExposesImportMetaAccessesAndIgnoresStrings(t *testing.T) {
 }
 `)
 
-	snapshot, err := New().buildAnalysisSnapshot(context.Background(), root, root, backend.SnapshotOptions{})
+	snapshot, _, _, err := New().buildLintaiSnapshot(context.Background(), root, root, backend.SnapshotOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -576,7 +581,7 @@ func TestBuildSnapshotExposesImportMetaAccessesAndIgnoresStrings(t *testing.T) {
 	var importMetaFound bool
 	for _, access := range snapshot.Accesses {
 		switch {
-		case access.FilePath == "src/env.ts" && access.Root == "import.meta" && access.AccessPath == "import.meta.env" && access.Origin == "special_form":
+		case access.FilePath == "src/env.ts" && access.AccessPath == "import.meta.env":
 			importMetaFound = true
 			if access.Range.File != "src/env.ts" || access.Range.StartLine != 2 {
 				t.Fatalf("unexpected import.meta access range %+v", access.Range)
@@ -618,7 +623,7 @@ export function a() {
 }
 `)
 
-	snapshot, err := New().buildAnalysisSnapshot(context.Background(), root, root, backend.SnapshotOptions{})
+	snapshot, _, _, err := New().buildLintaiSnapshot(context.Background(), root, root, backend.SnapshotOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -665,22 +670,22 @@ func TestUnreadableOptionalMapKeepsCheckedFactsAndChangesVersionWhenReadable(t *
 		t.Skip("current user can read mode-000 files")
 	}
 	options := backend.SnapshotOptions{Files: backend.FileScopeTsconfig}
-	unreadable, err := New().buildAnalysisSnapshot(context.Background(), root, root, options)
+	unreadable, _, unreadableVersion, err := New().buildLintaiSnapshot(context.Background(), root, root, options)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.ContainsFunc(unreadable.DeclarationSourceOutcomes, func(item analysis.DeclarationSourceOutcome) bool { return item.Outcome == "unavailable_map" }) ||
-		!slices.ContainsFunc(unreadable.Exports, func(item analysis.Export) bool { return item.Name == "value" && len(item.Targets) == 1 }) || !slices.Contains(unreadable.InputPaths, mapPath) {
+	if !slices.ContainsFunc(unreadable.DeclarationSourceOutcomes, func(item lintaiapi.DeclarationSourceOutcomeFact) bool { return item.Outcome == "unavailable_map" }) ||
+		!slices.ContainsFunc(unreadable.Exports, func(item lintaiapi.ExportFact) bool { return item.Name == "value" && len(item.Targets) == 1 }) || !hasSnapshotInput(unreadable, mapPath) {
 		t.Fatalf("unreadable optional map lost checked facts, outcome or input: %+v", unreadable)
 	}
 	if err := os.Chmod(mapPath, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	readable, err := New().buildAnalysisSnapshot(context.Background(), root, root, options)
+	_, _, readableVersion, err := New().buildLintaiSnapshot(context.Background(), root, root, options)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if unreadable.Version == readable.Version {
+	if unreadableVersion == readableVersion {
 		t.Fatal("making the map readable did not change the snapshot version")
 	}
 	linksPath := writeWorkspaceFile(t, root, "source-links.json", `{}`)
@@ -689,7 +694,7 @@ func TestUnreadableOptionalMapKeepsCheckedFactsAndChangesVersionWhenReadable(t *
 	}
 	t.Cleanup(func() { _ = os.Chmod(linksPath, 0o600) })
 	options.SourceLinks = "source-links.json"
-	if _, err := New().buildAnalysisSnapshot(context.Background(), root, root, options); err == nil || !strings.Contains(err.Error(), "invalid --source-links") {
+	if _, _, _, err := New().buildLintaiSnapshot(context.Background(), root, root, options); err == nil || !strings.Contains(err.Error(), "invalid --source-links") {
 		t.Fatalf("unreadable requested configuration was not an error: %v", err)
 	}
 }
