@@ -237,6 +237,8 @@ type RuleWatchSpec = {
 
 type DirectoryIdentity = { dev: bigint; ino: bigint };
 
+type InputWatchTarget = { directory: boolean; target: string | undefined };
+
 type InputWatchSpec = {
 	identity: DirectoryIdentity | undefined;
 	inputs: Array<{ path: string; directory: boolean }>;
@@ -271,6 +273,7 @@ export class LintAIClient {
 	private readonly inputWatchers: FileWatcher[] = [];
 	private inputPaths: string[] = [];
 	private inputPathSet = new Set<string>();
+	private inputWatchTargets = new Map<string, InputWatchTarget>();
 	private inputDirectories = new Map<string, DirectoryIdentity | undefined>();
 	private inputWatchGeneration = 0;
 	private ruleInvalidationTimer: ReturnType<typeof setTimeout> | undefined;
@@ -884,11 +887,27 @@ export class LintAIClient {
 				...(this.options.sourceLinks === undefined ? [] : [path.resolve(this.options.sourceLinks)]),
 			]),
 		];
+		const nextInputWatchTargets = new Map<string, InputWatchTarget>();
+		for (const input of paths) {
+			const directory = directoryIdentity(input) !== undefined;
+			nextInputWatchTargets.set(input, {
+				directory,
+				target: nearestExistingDirectory(directory ? input : path.dirname(input)),
+			});
+		}
 		// Stable watches need no handoff when an analysis returns the same inputs.
 		if (
 			!force &&
 			paths.length === this.inputPathSet.size &&
 			paths.every((item) => this.inputPathSet.has(item)) &&
+			paths.every((item) => {
+				const installed = this.inputWatchTargets.get(item);
+				const current = nextInputWatchTargets.get(item);
+				return (
+					installed?.directory === current?.directory &&
+					installed?.target === current?.target
+				);
+			}) &&
 			[...this.inputDirectories].every(([directory, identity]) =>
 				sameDirectory(identity, directoryIdentity(directory)),
 			)
@@ -897,6 +916,7 @@ export class LintAIClient {
 		}
 		this.inputPaths = paths;
 		this.inputPathSet = new Set(paths);
+		this.inputWatchTargets = nextInputWatchTargets;
 		const generation = ++this.inputWatchGeneration;
 		for (const watcher of this.inputWatchers) {
 			watcher.close();
@@ -913,8 +933,7 @@ export class LintAIClient {
 		};
 		const directories = new Set<string>();
 		for (const input of paths) {
-			const directory = directoryIdentity(input) !== undefined;
-			const target = nearestExistingDirectory(directory ? input : path.dirname(input));
+			const { directory, target } = this.inputWatchTargets.get(input)!;
 			if (target) {
 				directories.add(target);
 				specFor(target).inputs.push({ path: input, directory });

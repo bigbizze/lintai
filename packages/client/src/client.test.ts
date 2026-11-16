@@ -734,12 +734,20 @@ test("an event queued on a replaced input watcher still invalidates diagnostics"
 
 test("input changes around watch installation invalidate diagnostics", (t) => {
 	t.mock.timers.enable({ apis: ["setTimeout"] });
-	for (const kind of ["replacement", "edit", "after-install", "after-reinstall"] as const) {
+	for (const kind of [
+		"replacement",
+		"edit",
+		"after-install",
+		"after-reinstall",
+		"missing-directory",
+	] as const) {
 		const workspaceRoot = mkdtempSync(path.join(os.tmpdir(), "lintai-input-watch-gap-"));
 		const directory = path.join(workspaceRoot, "dist");
 		const input = path.join(directory, "input.d.ts");
-		mkdirSync(directory);
-		writeFileSync(input, "initial");
+		if (kind !== "missing-directory") {
+			mkdirSync(directory);
+			writeFileSync(input, "initial");
+		}
 		const child = createTestProcess();
 		let analyses = 0;
 		let watchers = 0;
@@ -747,7 +755,12 @@ test("input changes around watch installation invalidate diagnostics", (t) => {
 		let inputChanged: ((filename?: string) => void) | undefined;
 		const client = new LintAIClient(
 			resolveBridgeOptions(
-				{ mode: "serve", binary: "/tmp/lintai", workspaceRoot, sourceLinks: input },
+				{
+					mode: "serve",
+					binary: "/tmp/lintai",
+					workspaceRoot,
+					...(kind === "missing-directory" ? {} : { sourceLinks: input }),
+				},
 				workspaceRoot,
 				editorHost,
 			),
@@ -757,9 +770,14 @@ test("input changes around watch installation invalidate diagnostics", (t) => {
 					createInputResult(
 						++analyses,
 						[input, path.join(workspaceRoot, "extra")],
-						readFileSync(input, "utf8"),
+						existsSync(input) ? readFileSync(input, "utf8") : "missing",
 					),
 				watchInputPath: (target, onChange) => {
+					if (kind === "missing-directory" && target === workspaceRoot && !existsSync(directory)) {
+						// The directory appears while its ancestor watcher is still being installed.
+						mkdirSync(directory);
+						writeFileSync(input, "initial");
+					}
 					if (target === directory) inputChanged = onChange;
 					watchers++;
 					return {
@@ -781,8 +799,26 @@ test("input changes around watch installation invalidate diagnostics", (t) => {
 		);
 		try {
 			changeOnClose = kind === "replacement" || kind === "edit";
-			assert.equal(client.getDiagnostics("src/app.ts")[0]?.message, "initial");
+			assert.equal(
+				client.getDiagnostics("src/app.ts")[0]?.message,
+				kind === "missing-directory" ? "missing" : "initial",
+			);
 			assert.equal(changeOnClose, false);
+			if (kind === "missing-directory") {
+				t.mock.timers.tick(200);
+				assert.equal(client.getDiagnostics("src/app.ts")[0]?.message, "initial");
+				assert.equal(analyses, 2);
+				t.mock.timers.runAll();
+				assert.equal(client.getDiagnostics("src/app.ts")[0]?.message, "initial");
+				assert.equal(analyses, 3);
+				assert.ok(inputChanged);
+				writeFileSync(input, "nested edit");
+				inputChanged("input.d.ts");
+				t.mock.timers.tick(200);
+				assert.equal(client.getDiagnostics("src/app.ts")[0]?.message, "nested edit");
+				assert.equal(analyses, 4);
+				continue;
+			}
 			if (kind === "after-reinstall") {
 				t.mock.timers.tick(200);
 				assert.equal(client.getDiagnostics("src/app.ts")[0]?.message, "initial");
