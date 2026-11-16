@@ -22,7 +22,6 @@ import (
 	"github.com/bigbizze/lintai/internal/tsgo/internal/tspath"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/vfs"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/vfs/osvfs"
-	"github.com/bigbizze/lintai/internal/workspace"
 )
 
 const (
@@ -35,16 +34,11 @@ const (
 )
 
 type BuildSnapshotRequest struct {
-	WorkspaceRoot      string
-	Files              []string
-	ExactFiles         []string
-	ScopeOptions       *workspace.ScopeOptions
-	ConfigPath         string
-	ConfigDigest       string
-	ConfigPresent      bool
-	SourceLinks        string
-	AmbientMatchers    []AmbientMatcher
-	PreviousValidation *InputValidation
+	WorkspaceRoot   string
+	Files           []string
+	ExactFiles      []string
+	SourceLinks     string
+	AmbientMatchers []AmbientMatcher
 	// RequestedRelations is the producer's local predicate demand. Nil requests
 	// the full snapshot used by the direct extraction API.
 	RequestedRelations []string
@@ -56,7 +50,6 @@ type BuildSnapshotRequest struct {
 	// Files with no tsconfig.json are always analyzed with the synthetic
 	// tsconfig.
 	TsconfigFiles    bool
-	beforeValidation func()
 	trackingCache    map[string]TrackingSupport
 	trackingPrevious map[string]TrackingSupport
 }
@@ -397,20 +390,12 @@ type Snapshot struct {
 	// Inputs includes program, configuration, and association inputs, including
 	// absent paths. ConfigFiles remains the list of present configs.
 	Inputs []SnapshotInput
-	// WatchHints include captured inputs and directories whose membership
-	// selects the primary scope. They request checks but do not prove validity.
-	WatchHints []string
 	// ConfigAdjustments are the compiler options that lintai changed because
 	// TypeScript 7 rejects them, sorted by config path and option.
 	ConfigAdjustments []ConfigAdjustment
-	// InputRevision is the digest of captured compiler inputs after validation.
-	InputRevision string
-	// Scope is a producer-owned canonical scope description for result identity.
-	Scope        any
-	ContextPaths []string
-	Validation   validationStats
-	// Validity retains only the observations needed to validate this generation.
-	Validity            *InputValidity
+	ContextPaths      []string
+	// CompilerInputs is detached evidence for compiler-input validation.
+	CompilerInputs      *CompilerInputValidity
 	capture             *resolutionInputFS
 	typeStructureVisits int
 	trackingKeyBuilds   int
@@ -569,142 +554,20 @@ type extractTiming struct {
 	types time.Duration
 }
 
+// BuildSnapshot performs one compiler extraction attempt. The producer must
+// validate the returned compiler inputs, configuration, and scope before use.
 func BuildSnapshot(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, error) {
-	var total validationStats
-	if req.PreviousValidation != nil {
-		total = req.PreviousValidation.stats
+	snapshot, err := buildSnapshotAttempt(ctx, req)
+	if err != nil {
+		return nil, err
 	}
-	defer func() { printValidationTrace(validationStats{}, total) }()
-	for attempt := 0; attempt < 2; attempt++ {
-		attemptReq := req
-		var plan *workspace.ScopePlan
-		if req.ScopeOptions != nil {
-			var err error
-			plan, err = workspace.PlanSources(req.WorkspaceRoot, *req.ScopeOptions)
-			if err != nil {
-				return nil, err
-			}
-			attemptReq.WorkspaceRoot = plan.Root
-			attemptReq.Files = plan.Files
-			attemptReq.ExactFiles = plan.ExactFiles
-			// Keep an absolute source-links path in the same root spelling as the compiler inputs.
-			if filepath.IsAbs(req.SourceLinks) {
-				requestedRoot, err := normalizeAbsPath(req.WorkspaceRoot)
-				if err != nil {
-					return nil, err
-				}
-				relative := relativeScopePath(requestedRoot, req.SourceLinks)
-				if !filepath.IsAbs(filepath.FromSlash(relative)) {
-					attemptReq.SourceLinks = filepath.Join(plan.Root, filepath.FromSlash(relative))
-				}
-			}
-		}
-		snapshot, err := buildSnapshotAttempt(ctx, attemptReq)
-		if err != nil {
-			return nil, err
-		}
-		if req.beforeValidation != nil {
-			req.beforeValidation()
-		}
-		trace := validationStats{}
-		validationStarted := time.Now()
-		finishValidation := func() {
-			trace.elapsed = time.Since(validationStarted)
-			total.files += trace.files
-			total.bytes += trace.bytes
-			total.elapsed += trace.elapsed
-		}
-		stable := true
-		if snapshot.capture != nil {
-			var captureStats validationStats
-			stable, captureStats, err = snapshot.capture.validate()
-			trace.files += captureStats.files
-			trace.bytes += captureStats.bytes
-			if err != nil {
-				finishValidation()
-				return nil, err
-			}
-		}
-		if req.ConfigPath != "" {
-			configStable, bytesRead, fileRead, configErr := validateConfigInput(req.ConfigPath, req.ConfigPresent, req.ConfigDigest)
-			if fileRead {
-				trace.files++
-			}
-			trace.bytes += bytesRead
-			if configErr != nil {
-				finishValidation()
-				return nil, configErr
-			}
-			stable = stable && configStable
-		}
-		if plan != nil {
-			scopeStable, scopeErr := workspace.ValidateScope(plan)
-			if scopeErr != nil {
-				finishValidation()
-				return nil, scopeErr
-			}
-			stable = stable && scopeStable
-		}
-		finishValidation()
-		if stable {
-			capturedRevision := ""
-			if snapshot.capture != nil {
-				capturedRevision, err = snapshot.capture.revision()
-				if err != nil {
-					return nil, fmt.Errorf("input revision: %w", err)
-				}
-				snapshot.Inputs = uniqueSnapshotInputs(append(snapshot.Inputs, snapshot.capture.inputs()...))
-			}
-			if req.ConfigPath != "" {
-				snapshot.Inputs = uniqueSnapshotInputs(append(snapshot.Inputs, SnapshotInput{Path: normalizeSlash(req.ConfigPath), Exists: req.ConfigPresent}))
-			}
-			if plan != nil {
-				// Return in-workspace input paths through the requested root for callers watching them.
-				requestedRoot, err := normalizeAbsPath(req.WorkspaceRoot)
-				if err != nil {
-					return nil, err
-				}
-				for i := range snapshot.Inputs {
-					relative := relativeScopePath(plan.Root, snapshot.Inputs[i].Path)
-					if !filepath.IsAbs(filepath.FromSlash(relative)) {
-						snapshot.Inputs[i].Path = normalizeSlash(filepath.Join(requestedRoot, filepath.FromSlash(relative)))
-					}
-				}
-				snapshot.Inputs = uniqueSnapshotInputs(snapshot.Inputs)
-			}
-			for _, input := range snapshot.Inputs {
-				snapshot.WatchHints = append(snapshot.WatchHints, input.Path)
-			}
-			if plan != nil {
-				for _, directory := range plan.Membership {
-					snapshot.WatchHints = append(snapshot.WatchHints, directory.Path)
-				}
-			}
-			slices.Sort(snapshot.WatchHints)
-			snapshot.WatchHints = slices.Compact(snapshot.WatchHints)
-			if plan != nil {
-				capturedRevision = combineInputRevisions(capturedRevision, plan.Revision)
-				snapshot.Scope = scopeIdentity(plan, snapshot, req.TsconfigFiles)
-			}
-			if req.ConfigPath != "" {
-				configPath := normalizeIdentityPath(req.WorkspaceRoot, req.ConfigPath)
-				capturedRevision = combineInputRevisions(capturedRevision, configPath, req.ConfigPresent, req.ConfigDigest)
-			}
-			if capturedRevision == "" {
-				capturedRevision = combineInputRevisions()
-			}
-			snapshot.InputRevision = capturedRevision
-			snapshot.Validation = total
-			snapshot.Validity = retainInputValidity(snapshot.capture, plan, req)
-			snapshot.capture = nil
-			return snapshot, nil
-		}
-		if attempt == 1 {
-			return nil, fmt.Errorf("inputs_changed: compiler inputs or source membership changed during collection")
-		}
-		total.retries++
+	if snapshot.capture.captureErr != nil {
+		return nil, snapshot.capture.captureErr
 	}
-	return nil, fmt.Errorf("inputs_changed: compiler inputs or source membership changed during collection")
+	snapshot.Inputs = uniqueSnapshotInputs(append(snapshot.Inputs, snapshot.capture.inputs()...))
+	snapshot.CompilerInputs = retainCompilerInputValidity(snapshot.capture)
+	snapshot.capture = nil
+	return snapshot, nil
 }
 
 func buildSnapshotAttempt(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, error) {

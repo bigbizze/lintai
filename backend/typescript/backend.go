@@ -29,12 +29,18 @@ type Backend struct {
 	reported   map[string]string
 	collectMu  sync.Mutex
 	current    *producerGeneration
+	// beforeValidation supports deterministic mutation tests at the publication boundary.
+	beforeValidation func()
 }
 
 type producerGeneration struct {
 	repoRoot, workspaceRoot string
 	relations               []string
 	snapshot                *lintaiapi.Snapshot
+	plan                    *workspace.ScopePlan
+	inputRevision           string
+	scope                   map[string]any
+	watchHints              []string
 	items                   []facts.Fact
 }
 
@@ -222,9 +228,9 @@ func (b *Backend) Collect(ctx context.Context, request backend.CollectionRequest
 	for _, module := range snapshot.Modules {
 		batch.AnalyzedFiles = append(batch.AnalyzedFiles, module.Path)
 	}
-	batch.InputRevision = snapshot.InputRevision
-	batch.Scope = cloneProducerValue(snapshot.Scope)
-	batch.WatchHints = slices.Clone(snapshot.WatchHints)
+	batch.InputRevision = generation.inputRevision
+	batch.Scope = cloneProducerValue(generation.scope)
+	batch.WatchHints = slices.Clone(generation.watchHints)
 	return batch, nil
 }
 
@@ -239,12 +245,13 @@ func (b *Backend) Close() error {
 // new extraction, whose own validation covers the new inputs. The prior
 // snapshot only supplies tracking keys whose captured source bytes still match.
 func (b *Backend) generation(ctx context.Context, repoRoot, workspaceRoot string, relations []string) (*producerGeneration, error) {
+	var total validationStats
+	defer func() { printValidationTrace(total) }()
 	var previousSnapshot *lintaiapi.Snapshot
-	var previousValidation *lintaiapi.InputValidation
 	if b.current != nil && b.current.repoRoot == repoRoot && b.current.workspaceRoot == workspaceRoot {
 		previousSnapshot = b.current.snapshot
 		if slices.Equal(relations, b.current.relations) {
-			valid, validation, err := previousSnapshot.Validity.Validate(ctx)
+			valid, err := b.validateGeneration(ctx, b.current, &total)
 			if err != nil {
 				b.current = nil
 				return nil, err
@@ -252,21 +259,23 @@ func (b *Backend) generation(ctx context.Context, repoRoot, workspaceRoot string
 			if valid {
 				return b.current, nil
 			}
-			previousValidation = validation
 		}
 	}
 	b.current = nil
-	snapshot, sources, _, err := b.extractSnapshot(ctx, workspaceRoot, relations, previousSnapshot, previousValidation)
+	generation, sources, err := b.extractSnapshot(ctx, workspaceRoot, relations, previousSnapshot, &total)
 	if err != nil {
 		return nil, err
 	}
+	snapshot := generation.snapshot
 	adjustments := convertAdjustments(workspaceRoot, snapshot.ConfigAdjustments)
 	b.reportAdjustments(adjustments)
 	items, err := factsFromSnapshot(snapshot, sources, adjustments, b.namespace)
 	if err != nil {
 		return nil, err
 	}
-	b.current = &producerGeneration{repoRoot: repoRoot, workspaceRoot: workspaceRoot, relations: slices.Clone(relations), snapshot: snapshot, items: items}
+	generation.repoRoot, generation.workspaceRoot = repoRoot, workspaceRoot
+	generation.relations, generation.items = slices.Clone(relations), items
+	b.current = generation
 	return b.current, nil
 }
 
@@ -291,35 +300,6 @@ func cloneProducerValue(value any) any {
 	default:
 		return value
 	}
-}
-
-func (b *Backend) extractSnapshot(ctx context.Context, workspaceRoot string, relations []string, previousSnapshot *lintaiapi.Snapshot, previousValidation *lintaiapi.InputValidation) (*lintaiapi.Snapshot, []ambient.Source, string, error) {
-	options := b.settings
-	scope, err := ParseFileScope(string(options.Files))
-	if err != nil {
-		return nil, nil, "", err
-	}
-	sources := ambient.Builtin()
-	scopeOptions := workspace.ScopeOptions{
-		Exclude: options.WorkspaceExcludes, Include: options.Includes,
-		Sources: options.Sources, InvocationExclude: options.Excludes,
-	}
-	extracted, err := lintaiapi.BuildSnapshotReusingTracking(ctx, lintaiapi.BuildSnapshotRequest{
-		WorkspaceRoot:      workspaceRoot,
-		ScopeOptions:       &scopeOptions,
-		ConfigPath:         options.ConfigPath,
-		ConfigDigest:       options.ConfigDigest,
-		ConfigPresent:      options.ConfigPresent,
-		SourceLinks:        options.SourceLinks,
-		AmbientMatchers:    convertAmbientMatchers(sources),
-		RequestedRelations: relations,
-		PreviousValidation: previousValidation,
-		TsconfigFiles:      scope == FileScopeTsconfig,
-	}, previousSnapshot)
-	if err != nil {
-		return nil, nil, "", err
-	}
-	return extracted, sources, extracted.InputRevision, nil
 }
 
 func sortedUnique(values []string) []string {
