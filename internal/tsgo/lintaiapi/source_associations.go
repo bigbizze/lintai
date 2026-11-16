@@ -303,6 +303,7 @@ func (e *extractor) applyConfiguredSourceEntries(entries []configuredSourceEntry
 			e.sourceBindingFacts = append(e.sourceBindingFacts, item)
 		}
 		if sourceOutcome == "" {
+			sourceProgram.ex.recoverRetainedDeclarationMaps()
 			e.sourceProgramDeclarations = append(e.sourceProgramDeclarations, sourceProgram.ex.sortedDeclarations()...)
 			e.declarationSourceCandidates = append(e.declarationSourceCandidates, sourceProgram.ex.declarationSourceCandidates...)
 			e.declarationSources = append(e.declarationSources, sourceProgram.ex.declarationSources...)

@@ -10,11 +10,7 @@ import (
 
 	"codeberg.org/TauCeti/mangle-go/ast"
 	"codeberg.org/TauCeti/mangle-go/factstore"
-	"codeberg.org/TauCeti/mangle-go/parse"
-	"codeberg.org/TauCeti/mangle-go/symbols"
 )
-
-const LocationRelation = "location"
 
 type ValueKind uint8
 
@@ -49,83 +45,10 @@ type Fact struct {
 	Values   []Value
 }
 
-// Schema contains the backend's base relation declarations and derived-fact
-// prelude. Keeping these with the snapshot lets independently developed
-// backends define their own vocabularies.
+// Schema contains a producer's base relation declarations and derived-fact prelude.
 type Schema struct {
 	Declarations string
 	Prelude      string
-}
-
-// Snapshot is a deterministic, versioned set of backend facts.
-type Snapshot struct {
-	Version       string
-	InputRevision string
-	Scope         any
-	Schema        Schema
-	Facts         []Fact
-	// InputPaths are additional workspace dependencies whose changes may
-	// alter extracted facts, including paths that were absent at extraction.
-	InputPaths []string
-	WatchHints []string
-}
-
-// Validate checks that a snapshot has a versioned schema and that every fact
-// matches a declared base relation.
-func Validate(snapshot Snapshot) error {
-	if snapshot.Version == "" {
-		return fmt.Errorf("backend snapshot version is required")
-	}
-	decls, _, err := ParseSchema(snapshot.Schema)
-	if err != nil {
-		return err
-	}
-	if _, ok := decls[ast.PredicateSym{Symbol: LocationRelation, Arity: 6}]; !ok {
-		return fmt.Errorf("backend schema must declare %s/6", LocationRelation)
-	}
-	for _, fact := range snapshot.Facts {
-		sym := ast.PredicateSym{Symbol: fact.Relation, Arity: len(fact.Values)}
-		_, ok := decls[sym]
-		if !ok {
-			return fmt.Errorf("backend fact uses undeclared relation or wrong arity: %s/%d", fact.Relation, len(fact.Values))
-		}
-		for _, value := range fact.Values {
-			if _, err := value.constant(); err != nil {
-				return fmt.Errorf("backend fact %s: %w", fact.Relation, err)
-			}
-		}
-		if fact.Relation == LocationRelation && !validLocation(fact.Values) {
-			return fmt.Errorf("backend %s facts must use string entity and file values followed by four numbers", LocationRelation)
-		}
-	}
-	return nil
-}
-
-func validLocation(values []Value) bool {
-	return len(values) == 6 &&
-		values[0].Kind == StringKind && values[1].Kind == StringKind &&
-		values[2].Kind == NumberKind && values[3].Kind == NumberKind &&
-		values[4].Kind == NumberKind && values[5].Kind == NumberKind
-}
-
-// ParseSchema parses declarations and prelude supplied by a backend.
-func ParseSchema(schema Schema) (map[ast.PredicateSym]ast.Decl, parse.SourceUnit, error) {
-	declarations, err := parse.Unit(strings.NewReader(schema.Declarations))
-	if err != nil {
-		return nil, parse.SourceUnit{}, fmt.Errorf("backend declarations: %w", err)
-	}
-	prelude, err := parse.Unit(strings.NewReader(schema.Prelude))
-	if err != nil {
-		return nil, parse.SourceUnit{}, fmt.Errorf("backend prelude: %w", err)
-	}
-	decls := make(map[ast.PredicateSym]ast.Decl)
-	for _, decl := range declarations.Decls {
-		if decl.DeclaredAtom.Predicate == symbols.Package || decl.DeclaredAtom.Predicate == symbols.Use {
-			continue
-		}
-		decls[decl.DeclaredAtom.Predicate] = decl
-	}
-	return decls, prelude, nil
 }
 
 // Store converts generic facts to the Mangle store consumed by the engine.
@@ -143,32 +66,6 @@ func Store(items []Fact) (factstore.ReadOnlyFactStore, error) {
 		store.Add(ast.NewAtom(item.Relation, args...))
 	}
 	return store, nil
-}
-
-// Relations returns the declared base relation names in declaration order.
-func Relations(schema Schema) ([]string, error) {
-	unit, err := parse.Unit(strings.NewReader(schema.Declarations))
-	if err != nil {
-		return nil, fmt.Errorf("backend declarations: %w", err)
-	}
-	result := make([]string, 0, len(unit.Decls))
-	for _, decl := range unit.Decls {
-		if decl.DeclaredAtom.Predicate == symbols.Package || decl.DeclaredAtom.Predicate == symbols.Use {
-			continue
-		}
-		result = append(result, decl.DeclaredAtom.Predicate.Symbol)
-	}
-	return result, nil
-}
-
-// Format renders snapshot facts in sorted Mangle syntax. When relations is
-// empty, every declared base relation is rendered.
-func Format(snapshot Snapshot, relations []string) (string, error) {
-	decls, err := Relations(snapshot.Schema)
-	if err != nil {
-		return "", err
-	}
-	return FormatFacts(snapshot.Facts, decls, relations)
 }
 
 // FormatFacts renders already validated, qualified facts. allowedRelations is

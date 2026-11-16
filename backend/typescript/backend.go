@@ -170,7 +170,7 @@ func (b *Backend) Collect(ctx context.Context, request backend.CollectionRequest
 			}
 		}
 		for _, item := range items {
-			if item.Relation != facts.LocationRelation || len(item.Values) != 6 {
+			if item.Relation != "location" || len(item.Values) != 6 {
 				continue
 			}
 			id := producerEntityIDIn(b.namespace, item.Values[0].String)
@@ -213,26 +213,6 @@ func (b *Backend) Close() error {
 	return nil
 }
 
-// BuildSnapshot extracts the facts of the source files under workspaceRoot.
-func (b *Backend) BuildSnapshot(ctx context.Context, repoRoot, workspaceRoot string) (facts.Snapshot, error) {
-	b.collectMu.Lock()
-	defer b.collectMu.Unlock()
-	generation, err := b.generation(ctx, repoRoot, workspaceRoot, nil)
-	if err != nil {
-		return facts.Snapshot{}, err
-	}
-	snapshot := generation.snapshot
-	items := make([]facts.Fact, len(generation.items))
-	for index, item := range generation.items {
-		items[index] = facts.Fact{Relation: item.Relation, Values: slices.Clone(item.Values)}
-	}
-	inputPaths := make([]string, 0, len(snapshot.Inputs))
-	for _, input := range snapshot.Inputs {
-		inputPaths = append(inputPaths, input.Path)
-	}
-	return facts.Snapshot{Version: snapshot.InputRevision, InputRevision: snapshot.InputRevision, Scope: cloneProducerValue(snapshot.Scope), Schema: Schema(), Facts: items, InputPaths: inputPaths, WatchHints: slices.Clone(snapshot.WatchHints)}, nil
-}
-
 // generation is called with collectMu held. A changed relation demand needs a
 // new extraction, whose own validation covers the new inputs. The prior
 // snapshot only supplies tracking keys whose captured source bytes still match.
@@ -241,7 +221,7 @@ func (b *Backend) generation(ctx context.Context, repoRoot, workspaceRoot string
 	var previousValidation *lintaiapi.InputValidation
 	if b.current != nil && b.current.repoRoot == repoRoot && b.current.workspaceRoot == workspaceRoot {
 		previousSnapshot = b.current.snapshot
-		if (relations == nil) == (b.current.relations == nil) && slices.Equal(relations, b.current.relations) {
+		if slices.Equal(relations, b.current.relations) {
 			valid, validation, err := previousSnapshot.Validity.Validate(ctx)
 			if err != nil {
 				b.current = nil
@@ -289,12 +269,6 @@ func cloneProducerValue(value any) any {
 	default:
 		return value
 	}
-}
-
-func (b *Backend) buildLintaiSnapshot(ctx context.Context, repoRoot, workspaceRoot string) (*lintaiapi.Snapshot, []ambient.Source, string, error) {
-	b.collectMu.Lock()
-	defer b.collectMu.Unlock()
-	return b.extractSnapshot(ctx, workspaceRoot, nil, nil, nil)
 }
 
 func (b *Backend) extractSnapshot(ctx context.Context, workspaceRoot string, relations []string, previousSnapshot *lintaiapi.Snapshot, previousValidation *lintaiapi.InputValidation) (*lintaiapi.Snapshot, []ambient.Source, string, error) {

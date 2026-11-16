@@ -73,7 +73,7 @@ func qualifyTestFacts(t *testing.T, items []facts.Fact) ([]facts.Fact, map[strin
 			}
 		}
 		qualified[i] = facts.Fact{Relation: name, Values: row}
-		if item.Relation == facts.LocationRelation && len(row) == 6 {
+		if item.Relation == "location" && len(row) == 6 {
 			id := row[0].String
 			anchors[id] = facts.AnchorSupport{
 				Location:    diagnostics.SourceLocation{File: row[1].String, StartLine: int(row[2].Number), StartColumn: int(row[3].Number), EndLine: int(row[4].Number), EndColumn: int(row[5].Number)},

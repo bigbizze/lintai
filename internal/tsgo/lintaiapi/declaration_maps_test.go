@@ -223,7 +223,11 @@ func TestDeclarationMapReusesFilesAndSharedMap(t *testing.T) {
 	fs.mu.Lock()
 	fs.reads = make(map[string]int) // Count recovery, after program construction.
 	fs.mu.Unlock()
-	e := &extractor{workspaceRoot: root, host: host, program: program, declarations: make(map[string]*DeclarationFact)}
+	e := &extractor{workspaceRoot: root, host: host, program: program, declarations: make(map[string]*DeclarationFact), operations: semanticOperations{sourceRecovery: true}}
+	firstDeclaration := first.Statements.Nodes[0]
+	if _, _, ok := e.addDeclarationMetadata(firstDeclaration, nil, firstDeclaration.Name().Text()); !ok || e.declarationMaps != nil {
+		t.Fatal("declaration metadata registration performed map recovery")
+	}
 	firstIDs := make(map[string]bool, count)
 	for _, node := range first.Statements.Nodes {
 		firstIDs[e.declarationID(node)] = true

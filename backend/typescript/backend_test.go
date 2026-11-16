@@ -15,12 +15,38 @@ import (
 	"github.com/bigbizze/lintai/backend"
 	"github.com/bigbizze/lintai/engine"
 	"github.com/bigbizze/lintai/facts"
+	"github.com/bigbizze/lintai/internal/ambient"
 	"github.com/bigbizze/lintai/internal/tsgo/lintaiapi"
 	"github.com/bigbizze/lintai/internal/workspace"
 )
 
 func hasSnapshotInput(snapshot *lintaiapi.Snapshot, path string) bool {
 	return slices.ContainsFunc(snapshot.Inputs, func(input lintaiapi.SnapshotInput) bool { return input.Path == path })
+}
+
+// Inspect the retained producer generation after collecting and validating the
+// complete public relation set. Observation tests use its local projection.
+func (b *Backend) buildTestGeneration(ctx context.Context, repoRoot, workspaceRoot string) (*producerGeneration, error) {
+	description, err := b.Describe()
+	if err != nil {
+		return nil, err
+	}
+	predicates := make([]facts.Predicate, 0, len(description.BaseRelations))
+	for _, relation := range description.BaseRelations {
+		predicates = append(predicates, relation.Predicate)
+	}
+	batch, err := b.Collect(ctx, backend.CollectionRequest{RepoRoot: repoRoot, WorkspaceRoot: workspaceRoot, Predicates: predicates})
+	if err != nil {
+		return nil, err
+	}
+	if _, err := facts.ValidateBatch(description, predicates, batch); err != nil {
+		return nil, err
+	}
+	return b.current, nil
+}
+
+func (b *Backend) buildLintaiSnapshot(ctx context.Context, repoRoot, workspaceRoot string) (*lintaiapi.Snapshot, []ambient.Source, string, error) {
+	return b.extractSnapshot(ctx, workspaceRoot, nil, nil, nil)
 }
 
 // V04, V09, V10: relation demand must preserve rows and eligible reporting
@@ -251,12 +277,12 @@ func TestExactSourceAndExcludedGlobalUseOneProductionScope(t *testing.T) {
 		Files: FileScopeTsconfig, WorkspaceExcludes: []string{"src/globals.ts", "src/extra.ts"},
 		Sources: []string{"src/extra.ts"},
 	}
-	snapshot, err := New(options).BuildSnapshot(context.Background(), root, root)
+	snapshot, err := New(options).buildTestGeneration(context.Background(), root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	modules := make([]string, 0)
-	for _, fact := range snapshot.Facts {
+	for _, fact := range snapshot.items {
 		if fact.Relation == "module_path" {
 			modules = append(modules, fact.Values[1].String)
 		}
@@ -266,28 +292,28 @@ func TestExactSourceAndExcludedGlobalUseOneProductionScope(t *testing.T) {
 		t.Fatalf("exact and ordinary primary modules = %v", modules)
 	}
 	var readID, returnType string
-	for _, fact := range snapshot.Facts {
+	for _, fact := range snapshot.items {
 		if fact.Relation == "fn" && fact.Values[2].String == "read" {
 			readID = fact.Values[0].String
 		}
 	}
 	var signature string
-	for _, fact := range snapshot.Facts {
+	for _, fact := range snapshot.items {
 		if fact.Relation == "fn_signature" && fact.Values[0].String == readID {
 			signature = fact.Values[1].String
 		}
 	}
-	for _, fact := range snapshot.Facts {
+	for _, fact := range snapshot.items {
 		if fact.Relation == "signature_returns" && fact.Values[0].String == signature {
 			returnType = fact.Values[1].String
 		}
 	}
-	if readID == "" || !slices.ContainsFunc(snapshot.Facts, func(fact facts.Fact) bool {
+	if readID == "" || !slices.ContainsFunc(snapshot.items, func(fact facts.Fact) bool {
 		return fact.Relation == "type_kind" && fact.Values[0].String == returnType && fact.Values[1].String == "string"
 	}) {
 		t.Fatalf("excluded global declaration did not affect selected code's inferred return type")
 	}
-	if !slices.Contains(snapshot.InputPaths, filepath.Join(root, "src/globals.ts")) {
+	if !hasSnapshotInput(snapshot.snapshot, filepath.Join(root, "src/globals.ts")) {
 		t.Fatal("compiler-read excluded global was absent from captured dependency inputs")
 	}
 	scopeOptions := workspace.ScopeOptions{Exclude: options.WorkspaceExcludes, Sources: options.Sources}
@@ -328,21 +354,18 @@ class Escaping { value = [1].map(effect); }
 export function passing() { effect(kept); }
 `
 	writeWorkspaceFile(t, root, "src/main.ts", mainSource)
-	build := func(scope FileScope) facts.Snapshot {
+	build := func(scope FileScope) *producerGeneration {
 		t.Helper()
-		snapshot, err := New(Options{Files: scope}).BuildSnapshot(context.Background(), root, root)
+		snapshot, err := New(Options{Files: scope}).buildTestGeneration(context.Background(), root, root)
 		if err != nil {
-			t.Fatal(err)
-		}
-		if err := facts.Validate(snapshot); err != nil {
 			t.Fatal(err)
 		}
 		return snapshot
 	}
 	walk, filtered := build(FileScopeWalk), build(FileScopeTsconfig)
-	index := func(snapshot facts.Snapshot) map[string]map[string]facts.Fact {
+	index := func(snapshot *producerGeneration) map[string]map[string]facts.Fact {
 		result := make(map[string]map[string]facts.Fact)
-		for _, fact := range snapshot.Facts {
+		for _, fact := range snapshot.items {
 			if result[fact.Relation] == nil {
 				result[fact.Relation] = make(map[string]facts.Fact)
 			}
@@ -351,8 +374,8 @@ export function passing() { effect(kept); }
 		return result
 	}
 	before, after := index(walk), index(filtered)
-	findFunction := func(snapshot facts.Snapshot, file, name string) string {
-		for _, fact := range snapshot.Facts {
+	findFunction := func(snapshot *producerGeneration, file, name string) string {
+		for _, fact := range snapshot.items {
 			if fact.Relation == "fn" && fact.Values[1].String == file && fact.Values[2].String == name {
 				return fact.Values[0].String
 			}
@@ -481,13 +504,13 @@ export function run(callback: (n: number) => number, loose: any, callbacks: Arra
   accept(notDeclared.property);
 }
 `)
-	snapshot, err := New(Options{Files: FileScopeWalk}).BuildSnapshot(context.Background(), root, root)
+	snapshot, err := New(Options{Files: FileScopeWalk}).buildTestGeneration(context.Background(), root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	locations := make(map[string]int)
 	functions := make(map[string]string)
-	for _, item := range snapshot.Facts {
+	for _, item := range snapshot.items {
 		switch item.Relation {
 		case "location":
 			if item.Values[1].String == "src/main.ts" {
@@ -503,7 +526,7 @@ export function run(callback: (n: number) => number, loose: any, callbacks: Arra
 	call := make(map[string]bool)
 	provenance := make(map[string]bool)
 	references := make(map[string]string)
-	for _, item := range snapshot.Facts {
+	for _, item := range snapshot.items {
 		site := item.Values[0].String
 		switch item.Relation {
 		case "fn_value_escape":
@@ -566,25 +589,26 @@ func TestCapturedInputRevisionIgnoresAbsoluteRoot(t *testing.T) {
 	options := func(path string) Options {
 		return Options{Files: FileScopeWalk, ConfigPath: path, ConfigPresent: true, ConfigDigest: hex.EncodeToString(configDigest[:])}
 	}
-	left, err := New(options(configOne)).BuildSnapshot(context.Background(), rootOne, rootOne)
+	left, err := New(options(configOne)).buildTestGeneration(context.Background(), rootOne, rootOne)
 	if err != nil {
 		t.Fatal(err)
 	}
-	right, err := New(options(configTwo)).BuildSnapshot(context.Background(), rootTwo, rootTwo)
+	right, err := New(options(configTwo)).buildTestGeneration(context.Background(), rootTwo, rootTwo)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if left.InputRevision != right.InputRevision {
-		t.Fatalf("expected stable input revision across roots, got %q != %q", left.InputRevision, right.InputRevision)
+	if left.snapshot.InputRevision != right.snapshot.InputRevision {
+		t.Fatalf("expected stable input revision across roots, got %q != %q", left.snapshot.InputRevision, right.snapshot.InputRevision)
 	}
-	if !slices.Contains(left.InputPaths, configOne) || !slices.Contains(right.InputPaths, configTwo) {
-		t.Fatalf("lintai.toml was missing from producer input evidence: left=%v right=%v", left.InputPaths, right.InputPaths)
+	if !hasSnapshotInput(left.snapshot, configOne) || !hasSnapshotInput(right.snapshot, configTwo) {
+		t.Fatalf("lintai.toml was missing from producer input evidence: left=%v right=%v", left.snapshot.Inputs, right.snapshot.Inputs)
 	}
-	for _, snapshot := range []facts.Snapshot{left, right} {
-		seen := make(map[string]struct{}, len(snapshot.InputPaths))
-		for _, path := range snapshot.InputPaths {
+	for _, snapshot := range []*producerGeneration{left, right} {
+		seen := make(map[string]struct{}, len(snapshot.snapshot.Inputs))
+		for _, input := range snapshot.snapshot.Inputs {
+			path := input.Path
 			if _, exists := seen[path]; exists {
-				t.Fatalf("captured input %q was published more than once: %v", path, snapshot.InputPaths)
+				t.Fatalf("captured input %q was published more than once: %v", path, snapshot.snapshot.Inputs)
 			}
 			seen[path] = struct{}{}
 		}
@@ -604,27 +628,27 @@ func TestSymlinkedWorkspaceRootKeepsScopeAndIdentity(t *testing.T) {
 		t.Skipf("symlinks are unavailable: %v", err)
 	}
 	options := Options{Files: FileScopeTsconfig, Sources: []string{"src/a.ts"}, SourceLinks: filepath.Join(root, "source-links.json")}
-	realSnapshot, err := New(options).BuildSnapshot(context.Background(), root, root)
+	realSnapshot, err := New(options).buildTestGeneration(context.Background(), root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	options.SourceLinks = filepath.Join(alias, "source-links.json")
-	aliasSnapshot, err := New(options).BuildSnapshot(context.Background(), alias, alias)
+	aliasSnapshot, err := New(options).buildTestGeneration(context.Background(), alias, alias)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if realSnapshot.InputRevision != aliasSnapshot.InputRevision || !reflect.DeepEqual(realSnapshot.Scope, aliasSnapshot.Scope) {
-		t.Fatalf("symlinked root changed scope or input revision: %q != %q", realSnapshot.InputRevision, aliasSnapshot.InputRevision)
+	if realSnapshot.snapshot.InputRevision != aliasSnapshot.snapshot.InputRevision || !reflect.DeepEqual(realSnapshot.snapshot.Scope, aliasSnapshot.snapshot.Scope) {
+		t.Fatalf("symlinked root changed scope or input revision: %q != %q", realSnapshot.snapshot.InputRevision, aliasSnapshot.snapshot.InputRevision)
 	}
-	if len(realSnapshot.Facts) != len(aliasSnapshot.Facts) {
-		t.Fatalf("symlinked root changed fact count: %d != %d", len(realSnapshot.Facts), len(aliasSnapshot.Facts))
+	if len(realSnapshot.items) != len(aliasSnapshot.items) {
+		t.Fatalf("symlinked root changed fact count: %d != %d", len(realSnapshot.items), len(aliasSnapshot.items))
 	}
-	for _, fact := range realSnapshot.Facts {
-		if !slices.ContainsFunc(aliasSnapshot.Facts, func(other facts.Fact) bool { return reflect.DeepEqual(fact, other) }) {
+	for _, fact := range realSnapshot.items {
+		if !slices.ContainsFunc(aliasSnapshot.items, func(other facts.Fact) bool { return reflect.DeepEqual(fact, other) }) {
 			t.Fatalf("symlinked root lost fact: %+v", fact)
 		}
 	}
-	if !slices.ContainsFunc(aliasSnapshot.Facts, func(fact facts.Fact) bool {
+	if !slices.ContainsFunc(aliasSnapshot.items, func(fact facts.Fact) bool {
 		return fact.Relation == "module_path" && len(fact.Values) > 1 && fact.Values[1].String == "src/a.ts"
 	}) {
 		t.Fatal("symlinked root did not produce the workspace-relative module path")
@@ -642,8 +666,8 @@ func TestSymlinkedWorkspaceRootKeepsScopeAndIdentity(t *testing.T) {
 	if got := workspace.RelativePath(alias, filepath.Join(root, "src/a.ts")); got != "src/a.ts" {
 		t.Fatalf("relative path from symlinked root = %q", got)
 	}
-	if !slices.Contains(aliasSnapshot.InputPaths, filepath.Join(alias, "src/a.ts")) {
-		t.Fatalf("symlinked root input paths = %v", aliasSnapshot.InputPaths)
+	if !hasSnapshotInput(aliasSnapshot.snapshot, filepath.Join(alias, "src/a.ts")) {
+		t.Fatalf("symlinked root input paths = %v", aliasSnapshot.snapshot.Inputs)
 	}
 	plan, err := workspace.PlanSources(alias, workspace.ScopeOptions{Sources: []string{filepath.Join(alias, "src/a.ts")}})
 	if err != nil {
@@ -749,9 +773,9 @@ func TestMetadataPreservingInputEditChangesCapturedRevision(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	file := writeWorkspaceFile(t, root, "src/main.ts", "export const value = 1;\n")
-	build := func() facts.Snapshot {
+	build := func() *producerGeneration {
 		t.Helper()
-		result, err := New(Options{Files: FileScopeWalk}).BuildSnapshot(context.Background(), root, root)
+		result, err := New(Options{Files: FileScopeWalk}).buildTestGeneration(context.Background(), root, root)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -773,13 +797,13 @@ func TestMetadataPreservingInputEditChangesCapturedRevision(t *testing.T) {
 		t.Fatal(err)
 	}
 	after := build()
-	if before.InputRevision == after.InputRevision {
-		t.Fatalf("metadata-preserving content edit kept revision %q", before.InputRevision)
+	if before.snapshot.InputRevision == after.snapshot.InputRevision {
+		t.Fatalf("metadata-preserving content edit kept revision %q", before.snapshot.InputRevision)
 	}
 	if !info.ModTime().Equal(updatedInfo.ModTime()) {
 		t.Fatal("test edit did not preserve the file modification time")
 	}
-	if after.InputRevision == "" {
+	if after.snapshot.InputRevision == "" {
 		t.Fatal("captured input revision was empty")
 	}
 }
@@ -837,14 +861,14 @@ func TestSourceLinksFactsKeepUnappliedEntriesVisible(t *testing.T) {
 		{"checkedEntry":"dist/index.d.ts","sourceEntry":"src/source.ts"},
 		{"checkedEntry":"unused/dist/index.d.ts","sourceEntry":"unused/src/index.ts"}
 	]}`)
-	snapshot, err := New(Options{Files: FileScopeTsconfig, SourceLinks: "source-links.json"}).BuildSnapshot(context.Background(), root, root)
+	snapshot, err := New(Options{Files: FileScopeTsconfig, SourceLinks: "source-links.json"}).buildTestGeneration(context.Background(), root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	entries := make(map[string]string)
 	statuses := make(map[string][]string)
 	attempts := make(map[string]int)
-	for _, fact := range snapshot.Facts {
+	for _, fact := range snapshot.items {
 		switch fact.Relation {
 		case "source_entry":
 			entries[fact.Values[1].String] = fact.Values[0].String
@@ -1173,19 +1197,19 @@ export const mapped = [1].map((n) => n);`,
 	for path, text := range files {
 		writeWorkspaceFile(t, root, path, text)
 	}
-	snapshot, err := New(Options{Files: FileScopeTsconfig}).BuildSnapshot(context.Background(), root, root)
+	snapshot, err := New(Options{Files: FileScopeTsconfig}).buildTestGeneration(context.Background(), root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var function string
-	for _, fact := range snapshot.Facts {
+	for _, fact := range snapshot.items {
 		if fact.Relation == "fn" && fact.Values[1].String == "shared/api.ts" && fact.Values[2].String == "parse" {
 			function = fact.Values[0].String
 		}
 	}
 	signatures := make(map[string]bool)
 	params, returns := make(map[string]string), make(map[string]string)
-	for _, fact := range snapshot.Facts {
+	for _, fact := range snapshot.items {
 		switch fact.Relation {
 		case "fn_signature":
 			if fact.Values[0].String == function {
@@ -1213,14 +1237,14 @@ export const mapped = [1].map((n) => n);`,
 		t.Fatalf("fixture did not produce differing signatures: %v", seen)
 	}
 	byName := make(map[string]string)
-	for _, fact := range snapshot.Facts {
+	for _, fact := range snapshot.items {
 		if fact.Relation == "fn" && fact.Values[1].String == "shared/api.ts" {
 			byName[fact.Values[2].String] = fact.Values[0].String
 		}
 	}
 	var zeroSignature, markedSignature string
 	var omitted bool
-	for _, fact := range snapshot.Facts {
+	for _, fact := range snapshot.items {
 		switch fact.Relation {
 		case "fn_signature":
 			switch fact.Values[0].String {
@@ -1238,7 +1262,7 @@ export const mapped = [1].map((n) => n);`,
 		}
 	}
 	has := func(relation, signature string, position int64) bool {
-		return slices.ContainsFunc(snapshot.Facts, func(fact facts.Fact) bool {
+		return slices.ContainsFunc(snapshot.items, func(fact facts.Fact) bool {
 			return fact.Relation == relation && fact.Values[0].String == signature && fact.Values[1].Number == position
 		})
 	}
