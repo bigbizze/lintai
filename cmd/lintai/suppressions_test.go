@@ -26,7 +26,7 @@ func TestSuppressionLifecycle(t *testing.T) {
 	workspace := t.TempDir()
 	writeFiles(t, workspace, map[string]string{
 		"src/a.ts":                 "export async function first() { return 1; }\n",
-		"lintai-rules/no-async.ts": "import { dl, rule } from '@lintai/sdk';\nexport default rule('no-async').version(1).program(dl`Decl v(Fn). v(Fn) :- fn_async(Fn).`).report('v').message(() => 'no async');\n",
+		"lintai-rules/no-async.ts": "import { dl, rule } from '@lintai/sdk';\nexport default rule('no-async').version(1).program(dl`Decl v(Fn). v(Fn) :- ts.fn_async(Fn).`).report('v').message(() => 'no async');\n",
 	})
 	args := []string{"--json", "--workspace-root", workspace, "--repo-root", repoRoot}
 	check := func(want int, flags ...string) []diagnostics.Diagnostic {
@@ -114,7 +114,7 @@ func TestSuppressionLockLimits(t *testing.T) {
 	workspace := t.TempDir()
 	writeFiles(t, workspace, map[string]string{
 		"src/a.ts":                 "export async function first() { return 1; }\n",
-		"lintai-rules/no-async.ts": "import { dl, rule } from '@lintai/sdk';\nexport default rule('no-async').version(1).program(dl`Decl v(Fn). v(Fn) :- fn_async(Fn).`).report('v').message(() => 'no async');\n",
+		"lintai-rules/no-async.ts": "import { dl, rule } from '@lintai/sdk';\nexport default rule('no-async').version(1).program(dl`Decl v(Fn). v(Fn) :- ts.fn_async(Fn).`).report('v').message(() => 'no async');\n",
 	})
 	args := []string{"--json", "--workspace-root", workspace, "--repo-root", repoRoot}
 	if code, items := runCode(t, append(append([]string{}, args...), "--suppress-all")); code != exitClean {
@@ -212,7 +212,7 @@ func TestSuppressionsRespectFileAndRuleSelection(t *testing.T) {
 		"src/a.ts":                 "export const a = 1;\n",
 		"src/b.ts":                 "export const b = 1;\n",
 		"tsconfig.json":            `{"files":["src/a.ts"]}`,
-		"lintai-rules/no-async.ts": "import { dl, rule } from '@lintai/sdk';\nexport default rule('no-async').version(1).program(dl`Decl v(Fn). v(Fn) :- fn_async(Fn).`).report('v').message(() => 'no async');\n",
+		"lintai-rules/no-async.ts": "import { dl, rule } from '@lintai/sdk';\nexport default rule('no-async').version(1).program(dl`Decl v(Fn). v(Fn) :- ts.fn_async(Fn).`).report('v').message(() => 'no async');\n",
 		suppressions.DefaultFile:   `{"src/b.ts":{"no-async":{"count":1}},"src/a.ts":{"unselected":{"count":1}}}`,
 	})
 	args := []string{"--json", "--workspace-root", workspace, "--repo-root", repoRoot, "--rules", "lintai-rules/no-async.ts"}
@@ -265,7 +265,7 @@ func TestUnknownSuppressRuleWritesNothing(t *testing.T) {
 	workspace := t.TempDir()
 	writeFiles(t, workspace, map[string]string{
 		"src/a.ts":                 "export async function first() { return 1; }\n",
-		"lintai-rules/no-async.ts": "import { dl, rule } from '@lintai/sdk';\nexport default rule('no-async').version(1).program(dl`Decl v(Fn). v(Fn) :- fn_async(Fn).`).report('v').message(() => 'no async');\n",
+		"lintai-rules/no-async.ts": "import { dl, rule } from '@lintai/sdk';\nexport default rule('no-async').version(1).program(dl`Decl v(Fn). v(Fn) :- ts.fn_async(Fn).`).report('v').message(() => 'no async');\n",
 	})
 	code, items := runCode(t, []string{"--json", "--workspace-root", workspace, "--repo-root", repoRoot, "--suppress-rule", "no-async", "--suppress-rule", "no-asnyc"})
 	if code != exitRuleError {

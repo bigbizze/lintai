@@ -9,7 +9,6 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/bigbizze/lintai/backend"
 	"github.com/bigbizze/lintai/bundle"
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/engine"
@@ -29,8 +28,11 @@ type Analyzer interface {
 	Analyze(ctx context.Context, options engine.Options) (engine.Result, error)
 }
 
+type AnalyzerFactory func(InitializeParams) Analyzer
+
 type Server struct {
-	engine Analyzer
+	engine  Analyzer
+	factory AnalyzerFactory
 
 	mu                sync.RWMutex
 	diagnostics       []diagnostics.Diagnostic
@@ -92,6 +94,13 @@ type FileDiagnosticsResult struct {
 func New(selectedEngine Analyzer) *Server {
 	return &Server{
 		engine:            selectedEngine,
+		diagnosticsByFile: make(map[string][]diagnostics.Diagnostic),
+	}
+}
+
+func NewWithFactory(factory AnalyzerFactory) *Server {
+	return &Server{
+		factory:           factory,
 		diagnosticsByFile: make(map[string][]diagnostics.Diagnostic),
 	}
 }
@@ -176,10 +185,6 @@ func (s *Server) handleInitialize(ctx context.Context, rawParams json.RawMessage
 	if params.Env == nil {
 		params.Env = map[string]any{}
 	}
-	scope, err := backend.ParseFileScope(params.Files)
-	if err != nil {
-		return AnalysisResult{}, err
-	}
 	ruleSeverity := make(map[string]diagnostics.Severity, len(params.Severity))
 	for ruleID, level := range params.Severity {
 		severity, err := diagnostics.ParseSeverity(level)
@@ -197,9 +202,6 @@ func (s *Server) handleInitialize(ctx context.Context, rawParams json.RawMessage
 		AssetRoot:     params.AssetRoot,
 		WorkspaceRoot: params.WorkspaceRoot,
 		RuleGlobs:     append([]string(nil), params.RuleGlobs...),
-		Excludes:      append([]string(nil), params.Excludes...),
-		Files:         scope,
-		SourceLinks:   params.SourceLinks,
 		Env:           params.Env,
 		Severity:      diagnostics.SeverityError,
 		RuleSeverity:  ruleSeverity,
@@ -212,6 +214,9 @@ func (s *Server) handleInitialize(ctx context.Context, rawParams json.RawMessage
 	}
 	s.mu.Lock()
 	s.options = options
+	if s.factory != nil {
+		s.engine = s.factory(params)
+	}
 	s.initialized = true
 	s.analysisValid = false
 	s.diagnostics = nil

@@ -9,7 +9,6 @@ import (
 	"strings"
 
 	"github.com/bigbizze/lintai/diagnostics"
-	"github.com/bigbizze/lintai/facts"
 	"github.com/bigbizze/lintai/suppressions"
 )
 
@@ -29,7 +28,7 @@ type runInfo struct {
 	// lock, so known has every rule id.
 	complete        bool
 	snapshotVersion string
-	backendID       string
+	producerNames   []string
 }
 
 // suppressionsState is the suppressions file that a run reads.
@@ -72,18 +71,6 @@ func loadSuppressions(options Options) (suppressionsState, error) {
 	default:
 		return suppressionsState{}, err
 	}
-}
-
-// snapshotFiles returns the files that have location facts.
-func snapshotFiles(snapshot facts.Snapshot) map[string]struct{} {
-	files := make(map[string]struct{})
-	for _, fact := range snapshot.Facts {
-		if fact.Relation != facts.LocationRelation || len(fact.Values) < 2 {
-			continue
-		}
-		files[suppressions.NormalizePath(fact.Values[1].String)] = struct{}{}
-	}
-	return files
 }
 
 // applySuppressions records or prunes suppressions when options ask for it,
@@ -149,7 +136,7 @@ func applySuppressions(options Options, state suppressionsState, run runInfo, re
 	if run.lock != nil {
 		limited, failures := suppressions.Limit(file, run.lock.Suppressions)
 		for _, failure := range failures {
-			result.Diagnostics = append(result.Diagnostics, errorDiagnostic(failure.RuleID, "integrity", 0, run.snapshotVersion, run.backendID, fmt.Sprintf("%s %s; review the change and run lintai lock", filepath.Base(state.path), failure.Message)))
+			result.Diagnostics = append(result.Diagnostics, errorDiagnostic(failure.RuleID, "integrity", 0, run.snapshotVersion, run.producerNames, fmt.Sprintf("%s %s; review the change and run lintai lock", filepath.Base(state.path), failure.Message)))
 		}
 		file = limited
 	}
@@ -162,7 +149,7 @@ func applySuppressions(options Options, state suppressionsState, run runInfo, re
 	}
 	if !options.PassOnUnprunedSuppressions {
 		for _, unused := range applied.Unused {
-			result.Diagnostics = append(result.Diagnostics, unusedSuppressionDiagnostic(filepath.Base(state.path), unused, run.snapshotVersion, run.backendID))
+			result.Diagnostics = append(result.Diagnostics, unusedSuppressionDiagnostic(filepath.Base(state.path), unused, run.snapshotVersion, run.producerNames))
 		}
 	}
 	sortDiagnostics(result.Diagnostics)
@@ -216,7 +203,7 @@ func unknownSuppressRules(options Options, run runInfo) []diagnostics.Diagnostic
 	sort.Strings(ids)
 	result := make([]diagnostics.Diagnostic, 0, len(ids))
 	for _, ruleID := range ids {
-		result = append(result, errorDiagnostic(ruleID, "config", 0, run.snapshotVersion, run.backendID, fmt.Sprintf("--suppress-rule names rule %q, but no loaded rule has this id", ruleID)))
+		result = append(result, errorDiagnostic(ruleID, "config", 0, run.snapshotVersion, run.producerNames, fmt.Sprintf("--suppress-rule names rule %q, but no loaded rule has this id", ruleID)))
 	}
 	return result
 }
@@ -225,7 +212,7 @@ func unknownSuppressRules(options Options, run runInfo) []diagnostics.Diagnostic
 // that allows more violations than the run found. Its location is line 1 of
 // the file of the entry, so that the linter plugins can show it in that
 // file.
-func unusedSuppressionDiagnostic(fileName string, unused suppressions.Unused, snapshotVersion, backendID string) diagnostics.Diagnostic {
+func unusedSuppressionDiagnostic(fileName string, unused suppressions.Unused, snapshotVersion string, producers []string) diagnostics.Diagnostic {
 	subject := fmt.Sprintf("rule %s in %s", unused.RuleID, unused.File)
 	var identity *diagnostics.EntityIdentity
 	if unused.Entity != "" {
@@ -241,8 +228,8 @@ func unusedSuppressionDiagnostic(fileName string, unused suppressions.Unused, sn
 		SourceLocation: &diagnostics.SourceLocation{File: unused.File, StartLine: 1, StartColumn: 1, EndLine: 1, EndColumn: 1},
 		EntityIdentity: identity,
 		Provenance: diagnostics.Provenance{
-			SnapshotVersion: snapshotVersion,
-			BackendID:       backendID,
+			SnapshotVersion:    snapshotVersion,
+			ProducerNamespaces: append([]string(nil), producers...),
 		},
 	}
 }

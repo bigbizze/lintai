@@ -6,7 +6,6 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/bigbizze/lintai/backend"
 	"github.com/bigbizze/lintai/internal/tsgo/lintaiapi"
 )
 
@@ -51,10 +50,10 @@ func TestSourceConfigInputsInvalidateFailedAssociation(t *testing.T) {
 				writeWorkspaceFile(t, root, "contracts/base.json", test.dependency)
 			}
 			writeWorkspaceFile(t, root, "source-links.json", `{"version":1,"entries":[{"checkedEntry":"contracts/dist/index.d.ts","sourceEntry":"contracts/src/index.ts","sourceTsconfig":"contracts/custom.json"}]}`)
-			options := backend.SnapshotOptions{Files: backend.FileScopeTsconfig, SourceLinks: "source-links.json"}
+			options := Options{Files: FileScopeTsconfig, SourceLinks: "source-links.json"}
 			build := func() (*lintaiapi.Snapshot, string) {
 				t.Helper()
-				snapshot, _, version, err := New().buildLintaiSnapshot(context.Background(), root, root, options)
+				snapshot, _, version, err := New(options).buildLintaiSnapshot(context.Background(), root, root)
 				if err != nil {
 					t.Fatal(err)
 				}

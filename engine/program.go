@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"sort"
 	"strings"
 
@@ -23,12 +24,12 @@ import (
 
 const DefaultFactLimit = 5_000_000
 
-var globSym = ast.PredicateSym{Symbol: "glob", Arity: 2}
+var globSym = ast.PredicateSym{Symbol: "lintai.glob", Arity: 2}
 
 // notGlobSym is the internal predicate that a negated glob premise becomes.
-// Mangle cannot negate an external predicate, so !glob(P, X) is evaluated as
+// Mangle cannot negate an external predicate, so !lintai.glob(P, X) is evaluated as
 // a positive premise that holds when P does not match X.
-var notGlobSym = ast.PredicateSym{Symbol: "lintai:not_glob", Arity: 2}
+var notGlobSym = ast.PredicateSym{Symbol: "lintai.not_glob", Arity: 2}
 
 type phaseError struct {
 	phase string
@@ -56,12 +57,18 @@ type evalOptions struct {
 	explain   bool
 }
 
-func evaluateProgram(base factstore.ReadOnlyFactStore, prelude parse.SourceUnit, schemaDecls map[ast.PredicateSym]ast.Decl, output runtime.ProgramOutput, report, expectNonEmpty []string, options evalOptions) ([]violation, *phaseError) {
+func evaluateProgram(base factstore.ReadOnlyFactStore, catalog []parse.SourceUnit, schemaDecls map[ast.PredicateSym]ast.Decl, anchors map[string]facts.AnchorSupport, reportable map[facts.Predicate]map[string]struct{}, namespaces []string, output runtime.ProgramOutput, report, expectNonEmpty []string, options evalOptions) ([]violation, *phaseError) {
 	unit, err := parse.Unit(strings.NewReader(splitConstantTerminators(output.Text)))
 	if err != nil {
 		return nil, failPhase("program_parse", "%v", err)
 	}
-	if perr := checkReservedPredicates(unit, prelude, schemaDecls); perr != nil {
+	if perr := bindRuleUnit(&unit, output.Text, namespaces); perr != nil {
+		return nil, perr
+	}
+	if perr := rejectUnqualifiedProducerPredicates(unit, schemaDecls); perr != nil {
+		return nil, perr
+	}
+	if perr := checkReservedPredicates(unit, schemaDecls); perr != nil {
 		return nil, perr
 	}
 	ruleFacts, perr := ruleFactStore(unit, output.Facts)
@@ -75,8 +82,9 @@ func evaluateProgram(base factstore.ReadOnlyFactStore, prelude parse.SourceUnit,
 	if perr := checkNegatedWildcards(unit); perr != nil {
 		return nil, perr
 	}
-	prelude = preludeFor(prelude, unit, append(append([]string(nil), report...), expectNonEmpty...))
-	info, err := mangleanalysis.Analyze([]parse.SourceUnit{prelude, unit}, schemaDecls)
+	catalogView, requiredPredicates := catalogForRule(catalog, unit, append(slices.Clone(report), expectNonEmpty...))
+	program := append(catalogView, unit)
+	info, err := mangleanalysis.Analyze(program, nil)
 	if err != nil {
 		return nil, failPhase("program_analysis", "%v", err)
 	}
@@ -123,6 +131,17 @@ func evaluateProgram(base factstore.ReadOnlyFactStore, prelude parse.SourceUnit,
 	if len(empty) > 0 {
 		return nil, failPhase("premise", "expectNonEmpty: these predicates have no facts: %s", strings.Join(empty, ", "))
 	}
+	eligibleAnchors := make(map[string]struct{})
+	for predicate, eligible := range reportable {
+		if _, required := requiredPredicates[predicate.Name]; !required {
+			continue
+		}
+		for id := range eligible {
+			if _, exists := anchors[id]; exists {
+				eligibleAnchors[id] = struct{}{}
+			}
+		}
+	}
 
 	violations := make([]violation, 0)
 	for _, decl := range reportDecls {
@@ -144,15 +163,16 @@ func evaluateProgram(base factstore.ReadOnlyFactStore, prelude parse.SourceUnit,
 			}
 			anchorConstant, _ := atom.Args[0].(ast.Constant)
 			anchor := anchorString(anchorConstant)
-			location, ok := lookupLocation(base, anchorConstant)
-			if !ok {
-				return nil, failPhase("report", "anchor %s of %s has no location fact", anchorConstant, atom)
+			if _, eligible := eligibleAnchors[anchor]; !eligible {
+				return nil, failPhase("report", "anchor %s of %s has no eligible producer-owned location", anchorConstant, atom)
 			}
+			support := anchors[anchor]
 			row := make(map[string]any, len(argNames))
 			for index, argName := range argNames {
 				constant, _ := atom.Args[index].(ast.Constant)
 				row[argName] = decodeConstant(constant)
 			}
+			location := support.Location
 			item := violation{predicate: sym.Symbol, anchor: anchor, location: location, row: row}
 			if options.explain {
 				item.explanation = explain(info, store, atom)
@@ -284,30 +304,130 @@ func splitConstantTerminators(text string) string {
 	return out.String()
 }
 
-const notGlobDecl = `Decl lintai:not_glob(Path, Pattern) descr [external(), mode('+', '+')].`
-
-// rewriteNegatedGlobs replaces each !glob(P, X) premise with the internal
-// positive premise lintai:not_glob(P, X), and declares that predicate when
-// the program uses it.
+// rewriteNegatedGlobs replaces each !lintai.glob(P, X) premise with the internal
+// positive premise lintai.not_glob(P, X). Its declaration is part of the
+// engine package and is always available through catalog binding.
 func rewriteNegatedGlobs(unit *parse.SourceUnit) {
-	rewritten := false
 	for ci := range unit.Clauses {
 		premises := unit.Clauses[ci].Premises
 		for pi, premise := range premises {
 			if negated, ok := premise.(ast.NegAtom); ok && negated.Atom.Predicate == globSym {
 				premises[pi] = ast.Atom{Predicate: notGlobSym, Args: negated.Atom.Args}
-				rewritten = true
 			}
 		}
 	}
-	if !rewritten {
-		return
+}
+
+func bindRuleUnit(unit *parse.SourceUnit, source string, namespaces []string) *phaseError {
+	if containsMangleKeyword(source, "Package") || containsMangleKeyword(source, "Use") {
+		return failPhase("program_analysis", "Package and Use declarations are owned by the producer catalog")
 	}
-	decls, err := parse.Unit(strings.NewReader(notGlobDecl))
-	if err != nil {
-		panic(err)
+	uses := append(slices.Clone(namespaces), "lintai")
+	sort.Strings(uses)
+	for _, namespace := range slices.Compact(uses) {
+		useUnit, err := parse.Unit(strings.NewReader("Use " + namespace + "!"))
+		if err != nil {
+			return failPhase("program_analysis", "cannot bind namespace %q: %v", namespace, err)
+		}
+		for _, declaration := range useUnit.Decls {
+			if declaration.DeclaredAtom.Predicate == symbols.Use {
+				unit.Decls = append(unit.Decls, declaration)
+			}
+		}
 	}
-	unit.Decls = append(unit.Decls, decls.Decls...)
+	return nil
+}
+
+func rejectUnqualifiedProducerPredicates(unit parse.SourceUnit, schemaDecls map[ast.PredicateSym]ast.Decl) *phaseError {
+	locals := make(map[string][]string)
+	for predicate := range schemaDecls {
+		namespace, local, qualified := strings.Cut(predicate.Symbol, ".")
+		if qualified {
+			locals[local] = append(locals[local], namespace+"."+local)
+		}
+	}
+	check := func(predicate ast.PredicateSym) *phaseError {
+		if strings.Contains(predicate.Symbol, ".") {
+			return nil
+		}
+		if candidates := locals[predicate.Symbol]; len(candidates) > 0 {
+			sort.Strings(candidates)
+			return failPhase("program_analysis", "producer predicate %s/%d must be namespace-qualified as %s", predicate.Symbol, predicate.Arity, strings.Join(slices.Compact(candidates), " or "))
+		}
+		return nil
+	}
+	for _, declaration := range unit.Decls {
+		if isPackageDecl(declaration) {
+			continue
+		}
+		if perr := check(declaration.DeclaredAtom.Predicate); perr != nil {
+			return perr
+		}
+	}
+	for _, clause := range unit.Clauses {
+		if perr := check(clause.Head.Predicate); perr != nil {
+			return perr
+		}
+		for _, premise := range clause.Premises {
+			var predicate ast.PredicateSym
+			switch typed := premise.(type) {
+			case ast.Atom:
+				predicate = typed.Predicate
+			case ast.NegAtom:
+				predicate = typed.Atom.Predicate
+			default:
+				continue
+			}
+			if perr := check(predicate); perr != nil {
+				return perr
+			}
+		}
+	}
+	return nil
+}
+
+func containsMangleKeyword(source, keyword string) bool {
+	for index := 0; index < len(source); {
+		current := source[index]
+		if current == '#' {
+			for index < len(source) && source[index] != '\n' {
+				index++
+			}
+			continue
+		}
+		if current == '"' || current == '\'' || current == '`' {
+			quote := current
+			index++
+			for index < len(source) {
+				if source[index] == '\\' {
+					index += 2
+					continue
+				}
+				if source[index] == quote {
+					index++
+					break
+				}
+				index++
+			}
+			continue
+		}
+		if current >= 'A' && current <= 'Z' || current >= 'a' && current <= 'z' || current == '_' {
+			start := index
+			for index < len(source) {
+				char := source[index]
+				if !(char >= 'A' && char <= 'Z' || char >= 'a' && char <= 'z' || char >= '0' && char <= '9' || char == '_') {
+					break
+				}
+				index++
+			}
+			if source[start:index] == keyword {
+				return true
+			}
+			continue
+		}
+		index++
+	}
+	return false
 }
 
 // preludeFor keeps the prelude declarations and only the prelude clauses that
@@ -356,16 +476,10 @@ func preludeFor(prelude, unit parse.SourceUnit, roots []string) parse.SourceUnit
 // checkReservedPredicates rejects rule declarations and clauses for base and
 // prelude predicates. mangle-go accepts facts for declared extensional
 // predicates, so the check is done here.
-func checkReservedPredicates(unit, prelude parse.SourceUnit, schemaDecls map[ast.PredicateSym]ast.Decl) *phaseError {
+func checkReservedPredicates(unit parse.SourceUnit, schemaDecls map[ast.PredicateSym]ast.Decl) *phaseError {
 	reserved := make(map[string]string)
 	for sym := range schemaDecls {
 		reserved[sym.Symbol] = "base relation"
-	}
-	for _, decl := range prelude.Decls {
-		if isPackageDecl(decl) {
-			continue
-		}
-		reserved[decl.DeclaredAtom.Predicate.Symbol] = "prelude predicate"
 	}
 	extensional := make(map[string]struct{})
 	for _, decl := range unit.Decls {
@@ -534,54 +648,6 @@ func anchorString(constant ast.Constant) string {
 		return value
 	}
 	return constant.String()
-}
-
-func lookupLocation(base factstore.ReadOnlyFactStore, anchor ast.Constant) (diagnostics.SourceLocation, bool) {
-	if anchor.Type != ast.StringType {
-		return diagnostics.SourceLocation{}, false
-	}
-	query := ast.NewQuery(ast.PredicateSym{Symbol: facts.LocationRelation, Arity: 6})
-	query.Args[0] = anchor
-	var found *diagnostics.SourceLocation
-	_ = base.GetFacts(query, func(atom ast.Atom) error {
-		file, _ := atom.Args[1].(ast.Constant).StringValue()
-		number := func(index int) int {
-			value, _ := atom.Args[index].(ast.Constant).NumberValue()
-			return int(value)
-		}
-		location := diagnostics.SourceLocation{
-			File:        file,
-			StartLine:   number(2),
-			StartColumn: number(3),
-			EndLine:     number(4),
-			EndColumn:   number(5),
-		}
-		if found == nil || compareLocations(location, *found) < 0 {
-			found = &location
-		}
-		return nil
-	})
-	if found == nil {
-		return diagnostics.SourceLocation{}, false
-	}
-	return *found, true
-}
-
-func compareLocations(left, right diagnostics.SourceLocation) int {
-	if c := strings.Compare(left.File, right.File); c != 0 {
-		return c
-	}
-	for _, pair := range [][2]int{
-		{left.StartLine, right.StartLine},
-		{left.StartColumn, right.StartColumn},
-		{left.EndLine, right.EndLine},
-		{left.EndColumn, right.EndColumn},
-	} {
-		if pair[0] != pair[1] {
-			return pair[0] - pair[1]
-		}
-	}
-	return 0
 }
 
 func hasFacts(store factstore.ReadOnlyFactStore, sym ast.PredicateSym) bool {

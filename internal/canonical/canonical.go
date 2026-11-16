@@ -24,6 +24,12 @@ func Normalize(value any) (any, error) {
 			items = append(items, normalized)
 		}
 		return items, nil
+	case []string:
+		items := make([]any, 0, len(typed))
+		for _, item := range typed {
+			items = append(items, item)
+		}
+		return items, nil
 	case map[string]any:
 		result := make(map[string]any, len(typed))
 		for key, item := range typed {

@@ -108,7 +108,7 @@ export default rule("arch.broken-setup")
 	.setup(() => {
 		throw new Error("setup boom");
 	})
-	.program(dl`+"`Decl v(F). v(F) :- module(F).`"+`)
+	.program(dl`+"`Decl v(F). v(F) :- ts.module(F).`"+`)
 	.report("v")
 	.message(() => "broken");
 `)
@@ -160,7 +160,7 @@ import { dl, rule } from "@lintai/sdk";
 			const target = path.join(workspaceRoot, "src", "pure", "helper.ts");
 			return { exists: fs.existsSync(target) };
 		})
-	.program(dl`+"`Decl v(F). v(F) :- module(F).`"+`)
+	.program(dl`+"`Decl v(F). v(F) :- ts.module(F).`"+`)
 	.report("v")
 	.message(() => "broken");
 `)
@@ -202,7 +202,7 @@ import { dl, rule } from "@lintai/sdk";
 export default rule("arch.top-level-node-import")
 	.version(1)
 	.setup(() => ({ cwdExists: typeof fs.existsSync === "function" }))
-	.program(dl`+"`Decl v(F). v(F) :- module(F).`"+`)
+	.program(dl`+"`Decl v(F). v(F) :- ts.module(F).`"+`)
 	.report("v")
 	.message(() => "broken");
 `)

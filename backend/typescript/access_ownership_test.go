@@ -4,7 +4,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/bigbizze/lintai/backend"
 	"github.com/bigbizze/lintai/facts"
 )
 
@@ -39,7 +38,7 @@ func TestImportMetaSyntaxAndOwnership(t *testing.T) {
 		"const other = [import.meta?.env, import.meta[\"env\"], (import.meta).env];\n"
 	root := t.TempDir()
 	writeWorkspaceFile(t, root, "src/main.ts", source)
-	snapshot, sources, version, err := New().buildLintaiSnapshot(context.Background(), root, root, backend.SnapshotOptions{Files: backend.FileScopeWalk})
+	snapshot, sources, version, err := New(Options{Files: FileScopeWalk}).buildLintaiSnapshot(context.Background(), root, root)
 	if err != nil {
 		t.Fatal(err)
 	}

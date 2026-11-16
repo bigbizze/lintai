@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/bigbizze/lintai/backend/typescript"
 	"github.com/bigbizze/lintai/facts"
 	"github.com/bigbizze/lintai/runtime"
 )
@@ -28,16 +27,14 @@ func TestFnReachesAmbientScalesLinearly(t *testing.T) {
 	}
 	add("ambient_use", facts.String("use"), facts.Name("clock"), facts.Name("read"), facts.String("a.ts"))
 	add("site_in_fn", facts.String("use"), facts.String(fn(n-1)))
+	items, anchors, reportable := qualifyTestFacts(t, items)
 	base, err := facts.Store(items)
 	if err != nil {
 		t.Fatal(err)
 	}
-	schemaDecls, prelude, err := facts.ParseSchema(typescript.Schema())
-	if err != nil {
-		t.Fatal(err)
-	}
-	output := runtime.ProgramOutput{Text: `Decl v(Fn). v(Fn) :- fn(Fn, _, _), fn_reaches_ambient(Fn, /clock).`}
-	violations, perr := evaluateProgram(base, prelude, schemaDecls, output, []string{"v"}, nil, evalOptions{factLimit: 10 * n})
+	catalog, schemaDecls := typeScriptCatalogForTest(t)
+	output := runtime.ProgramOutput{Text: `Decl v(Fn). v(Fn) :- ts.fn(Fn, _, _), ts.fn_reaches_ambient(Fn, /clock).`}
+	violations, perr := evaluateProgram(base, catalog, schemaDecls, anchors, reportable, []string{"ts"}, output, []string{"v"}, nil, evalOptions{factLimit: 10 * n})
 	if perr != nil {
 		t.Fatal(perr)
 	}
@@ -70,32 +67,30 @@ func TestTypeOpacityPolicyAcceptsLibraryLeavesAndChecksArguments(t *testing.T) {
 	add("type_arg", facts.String("promise-string"), facts.Number(0), facts.String("array-string"))
 	add("type_arg", facts.String("array-string"), facts.Number(0), facts.String("string"))
 
+	items, anchors, reportable := qualifyTestFacts(t, items)
 	base, err := facts.Store(items)
 	if err != nil {
 		t.Fatal(err)
 	}
-	schemaDecls, prelude, err := facts.ParseSchema(typescript.Schema())
-	if err != nil {
-		t.Fatal(err)
-	}
+	catalog, schemaDecls := typeScriptCatalogForTest(t)
 	output := runtime.ProgramOutput{Text: `
 Decl permitted_opaque_leaf(Type).
-permitted_opaque_leaf(T) :- type_named(T, "lib", "Promise"), type_origin_kind(T, /lib).
-permitted_opaque_leaf(T) :- type_named(T, "lib", "Array"), type_origin_kind(T, /lib).
+permitted_opaque_leaf(T) :- ts.type_named(T, "lib", "Promise"), ts.type_origin_kind(T, /lib).
+permitted_opaque_leaf(T) :- ts.type_named(T, "lib", "Array"), ts.type_origin_kind(T, /lib).
 Decl disallowed_incomplete(Type).
-disallowed_incomplete(T) :- type_incomplete(T, Reason), Reason != /members_omitted.
-disallowed_incomplete(T) :- type_incomplete(T, /members_omitted), !permitted_opaque_leaf(T).
+disallowed_incomplete(T) :- ts.type_incomplete(T, Reason), Reason != /members_omitted.
+disallowed_incomplete(T) :- ts.type_incomplete(T, /members_omitted), !permitted_opaque_leaf(T).
 Decl reaches_disallowed_incomplete(Type).
 reaches_disallowed_incomplete(T) :- disallowed_incomplete(T).
-reaches_disallowed_incomplete(T) :- type_child(T, Child), reaches_disallowed_incomplete(Child).
+reaches_disallowed_incomplete(T) :- ts.type_child(T, Child), reaches_disallowed_incomplete(Child).
 Decl violation(Fn).
-violation(Fn) :- fn_param(Fn, _, T), reaches_disallowed_incomplete(T).
+violation(Fn) :- ts.fn_param(Fn, _, T), reaches_disallowed_incomplete(T).
 `}
-	violations, perr := evaluateProgram(base, prelude, schemaDecls, output, []string{"violation"}, nil, evalOptions{})
+	violations, perr := evaluateProgram(base, catalog, schemaDecls, anchors, reportable, []string{"ts"}, output, []string{"violation"}, nil, evalOptions{})
 	if perr != nil {
 		t.Fatal(perr)
 	}
-	if len(violations) != 1 || violations[0].anchor != "fn:hidden" {
+	if len(violations) != 1 || violations[0].anchor != "ts:fn:hidden" {
 		t.Fatalf("opacity policy violations: %v", violations)
 	}
 }
