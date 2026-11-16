@@ -7,6 +7,7 @@ require github.com/bigbizze/lintai v0.0.0
 require (
 	bitbucket.org/creachadair/stringset v0.0.14 // indirect
 	codeberg.org/TauCeti/mangle-go v0.7.0 // indirect
+	github.com/BurntSushi/toml v1.6.0 // indirect
 	github.com/Microsoft/go-winio v0.6.2 // indirect
 	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect
 	github.com/bmatcuk/doublestar/v4 v4.10.0 // indirect
