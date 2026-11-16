@@ -394,11 +394,9 @@ func (e *Engine) analyzeWithEvidence(ctx context.Context, options Options) (Resu
 	skipSetup := make(map[string]struct{})
 	withoutSetup := make([]string, 0)
 	for _, rulePath := range ruleCatalog.paths {
-		entry, exists := ruleCatalog.entries[rulePath]
-		if !exists || !entry.isRule {
-			continue
-		}
+		entry := ruleCatalog.entries[rulePath]
 		if entry.loadError != nil {
+			run.complete = false
 			allDiagnostics = append(allDiagnostics, errorDiagnostic(ruleIDOrPath(entry.metadata.ID, rulePath), "setup", entry.metadata.Version, assembled.snapshotID, nil, entry.loadError.Error()))
 			continue
 		}
@@ -409,7 +407,7 @@ func (e *Engine) analyzeWithEvidence(ctx context.Context, options Options) (Resu
 		if _, failed := integrityByPath[rulePath]; failed {
 			continue
 		}
-		if severityOf(options, entry.metadata.ID) == diagnostics.SeverityOff {
+		if !entry.isRule || severityOf(options, entry.metadata.ID) == diagnostics.SeverityOff {
 			continue
 		}
 		if entry.metadata.HasSetup || entry.metadata.HasConfig {

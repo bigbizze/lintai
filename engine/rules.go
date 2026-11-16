@@ -280,11 +280,6 @@ func bundleResolutionDirectories(inputs []bundle.Input, options Options) (map[st
 			}
 			var names strings.Builder
 			for _, entry := range entries {
-				// Hidden entries do not participate in the source module lookup
-				// rules used by these bundles.
-				if strings.HasPrefix(entry.Name(), ".") {
-					continue
-				}
 				kind := "f"
 				if entry.IsDir() {
 					kind = "d"
@@ -293,6 +288,15 @@ func bundleResolutionDirectories(inputs []bundle.Input, options Options) (map[st
 				names.WriteByte(':')
 				names.WriteString(entry.Name())
 				names.WriteByte(0)
+				if !entry.IsDir() && (entry.Name() == "package.json" || entry.Name() == "jsconfig.json" || strings.HasPrefix(entry.Name(), "tsconfig") && strings.HasSuffix(entry.Name(), ".json")) {
+					contents, err := os.ReadFile(filepath.Join(directory, entry.Name()))
+					if err != nil {
+						return nil, false
+					}
+					digest := sha256.Sum256(contents)
+					names.Write(digest[:])
+					names.WriteByte(0)
+				}
 			}
 			digest := sha256.Sum256([]byte(names.String()))
 			directories[directory] = hex.EncodeToString(digest[:])

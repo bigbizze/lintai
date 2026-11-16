@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
@@ -47,6 +48,50 @@ export default rule("fixture.generated-program").version(1)
 	}
 	if secondObservation.mangleCompiles != firstObservation.mangleCompiles+1 {
 		t.Fatalf("generated program change did not compile a new plan: first=%+v second=%+v", firstObservation, secondObservation)
+	}
+}
+
+func TestRuleBundleInvalidatedByResolutionConfigChange(t *testing.T) {
+	repoRoot, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	writeTestFile(t, workspace, "rules-support/a.ts", `export const message = "from-a";`)
+	writeTestFile(t, workspace, "rules-support/b.ts", `export const message = "from-b";`)
+	writeTestFile(t, workspace, "lintai-rules/alias.ts", `import { dl, rule } from "@lintai/sdk";
+import { message } from "@fixture/policy";
+export default rule("fixture.alias").version(1)
+	.program(dl`+"`"+`Decl violation(Entity, Code). violation(Entity, Code) :- catalog.usable(Entity, Code).`+"`"+`)
+	.report("violation").message(() => message);
+`)
+	writeTestFile(t, workspace, "lintai-rules/tsconfig.json", `{"compilerOptions":{"baseUrl":".","paths":{"@fixture/policy":["../rules-support/a.ts"]}}}`)
+	options := parallelFixtureOptions(repoRoot, workspace)
+	warmEngine := New(newParallelFixtureProducer())
+	defer warmEngine.Close()
+	first, err := warmEngine.Analyze(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(first.Diagnostics) != 3 || first.Diagnostics[0].Message != "from-a" {
+		t.Fatalf("initial alias did not resolve to a.ts: %+v", first.Diagnostics)
+	}
+	writeTestFile(t, workspace, "lintai-rules/tsconfig.json", `{"compilerOptions":{"baseUrl":".","paths":{"@fixture/policy":["../rules-support/b.ts"]}}}`)
+	warm, err := warmEngine.Analyze(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	freshEngine := New(newParallelFixtureProducer())
+	defer freshEngine.Close()
+	fresh, err := freshEngine.Analyze(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fresh.Diagnostics) != 3 || fresh.Diagnostics[0].Message != "from-b" {
+		t.Fatalf("updated alias did not resolve to b.ts: %+v", fresh.Diagnostics)
+	}
+	if !reflect.DeepEqual(warm, fresh) {
+		t.Fatalf("warm result differs from a fresh engine after the alias change:\nwarm:  %+v\nfresh: %+v", warm, fresh)
 	}
 }
 

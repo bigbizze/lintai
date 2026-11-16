@@ -62,7 +62,7 @@ func TestParallelRuleExecutionContract(t *testing.T) {
 	}
 	assertParallelFixtureOutcomes(t, parallelResult, parallelRun, parallelEvidence)
 	firstObservation := engine.executionObservation()
-	if firstObservation.bundleArtifacts != 7 || firstObservation.programBuilds != 7 || firstObservation.mangleCompiles >= 7 || firstObservation.peakActiveJobs != 2 {
+	if firstObservation.bundleArtifacts != 8 || firstObservation.programBuilds != 7 || firstObservation.mangleCompiles >= 7 || firstObservation.peakActiveJobs != 2 {
 		t.Fatalf("unexpected first-run execution observation: %+v", firstObservation)
 	}
 	t.Logf("R5 cold observation: bundle builds=%d, program builds=%d, Mangle plan compiles=%d, created facts=%v, peak active jobs=%d",
@@ -216,6 +216,9 @@ func assertParallelFixtureOutcomes(t *testing.T, result Result, run runInfo, evi
 	if result.RulesLoaded != 7 {
 		t.Fatalf("expected seven fixture rules, got %d", result.RulesLoaded)
 	}
+	if run.complete {
+		t.Fatal("rule discovery must be incomplete when module initialization fails")
+	}
 	byRule := make(map[string][]diagnostics.Diagnostic)
 	for _, item := range result.Diagnostics {
 		byRule[item.RuleID] = append(byRule[item.RuleID], item)
@@ -238,6 +241,9 @@ func assertParallelFixtureOutcomes(t *testing.T, result Result, run runInfo, evi
 	}
 	if got := byRule["fixture.message-failure"]; len(got) != 1 || got[0].Phase != "message" || !strings.Contains(got[0].Message, "second row failed") {
 		t.Fatalf("message failure did not discard that rule's partial findings: %+v", got)
+	}
+	if got := byRule["init-failure.ts"]; len(got) != 1 || got[0].DiagnosticKind != diagnostics.KindRuleExecutionError || got[0].Phase != "setup" || !strings.Contains(got[0].Message, "initialization failed") {
+		t.Fatalf("module initialization failure did not produce an explicit rule error: %+v", got)
 	}
 	if len(evidence.findings) != 15 {
 		t.Fatalf("failed rules contributed provisional findings: got %d detached typed rows, want 15", len(evidence.findings))
@@ -289,6 +295,7 @@ func writeParallelRules(t *testing.T, workspace string, successes int, includeFa
 	writeTestFile(t, workspace, "lintai-rules/fact-limit.ts", parallelRuleSource("fixture.fact-limit", factLimitProgram, "(row) => row.Entity"))
 	messageProgram := "Decl violation(Entity, Code). violation(Entity, Code) :- catalog.usable(Entity, Code)."
 	writeTestFile(t, workspace, "lintai-rules/message-failure.ts", parallelRuleSource("fixture.message-failure", messageProgram, "(() => { let count = 0; return (row) => { count++; if (count === 2) throw new Error('second row failed'); return row.Code; }; })()"))
+	writeTestFile(t, workspace, "lintai-rules/init-failure.ts", "throw new Error('initialization failed');\n"+parallelRuleSource("fixture.init-failure", messageProgram, "(row) => row.Code"))
 }
 
 func parallelRuleSource(id, program, message string) string {

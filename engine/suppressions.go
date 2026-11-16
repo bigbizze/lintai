@@ -24,8 +24,8 @@ type runInfo struct {
 	evaluated map[string]struct{}
 	// known are the ids of every loaded rule.
 	known map[string]struct{}
-	// complete is true when every rule file bundled and matched the rules
-	// lock, so known has every rule id.
+	// complete is true when every rule file bundled, matched the rules lock,
+	// and loaded its metadata, so known has every rule id.
 	complete        bool
 	snapshotVersion string
 	producerNames   []string
