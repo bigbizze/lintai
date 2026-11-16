@@ -3,9 +3,9 @@ package typescript
 import (
 	_ "embed"
 	"fmt"
-	"maps"
 	"math"
 	"slices"
+	"strings"
 
 	"github.com/bigbizze/lintai/facts"
 	"github.com/bigbizze/lintai/internal/ambient"
@@ -24,16 +24,21 @@ func Schema() facts.Schema {
 }
 
 // factsFromSnapshot projects completed TypeScript records into public facts.
-func factsFromSnapshot(snapshot *lintaiapi.Snapshot, sources []ambient.Source, adjustments []lintaiapi.ConfigAdjustment) ([]facts.Fact, error) {
+func factsFromSnapshot(snapshot *lintaiapi.Snapshot, sources []ambient.Source, adjustments []lintaiapi.ConfigAdjustment, namespaces ...string) ([]facts.Fact, error) {
+	namespace := "ts"
+	if len(namespaces) != 0 {
+		namespace = namespaces[0]
+	}
 	b := builder{}
 	for _, module := range snapshot.Modules {
-		b.add("module", str(module.Path))
-		b.location(module.Path, module.Range)
+		b.add("module", str(module.EntityID))
+		b.add("module_path", str(module.EntityID), str(module.Path))
+		b.location(module.EntityID, module.Range)
 	}
 	for _, fn := range snapshot.Functions {
 		id := str(fn.SemanticKey)
 		b.add("fn", id, str(fn.FilePath), str(fn.Name))
-		b.add("fn_kind", id, str(fn.Kind))
+		b.add("fn_kind", id, facts.Name(fn.Kind))
 		if fn.ContainerName != "" {
 			b.add("fn_container", id, str(fn.ContainerName))
 		}
@@ -50,53 +55,45 @@ func factsFromSnapshot(snapshot *lintaiapi.Snapshot, sources []ambient.Source, a
 			b.add("fn_signature_unresolved", id)
 		}
 		for _, observation := range fn.SignatureObservations {
+			signature := lintaiapi.SignatureID(fn.SemanticKey, observation, namespace)
+			sid := str(signature)
+			b.add("fn_signature", id, sid)
+			b.add("signature_arity", sid, facts.Number(int64(len(observation.ParameterTypes))))
 			for index, typeID := range observation.ParameterTypes {
 				if typeID != "" {
-					b.add("fn_param", id, facts.Number(int64(index)), str(typeID))
+					b.add("signature_param", sid, facts.Number(int64(index)), str(typeID))
 				}
 			}
-			if observation.ReturnType != "" {
-				b.add("fn_returns", id, str(observation.ReturnType))
+			if err := b.marks(sid, observation.ParameterMarks, "signature_param_optional", "signature_param_rest"); err != nil {
+				return nil, err
 			}
+			if observation.ReturnType != "" {
+				b.add("signature_returns", sid, str(observation.ReturnType))
+			}
+			if observation.Complete {
+				b.add("signature_complete", sid)
+			} else {
+				b.add("signature_incomplete", sid, facts.Name("unresolved"))
+			}
+			b.location(signature, fn.Range)
 		}
 		if fn.SignatureConflict {
 			b.add("fn_signature_conflict", id)
 		}
 		b.location(fn.SemanticKey, fn.Range)
 	}
-	awaitFns := make(map[string]struct{})
+	for _, site := range snapshot.Sites {
+		id := str(site.ID)
+		b.add("site", id, str(site.File))
+		if site.UnsupportedReason != "" {
+			b.add("site_attribution_unsupported", id, facts.Name(site.UnsupportedReason))
+		} else {
+			b.add("site_owner", id, str(site.Owner))
+		}
+		b.location(site.ID, site.Range)
+	}
 	for _, site := range snapshot.SuspensionSites {
-		id := str(site.EntityID)
-		kind, err := name(site.Kind)
-		if err != nil {
-			return nil, err
-		}
-		b.add("suspension_site", id, str(site.FilePath), kind)
-		if site.FunctionSemanticKey != "" {
-			b.add("suspension_in_fn", id, str(site.FunctionSemanticKey))
-			if site.Kind == "await" {
-				awaitFns[site.FunctionSemanticKey] = struct{}{}
-			}
-		} else if site.AtModule {
-			b.add("suspension_at_module", id)
-		} else if site.UnsupportedReason != "" {
-			reason, err := name(site.UnsupportedReason)
-			if err != nil {
-				return nil, err
-			}
-			b.add("site_attribution_unsupported", id, reason)
-		}
-		b.location(site.EntityID, site.Range)
-	}
-	for _, fn := range slices.Sorted(maps.Keys(awaitFns)) {
-		b.add("fn_awaits", str(fn))
-	}
-	for _, item := range snapshot.UnsupportedAttributions {
-		reason, err := name(item.Reason)
-		if err != nil {
-			return nil, err
-		}
-		b.add("site_attribution_unsupported", str(item.Site), reason)
+		b.add("suspension_site", str(site.SemanticKey), facts.Name(site.Kind))
 	}
 	for _, edge := range snapshot.ImportEdges {
 		id := str(edge.SemanticKey)
@@ -133,29 +130,33 @@ func factsFromSnapshot(snapshot *lintaiapi.Snapshot, sources []ambient.Source, a
 		}
 		b.location(edge.SemanticKey, edge.Range)
 	}
+	callSites := make(map[string]bool)
 	for _, edge := range snapshot.CallEdges {
-		id := str(edge.SemanticKey)
-		b.add("call_edge", id, str(edge.FromSemanticKey), str(edge.ToSemanticKey))
-		if !edge.FromModule && edge.FromSemanticKey != "" {
-			b.add("site_in_fn", id, str(edge.FromSemanticKey))
-		}
-		b.location(edge.SemanticKey, edge.Range)
+		callSites[edge.SemanticKey] = true
+		b.add("call_edge", str(edge.SemanticKey), str(edge.ToSemanticKey))
 	}
 	for _, call := range snapshot.ExternalCalls {
-		id := str(call.SemanticKey)
-		b.add("external_call", id, str(call.FromSemanticKey), str(call.Module), str(call.Name))
-		if !call.FromModule && call.FromSemanticKey != "" {
-			b.add("site_in_fn", id, str(call.FromSemanticKey))
-		}
-		b.location(call.SemanticKey, call.Range)
+		callSites[call.SemanticKey] = true
+		b.add("external_call", str(call.SemanticKey), facts.Name(call.OriginKind), str(call.Module), str(call.Name))
 	}
 	for _, call := range snapshot.CallsUnresolved {
-		id := str(call.SemanticKey)
-		b.add("call_unresolved", id, str(call.FromSemanticKey))
-		if !call.FromModule && call.FromSemanticKey != "" {
-			b.add("site_in_fn", id, str(call.FromSemanticKey))
+		callSites[call.SemanticKey] = true
+		b.add("call_unresolved", str(call.SemanticKey))
+	}
+	for site := range callSites {
+		b.add("call_site", str(site))
+	}
+	for _, site := range snapshot.CallTargetConflicts {
+		b.add("call_target_conflict", str(site))
+	}
+	for _, escape := range snapshot.FunctionEscapes {
+		b.add("fn_value_escape", str(escape.Site), facts.Name("argument"))
+		if escape.Target != "" {
+			b.add("fn_value_escape_target", str(escape.Site), str(escape.Target))
 		}
-		b.location(call.SemanticKey, call.Range)
+		if escape.Unknown {
+			b.add("fn_value_escape_unknown", str(escape.Site))
+		}
 	}
 	for _, item := range snapshot.CallDeclarations {
 		b.add("call_declaration", str(item.Site), str(item.Declaration))
@@ -171,24 +172,16 @@ func factsFromSnapshot(snapshot *lintaiapi.Snapshot, sources []ambient.Source, a
 		b.add("call_declaration_incomplete", str(item.Site), reason)
 	}
 	for _, item := range snapshot.ImportsOpaque {
-		b.add("import_opaque", str(item.SemanticKey), str(item.FromPath))
-		b.location(item.SemanticKey, item.Range)
+		b.add("import_opaque", str(item.SemanticKey))
 	}
 	for _, ref := range snapshot.FnRefs {
-		id := str(ref.SemanticKey)
-		b.add("fn_ref", id, str(ref.FromSemanticKey), str(ref.ToSemanticKey))
-		if !ref.FromModule && ref.FromSemanticKey != "" {
-			b.add("site_in_fn", id, str(ref.FromSemanticKey))
-		}
-		b.location(ref.SemanticKey, ref.Range)
+		b.add("fn_ref", str(ref.SemanticKey), str(ref.ToSemanticKey))
 	}
 	for _, directive := range snapshot.Directives {
-		b.add("module_directive", str(directive.SemanticKey), str(directive.FilePath), str(directive.Text))
-		b.location(directive.SemanticKey, directive.Range)
+		b.add("module_directive", str(directive.SemanticKey), str(directive.Text))
 	}
 	for _, parseError := range snapshot.ParseErrors {
-		b.add("module_parse_error", str(parseError.SemanticKey), str(parseError.FilePath), str(parseError.Message))
-		b.location(parseError.SemanticKey, parseError.Range)
+		b.add("module_parse_error", str(parseError.SemanticKey), str(parseError.Message))
 	}
 	for _, adjustment := range adjustments {
 		action, err := name(adjustment.Action)
@@ -199,11 +192,10 @@ func factsFromSnapshot(snapshot *lintaiapi.Snapshot, sources []ambient.Source, a
 	}
 	for _, ref := range snapshot.TypeRefs {
 		id := str(ref.SemanticKey)
-		b.add("type_ref", id, str(ref.FilePath), str(ref.Name))
+		b.add("type_ref", id, str(ref.Name))
 		if ref.TargetPath != "" {
 			b.add("type_ref_target", id, str(ref.TargetPath))
 		}
-		b.location(ref.SemanticKey, ref.Range)
 	}
 	for _, item := range snapshot.Types {
 		if err := b.typeFacts(item); err != nil {
@@ -224,6 +216,9 @@ func factsFromSnapshot(snapshot *lintaiapi.Snapshot, sources []ambient.Source, a
 			}
 			b.add("declaration_origin", id, originKind, str(item.Origin))
 		}
+		for _, space := range item.TypeSubjects {
+			b.add("declaration_type_subject", id, facts.Name(space))
+		}
 		for _, value := range item.Types {
 			space, err := name(value.Space)
 			if err != nil {
@@ -231,15 +226,24 @@ func factsFromSnapshot(snapshot *lintaiapi.Snapshot, sources []ambient.Source, a
 			}
 			b.add("declaration_type", id, space, str(value.Type))
 		}
-		if item.Function != "" {
+		for _, function := range item.FunctionObservations {
+			b.add("declaration_fn", id, str(function))
+		}
+		if len(item.FunctionObservations) == 0 && item.Function != "" {
 			b.add("declaration_fn", id, str(item.Function))
+		}
+		for _, reason := range item.FunctionIncomplete {
+			b.add("declaration_fn_incomplete", id, facts.Name(reason))
+		}
+		for _, value := range item.TypeIncomplete {
+			b.add("declaration_type_incomplete", id, facts.Name(value.Space), facts.Name(value.Reason))
 		}
 		for _, reason := range item.Incomplete {
 			value, err := name(reason)
 			if err != nil {
 				return nil, err
 			}
-			b.add("declaration_incomplete", id, value)
+			b.add("declaration_metadata_incomplete", id, value)
 		}
 		b.location(item.ID, item.Location)
 	}
@@ -249,7 +253,7 @@ func factsFromSnapshot(snapshot *lintaiapi.Snapshot, sources []ambient.Source, a
 		if err != nil {
 			return nil, err
 		}
-		b.add("module_export", id, str(item.File), str(item.Name), space)
+		b.add("module_export", id, str("module:"+item.File), str(item.Name), space)
 		for _, target := range item.Targets {
 			b.add("export_target", id, str(target))
 		}
@@ -270,16 +274,23 @@ func factsFromSnapshot(snapshot *lintaiapi.Snapshot, sources []ambient.Source, a
 			}
 			b.add("export_incomplete", id, value)
 		}
-		if item.Location != (lintaiapi.SourceLocation{}) {
-			b.location(item.ID, item.Location)
+		location := item.Location
+		if location == (lintaiapi.SourceLocation{}) {
+			for _, module := range snapshot.Modules {
+				if module.Path == item.File {
+					location = module.Range
+					break
+				}
+			}
 		}
+		b.location(item.ID, location)
 	}
 	for _, item := range snapshot.ModuleExportsIncomplete {
 		reason, err := name(item.Reason)
 		if err != nil {
 			return nil, err
 		}
-		b.add("module_exports_incomplete", str(item.File), reason)
+		b.add("module_exports_incomplete", str("module:"+item.File), reason)
 	}
 	for _, item := range snapshot.DeclarationSourceCandidates {
 		method, err := name(item.Method)
@@ -349,19 +360,7 @@ func factsFromSnapshot(snapshot *lintaiapi.Snapshot, sources []ambient.Source, a
 		b.location(item.ID, item.Location)
 	}
 	for _, access := range snapshot.Accesses {
-		id := str(access.SemanticKey)
-		b.add("meta_access", id, str(access.FilePath), str(access.AccessPath))
-		if access.FunctionSemanticKey != "" {
-			b.add("site_in_fn", id, str(access.FunctionSemanticKey))
-		}
-		if access.UnsupportedReason != "" {
-			reason, err := name(access.UnsupportedReason)
-			if err != nil {
-				return nil, err
-			}
-			b.add("site_attribution_unsupported", id, reason)
-		}
-		b.location(access.SemanticKey, access.Range)
+		b.add("meta_access", str(access.SemanticKey), str(access.AccessPath))
 	}
 	for _, source := range sources {
 		sourceName, err := name(source.ID)
@@ -392,7 +391,7 @@ func factsFromSnapshot(snapshot *lintaiapi.Snapshot, sources []ambient.Source, a
 		if err != nil {
 			return nil, err
 		}
-		b.add("ambient_use", id, sourceName, capabilityName, str(use.FilePath))
+		b.add("ambient_use", id, sourceName, capabilityName)
 		if use.HasKey {
 			b.add("ambient_key", id, str(use.Key))
 		}
@@ -402,19 +401,12 @@ func factsFromSnapshot(snapshot *lintaiapi.Snapshot, sources []ambient.Source, a
 		if use.Write {
 			b.add("ambient_write", id)
 		}
-		if use.FunctionSemanticKey != "" {
-			b.add("site_in_fn", id, str(use.FunctionSemanticKey))
-		}
-		b.location(use.SemanticKey, use.Range)
+
 	}
 	for _, ref := range snapshot.GlobalRefs {
-		id := str(ref.SemanticKey)
-		b.add("global_ref", id, str(ref.Name), str(ref.FilePath))
-		if ref.FunctionSemanticKey != "" {
-			b.add("site_in_fn", id, str(ref.FunctionSemanticKey))
-		}
-		b.location(ref.SemanticKey, ref.Range)
+		b.add("global_ref", str(ref.SemanticKey), str(ref.Name))
 	}
+
 	return b.items, nil
 }
 
@@ -452,7 +444,7 @@ func (b *builder) typeFacts(item lintaiapi.TypeFact) error {
 		if err != nil {
 			return err
 		}
-		b.add("type_literal", id, value)
+		b.add("type_literal", id, facts.Name(item.Literal.Kind), value)
 	}
 	if item.Kind == "type_param" {
 		b.add("type_param_name", id, str(item.ParamName))
@@ -535,6 +527,9 @@ func (b *builder) add(predicate string, args ...facts.Value) {
 }
 
 func (b *builder) location(entity string, location lintaiapi.SourceLocation) {
+	if location.File == "" || strings.HasPrefix(location.File, "bundled://") || location.StartLine <= 0 || location.StartColumn <= 0 || location.EndLine <= 0 || location.EndColumn <= 0 {
+		return
+	}
 	b.add("location",
 		str(entity),
 		str(location.File),

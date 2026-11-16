@@ -12,12 +12,12 @@ export default rule("arch.pure-no-effects")
 		({ env }) => dl`
 		Decl reaches_suspension(Fn).
 		reaches_suspension(Fn) :- ts.fn_suspends(Fn).
-		reaches_suspension(Fn) :- ts.call_edge(Site, Fn, Callee), !ts.site_attribution_unknown(Site), reaches_suspension(Callee).
+		reaches_suspension(Fn) :- ts.site_owner(Site, Fn), ts.call_edge(Site, Callee), !ts.site_attribution_unknown(Site), reaches_suspension(Callee).
 
 		Decl violation(Fn, Name).
 		violation(Fn, Name) :-
 			ts.fn(Fn, File, Name), lintai.glob(File, ${`${env.pureDir}/**`}),
-			ts.call_edge(Site, Fn, Callee), !ts.site_attribution_unknown(Site), reaches_suspension(Callee).
+			ts.site_owner(Site, Fn), ts.call_edge(Site, Callee), !ts.site_attribution_unknown(Site), reaches_suspension(Callee).
 	`,
 	)
 	.report("violation")

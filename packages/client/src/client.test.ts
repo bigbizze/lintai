@@ -966,6 +966,114 @@ test("input watches follow replaced directories and later edits", async () => {
 	}
 });
 
+test("native input watches follow replaced directories and later edits", async () => {
+	const workspaceRoot = mkdtempSync(path.join(os.tmpdir(), "lintai-native-input-watch-"));
+	const contracts = path.join(workspaceRoot, "contracts");
+	const dist = path.join(contracts, "dist");
+	const input = path.join(dist, "index.d.ts");
+	const declaration = (value: string) => `export declare const value: "${value}";\n`;
+	mkdirSync(dist, { recursive: true });
+	writeFileSync(input, declaration("initial"));
+	const child = createTestProcess();
+	let analyses = 0;
+	const client = new LintAIClient(
+		resolveBridgeOptions(
+			{ mode: "serve", binary: "/tmp/lintai", repoRoot: workspaceRoot, workspaceRoot },
+			workspaceRoot,
+			editorHost,
+		),
+		createTestDependencies({
+			spawnServe: () => child,
+			readServeSync: () => {
+				const message = readFileSync(input, "utf8");
+				return createFramedResponse({
+					jsonrpc: "2.0",
+					id: ++analyses,
+					result: {
+						rulesLoaded: 1,
+						diagnosticCount: 1,
+						snapshotVersion: `snap-${analyses}`,
+						watchHints: [input],
+						diagnostics: [
+							{
+								rule_id: "arch.input",
+								assertion_id: "default",
+								message,
+								source_location: {
+									file: "src/app.ts",
+									startLine: 1,
+									startColumn: 1,
+									endLine: 1,
+									endColumn: 2,
+								},
+							},
+						],
+					},
+				});
+			},
+			watchInputPath: (target, onChange, onError) => {
+				const watcher = fs.watch(target, { persistent: false, recursive: false }, (_event, filename) =>
+					onChange(filename ?? undefined),
+				);
+				watcher.on("error", onError);
+				return watcher;
+			},
+			now: () => 0,
+			log: () => undefined,
+		}),
+	);
+	const waitForMessage = async (expected: string) => {
+		let interval: ReturnType<typeof setInterval> | undefined;
+		try {
+			await withTimeout(new Promise<void>((resolve, reject) => {
+				const check = () => {
+					try {
+						if (client.getDiagnostics("src/app.ts")[0]?.message === expected) resolve();
+					} catch (error) {
+						reject(error);
+					}
+				};
+				interval = setInterval(check, 20);
+				check();
+			}), `diagnostics for ${expected}`);
+		} finally {
+			if (interval) clearInterval(interval);
+		}
+	};
+	try {
+		assert.equal(client.getDiagnostics("src/app.ts")[0]?.message, declaration("initial"));
+		assert.equal(analyses, 1);
+		assert.deepEqual(client.problems(), []);
+
+		renameSync(dist, path.join(contracts, "old-dist"));
+		mkdirSync(dist);
+		writeFileSync(input, declaration("replacement"));
+		await waitForMessage(declaration("replacement"));
+		let previousAnalyses = analyses;
+		assert.ok(previousAnalyses > 1);
+
+		writeFileSync(input, declaration("edited replacement"));
+		await waitForMessage(declaration("edited replacement"));
+		assert.ok(analyses > previousAnalyses);
+
+		previousAnalyses = analyses;
+		renameSync(contracts, path.join(workspaceRoot, "old-contracts"));
+		mkdirSync(dist, { recursive: true });
+		writeFileSync(input, declaration("replacement ancestor"));
+		await waitForMessage(declaration("replacement ancestor"));
+		assert.ok(analyses > previousAnalyses);
+
+		previousAnalyses = analyses;
+		writeFileSync(input, declaration("edited ancestor replacement"));
+		await waitForMessage(declaration("edited ancestor replacement"));
+		assert.ok(analyses > previousAnalyses);
+		assert.deepEqual(client.problems(), []);
+	} finally {
+		client.dispose();
+		rmSync(workspaceRoot, { recursive: true, force: true });
+	}
+});
+
 test("oneshot source-links changes follow a replaced directory", (t) => {
 	t.mock.timers.enable({ apis: ["setTimeout"] });
 	const workspaceRoot = mkdtempSync(path.join(os.tmpdir(), "lintai-oneshot-input-watch-"));

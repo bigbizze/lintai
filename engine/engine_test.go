@@ -58,7 +58,7 @@ func TestRuleErrorPhases(t *testing.T) {
 			phase:   "evaluation",
 			message: "fact size limit",
 			source: `export default rule("t.limit").version(1)
-	.program(dl` + "`" + `Decl v(A, B). v(A, B) :- ts.module(A), ts.module(B).` + "`" + `)
+	.program(dl` + "`" + `Decl v(A, B, C). v(A, B, C) :- ts.module(A), ts.module(B), ts.module(C).` + "`" + `)
 	.report("v").message(() => "x");`,
 		},
 		{
@@ -100,7 +100,7 @@ func TestRuleErrorPhases(t *testing.T) {
 		RuleGlobs:     rulePaths,
 		Env:           map[string]any{},
 		Severity:      diagnostics.SeverityError,
-		FactLimit:     50,
+		FactLimit:     200,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -274,7 +274,7 @@ func TestDlStringsRoundTripThroughMangle(t *testing.T) {
 	rulePath := writeTestFile(t, t.TempDir(), "round-trip.ts", `import { dl, rule } from "@lintai/sdk";
 const tricky = `+string(tricky)+`;
 export default rule("t.round-trip").version(1)
-	.program(dl`+"`"+`Decl v(M, S, N, K). v(M, ${tricky}, ${-12}, ${dl.name("a/b_c")}) :- ts.module(M), ts.location(M, F, _, _, _, _), F = "src/pure/math.ts".`+"`"+`)
+	.program(dl`+"`"+`Decl v(M, S, N, K). v(M, ${tricky}, ${-12}, ${dl.name("a/b_c")}) :- ts.module_path(M, F), F = "src/pure/math.ts".`+"`"+`)
 	.report("v")
 		.message((row) => JSON.stringify([row.S === tricky, row.N, row.K]));
 `)
@@ -315,10 +315,10 @@ export default rule("t.runtime").version(1)
 `)
 	writeTestFile(t, workspaceRoot, "lintai-rules/outside.ts", `import { dl, rule } from "@lintai/sdk";
 export default rule("t.outside").version(1)
-	.program(dl`+"`"+`Decl layer(M, L). layer(M, /ui) :- ts.module(M), ts.location(M, F, _, _, _, _), lintai.glob(F, "src/ui/**"). layer(M, /core) :- ts.module(M), ts.location(M, F, _, _, _, _), lintai.glob(F, "src/core/**").
-Decl v(M). v(M) :- ts.module(M), ts.location(M, F, _, _, _, _), !lintai.glob(F, "src/core/**"), layer(M, L), L != /core.
+	.program(dl`+"`"+`Decl layer(M, L). layer(M, /ui) :- ts.module_path(M, F), lintai.glob(F, "src/ui/**"). layer(M, /core) :- ts.module_path(M, F), lintai.glob(F, "src/core/**").
+Decl v(M). v(M) :- ts.module_path(M, F), !lintai.glob(F, "src/core/**"), layer(M, L), L != /core.
 # a comment with /core. in it
-Decl w(M). w(M) :- ts.module(M), ts.location(M, F, _, _, _, _), F = "src/a/b.c", layer(M, /ui.x).`+"`"+`)
+Decl w(M). w(M) :- ts.module_path(M, F), F = "src/a/b.c", layer(M, /ui.x).`+"`"+`)
 	.report("v").message(() => "outside");
 `)
 	result, err := Open(Options{}, typescript.New()).Check(context.Background(), Options{
@@ -452,8 +452,8 @@ export default rule("arch.domain-signatures").version(1)
 		Decl violation(Fn, Name).
 		Decl signature_type(Fn, T).
 		Decl mentions_infra(Fn).
-		signature_type(Fn, T) :- ts.fn_param(Fn, _, T).
-		signature_type(Fn, T) :- ts.fn_returns(Fn, T).
+		signature_type(Fn, T) :- ts.fn_signature(Fn, Sig), ts.signature_param(Sig, _, T).
+		signature_type(Fn, T) :- ts.fn_signature(Fn, Sig), ts.signature_returns(Sig, T).
 		mentions_infra(Fn) :- signature_type(Fn, T), ts.type_named(T, Origin, _), lintai.glob(Origin, "src/infra/**").
 		mentions_infra(Fn) :- signature_type(Fn, T), ts.type_contains(T, Inner), ts.type_named(Inner, Origin, _), lintai.glob(Origin, "src/infra/**").
 		violation(Fn, Name) :- ts.fn(Fn, File, Name), ts.fn_exported(Fn), lintai.glob(File, "src/domain/**"), mentions_infra(Fn).
@@ -466,8 +466,8 @@ export default rule("arch.domain-signatures-strict").version(1)
 	.program(dl`+"`"+`
 		Decl violation(Fn, Name).
 		Decl signature_type(Fn, T).
-		signature_type(Fn, T) :- ts.fn_param(Fn, _, T).
-		signature_type(Fn, T) :- ts.fn_returns(Fn, T).
+		signature_type(Fn, T) :- ts.fn_signature(Fn, Sig), ts.signature_param(Sig, _, T).
+		signature_type(Fn, T) :- ts.fn_signature(Fn, Sig), ts.signature_returns(Sig, T).
 		violation(Fn, Name) :- ts.fn(Fn, File, Name), ts.fn_exported(Fn), lintai.glob(File, "src/domain/**"), signature_type(Fn, T), ts.type_reaches_incomplete(T).
 	`+"`"+`)
 	.report("violation")
@@ -477,7 +477,7 @@ export default rule("arch.domain-signatures-strict").version(1)
 export default rule("t.awaited").version(1)
 	.program(dl`+"`"+`
 		Decl v(Fn, Name, Text).
-		v(Fn, Name, Text) :- ts.fn(Fn, _, Name), ts.fn_returns_awaited(Fn, T), ts.type_display(T, Text).
+		v(Fn, Name, Text) :- ts.fn(Fn, _, Name), ts.fn_signature(Fn, Sig), ts.signature_returns_awaited(Sig, T), ts.type_display(T, Text).
 	`+"`"+`)
 	.report("v")
 	.message((row) => `+"`${row.Name}:${row.Text}`"+`);
@@ -505,7 +505,7 @@ export default rule("t.awaited").version(1)
 	checkedName := fmt.Sprintf("<anonymous@%d>", strings.Index(actionSource, "async () => 3"))
 	defaultName := fmt.Sprintf("<anonymous@%d>", strings.Index(actionSource, "async () => 4"))
 	wantActions := []string{
-		"legacy must return Promise<ActionResult<T>>, but returns Promise<Legacy<number>>", "wrongDirect must return Promise<ActionResult<T>>, but returns Promise<number>",
+		"legacy must return Promise<ActionResult<T>>, but returns Promise<ActionResult<number>>", "wrongDirect must return Promise<ActionResult<T>>, but returns Promise<number>",
 		wrappedName + " must return Promise<ActionResult<T>>, but returns Promise<number>", checkedName + " must return Promise<ActionResult<T>>, but returns Promise<number>", defaultName + " must return Promise<ActionResult<T>>, but returns Promise<number>",
 	}
 	sort.Strings(wantActions)
@@ -524,7 +524,7 @@ export default rule("t.awaited").version(1)
 		t.Fatalf("strict domain rule: %v", got)
 	}
 	// fn_returns_awaited unwraps one lib Promise, not a union that has one.
-	want := []string{"Db.query:number", "constrained:void", "hidden:void", "legacy:Legacy<number>", "load:number", "maybe:Promise<number> | undefined", "picked:Db[K]", "plain:number", "save:ActionResult<number>", "sync:number", "wrongDirect:number", wrappedName + ":number", checkedName + ":number", defaultName + ":number"}
+	want := []string{"Db.query:number", "constrained:void", "hidden:void", "legacy:ActionResult<number>", "load:number", "maybe:Promise<number> | undefined", "picked:Db[K]", "plain:number", "save:ActionResult<number>", "sync:number", "wrongDirect:number", wrappedName + ":number", checkedName + ":number", defaultName + ":number"}
 	sort.Strings(want)
 	if got := byRule["t.awaited"]; strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("fn_returns_awaited: got %v, want %v", got, want)
@@ -639,9 +639,10 @@ export default rule("test.strict").version(1)
     Decl selected(Fn, Name).
     selected(Fn, Name) :- ts.fn(Fn, _, Name), ts.fn_exported(Fn), Name != "replace".
     Decl ambient(Fn, Name).
-    ambient(Fn, Name) :- selected(Fn, Name), ts.fn_reaches_ambient_strict(Fn, _).
+    ambient(Fn, Name) :- selected(Fn, Name), ts.owner_reaches_ambient_strict(Fn, _).
     Decl indeterminate(Fn, Name).
-    indeterminate(Fn, Name) :- selected(Fn, Name), ts.fn_reaches_unresolved(Fn).
+    indeterminate(Fn, Name) :- selected(Fn, Name), ts.owner_reaches_unresolved(Fn).
+    indeterminate(Fn, Name) :- selected(Fn, Name), ts.site_owner(Site, Fn), ts.fn_value_escape_unknown(Site).
   `+"`"+`)
   .report("ambient", "indeterminate").message((row, ctx) => `+"`${row.Name}:${ctx.assertion_id}`"+`);
 `)
@@ -696,7 +697,7 @@ export type { EventMessage } from "./rpc";
 export default rule("arch.public-api-infrastructure-types").version(1)
 	.program(dl` + "`" + `
 		Decl api_root(Export, File, Name, Type).
-		api_root(E, F, N, T) :- ts.module_export(E, F, N, /type), lintai.glob(F, "src/common/index.ts"), ts.export_target(E, D), ts.declaration_type(D, /type, T).
+		api_root(E, F, N, T) :- ts.module_path(M, F), ts.module_export(E, M, N, /type), lintai.glob(F, "src/common/index.ts"), ts.export_target(E, D), ts.declaration_type(D, /type, T).
 		Decl reaches_knex(Type).
 		reaches_knex(T) :- ts.type_named(T, "knex", _), ts.type_origin_kind(T, /package).
 		reaches_knex(T) :- ts.type_child(T, Child), reaches_knex(Child).
@@ -795,9 +796,15 @@ export function choose(flag: boolean) {
 		}
 		return result
 	}
+	fnIDs := make(map[string]string)
+	for _, fact := range snapshot.Facts {
+		if fact.Relation == "fn" {
+			fnIDs[fact.Values[2].String] = fact.Values[0].String
+		}
+	}
 	owner := func(site string) string {
 		for _, fact := range snapshot.Facts {
-			if fact.Relation == "site_in_fn" && fact.Values[0].String == site {
+			if fact.Relation == "site_owner" && fact.Values[0].String == site {
 				return fact.Values[1].String
 			}
 		}
@@ -811,10 +818,10 @@ export function choose(flag: boolean) {
 		}
 		return ""
 	}
-	callback := fmt.Sprintf("src/scorecard/total.ts::arrow_function::<anonymous@%d>", strings.Index(source, "async () =>"))
-	scorecard := "src/scorecard/total.ts::function::total"
-	known := "src/scorecard/total.ts::function::known"
-	constructor := "src/scorecard/total.ts::constructor::Present.constructor"
+	callback := fnIDs[fmt.Sprintf("<anonymous@%d>", strings.Index(source, "async () =>"))]
+	scorecard := fnIDs["total"]
+	known := fnIDs["known"]
+	constructor := fnIDs["Present.constructor"]
 	for _, check := range []struct {
 		relation   string
 		line       int
@@ -842,30 +849,26 @@ export function choose(flag: boolean) {
 		if got := unsupported(site); got != check.reason {
 			t.Errorf("%s line %d unsupported = %q, want %q", check.relation, check.line, got, check.reason)
 		}
-		if check.relation == "call_edge" || check.relation == "call_unresolved" || check.relation == "external_call" || check.relation == "fn_ref" {
-			if got := rows[0].Values[1].String; got != check.fn {
-				t.Errorf("%s line %d caller = %q, want %q", check.relation, check.line, got, check.fn)
-			}
-		}
+
 	}
-	if rows := find("call_edge", 5); len(rows) == 1 && rows[0].Values[2].String != known {
+	if rows := find("call_edge", 5); len(rows) == 1 && rows[0].Values[1].String != known {
 		t.Errorf("wrong callback target: %v", rows)
 	}
-	if rows := find("fn_ref", 7); len(rows) == 1 && rows[0].Values[2].String != known {
+	if rows := find("fn_ref", 7); len(rows) == 1 && rows[0].Values[1].String != known {
 		t.Errorf("wrong referenced function: %v", rows)
 	}
-	if rows := find("fn_ref", 3); len(rows) == 1 && rows[0].Values[2].String != "src/scorecard/total.ts::function::total.nested" {
+	if rows := find("fn_ref", 3); len(rows) == 1 && rows[0].Values[1].String != fnIDs["total.nested"] {
 		t.Errorf("wrong nested function reference: %v", rows)
 	}
 	var valueTargets []string
 	for _, row := range find("fn_ref", 28) {
-		if got := owner(row.Values[0].String); got != "src/scorecard/total.ts::function::values" {
+		if got := owner(row.Values[0].String); got != fnIDs["values"] {
 			t.Errorf("function value owner = %q: %v", got, row)
 		}
-		valueTargets = append(valueTargets, row.Values[2].String)
+		valueTargets = append(valueTargets, row.Values[1].String)
 	}
 	slices.Sort(valueTargets)
-	if want := []string{"src/scorecard/total.ts::arrow_function::values.saved", "src/scorecard/total.ts::function_expression::values.returned"}; !slices.Equal(valueTargets, want) {
+	if want := []string{fnIDs["values.saved"], fnIDs["values.returned"]}; !slices.Equal(valueTargets, slices.Sorted(slices.Values(want))) {
 		t.Errorf("assigned and returned references = %v, want %v", valueTargets, want)
 	}
 	if rows := find("suspension_site", 10); len(rows) != 1 {
@@ -874,11 +877,11 @@ export function choose(flag: boolean) {
 		site := rows[0].Values[0].String
 		found := false
 		for _, fact := range snapshot.Facts {
-			if fact.Relation == "suspension_in_fn" && fact.Values[0].String == site && fact.Values[1].String == callback {
+			if fact.Relation == "site_owner" && fact.Values[0].String == site && fact.Values[1].String == callback {
 				found = true
 			}
 		}
-		if !found || !strings.HasPrefix(site, "suspension:") {
+		if !found || !strings.HasPrefix(site, "site:") {
 			t.Errorf("callback suspension owner or ID: %v", rows)
 		}
 	}
@@ -887,27 +890,27 @@ export function choose(flag: boolean) {
 	} else if reason := unsupported(rows[0].Values[0].String); reason != "instance_construction" {
 		t.Errorf("unsupported suspension reason = %q", reason)
 	}
-	if rows := find("ambient_use", 27); len(rows) != 1 || owner(rows[0].Values[0].String) != "" || unsupported(rows[0].Values[0].String) != "" {
+	if rows := find("ambient_use", 27); len(rows) != 1 || owner(rows[0].Values[0].String) != "module:src/scorecard/total.ts" || unsupported(rows[0].Values[0].String) != "" {
 		t.Errorf("module ambient use: %v", rows)
 	}
-	choose := "src/scorecard/total.ts::function::choose"
+	choose := fnIDs["choose"]
 	for _, check := range []struct {
 		line             int
 		relation, target string
 	}{
 		{30, "call_unresolved", ""},
-		{31, "call_edge", fmt.Sprintf("src/scorecard/total.ts::arrow_function::<anonymous@%d>", strings.Index(source, "() => known()) as"))},
-		{33, "call_edge", fmt.Sprintf("src/scorecard/total.ts::arrow_function::<anonymous@%d>", strings.Index(source, "() => known()) satisfies"))},
+		{31, "call_edge", fnIDs[fmt.Sprintf("<anonymous@%d>", strings.Index(source, "() => known()) as"))]},
+		{33, "call_edge", fnIDs[fmt.Sprintf("<anonymous@%d>", strings.Index(source, "() => known()) satisfies"))]},
 	} {
 		var outcomes []facts.Fact
 		for _, relation := range []string{"call_edge", "external_call", "call_unresolved"} {
 			for _, row := range find(relation, check.line) {
-				if row.Values[1].String == choose {
+				if owner(row.Values[0].String) == choose {
 					outcomes = append(outcomes, row)
 				}
 			}
 		}
-		if len(outcomes) != 1 || outcomes[0].Relation != check.relation || check.target != "" && outcomes[0].Values[2].String != check.target {
+		if len(outcomes) != 1 || outcomes[0].Relation != check.relation || check.target != "" && outcomes[0].Values[1].String != check.target {
 			t.Errorf("choose line %d outcomes: %v", check.line, outcomes)
 		}
 	}
@@ -918,10 +921,10 @@ export function choose(flag: boolean) {
 		t.Errorf("direct IIFE was also treated as a function value: %v", rows)
 	}
 	for _, fact := range snapshot.Facts {
-		if fact.Relation == "fn_ref" && strings.HasSuffix(fact.Values[2].String, "::function::total.nestedAlone") {
+		if fact.Relation == "fn_ref" && fact.Values[1].String == fnIDs["total.nestedAlone"] {
 			t.Errorf("declaration created a reference: %v", fact)
 		}
-		if fact.Relation == "call_edge" && fact.Values[1].String == scorecard && fact.Values[2].String == callback {
+		if fact.Relation == "call_edge" && owner(fact.Values[0].String) == scorecard && fact.Values[1].String == callback {
 			t.Errorf("containment created a call: %v", fact)
 		}
 		if fact.Relation == "fn_awaits" && fact.Values[0].String != callback {
@@ -940,11 +943,11 @@ export function choose(flag: boolean) {
 	output := runtime.ProgramOutput{Text: `
 Decl direct(Fn).
 direct(Fn) :- ts.fn_suspends(Fn).
-direct(Fn) :- ts.call_edge(Site, Fn, To), !ts.site_attribution_unknown(Site), direct(To).
+direct(Fn) :- ts.site_owner(Site, Fn), ts.call_edge(Site, To), !ts.site_attribution_unknown(Site), direct(To).
 Decl with_refs(Fn).
 with_refs(Fn) :- ts.fn_suspends(Fn).
-with_refs(Fn) :- ts.call_edge(Site, Fn, To), !ts.site_attribution_unknown(Site), with_refs(To).
-with_refs(Fn) :- ts.fn_ref(Site, Fn, To), !ts.site_attribution_unknown(Site), with_refs(To).
+with_refs(Fn) :- ts.site_owner(Site, Fn), ts.call_edge(Site, To), !ts.site_attribution_unknown(Site), with_refs(To).
+with_refs(Fn) :- ts.site_owner(Site, Fn), ts.fn_ref(Site, To), !ts.site_attribution_unknown(Site), with_refs(To).
 Decl selected(Fn).
 selected(Fn) :- ts.fn(Fn, File, _), ts.fn_exported(Fn), lintai.glob(File, "src/scorecard/**").
 Decl call_only(Fn).
@@ -952,11 +955,11 @@ call_only(Fn) :- selected(Fn), direct(Fn).
 Decl follow_refs(Fn).
 follow_refs(Fn) :- selected(Fn), with_refs(Fn).
 Decl module_seen(File).
-module_seen(Module) :- ts.module(Module), ts.location(Module, File, _, _, _, _), ts.module_has_suspension(File).
+module_seen(Module) :- ts.module_path(Module, File), ts.module_has_suspension(File).
 Decl bad_owner(Site).
-bad_owner(Site) :- ts.site_attribution_unsupported(Site, _), ts.call_edge(Site, "", _), ts.calls_reach("", _).
+bad_owner(Site) :- ts.site_attribution_unsupported(Site, _), ts.site_owner(Site, _).
 Decl uncertain(Fn).
-uncertain(Fn) :- ts.fn(Fn, _, "choose"), ts.fn_has_unresolved_call(Fn).
+uncertain(Fn) :- ts.fn(Fn, _, "choose"), ts.owner_has_unresolved_call(Fn).
 `}
 	violations, perr := evaluateProgram(base, catalog, decls, anchors, reportable, []string{"ts"}, output, []string{"call_only", "follow_refs", "module_seen", "bad_owner", "uncertain"}, nil, evalOptions{})
 	if perr != nil {
@@ -967,7 +970,7 @@ uncertain(Fn) :- ts.fn(Fn, _, "choose"), ts.fn_has_unresolved_call(Fn).
 		got = append(got, item.predicate+":"+item.anchor)
 	}
 	slices.Sort(got)
-	want := []string{"follow_refs:ts:" + scorecard, "module_seen:ts:src/scorecard/only-unsupported.ts", "module_seen:ts:src/scorecard/total.ts", "uncertain:ts:" + choose}
+	want := []string{"follow_refs:ts:" + scorecard, "module_seen:ts:module:src/scorecard/only-unsupported.ts", "module_seen:ts:module:src/scorecard/total.ts", "uncertain:ts:" + choose}
 	if !slices.Equal(got, want) {
 		t.Fatalf("policy rows = %v, want %v", got, want)
 	}

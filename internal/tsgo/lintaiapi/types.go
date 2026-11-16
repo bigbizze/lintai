@@ -2,11 +2,11 @@ package lintaiapi
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"maps"
 	"math"
-	"path/filepath"
 	"reflect"
 	"slices"
 	"strconv"
@@ -15,9 +15,6 @@ import (
 	"github.com/bigbizze/lintai/internal/tsgo/internal/ast"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/checker"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/jsnum"
-	"github.com/bigbizze/lintai/internal/tsgo/internal/scanner"
-	"github.com/bigbizze/lintai/internal/tsgo/internal/tspath"
-	"github.com/zeebo/xxh3"
 )
 
 const (
@@ -113,6 +110,8 @@ type TypeFact struct {
 	Incomplete []string
 	Display    string
 	Location   *SourceLocation
+	// Description is captured source context for a locatable type anchor.
+	Description string
 }
 
 // typeShape is the classification of one checker type.
@@ -159,32 +158,30 @@ type shapeProp struct {
 
 // emitFunctionType records the facts of a parameter or return type and of
 // every type that those facts refer to, and returns the type ID.
-func (e *extractor) emitFunctionType(root *checker.Type, enclosing *ast.Node) string {
+func (e *extractor) emitFunctionType(root *checker.Type, _ *ast.Node) string {
 	if root == nil {
 		return ""
 	}
-	visited := make(map[*checker.Type]struct{})
+	if !e.operations.typeStructure {
+		return e.typeID(root)
+	}
 	var visit func(t *checker.Type)
 	visit = func(t *checker.Type) {
-		if _, ok := visited[t]; ok {
+		// A checker type is one observation, even when several roots reach it.
+		// Mark it before descending so recursive types terminate as well.
+		if _, ok := e.typeFactSeen[t]; ok {
 			return
 		}
-		visited[t] = struct{}{}
+		e.typeFactSeen[t] = struct{}{}
+		e.typeStructureVisits++
 		id := e.typeID(t)
-		display := e.typeDisplay(t, enclosing)
+		display := e.typeDisplay(t, nil)
 		existing := e.typeFacts[id]
-		switch {
-		case existing == nil:
+		if existing == nil {
 			e.typeFacts[id] = e.newTypeFact(t, id, display)
-			e.typeFactSeen[t] = struct{}{}
-		case !hasKey(e.typeFactSeen, t):
+		} else {
 			// Another checker type has this ID. Its facts must agree.
 			*existing = mergeTypeFact(*existing, *e.newTypeFact(t, id, display))
-			e.typeFactSeen[t] = struct{}{}
-		default:
-			if display < existing.Display {
-				existing.Display = display
-			}
 		}
 		if e.isTruncated(t) {
 			return
@@ -241,6 +238,9 @@ func (e *extractor) newTypeFact(t *checker.Type, id string, display string) *Typ
 		fact.OriginKind = shape.originKind
 	}
 	fact.Location = e.typeLocation(t)
+	if fact.Location != nil && shape.nameDecl != nil {
+		fact.Description = trackingDescription("type", shape.name, trackingScope(shape.nameDecl), trackingPreview(shape.nameDecl))
+	}
 	if e.isTruncated(t) {
 		fact.Kind = TypeKindOther
 		fact.Incomplete = []string{IncompleteTruncated}
@@ -343,7 +343,7 @@ func (e *extractor) typeID(t *checker.Type) string {
 }
 
 func hashKey(key string) string {
-	sum := xxh3.HashString128(key).Bytes()
+	sum := sha256.Sum256([]byte(key))
 	return hex.EncodeToString(sum[:])
 }
 
@@ -878,16 +878,7 @@ func (e *extractor) declarationID(declaration *ast.Node) string {
 	if file == nil {
 		return ""
 	}
-	pathKey := normalizeSlash(e.program.PathKeyForFileName(file.FileName()).AsString())
-	rootKey := normalizeSlash(e.program.PathKeyForFileName(tspath.RootedFilePathFromAbsolute(e.workspaceRoot)).AsString())
-	if isWithinRoot(rootKey, pathKey) {
-		if relative, err := filepath.Rel(filepath.FromSlash(rootKey), filepath.FromSlash(pathKey)); err == nil {
-			pathKey = filepath.ToSlash(relative)
-		}
-	}
-	start := scanner.GetTokenPosOfNode(declaration, file, false)
-	key := jsonList(jsonQuote("decl-v1"), jsonQuote(normalizeSlash(pathKey)), jsonQuote(declaration.Kind.String()), strconv.Itoa(start))
-	return "decl:" + hashKey(key)
+	return e.sourceNodeID("decl", "declaration-v1", declaration)
 }
 
 func (e *extractor) typeDeclarationIDs(t *checker.Type) []string {
@@ -1012,8 +1003,12 @@ func mergeTypes(existing []TypeFact, incoming []TypeFact) []TypeFact {
 func mergeTypeFact(left TypeFact, right TypeFact) TypeFact {
 	display := min(left.Display, right.Display)
 	location := left.Location
+	description := left.Description
 	if location == nil || (right.Location != nil && locationLess(*right.Location, *location)) {
 		location = right.Location
+		description = right.Description
+	} else if right.Location != nil && *right.Location == *location && right.Description != "" && (description == "" || right.Description < description) {
+		description = right.Description
 	}
 	if !sameStructure(left, right) {
 		kind := left.Kind
@@ -1036,6 +1031,7 @@ func mergeTypeFact(left TypeFact, right TypeFact) TypeFact {
 	}
 	left.Display = display
 	left.Location = location
+	left.Description = description
 	return left
 }
 
@@ -1044,6 +1040,7 @@ func mergeTypeFact(left TypeFact, right TypeFact) TypeFact {
 func sameStructure(left TypeFact, right TypeFact) bool {
 	left.Display, right.Display = "", ""
 	left.Location, right.Location = nil, nil
+	left.Description, right.Description = "", ""
 	return reflect.DeepEqual(left, right)
 }
 
@@ -1054,5 +1051,11 @@ func locationLess(left SourceLocation, right SourceLocation) bool {
 	if left.StartLine != right.StartLine {
 		return left.StartLine < right.StartLine
 	}
-	return left.StartColumn < right.StartColumn
+	if left.StartColumn != right.StartColumn {
+		return left.StartColumn < right.StartColumn
+	}
+	if left.EndLine != right.EndLine {
+		return left.EndLine < right.EndLine
+	}
+	return left.EndColumn < right.EndColumn
 }

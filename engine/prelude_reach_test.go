@@ -22,18 +22,19 @@ func TestFnReachesAmbientScalesLinearly(t *testing.T) {
 		add("fn", facts.String(fn(i)), facts.String("a.ts"), facts.String(fn(i)))
 		add("location", facts.String(fn(i)), facts.String("a.ts"), facts.Number(1), facts.Number(1), facts.Number(1), facts.Number(2))
 		if i+1 < n {
-			add("call_edge", facts.String(fn(i)+"c"), facts.String(fn(i)), facts.String(fn(i+1)))
+			add("site_owner", facts.String(fn(i)+"c"), facts.String(fn(i)))
+			add("call_edge", facts.String(fn(i)+"c"), facts.String(fn(i+1)))
 		}
 	}
-	add("ambient_use", facts.String("use"), facts.Name("clock"), facts.Name("read"), facts.String("a.ts"))
-	add("site_in_fn", facts.String("use"), facts.String(fn(n-1)))
+	add("ambient_use", facts.String("use"), facts.Name("clock"), facts.Name("read"))
+	add("site_owner", facts.String("use"), facts.String(fn(n-1)))
 	items, anchors, reportable := qualifyTestFacts(t, items)
 	base, err := facts.Store(items)
 	if err != nil {
 		t.Fatal(err)
 	}
 	catalog, schemaDecls := typeScriptCatalogForTest(t)
-	output := runtime.ProgramOutput{Text: `Decl v(Fn). v(Fn) :- ts.fn(Fn, _, _), ts.fn_reaches_ambient(Fn, /clock).`}
+	output := runtime.ProgramOutput{Text: `Decl v(Fn). v(Fn) :- ts.fn(Fn, _, _), ts.owner_reaches_ambient(Fn, /clock).`}
 	violations, perr := evaluateProgram(base, catalog, schemaDecls, anchors, reportable, []string{"ts"}, output, []string{"v"}, nil, evalOptions{factLimit: 10 * n})
 	if perr != nil {
 		t.Fatal(perr)
@@ -48,8 +49,10 @@ func TestTypeOpacityPolicyAcceptsLibraryLeavesAndChecksArguments(t *testing.T) {
 	add := func(relation string, values ...facts.Value) {
 		items = append(items, facts.Fact{Relation: relation, Values: values})
 	}
-	add("fn_param", facts.String("fn:hidden"), facts.Number(0), facts.String("promise-hidden"))
-	add("fn_param", facts.String("fn:plain"), facts.Number(0), facts.String("promise-string"))
+	add("fn_signature", facts.String("fn:hidden"), facts.String("sig:hidden"))
+	add("fn_signature", facts.String("fn:plain"), facts.String("sig:plain"))
+	add("signature_param", facts.String("sig:hidden"), facts.Number(0), facts.String("promise-hidden"))
+	add("signature_param", facts.String("sig:plain"), facts.Number(0), facts.String("promise-string"))
 	add("location", facts.String("fn:hidden"), facts.String("src/api.ts"), facts.Number(1), facts.Number(1), facts.Number(1), facts.Number(2))
 	add("location", facts.String("fn:plain"), facts.String("src/api.ts"), facts.Number(2), facts.Number(1), facts.Number(2), facts.Number(2))
 	for _, id := range []string{"promise-hidden", "array-hidden", "promise-string", "array-string"} {
@@ -84,7 +87,7 @@ Decl reaches_disallowed_incomplete(Type).
 reaches_disallowed_incomplete(T) :- disallowed_incomplete(T).
 reaches_disallowed_incomplete(T) :- ts.type_child(T, Child), reaches_disallowed_incomplete(Child).
 Decl violation(Fn).
-violation(Fn) :- ts.fn_param(Fn, _, T), reaches_disallowed_incomplete(T).
+violation(Fn) :- ts.fn_signature(Fn, Sig), ts.signature_param(Sig, _, T), reaches_disallowed_incomplete(T).
 `}
 	violations, perr := evaluateProgram(base, catalog, schemaDecls, anchors, reportable, []string{"ts"}, output, []string{"violation"}, nil, evalOptions{})
 	if perr != nil {

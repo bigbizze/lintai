@@ -2,6 +2,7 @@ package lintaiapi
 
 import (
 	"context"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -247,7 +248,11 @@ func (e *extractor) applyConfiguredSourceEntries(entries []configuredSourceEntry
 			sourceProgram, sourceOutcome = auxiliary.forEntry(entry)
 		}
 		if sourceOutcome == "" {
-			e.inputs = append(e.inputs, sourceProgram.ex.inputs...)
+			// Auxiliary declaration anchors use the same immutable source-key
+			// cache as the primary context, including on an unchanged check.
+			sourceProgram.ex.operations.trackingCache = e.operations.trackingCache
+			sourceProgram.ex.operations.trackingPrevious = e.operations.trackingPrevious
+			sourceProgram.ex.operations.sourceRecovery = e.operations.sourceRecovery
 			for _, reason := range sourceProgram.ex.exportInventoryIncomplete(sourceProgram.file) {
 				e.sourceEntryFacts = append(e.sourceEntryFacts, SourceEntryFact{ID: entry.ID, Incomplete: []string{reason}})
 			}
@@ -299,6 +304,21 @@ func (e *extractor) applyConfiguredSourceEntries(entries []configuredSourceEntry
 		}
 		if sourceOutcome == "" {
 			e.sourceProgramDeclarations = append(e.sourceProgramDeclarations, sourceProgram.ex.sortedDeclarations()...)
+			e.declarationSourceCandidates = append(e.declarationSourceCandidates, sourceProgram.ex.declarationSourceCandidates...)
+			e.declarationSources = append(e.declarationSources, sourceProgram.ex.declarationSources...)
+			e.declarationSourceOutcomes = append(e.declarationSourceOutcomes, sourceProgram.ex.declarationSourceOutcomes...)
+			e.inputs = append(e.inputs, sourceProgram.ex.inputs...)
+			e.trackingKeyBuilds += sourceProgram.ex.trackingKeyBuilds
+			for id, support := range sourceProgram.ex.tracking {
+				if e.tracking == nil {
+					e.tracking = make(map[string]TrackingSupport)
+				}
+				if previous, exists := e.tracking[id]; !exists {
+					e.tracking[id] = support
+				} else if !reflect.DeepEqual(previous, support) {
+					e.trackingConflict = id
+				}
+			}
 		}
 		if len(bindings) == 0 && sourceOutcome != "" {
 			e.sourceEntryFacts = append(e.sourceEntryFacts, SourceEntryFact{ID: entry.ID, Incomplete: []string{sourceOutcome}})

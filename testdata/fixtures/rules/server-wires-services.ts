@@ -5,7 +5,7 @@ export default rule("arch.server-wires-services")
 	.program(dl`
 		Decl wires(Module, File, Fn, Name).
 		wires(Module, File, Fn, Name) :-
-			ts.module(Module), ts.location(Module, File, _, _, _, _), lintai.glob(File, "src/server/**"),
+			ts.module_path(Module, File), lintai.glob(File, "src/server/**"),
 			ts.calls_or_refs_reach(Module, Fn), ts.fn(Fn, Target, Name), lintai.glob(Target, "src/services/**").
 	`)
 	.report("wires")

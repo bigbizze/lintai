@@ -90,8 +90,14 @@ function exercise(cap: Capabilities, other: Other, inline: Inline, getter: Gette
 	files := writeWorkspace(t, root, map[string]string{"src/calls.ts": source})
 	host := compiler.NewCompilerHost(bundled.WrapFS(osvfs.FS()), bundled.LibPath(), nil, nil, nil)
 	// Inspect raw per-program observations before merge and retention.
+	group := configGroup{PrimaryFiles: files}
+	timing := &extractTiming{}
+	program, err := prepareGroupProgram(host, root, group, timing)
+	if err != nil {
+		t.Fatal(err)
+	}
 	partial, missing, err := buildSnapshotForGroup(context.Background(), host, root, files,
-		configGroup{PrimaryFiles: files}, nil, nil, nil, nil, nil, &extractTiming{})
+		group, program, nil, nil, nil, nil, nil, timing)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,9 +260,10 @@ function exercise(cap: Capabilities, other: Other, inline: Inline, getter: Gette
 	}
 }
 
+// V06, V08, V09, V10, V12: reconcile the same sites across checker contexts.
 func TestCallProvenanceProgramReconciliationAndRetention(t *testing.T) {
 	root := t.TempDir()
-	const source = `import { capability, uncertainMember, uncertain, task } from "contract";
+	const source = `import { capability, uncertainMember, uncertain, task, callback } from "contract";
 import { stable } from "./stable";
 capability.write();
 uncertainMember.write();
@@ -272,6 +279,7 @@ fluent().next();
 }
 const values: number[] = [];
 values.map(task);
+values.map(callback);
 function escaped(first: (n: number) => number, second: (n: number) => number) {
   values.map(first);
   values.map(second);
@@ -285,12 +293,14 @@ function escaped(first: (n: number) => number, second: (n: number) => number) {
 export declare const capability: Writer;
 export declare const uncertainMember: Writer;
 export function uncertain(): number { return 1; }
-export function task(): number { return 1; }`,
+export function task(): number { return 1; }
+export function callback(value: number): number { return value; }`,
 		"blue/contract.ts": `interface Writer { write(): void }
 export declare const capability: Writer;
 export declare const uncertainMember: any;
 export declare const uncertain: any;
-export function task(): number { return 2; }`,
+export function task(): number { return 2; }
+export declare const callback: (value: number) => number;`,
 		"shared/calls.ts":  source,
 		"shared/stable.ts": `export function stable(): number { return 1; }`,
 		"unrelated.ts":     `export const unrelated = 1;`,
@@ -307,10 +317,16 @@ export function task(): number { return 2; }`,
 		if err != nil {
 			t.Fatal(err)
 		}
+		config := configGroup{ConfigPath: configPath, Config: parsed, PrimaryFiles: []string{
+			filepath.Join(root, "shared/calls.ts"), filepath.Join(root, "shared/stable.ts"),
+		}}
+		timing := &extractTiming{}
+		program, err := prepareGroupProgram(host, root, config, timing)
+		if err != nil {
+			t.Fatal(err)
+		}
 		partial, missing, err := buildSnapshotForGroup(context.Background(), host, root, files,
-			configGroup{ConfigPath: configPath, Config: parsed, PrimaryFiles: []string{
-				filepath.Join(root, "shared/calls.ts"), filepath.Join(root, "shared/stable.ts"),
-			}}, nil, nil, configs, nil, nil, &extractTiming{})
+			config, program, nil, nil, configs, nil, nil, timing)
 		if err != nil || len(missing) != 0 {
 			t.Fatalf("build %s: missing=%v err=%v", group, missing, err)
 		}
@@ -319,8 +335,14 @@ export function task(): number { return 2; }`,
 	// This checked program never analyzes the invocations. It must not count
 	// as an empty/incomplete observation of them.
 	unrelated := filepath.Join(root, "unrelated.ts")
+	otherGroup := configGroup{PrimaryFiles: []string{unrelated}}
+	timing := &extractTiming{}
+	program, err := prepareGroupProgram(host, root, otherGroup, timing)
+	if err != nil {
+		t.Fatal(err)
+	}
 	absent, _, err := buildSnapshotForGroup(context.Background(), host, root, files,
-		configGroup{PrimaryFiles: []string{unrelated}}, nil, nil, configs, nil, nil, &extractTiming{})
+		otherGroup, program, nil, nil, configs, nil, nil, timing)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,6 +361,40 @@ export function task(): number { return 2; }`,
 		t.Fatalf("missing actual checker observation for %s", call)
 		return callDeclarationObservation{}
 	}
+	// V09, V10, V12: classification changes keep the syntax identity, and
+	// retracting a conflicting context restores the surviving observation.
+	taskSite := observationAt(partials[0], "task()").Site
+	if taskSite != observationAt(partials[1], "task()").Site {
+		t.Fatal("runtime target changed source identity")
+	}
+	combined := &Snapshot{}
+	mergeSnapshot(combined, partials[0])
+	mergeSnapshot(combined, partials[1])
+	callbackLine := strings.Count(source[:strings.Index(source, "values.map(callback)")], "\n") + 1
+	callbackSite := ""
+	for _, site := range combined.Sites {
+		if site.Range.StartLine == callbackLine && site.Range.StartColumn == len("values.map(")+1 {
+			callbackSite = site.ID
+		}
+	}
+	if callbackSite == "" || !slices.ContainsFunc(combined.FunctionEscapes, func(item FunctionEscape) bool {
+		return item.Site == callbackSite && item.Target != "" && !item.Unknown
+	}) || !slices.ContainsFunc(combined.FunctionEscapes, func(item FunctionEscape) bool {
+		return item.Site == callbackSite && item.Target == "" && item.Unknown
+	}) {
+		t.Fatalf("callback contexts did not retain both target and unknown at one site: %q %+v", callbackSite, combined.FunctionEscapes)
+	}
+	finalizeCallTargets(combined)
+	if !slices.Contains(combined.CallTargetConflicts, taskSite) {
+		t.Fatalf("missing target conflict for %s", taskSite)
+	}
+	surviving := &Snapshot{}
+	mergeSnapshot(surviving, partials[0])
+	finalizeCallTargets(surviving)
+	if slices.Contains(surviving.CallTargetConflicts, taskSite) {
+		t.Fatalf("removed context left a conflict for %s", taskSite)
+	}
+
 	merged := &Snapshot{}
 	for _, partial := range []*Snapshot{partials[0], partials[1], absent, partials[0]} {
 		mergeSnapshot(merged, partial)
@@ -357,8 +413,8 @@ export function task(): number { return 2; }`,
 	}{
 		{call: "capability.write()", conflict: true},
 		{call: "uncertainMember.write()", conflict: true, incomplete: true},
-		{call: "uncertain()", conflict: true, different: true, incomplete: true},
-		{call: "task()", conflict: true, different: true},
+		{call: "uncertain()", conflict: true, incomplete: true},
+		{call: "task()", conflict: true},
 		{call: "stable()"},
 		{call: "Math.abs(-1)"},
 	} {
@@ -457,20 +513,14 @@ export function task(): number { return 2; }`,
 			}
 		}
 	})
-	// Both ordinary escaped parameters and the callback whose collected target
-	// was filtered out remain unsupported, without conflicts between values.
-	escapes := 0
-	for _, call := range merged.CallsUnresolved {
-		if strings.Contains(call.SemanticKey, "::escaping_callback::") || strings.Contains(call.FromSemanticKey, "escaped") {
-			escapes++
-			if !slices.Contains(merged.CallDeclarationIncomplete, CallDeclarationIncompleteFact{Site: call.SemanticKey, Reason: "unsupported"}) ||
-				slices.Contains(merged.CallDeclarationIncomplete, CallDeclarationIncompleteFact{Site: call.SemanticKey, Reason: "conflict"}) {
-				t.Fatalf("escaped value lost unsupported outcome or gained conflict: %+v", call)
-			}
-		}
+	// A callback argument is transfer evidence, never an invocation.
+	if len(merged.FunctionEscapes) == 0 {
+		t.Fatal("missing direct callback evidence")
 	}
-	if escapes != 3 {
-		t.Fatalf("want two parameter escapes and one materialized filtered escape, got %d", escapes)
+	for _, escape := range merged.FunctionEscapes {
+		if slices.ContainsFunc(merged.CallsUnresolved, func(call CallUnresolved) bool { return call.SemanticKey == escape.Site }) || slices.ContainsFunc(merged.CallDeclarationIncomplete, func(item CallDeclarationIncompleteFact) bool { return item.Site == escape.Site }) {
+			t.Fatalf("callback argument became an invocation: %+v", escape)
+		}
 	}
 	for i, fact := range merged.CallDeclarations {
 		semanticDeclaration(t, merged, fact.Declaration)

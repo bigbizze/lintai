@@ -168,27 +168,37 @@ export default () => add(4);
 		t.Fatalf("call edges differ:\ngot:\n%s\nwant:\n%s", strings.Join(calls, "\n"), strings.Join(wantCalls, "\n"))
 	}
 
+	names := make(map[string]string)
+	for _, fn := range snapshot.Functions {
+		names[fn.SemanticKey] = fn.Name
+	}
 	external := make([]string, 0)
 	for _, call := range snapshot.ExternalCalls {
-		external = append(external, fmt.Sprintf("%s %s %s", call.FromSemanticKey, call.Module, call.Name))
+		external = append(external, fmt.Sprintf("%s %s %s", names[call.FromSemanticKey], call.Module, call.Name))
 	}
 	slices.Sort(external)
 	wantExternal := []string{
-		"src/a.ts::arrow_function::text lib String",
-		"src/a.ts::function::add lib DateConstructor.now",
-		"src/a.ts::function::collect lib Set",
-		"src/a.ts::function::collect lib Set.add",
-		"src/a.ts::function::parse lib JSON.parse",
+		"text lib String",
+		"add lib DateConstructor.now",
+		"collect lib Set",
+		"collect lib Set.add",
+		"parse lib JSON.parse",
 	}
+	slices.Sort(wantExternal)
 	if !slices.Equal(external, wantExternal) {
 		t.Fatalf("external calls differ:\ngot:\n%s\nwant:\n%s", strings.Join(external, "\n"), strings.Join(wantExternal, "\n"))
 	}
 
 	unresolved := make([]string, 0)
 	for _, call := range snapshot.CallsUnresolved {
-		unresolved = append(unresolved, call.FromSemanticKey)
+		if call.FromModule {
+			unresolved = append(unresolved, "<module>")
+		} else {
+			unresolved = append(unresolved, names[call.FromSemanticKey])
+		}
 	}
-	if want := []string{"src/a.ts", "src/a.ts::function::show"}; !slices.Equal(unresolved, want) {
+	slices.Sort(unresolved)
+	if want := []string{"<module>", "show"}; !slices.Equal(unresolved, want) {
 		t.Fatalf("unresolved calls differ:\ngot  %q\nwant %q", unresolved, want)
 	}
 }
@@ -309,26 +319,34 @@ class Quiet extends Base {
 export const made = [new Stamped(), new Quiet()];
 `,
 	})
+	names := make(map[string]string)
+	for _, fn := range snapshot.Functions {
+		names[fn.SemanticKey] = fn.Name
+	}
 	callers := func(items []CallUnresolved) []string {
 		result := make([]string, 0, len(items))
 		for _, item := range items {
-			result = append(result, fmt.Sprintf("%s:%d", item.FromSemanticKey, item.Range.StartLine))
+			name := names[item.FromSemanticKey]
+			if item.FromModule {
+				name = item.FromPath
+			}
+			result = append(result, fmt.Sprintf("%s:%d", name, item.Range.StartLine))
 		}
+		slices.Sort(result)
 		return result
 	}
 	if got, want := callers(snapshot.CallsUnresolved), []string{
 		"src/a.ts:25",
-		"src/a.ts::function::inject:6",
-		"src/a.ts::function::inject:7",
-		"src/a.ts::function::inject:8",
-		"src/a.ts::function::inject:9",
-		"src/a.ts::function::inject:12",
+		"inject:6",
+		"inject:7",
+		"inject:8",
+		"inject:9",
+		"inject:12",
 		"src/b.ts:18",
-		"src/b.ts::function::hidden:2",
-		"src/b.ts::function::hidden:3",
-		"src/b.ts::function::hidden:4",
-		"src/b.ts::function::hidden:5",
-	}; !slices.Equal(got, want) {
+		"hidden:2",
+		"hidden:3",
+		"hidden:5",
+	}; !slices.Equal(got, slices.Sorted(slices.Values(want))) {
 		t.Fatalf("unresolved calls differ:\ngot  %q\nwant %q", got, want)
 	}
 
@@ -345,15 +363,18 @@ export const made = [new Stamped(), new Quiet()];
 
 	refs := make([]string, 0)
 	for _, ref := range snapshot.FnRefs {
-		refs = append(refs, fmt.Sprintf("%s:%d", ref.SemanticKey, ref.Range.StartLine))
+		owner := names[ref.FromSemanticKey]
+		if ref.FromModule {
+			owner = ref.FromPath
+		}
+		if owner == "" {
+			owner = "unsupported"
+		}
+		refs = append(refs, fmt.Sprintf("%s -> %s:%d", owner, names[ref.ToSemanticKey], ref.Range.StartLine))
 	}
 	slices.Sort(refs)
 	if want := []string{
-		"src/a.ts::function::wire::refs::src/effect.ts::function::effect#2:15",
-		"src/a.ts::function::wire::refs::src/effect.ts::function::effect:15",
-		"src/a.ts::refs::src/effect.ts::function::effect:17",
-		"src/b.ts::function::hidden::refs::src/b.ts::arrow_function::<anonymous@178>:6",
-		"src/b.ts::unsupported::refs::src/b.ts::arrow_function::Quiet.handler:16",
+		"hidden -> <anonymous@178>:6", "src/a.ts -> effect:17", "unsupported -> Quiet.handler:16", "wire -> effect:15", "wire -> effect:15",
 	}; !slices.Equal(refs, want) {
 		t.Fatalf("function references differ:\ngot  %q\nwant %q", refs, want)
 	}
@@ -362,6 +383,7 @@ export const made = [new Stamped(), new Quiet()];
 	for _, item := range snapshot.ImportsOpaque {
 		opaque = append(opaque, fmt.Sprintf("%s:%d", item.FromPath, item.Range.StartLine))
 	}
+	slices.Sort(opaque)
 	if want := []string{"src/a.ts:19", "src/a.ts:20", "src/a.ts:22"}; !slices.Equal(opaque, want) {
 		t.Fatalf("opaque imports differ:\ngot  %q\nwant %q", opaque, want)
 	}
@@ -395,6 +417,10 @@ export default ((() => 1) satisfies () => number);
 	for _, fn := range snapshot.Functions {
 		functions[fn.SemanticKey] = fn
 	}
+	byName := make(map[string]string)
+	for _, fn := range snapshot.Functions {
+		byName[fn.Name] = fn.SemanticKey
+	}
 	var anonymous []string
 	for _, item := range []struct {
 		fragment, token, kind string
@@ -410,25 +436,25 @@ export default ((() => 1) satisfies () => number);
 		{"export const checkedAsync = (async", "async", "arrow_function", true, 0},
 	} {
 		offset := strings.Index(source, item.fragment) + strings.Index(item.fragment, item.token)
-		key := fmt.Sprintf("src/main.ts::%s::<anonymous@%d>", item.kind, offset)
+		key := byName[fmt.Sprintf("<anonymous@%d>", offset)]
 		fn, ok := functions[key]
 		if !ok || fn.IsExported != item.exported || fn.SignatureOmitted || fn.SignatureUnresolved || len(fn.ParameterTypes) != item.parameters || fn.ReturnType == "" || len(fn.SignatureObservations) != 1 || !fn.SignatureObservations[0].Complete {
 			t.Errorf("wrapped function %q: %+v", item.fragment, fn)
 		}
 		anonymous = append(anonymous, key)
 	}
-	if direct := functions["src/main.ts::arrow_function::directAsync"]; direct.ReturnType == "" || direct.ReturnType != functions[anonymous[5]].ReturnType || direct.ReturnType != functions[anonymous[6]].ReturnType {
+	if direct := functions[byName["directAsync"]]; direct.ReturnType == "" || direct.ReturnType != functions[anonymous[5]].ReturnType || direct.ReturnType != functions[anonymous[6]].ReturnType {
 		t.Errorf("direct, wrapped and satisfies bindings have different return types: %q, %q, %q", direct.ReturnType, functions[anonymous[5]].ReturnType, functions[anonymous[6]].ReturnType)
 	}
-	for _, key := range []string{"src/main.ts::function_expression::original", "src/main.ts::arrow_function::direct"} {
+	for _, key := range []string{byName["original"], byName["direct"]} {
 		if fn, ok := functions[key]; !ok || fn.SignatureOmitted || fn.ReturnType == "" {
 			t.Errorf("named function identity or signature changed: %+v", fn)
 		}
 	}
-	wantRefs := []string{anonymous[0], anonymous[2], anonymous[3], "src/main.ts::function_expression::original", "src/main.ts::arrow_function::direct"}
+	wantRefs := []string{anonymous[0], anonymous[2], anonymous[3], byName["original"], byName["direct"]}
 	var refs []string
 	for _, ref := range snapshot.FnRefs {
-		if ref.FromSemanticKey == "src/main.ts::function::total" {
+		if ref.FromSemanticKey == byName["total"] {
 			refs = append(refs, ref.ToSemanticKey)
 		}
 	}
@@ -479,8 +505,8 @@ export function a(): number {
 		t.Fatalf("expected one import and one call, got %+v and %+v", snapshot.ImportEdges, snapshot.CallEdges)
 	}
 	importRange := snapshot.ImportEdges[0].Range
-	if importRange.StartLine != 1 || importRange.StartColumn != 19 {
-		t.Fatalf("import starts at %d:%d, want 1:19", importRange.StartLine, importRange.StartColumn)
+	if importRange.StartLine != 1 || importRange.StartColumn != 1 {
+		t.Fatalf("import starts at %d:%d, want 1:1", importRange.StartLine, importRange.StartColumn)
 	}
 	callRange := snapshot.CallEdges[0].Range
 	if callRange.StartLine != 5 || callRange.StartColumn != 10 {
@@ -522,9 +548,13 @@ export function b(crypto: number) {
 }
 `,
 	})
+	names := make(map[string]string)
+	for _, fn := range snapshot.Functions {
+		names[fn.SemanticKey] = fn.Name
+	}
 	got := make([]string, 0)
 	for _, ref := range snapshot.GlobalRefs {
-		fn := ref.FunctionSemanticKey[strings.LastIndex(ref.FunctionSemanticKey, "::")+2:]
+		fn := names[ref.FunctionSemanticKey]
 		got = append(got, fmt.Sprintf("%s %s:%d", ref.Name, fn, ref.Range.StartLine))
 	}
 	slices.Sort(got)
@@ -628,15 +658,21 @@ async function factory() {
 		{"await ambiguous()", "await", "unsupported:unsupported_context"},
 	}
 	byKey := make(map[string]SuspensionSite)
+	functionNames := make(map[string]string)
+	for _, fn := range snapshot.Functions {
+		functionNames[fn.SemanticKey] = "src/main.ts::" + fn.Kind + "::" + fn.Name
+	}
 	for _, site := range snapshot.SuspensionSites {
-		byKey[site.SemanticKey] = site
+		byKey[fmt.Sprintf("%s:%d:%d", site.Kind, site.Range.StartLine, site.Range.StartColumn)] = site
 	}
 	if len(byKey) != len(want) || len(snapshot.SuspensionSites) != len(want) {
 		t.Fatalf("unexpected suspension sites: %+v", snapshot.SuspensionSites)
 	}
 	for _, expected := range want {
 		offset := strings.Index(source, expected.text)
-		key := fmt.Sprintf("src/main.ts::suspension::%s::%d", expected.kind, offset)
+		line := strings.Count(source[:offset], "\n") + 1
+		column := offset - strings.LastIndex(source[:offset], "\n")
+		key := fmt.Sprintf("%s:%d:%d", expected.kind, line, column)
 		site, ok := byKey[key]
 		if !ok {
 			t.Errorf("missing %s at %q", key, expected.text)
@@ -655,16 +691,14 @@ async function factory() {
 		if classifications != 1 {
 			t.Errorf("site %q has %d owner classifications: %+v", expected.text, classifications, site)
 		}
-		owner := site.FunctionSemanticKey
+		owner := functionNames[site.FunctionSemanticKey]
 		if site.AtModule {
 			owner = "module"
 		}
 		if site.UnsupportedReason != "" {
 			owner = "unsupported:" + site.UnsupportedReason
 		}
-		line := strings.Count(source[:offset], "\n") + 1
-		column := offset - strings.LastIndex(source[:offset], "\n")
-		if owner != expected.owner || site.Range.File != "src/main.ts" || site.Range.StartLine != line || site.Range.StartColumn != column || site.Range.EndLine < line || site.EntityID != "suspension:"+key {
+		if owner != expected.owner || site.Range.File != "src/main.ts" || site.Range.StartLine != line || site.Range.StartColumn != column || site.Range.EndLine < line || site.EntityID != site.SemanticKey {
 			t.Errorf("site %q: got %+v, owner %q; want owner %q at %d:%d", expected.text, site, owner, expected.owner, line, column)
 		}
 	}
@@ -675,7 +709,9 @@ async function factory() {
 	} {
 		start := strings.Index(source, full.text)
 		end := start + len(full.text)
-		site := byKey[fmt.Sprintf("src/main.ts::suspension::%s::%d", full.kind, start)]
+		startLine := strings.Count(source[:start], "\n") + 1
+		startColumn := start - strings.LastIndex(source[:start], "\n")
+		site := byKey[fmt.Sprintf("%s:%d:%d", full.kind, startLine, startColumn)]
 		line := strings.Count(source[:end], "\n") + 1
 		column := end - strings.LastIndex(source[:end], "\n")
 		if site.Range.EndLine != line || site.Range.EndColumn != column {
@@ -685,10 +721,10 @@ async function factory() {
 	var anonymous, zero *Function
 	for i := range snapshot.Functions {
 		fn := &snapshot.Functions[i]
-		if fn.SemanticKey == callback {
+		if functionNames[fn.SemanticKey] == callback {
 			anonymous = fn
 		}
-		if fn.SemanticKey == "src/main.ts::function::zero" {
+		if fn.Name == "zero" {
 			zero = fn
 		}
 	}

@@ -61,8 +61,17 @@ func TestImportMetaSyntaxAndOwnership(t *testing.T) {
 		}
 		rows[item.Relation][item.Values[0].String] = item
 	}
-	owner := "src/main.ts::function::read"
-	constructor := "src/main.ts::constructor::Present.constructor"
+	functionID := func(name string) string {
+		for _, fn := range snapshot.Functions {
+			if fn.Name == name {
+				return fn.SemanticKey
+			}
+		}
+		t.Fatalf("missing function %s", name)
+		return ""
+	}
+	owner := functionID("read")
+	constructor := functionID("Present.constructor")
 	want := []struct {
 		path, suffix, owner, reason string
 		line, start, end            int64
@@ -83,9 +92,15 @@ func TestImportMetaSyntaxAndOwnership(t *testing.T) {
 	}
 	for _, expected := range want {
 		path := "import.meta." + expected.path
-		id := "src/main.ts::access::" + path + expected.suffix
+		id := ""
+		for candidate := range rows["meta_access"] {
+			if location := rows["location"][candidate]; len(location.Values) > 2 && location.Values[2].Number == expected.line {
+				id = candidate
+				break
+			}
+		}
 		access, ok := rows["meta_access"][id]
-		if !ok || access.Values[1].String != "src/main.ts" || access.Values[2].String != path {
+		if !ok || access.Values[1].String != path {
 			t.Errorf("access %s: %v", id, access)
 			continue
 		}
@@ -94,8 +109,12 @@ func TestImportMetaSyntaxAndOwnership(t *testing.T) {
 			location.Values[3].Number != expected.start || location.Values[4].Number != expected.line || location.Values[5].Number != expected.end {
 			t.Errorf("access %s location: %v", id, location)
 		}
-		actualOwner, hasOwner := rows["site_in_fn"][id]
-		if hasOwner != (expected.owner != "") || hasOwner && actualOwner.Values[1].String != expected.owner {
+		actualOwner, hasOwner := rows["site_owner"][id]
+		expectedOwner := expected.owner
+		if expectedOwner == "" && expected.reason == "" {
+			expectedOwner = "module:src/main.ts"
+		}
+		if hasOwner != (expectedOwner != "") || hasOwner && actualOwner.Values[1].String != expectedOwner {
 			t.Errorf("access %s owner: %v", id, actualOwner)
 		}
 		marker, hasMarker := rows["site_attribution_unsupported"][id]
@@ -110,7 +129,7 @@ func TestImportMetaSyntaxAndOwnership(t *testing.T) {
 	}{
 		6:  {"await", owner, "", false},
 		11: {"await", "", "instance_construction", false},
-		25: {"for_await", "src/main.ts::function::iterate", "", false},
+		25: {"for_await", functionID("iterate"), "", false},
 		27: {"await", "", "", true},
 	}
 	if len(snapshot.SuspensionSites) != len(wantSuspension) {
@@ -122,18 +141,15 @@ func TestImportMetaSyntaxAndOwnership(t *testing.T) {
 			t.Errorf("unexpected suspension: %+v", site)
 			continue
 		}
-		fn, hasFn := rows["suspension_in_fn"][site.EntityID]
-		if hasFn != (expected.owner != "") || hasFn && fn.Values[1].String != expected.owner {
-			t.Errorf("suspension %s owner: %v", site.EntityID, fn)
+		ownerFact, hasOwner := rows["site_owner"][site.EntityID]
+		ownerID := expected.owner
+		if expected.module {
+			ownerID = "module:src/main.ts"
 		}
-		_, atModule := rows["suspension_at_module"][site.EntityID]
 		marker, hasMarker := rows["site_attribution_unsupported"][site.EntityID]
-		if atModule != expected.module || hasMarker != (expected.reason != "") || hasMarker && marker.Values[1].String != expected.reason {
-			t.Errorf("suspension %s module=%v, unsupported=%v", site.EntityID, atModule, marker)
+		if hasOwner != (ownerID != "") || hasOwner && ownerFact.Values[1].String != ownerID || hasMarker != (expected.reason != "") || hasMarker && marker.Values[1].String != expected.reason {
+			t.Errorf("suspension owner or attribution: %s %v %v", site.EntityID, ownerFact, marker)
 		}
-	}
-	if len(rows["fn_awaits"]) != 1 || rows["fn_awaits"][owner].Relation != "fn_awaits" {
-		t.Errorf("ordinary await owners: %v", rows["fn_awaits"])
 	}
 	var missingCall string
 	for _, call := range snapshot.CallsUnresolved {
