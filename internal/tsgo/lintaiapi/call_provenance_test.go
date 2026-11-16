@@ -460,8 +460,8 @@ export declare const callback: (value: number) => number;`,
 					if test.call == "Math.abs(-1)" && declaration.OriginKind != OriginKindLib {
 						t.Fatalf("lost checked library declaration: %+v", declaration)
 					}
-					if test.call == "task()" && (len(declaration.Types) == 0 || declaration.Function != "") {
-						t.Fatalf("lost independently collected types or retained a filtered function: %+v", declaration)
+					if test.call == "task()" && (len(declaration.TypeSubjects) != 0 || len(declaration.Types) != 0 || len(declaration.TypeIncomplete) != 0 || declaration.Function != "") {
+						t.Fatalf("call-only endpoint retained a type or filtered function: %+v", declaration)
 					}
 					if test.call == "stable()" && declaration.Function == "" {
 						t.Fatal("lost surviving direct function association")

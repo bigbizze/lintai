@@ -356,6 +356,128 @@ func TestExactSourceAndExcludedGlobalUseOneProductionScope(t *testing.T) {
 	}
 }
 
+// V04, V09, V10: a declaration retained for a call is not a type subject
+// unless a retained export calls for its type in that space.
+func TestFilteredExportsDefineDeclarationTypeSubjects(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "tsconfig.json", `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler"},"files":["src/main.ts"]}`)
+	writeWorkspaceFile(t, root, "src/excluded/tsconfig.json", `{"files":["other.ts"]}`)
+	writeWorkspaceFile(t, root, "src/excluded/other.ts", `export {};`)
+	writeWorkspaceFile(t, root, "src/excluded/effect.ts", `
+export function effect(value: string): boolean { return value.length > 0; }
+export class Widget {}
+export const valueOnly = 123;
+`)
+	writeWorkspaceFile(t, root, "src/main.ts", `
+import { effect } from "./excluded/effect";
+export type { Widget, valueOnly } from "./excluded/effect";
+export function run(): boolean { return effect("ok"); }
+`)
+	producer := New(Options{Files: FileScopeTsconfig})
+	description, err := producer.Describe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := make(map[string]facts.Predicate)
+	var all []facts.Predicate
+	for _, relation := range description.BaseRelations {
+		byName[relation.Predicate.Name] = relation.Predicate
+		all = append(all, relation.Predicate)
+	}
+	collect := func(producer *Backend, predicates []facts.Predicate) facts.Batch {
+		t.Helper()
+		batch, err := producer.Collect(context.Background(), backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: root, Predicates: predicates})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := facts.ValidateBatch(description, predicates, batch); err != nil {
+			t.Fatal(err)
+		}
+		return batch
+	}
+	full := collect(producer, all)
+	rows := func(batch facts.Batch, name string) []facts.Row { return batch.Relations[byName["ts."+name]] }
+	if slices.Contains(full.AnalyzedFiles, "src/excluded/effect.ts") || !slices.Contains(full.AnalyzedFiles, "src/main.ts") {
+		t.Fatalf("fixture has wrong primary modules: %v", full.AnalyzedFiles)
+	}
+	ids := make(map[string]string)
+	for _, row := range rows(full, "declaration") {
+		ids[row[1].String] = row[0].String
+	}
+	for _, name := range []string{"effect", "Widget", "valueOnly", "run"} {
+		if ids[name] == "" {
+			t.Fatalf("missing %s declaration: %v", name, rows(full, "declaration"))
+		}
+	}
+	if !slices.ContainsFunc(rows(full, "call_declaration"), func(row facts.Row) bool { return row[1].String == ids["effect"] }) {
+		t.Fatalf("excluded declaration was not retained for call provenance: %v", rows(full, "call_declaration"))
+	}
+	wantExports := map[string]struct{ space, declaration string }{
+		"Widget": {"type", ids["Widget"]}, "valueOnly": {"type", ids["valueOnly"]}, "run": {"value", ids["run"]},
+	}
+	for _, row := range rows(full, "module_export") {
+		binding, ok := wantExports[row[2].String]
+		if !ok || row[1].String != "ts:module:src/main.ts" || row[3].String != binding.space ||
+			!slices.ContainsFunc(rows(full, "export_target"), func(target facts.Row) bool {
+				return target[0].String == row[0].String && target[1].String == binding.declaration
+			}) {
+			t.Fatalf("unexpected retained export or target: %v", row)
+		}
+		delete(wantExports, row[2].String)
+	}
+	if len(wantExports) != 0 {
+		t.Fatalf("missing retained exports: %v", wantExports)
+	}
+	want := map[string]string{ids["Widget"]: "type", ids["valueOnly"]: "value", ids["run"]: "value"}
+	subjects := make(map[string]string)
+	for _, row := range rows(full, "declaration_type_subject") {
+		id, space := row[0].String, row[1].String
+		if want[id] != space {
+			t.Errorf("unexpected declaration type subject: %v", row)
+		}
+		subjects[id] = space
+	}
+	if !reflect.DeepEqual(subjects, want) {
+		t.Errorf("declaration type subjects = %v, want %v", subjects, want)
+	}
+	for _, name := range []string{"declaration_type", "declaration_type_incomplete"} {
+		for _, row := range rows(full, name) {
+			if want[row[0].String] != row[1].String {
+				t.Errorf("%s outside retained subject domain: %v", name, row)
+			}
+		}
+	}
+	for id, space := range want {
+		if !slices.ContainsFunc(rows(full, "declaration_type"), func(row facts.Row) bool { return row[0].String == id && row[1].String == space }) &&
+			!slices.ContainsFunc(rows(full, "declaration_type_incomplete"), func(row facts.Row) bool { return row[0].String == id && row[1].String == space }) {
+			t.Errorf("subject %s /%s has no type or incomplete reason", id, space)
+		}
+	}
+	// The walk scope exposes the excluded function's export type. It must not
+	// remain in the filtered type population solely through that discarded root.
+	walk := collect(New(Options{Files: FileScopeWalk}), []facts.Predicate{byName["ts.declaration_type"], byName["ts.type_kind"]})
+	effectTypes := make(map[string]bool)
+	for _, row := range rows(walk, "declaration_type") {
+		if row[0].String == ids["effect"] && row[1] == facts.Name("value") {
+			effectTypes[row[2].String] = true
+		}
+	}
+	if len(effectTypes) == 0 {
+		t.Fatal("walk scope did not expose the excluded export's value type")
+	}
+	for _, row := range rows(full, "type_kind") {
+		if effectTypes[row[0].String] {
+			t.Errorf("discarded export kept an otherwise unreachable type: %v", row)
+		}
+	}
+	for _, name := range []string{"declaration_type_subject", "declaration_type", "declaration_type_incomplete"} {
+		selected := collect(producer, []facts.Predicate{byName["ts."+name]})
+		if !reflect.DeepEqual(rows(selected, name), rows(full, name)) {
+			t.Errorf("%s-only collection differs from full collection: %v vs %v", name, rows(selected, name), rows(full, name))
+		}
+	}
+}
+
 // V06, V08: target filtering preserves invocation identity and exposes only
 // the callback transfers of the now-unresolved invocation.
 func TestFilteredCallTargetsRemainUnresolved(t *testing.T) {

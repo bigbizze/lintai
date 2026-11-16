@@ -371,7 +371,7 @@ func (e *extractor) collectSemanticExports(file *ast.SourceFile) {
 		if !complete && len(reasons) == 0 {
 			reasons = append(reasons, AssociationUnresolved)
 		}
-		e.addExport(moduleIdentity, moduleFile, binding.name, binding.space, targets, complete, reasons, items)
+		e.addExport(moduleIdentity, moduleFile, binding.name, binding.space, binding.declarationSpace, targets, complete, reasons, items)
 	}
 	e.collectStarSourceObservations(inventory.starSources, map[string]struct{}{moduleIdentity: {}})
 	e.moduleExportObservations = append(e.moduleExportObservations, ModuleExportObservation{
@@ -746,7 +746,7 @@ func (e *extractor) addDeclarationType(fact *DeclarationFact, space string, type
 	fact.Types = append(fact.Types, item)
 }
 
-func (e *extractor) addExport(moduleIdentity string, file string, name string, space string, targetIDs []string, complete bool, reasons []string, contributions []syntaxExportContribution) {
+func (e *extractor) addExport(moduleIdentity string, file string, name string, space string, declarationSpace string, targetIDs []string, complete bool, reasons []string, contributions []syntaxExportContribution) {
 	id := exportEntityID(moduleIdentity, name, space)
 	e.trackExport(id, name, space)
 	fact := e.exports[id]
@@ -756,6 +756,11 @@ func (e *extractor) addExport(moduleIdentity string, file string, name string, s
 	}
 	targetIDs = sortedUnique(targetIDs)
 	fact.Targets = sortedUnique(append(fact.Targets, targetIDs...))
+	if e.operations.declarationTypes {
+		for _, target := range targetIDs {
+			fact.typeSubjects = append(fact.typeSubjects, declarationTypeSubject{target, declarationSpace})
+		}
+	}
 	if complete {
 		fact.TargetObservations = append(fact.TargetObservations, slices.Clone(targetIDs))
 	}
@@ -1645,6 +1650,7 @@ func mergeExportObservations(items []ExportFact) []ExportFact {
 			continue
 		}
 		current.Targets = sortedUnique(append(current.Targets, item.Targets...))
+		current.typeSubjects = append(current.typeSubjects, item.typeSubjects...)
 		current.Via = sortedUnique(append(current.Via, item.Via...))
 		current.Reexports = uniqueReexports(append(current.Reexports, item.Reexports...))
 		current.Incomplete = sortedUnique(append(current.Incomplete, item.Incomplete...))
