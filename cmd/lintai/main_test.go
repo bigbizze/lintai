@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bigbizze/lintai/backend/typescript"
 	"github.com/bigbizze/lintai/diagnostics"
 )
 
@@ -151,6 +152,143 @@ func TestFactsCommandPropagatesSourceLinksConfigurationErrors(t *testing.T) {
 	}
 	if err == nil || !strings.Contains(err.Error(), "invalid --source-links: unsupported version 2") {
 		t.Fatalf("source-links config error was lost by the CLI: %v", err)
+	}
+}
+
+func TestTypeScriptSettingsApplyConfigAndInvocationPrecedence(t *testing.T) {
+	root := t.TempDir()
+	config := `[workspace]
+exclude = ["tmp/**"]
+include = ["dist/**"]
+sources = ["configured.d.ts"]
+
+[producers.ts]
+implementation = "lintai.typescript"
+files = "walk"
+source_links = "links.json"
+`
+	if err := os.WriteFile(filepath.Join(root, "lintai.toml"), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	settings, err := loadTypeScriptSettings(root, "", "", false, "", false, []string{"cli/**"}, []string{"cli.d.ts"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(settings) != 1 || settings[0].Files != typescript.FileScopeWalk || settings[0].SourceLinks != "links.json" ||
+		!slices.Equal(settings[0].WorkspaceExcludes, []string{"tmp/**"}) || !slices.Equal(settings[0].Includes, []string{"dist/**"}) ||
+		!slices.Equal(settings[0].Excludes, []string{"cli/**"}) || !slices.Equal(settings[0].Sources, []string{"configured.d.ts", "cli.d.ts"}) {
+		t.Fatalf("configuration defaults or list appends were not applied: %+v", settings)
+	}
+	settings, err = loadTypeScriptSettings(root, "", "tsconfig", true, "", true, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings[0].Files != typescript.FileScopeTsconfig || settings[0].SourceLinks != "" {
+		t.Fatalf("explicit scalar flags did not override file values, including clearing source_links: %+v", settings[0])
+	}
+	if err := os.WriteFile(filepath.Join(root, "lintai.toml"), []byte(config+`
+[producers.catalog]
+implementation = "lintai.typescript"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadTypeScriptSettings(root, "", "walk", true, "", false, nil, nil); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("scalar TypeScript flags were accepted with multiple configured instances: %v", err)
+	}
+	if _, err := loadTypeScriptSettings(root, "", "", false, "", true, nil, nil); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("source-links flag was accepted with multiple configured instances: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "cli"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"configured.d.ts", "cli.d.ts", "cli/ignored.ts", "ordinary.ts"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("export {};"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var output bytes.Buffer
+	if err := run(context.Background(), []string{
+		"scope", "--explain", "--json", "--workspace-root", root, "--exclude", "cli/**", "--source", "cli.d.ts",
+	}, &output); err != nil {
+		t.Fatal(err)
+	}
+	var reports []struct {
+		Producer string `json:"producer"`
+		Scope    struct {
+			Sources  []string `json:"sources"`
+			Selected []struct {
+				Path string `json:"path"`
+			} `json:"selected"`
+		} `json:"scope"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &reports); err != nil {
+		t.Fatal(err)
+	}
+	if len(reports) != 2 {
+		t.Fatalf("got %d producer scopes, want 2", len(reports))
+	}
+	for _, report := range reports {
+		selected := make([]string, 0, len(report.Scope.Selected))
+		for _, file := range report.Scope.Selected {
+			selected = append(selected, file.Path)
+		}
+		if !slices.Equal(report.Scope.Sources, []string{"cli.d.ts", "configured.d.ts"}) ||
+			!slices.Equal(selected, []string{"cli.d.ts", "configured.d.ts", "ordinary.ts"}) {
+			t.Fatalf("list additions were not applied to producer %s: %+v", report.Producer, report.Scope)
+		}
+	}
+}
+
+func TestScopeExplainUsesConfiguredExactSourceSelection(t *testing.T) {
+	root := t.TempDir()
+	write := func(name, contents string) {
+		t.Helper()
+		path := filepath.Join(root, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("lintai.toml", `[workspace]
+exclude = ["src/extra.ts"]
+sources = ["src/extra.ts"]
+
+[producers.ts]
+files = "tsconfig"
+`)
+	write("tsconfig.json", `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler"},"files":["src/main.ts"]}`)
+	write("src/main.ts", "export const main = 1;\n")
+	write("src/extra.ts", "export const extra = 2;\n")
+	var output bytes.Buffer
+	if err := run(context.Background(), []string{"scope", "--explain", "--json", "--workspace-root", root}, &output); err != nil {
+		t.Fatal(err)
+	}
+	var reports []struct {
+		Producer string `json:"producer"`
+		Scope    struct {
+			ExactSources     []string `json:"sources"`
+			CompilerEligible []string `json:"compilerEligible"`
+			Selected         []struct {
+				Path  string `json:"path"`
+				Exact bool   `json:"exact"`
+			} `json:"selected"`
+		} `json:"scope"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &reports); err != nil {
+		t.Fatal(err)
+	}
+	if len(reports) != 1 || reports[0].Producer != "ts" ||
+		!slices.Equal(reports[0].Scope.ExactSources, []string{"src/extra.ts"}) ||
+		!slices.Equal(reports[0].Scope.CompilerEligible, []string{"src/extra.ts", "src/main.ts"}) ||
+		!slices.ContainsFunc(reports[0].Scope.Selected, func(item struct {
+			Path  string `json:"path"`
+			Exact bool   `json:"exact"`
+		}) bool {
+			return item.Path == "src/extra.ts" && item.Exact
+		}) {
+		t.Fatalf("scope explanation did not match config and exact source selection: %s", output.String())
 	}
 }
 

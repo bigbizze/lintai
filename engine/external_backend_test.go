@@ -21,13 +21,15 @@ type catalogFake struct {
 	rows        map[facts.Predicate][]facts.Row
 	anchors     map[string]facts.AnchorSupport
 	revision    string
+	scope       any
+	analyzed    []string
 	omit        facts.Predicate
 }
 
 func (p *catalogFake) Describe() (facts.ProducerDescription, error) { return p.description, nil }
 
 func (p *catalogFake) Collect(_ context.Context, request backend.CollectionRequest) (facts.Batch, error) {
-	batch := facts.Batch{Relations: make(map[facts.Predicate][]facts.Row), Anchors: p.anchors, InputRevision: p.revision}
+	batch := facts.Batch{Relations: make(map[facts.Predicate][]facts.Row), Anchors: p.anchors, InputRevision: p.revision, Scope: p.scope, AnalyzedFiles: p.analyzed}
 	for _, predicate := range request.Predicates {
 		if predicate == p.omit {
 			continue
@@ -72,7 +74,7 @@ func fakeProducer(namespace string, predicates ...string) *catalogFake {
 	description.Schema = facts.Schema{Declarations: schema.String(), Prelude: prelude.String()}
 	return &catalogFake{
 		description: description, rows: rows,
-		anchors: make(map[string]facts.AnchorSupport), revision: "generic-fixture-v1",
+		anchors: make(map[string]facts.AnchorSupport), revision: "opaque-revision-v1", scope: "opaque fixture scope",
 	}
 }
 
@@ -125,6 +127,33 @@ func TestCatalogFakeAloneReportsProducerOwnedAnchorAndOpaqueRevision(t *testing.
 	}
 	if len(emptyResult.InputPaths) != 0 {
 		t.Fatalf("no-rule run claimed analyzed-file coverage: %v", emptyResult.InputPaths)
+	}
+}
+
+func TestOpaqueProducerScopeContributesToResultIdentity(t *testing.T) {
+	// V16: identical opaque revision and file coverage with a different scope
+	// token produce different producer-result-v2 identities.
+	repoRoot, _ := filepath.Abs("..")
+	options := engine.Options{
+		RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: t.TempDir(),
+		RuleGlobs: []string{}, Env: map[string]any{},
+	}
+	left := fakeProducer("catalog", "item")
+	left.scope = "partition-a"
+	left.analyzed = []string{"catalog/objects.sql"}
+	leftResult, err := engine.New(left).Analyze(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	right := fakeProducer("catalog", "item")
+	right.scope = "partition-b"
+	right.analyzed = []string{"catalog/objects.sql"}
+	rightResult, err := engine.New(right).Analyze(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if leftResult.SnapshotVersion == rightResult.SnapshotVersion {
+		t.Fatalf("producer scope did not affect identity: %s", leftResult.SnapshotVersion)
 	}
 }
 

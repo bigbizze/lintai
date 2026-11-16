@@ -2,13 +2,9 @@ package typescript
 
 import (
 	"context"
-	"crypto/sha1"
-	"encoding/hex"
 	"fmt"
 	"io"
-	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 
@@ -22,7 +18,8 @@ import (
 
 // Backend extracts facts from TypeScript and JavaScript files.
 type Backend struct {
-	settings Options
+	settings  Options
+	namespace string
 
 	// Log receives one line for each tsconfig that lintai adjusted for
 	// TypeScript 7, once per config and adjustment set. Nil discards them.
@@ -34,7 +31,9 @@ type Backend struct {
 
 var _ backend.Producer = (*Backend)(nil)
 
-func producerEntityID(localID string) string { return "ts:" + localID }
+func producerEntityID(localID string) string { return producerEntityIDIn("ts", localID) }
+
+func producerEntityIDIn(namespace, localID string) string { return namespace + ":" + localID }
 
 func New(settings ...Options) *Backend {
 	selected := Options{Files: FileScopeTsconfig}
@@ -43,18 +42,27 @@ func New(settings ...Options) *Backend {
 		if scope, err := ParseFileScope(string(selected.Files)); err == nil {
 			selected.Files = scope
 		}
+		selected.WorkspaceExcludes = slices.Clone(selected.WorkspaceExcludes)
+		selected.Includes = slices.Clone(selected.Includes)
+		selected.Sources = slices.Clone(selected.Sources)
 		selected.Excludes = slices.Clone(selected.Excludes)
 	}
-	return &Backend{settings: selected}
+	if selected.Namespace == "" {
+		selected.Namespace = "ts"
+	}
+	return &Backend{settings: selected, namespace: selected.Namespace}
 }
 
 func (b *Backend) Describe() (facts.ProducerDescription, error) {
 	configuration := map[string]any{
-		"excludes":    slices.Clone(b.settings.Excludes),
-		"files":       string(b.settings.Files),
-		"sourceLinks": b.settings.SourceLinks,
+		"workspaceExclude": sortedUnique(b.settings.WorkspaceExcludes),
+		"include":          sortedUnique(b.settings.Includes),
+		"sources":          sortedUnique(b.settings.Sources),
+		"exclude":          sortedUnique(b.settings.Excludes),
+		"files":            string(b.settings.Files),
+		"sourceLinks":      b.settings.SourceLinks,
 	}
-	return facts.DescribeSchema("ts", "lintai.typescript", "typescript-producer-r1", "ts-vocabulary/1", configuration, Schema())
+	return facts.DescribeSchema(b.namespace, "lintai.typescript", "typescript-producer-r2", "ts-vocabulary/1", configuration, Schema())
 }
 
 func (b *Backend) Collect(ctx context.Context, request backend.CollectionRequest) (facts.Batch, error) {
@@ -95,7 +103,7 @@ func (b *Backend) Collect(ctx context.Context, request backend.CollectionRequest
 		batch.Relations[predicate] = []facts.Row{}
 	}
 	for _, item := range snapshot.Facts {
-		predicate := facts.Predicate{Name: "ts." + item.Relation, Arity: len(item.Values)}
+		predicate := facts.Predicate{Name: b.namespace + "." + item.Relation, Arity: len(item.Values)}
 		if _, wanted := requested[predicate]; !wanted {
 			continue
 		}
@@ -111,17 +119,17 @@ func (b *Backend) Collect(ctx context.Context, request backend.CollectionRequest
 			if id == "" && (argument.Name == "Caller" || argument.Name == "From" || argument.Name == "Owner") {
 				id = "unsupported"
 			}
-			values[index].String = producerEntityID(id)
+			values[index].String = producerEntityIDIn(b.namespace, id)
 		}
 		batch.Relations[predicate] = append(batch.Relations[predicate], facts.Row(values))
 	}
-	locationPredicate := facts.Predicate{Name: "ts.location", Arity: 6}
+	locationPredicate := facts.Predicate{Name: b.namespace + ".location", Arity: 6}
 	if _, ok := metadata[locationPredicate]; ok {
 		for _, item := range snapshot.Facts {
 			if item.Relation != facts.LocationRelation || len(item.Values) != 6 {
 				continue
 			}
-			id := producerEntityID(item.Values[0].String)
+			id := producerEntityIDIn(b.namespace, item.Values[0].String)
 			file := item.Values[1].String
 			if strings.HasPrefix(file, "bundled://") {
 				continue
@@ -138,7 +146,8 @@ func (b *Backend) Collect(ctx context.Context, request backend.CollectionRequest
 			batch.AnalyzedFiles = append(batch.AnalyzedFiles, item.Values[0].String)
 		}
 	}
-	batch.InputRevision = snapshot.Version
+	batch.InputRevision = snapshot.InputRevision
+	batch.Scope = snapshot.Scope
 	return batch, nil
 }
 
@@ -160,7 +169,7 @@ func (b *Backend) BuildSnapshot(ctx context.Context, repoRoot, workspaceRoot str
 	for _, input := range snapshot.Inputs {
 		inputPaths = append(inputPaths, input.Path)
 	}
-	return facts.Snapshot{Version: version, Schema: Schema(), Facts: items, InputPaths: inputPaths}, nil
+	return facts.Snapshot{Version: version, InputRevision: snapshot.InputRevision, Scope: snapshot.Scope, Schema: Schema(), Facts: items, InputPaths: inputPaths}, nil
 }
 
 func (b *Backend) buildLintaiSnapshot(ctx context.Context, repoRoot, workspaceRoot string) (*lintaiapi.Snapshot, []ambient.Source, string, error) {
@@ -169,14 +178,17 @@ func (b *Backend) buildLintaiSnapshot(ctx context.Context, repoRoot, workspaceRo
 	if err != nil {
 		return nil, nil, "", err
 	}
-	walked, err := workspace.ListSourceFiles(workspaceRoot, options.Excludes)
-	if err != nil {
-		return nil, nil, "", err
-	}
 	sources := ambient.Builtin()
+	scopeOptions := workspace.ScopeOptions{
+		Exclude: options.WorkspaceExcludes, Include: options.Includes,
+		Sources: options.Sources, InvocationExclude: options.Excludes,
+	}
 	extracted, err := lintaiapi.BuildSnapshot(ctx, lintaiapi.BuildSnapshotRequest{
 		WorkspaceRoot:   workspaceRoot,
-		Files:           walked,
+		ScopeOptions:    &scopeOptions,
+		ConfigPath:      options.ConfigPath,
+		ConfigDigest:    options.ConfigDigest,
+		ConfigPresent:   options.ConfigPresent,
 		SourceLinks:     options.SourceLinks,
 		AmbientMatchers: convertAmbientMatchers(sources),
 		TsconfigFiles:   scope == FileScopeTsconfig,
@@ -184,20 +196,13 @@ func (b *Backend) buildLintaiSnapshot(ctx context.Context, repoRoot, workspaceRo
 	if err != nil {
 		return nil, nil, "", err
 	}
-	files := moduleFiles(workspaceRoot, walked, extracted.Modules)
-	versionFiles := slices.Concat(files, extracted.ConfigFiles)
-	if options.SourceLinks != "" {
-		links := options.SourceLinks
-		if !filepath.IsAbs(links) {
-			links = filepath.Join(workspaceRoot, links)
-		}
-		versionFiles = append(versionFiles, links)
-	}
-	version, err := snapshotVersionWithInputs(workspaceRoot, versionFiles, extracted.Inputs)
-	if err != nil {
-		return nil, nil, "", err
-	}
-	return extracted, sources, version, nil
+	return extracted, sources, extracted.InputRevision, nil
+}
+
+func sortedUnique(values []string) []string {
+	result := slices.Clone(values)
+	slices.Sort(result)
+	return slices.Compact(result)
 }
 
 // moduleFiles returns the walked files that are modules of the snapshot.
@@ -252,58 +257,6 @@ func (b *Backend) reportAdjustments(adjustments []lintaiapi.ConfigAdjustment) {
 		}
 		start = end
 	}
-}
-
-func snapshotVersion(root string, files []string) (string, error) {
-	return snapshotVersionWithInputs(root, files, nil)
-}
-
-func snapshotVersionWithInputs(root string, files []string, inputs []lintaiapi.SnapshotInput) (string, error) {
-	byPath := make(map[string]lintaiapi.SnapshotInput, len(files)+len(inputs))
-	required := make(map[string]bool, len(files))
-	for _, file := range files {
-		path := filepath.Clean(file)
-		byPath[path] = lintaiapi.SnapshotInput{Path: path, Exists: true}
-		required[path] = true
-	}
-	for _, input := range inputs {
-		path := filepath.Clean(input.Path)
-		current := byPath[path]
-		current.Exists = current.Exists || input.Exists
-		current.OptionalMap = current.OptionalMap || input.OptionalMap
-		byPath[path] = current
-	}
-	paths := make([]string, 0, len(byPath))
-	for file := range byPath {
-		paths = append(paths, file)
-	}
-	sort.Strings(paths)
-	hash := sha1.New()
-	for _, file := range paths {
-		relative := workspace.RelativePath(root, file)
-		if strings.HasPrefix(relative, "../") || filepath.IsAbs(relative) {
-			relative = filepath.ToSlash(file)
-		}
-		hash.Write([]byte(relative))
-		hash.Write([]byte{0})
-		if !byPath[file].Exists {
-			hash.Write([]byte{0})
-			hash.Write([]byte{0})
-			continue
-		}
-		source, err := workspace.ReadFile(file)
-		if err != nil {
-			if required[file] || !byPath[file].OptionalMap {
-				return "", err
-			}
-			hash.Write([]byte{2, 0})
-			continue
-		}
-		hash.Write([]byte{1})
-		hash.Write([]byte(source))
-		hash.Write([]byte{0})
-	}
-	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func convertAmbientMatchers(sources []ambient.Source) []lintaiapi.AmbientMatcher {
