@@ -329,11 +329,7 @@ func patternCouldMatchBelow(pattern, directory string) bool {
 	if meta >= 0 {
 		prefix = pattern[:meta]
 	}
-	prefix = strings.TrimSuffix(prefix, "/")
-	if prefix == "" || directory == prefix || strings.HasPrefix(prefix, directory+"/") || strings.HasPrefix(directory, prefix+"/") {
-		return true
-	}
-	return false
+	return strings.HasPrefix(prefix, directory+"/") || strings.HasPrefix(directory+"/", prefix)
 }
 
 func hasExactBelow(directory string, exact []string) bool {

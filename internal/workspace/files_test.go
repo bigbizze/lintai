@@ -85,6 +85,13 @@ func TestScopePlanAppliesRestoreExactAndInvocationPrecedenceAndTracksMembership(
 	if slices.Contains(got, "src/keep.ts") || slices.Contains(got, ".git/secret.ts") || slices.Contains(got, "node_modules/pkg/index.ts") {
 		t.Fatalf("higher-priority invocation or hard exclusions were restored: %q", got)
 	}
+	wildcard, err := PlanSources(root, ScopeOptions{Include: []string{"dist/co*/api.ts"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(wildcard.Matches, func(match ScopeMatch) bool { return match.Path == "dist/contracts/api.ts" }) {
+		t.Fatalf("mid-segment wildcard did not restore dist/contracts/api.ts: %+v", wildcard.Matches)
+	}
 	reordered, err := PlanSources(root, ScopeOptions{
 		Exclude: []string{"tmp/**", "src/**"}, Include: []string{".hidden/restore.ts", "dist/contracts/**", "src/keep.ts"},
 		Sources: []string{"types/api.d.ts", "src/drop.ts", "tmp/exact.ts"}, InvocationExclude: []string{"src/keep.ts"},

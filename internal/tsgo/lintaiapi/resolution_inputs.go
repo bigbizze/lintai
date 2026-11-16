@@ -323,7 +323,7 @@ func (fsys *resolutionInputFS) validate() (bool, validationStats, error) {
 		}
 	}
 	for path, expected := range directories {
-		actual, err := readDirectory(path)
+		actual, err := fsys.readDirectory(path)
 		if err != nil {
 			if os.IsNotExist(err) {
 				valid = false
@@ -368,24 +368,18 @@ func existsKind(path string, directory bool) (bool, error) {
 	return !info.IsDir(), nil
 }
 
-func readDirectory(path string) (capturedDirectory, error) {
-	entries, err := os.ReadDir(filepath.FromSlash(path))
-	if err != nil {
+func (fsys *resolutionInputFS) readDirectory(path string) (capturedDirectory, error) {
+	// GetAccessibleEntries treats unreadable directories as empty, so check for errors first.
+	if _, err := os.ReadDir(filepath.FromSlash(path)); err != nil {
 		return capturedDirectory{}, err
 	}
-	result := capturedDirectory{}
-	for _, entry := range entries {
-		if entry.Type()&os.ModeSymlink != 0 {
-			result.symlinks = append(result.symlinks, entry.Name())
-		} else if entry.IsDir() {
-			result.directories = append(result.directories, entry.Name())
-		} else if entry.Type().IsRegular() {
-			result.files = append(result.files, entry.Name())
-		}
+	entries := fsys.FS.GetAccessibleEntries(tspath.RootedDirectoryPathFromAbsolute(path))
+	result := capturedDirectory{
+		files: slices.Clone(entries.Files), directories: slices.Clone(entries.Directories),
+		symlinks: mapKeys(entries.Symlinks),
 	}
 	slices.Sort(result.files)
 	slices.Sort(result.directories)
-	slices.Sort(result.symlinks)
 	return result, nil
 }
 

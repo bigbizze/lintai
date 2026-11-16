@@ -235,7 +235,7 @@ func loadTypeScriptSettings(workspaceRoot, explicitConfig, filesOverride string,
 		namespaces = append(namespaces, namespace)
 	}
 	sort.Strings(namespaces)
-	if len(namespaces) > 1 && (filesSet || sourceLinksSet || len(invocationExcludes) > 0 || len(invocationSources) > 0) {
+	if len(namespaces) > 1 && (filesSet || sourceLinksSet) {
 		return nil, fmt.Errorf("TypeScript command-line scope flags are ambiguous with multiple TypeScript producers; configure them in lintai.toml")
 	}
 	settings := make([]typescript.Options, 0, len(namespaces))
