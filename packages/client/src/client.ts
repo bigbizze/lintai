@@ -667,10 +667,14 @@ export class LintAIClient {
 				return;
 			}
 			this.setDiagnostics(result.diagnostics, startedAt, result.watchHints);
-			this.state = "ready";
+			if (this.state === "invalidated") {
+				this.state = "ready";
+			}
 		} catch (error) {
-			this.setReanalyzeFailure(asError(error), startedAt);
-			this.state = "ready";
+			if (this.state === "invalidated") {
+				this.setReanalyzeFailure(asError(error), startedAt);
+				this.state = "ready";
+			}
 		}
 	}
 

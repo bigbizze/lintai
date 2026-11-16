@@ -572,6 +572,81 @@ test("rule file changes invalidate cached diagnostics and the next pass refreshe
 	}
 });
 
+test("watcher installation failure during an invalidated refresh falls back to oneshot", (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	const workspaceRoot = mkdtempSync(path.join(os.tmpdir(), "lintai-invalidated-input-watch-"));
+	const input = path.join(workspaceRoot, "input.json");
+	const child = createTestProcess();
+	const ruleWatchers: Array<(filename?: string) => void> = [];
+	const oneshotDiagnostics: Diagnostic[] = [
+		{
+			rule_id: "arch.oneshot",
+			assertion_id: "default",
+			message: "oneshot",
+			source_location: {
+				file: "src/example.ts",
+				startLine: 2,
+				startColumn: 1,
+				endLine: 2,
+				endColumn: 8,
+			},
+		},
+	];
+	let analyses = 0;
+	let oneshotCalls = 0;
+	const client = new LintAIClient(
+		resolveBridgeOptions(
+			{
+				mode: "serve",
+				binary: "/tmp/lintai",
+				repoRoot: workspaceRoot,
+				workspaceRoot,
+				rules: ["lintai-rules/**/*.ts"],
+			},
+			workspaceRoot,
+			editorHost,
+		),
+		createTestDependencies({
+			spawnServe: () => child,
+			readServeSync: () => {
+				analyses += 1;
+				return createInitializeResult(
+					analyses === 1 ? "arch.initial" : "arch.refreshed",
+					[input],
+					"src/example.ts",
+					analyses,
+				);
+			},
+			watchPath: (_target, listener) => {
+				ruleWatchers.push(listener);
+				return { close() {} };
+			},
+			watchInputPath: () => {
+				if (analyses === 2) throw new Error("watch refresh failed");
+				return { close() {} };
+			},
+			spawnSync: () => {
+				oneshotCalls += 1;
+				return { stdout: JSON.stringify(oneshotDiagnostics), stderr: "", error: undefined, status: 0 };
+			},
+			log: () => undefined,
+		}),
+	);
+	try {
+		assert.equal(client.getDiagnostics("src/example.ts")[0]?.rule_id, "arch.initial");
+		assert.ok(ruleWatchers.length > 0);
+		ruleWatchers[0]();
+		t.mock.timers.runAll();
+
+		assert.deepEqual(client.getDiagnostics("src/example.ts"), oneshotDiagnostics);
+		assert.equal((client as unknown as { state: string }).state, "fallback");
+		assert.equal(oneshotCalls, 1);
+	} finally {
+		client.dispose();
+		rmSync(workspaceRoot, { recursive: true, force: true });
+	}
+});
+
 // V19: producer-validated discovery is accepted once. Later watch events request a check.
 test("new watch hints do not reject a completed analysis", async () => {
 	const workspaceRoot = mkdtempSync(path.join(os.tmpdir(), "lintai-discovery-"));
