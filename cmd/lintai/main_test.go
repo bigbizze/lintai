@@ -273,6 +273,29 @@ implementation = "lintai.typescript"
 	}
 }
 
+func TestSchemaRendersConfiguredProducerNamespaceWithoutCollection(t *testing.T) {
+	root := t.TempDir()
+	config := `[producers.app]
+implementation = "lintai.typescript"
+source_links = "missing-source-links.json"
+`
+	if err := os.WriteFile(filepath.Join(root, "lintai.toml"), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var output bytes.Buffer
+	if err := run(context.Background(), []string{"schema", "--workspace-root", root}, &output); err != nil {
+		t.Fatalf("schema command failed: %v", err)
+	}
+	rendered := output.String()
+	if !strings.Contains(rendered, "Package app!") || strings.Contains(rendered, "Package ts!") {
+		t.Fatalf("schema did not use the configured producer namespace:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "Decl module(") || !strings.Contains(rendered, "Package lintai!") || !strings.Contains(rendered, "Decl glob(") {
+		t.Fatalf("schema omitted producer relations or engine helpers:\n%s", rendered)
+	}
+}
+
 func TestScopeExplainUsesConfiguredExactSourceSelection(t *testing.T) {
 	root := t.TempDir()
 	write := func(name, contents string) {

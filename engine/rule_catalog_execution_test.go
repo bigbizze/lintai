@@ -2,10 +2,10 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -116,6 +116,84 @@ export default rule("fixture.alias").version(1)
 		warmEngine.executionObservation().bundleArtifacts != beforeFailureBuilds+1 || evaluations.Load() != beforeFailureEvaluations+1 {
 		t.Fatalf("recovery used an obsolete artifact or outcome: %+v %v", recovered.Diagnostics, err)
 	}
+
+	// Esbuild consumes the complete extends chain, even for config names that
+	// do not start with tsconfig. Only the deepest file changes below.
+	baseURL, err := json.Marshal(filepath.ToSlash(workspace))
+	if err != nil {
+		t.Fatal(err)
+	}
+	configFor := func(target string) string {
+		return `{
+			// JSONC and trailing commas are accepted in inherited configs.
+			"compilerOptions": { "baseUrl": ` + string(baseURL) + `, "paths": { "@fixture/policy": ["rules-support/` + target + `.ts"] }, },
+		}`
+	}
+	packageConfig := `{
+		"name": "@fixture/compiler",
+		"exports": { ".": { "types": "./types.json", "node": "./configs/node-options.json", "browser": "./configs/base-options.json" } }
+	}`
+	writeTestFile(t, workspace, "lintai-rules/node_modules/.keep", "")
+	writeTestFile(t, workspace, "lintai-rules/tsconfig.json", `{ "extends": ["./compiler-options.json"] }`)
+	writeTestFile(t, workspace, "lintai-rules/compiler-options.json", `{ "extends": "@fixture/compiler" }`)
+	writeTestFile(t, workspace, "node_modules/@fixture/compiler/package.json", packageConfig)
+	writeTestFile(t, workspace, "node_modules/@fixture/compiler/types.json", `{}`)
+	writeTestFile(t, workspace, "node_modules/@fixture/compiler/configs/node-options.json", configFor("a"))
+	writeTestFile(t, workspace, "node_modules/@fixture/compiler/configs/base-options.json", configFor("a"))
+	extendedFirst, err := warmEngine.Check(context.Background(), options)
+	if err != nil || len(extendedFirst.Diagnostics) != 3 || extendedFirst.Diagnostics[0].Message != "from-a" {
+		t.Fatalf("extended alias did not resolve to a.ts: %+v %v", extendedFirst.Diagnostics, err)
+	}
+	writeTestFile(t, workspace, "node_modules/@fixture/compiler/configs/base-options.json", configFor("b"))
+	extendedWarm, err := warmEngine.Check(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	extendedFreshEngine := Open(Options{}, newParallelFixtureProducer())
+	defer extendedFreshEngine.Close()
+	extendedFresh, err := extendedFreshEngine.Check(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(extendedFresh.Diagnostics) != 3 || extendedFresh.Diagnostics[0].Message != "from-b" || !reflect.DeepEqual(extendedWarm, extendedFresh) {
+		t.Fatalf("extended config change: warm=%+v fresh=%+v", extendedWarm.Diagnostics, extendedFresh.Diagnostics)
+	}
+	outerLock, _, err := BuildRulesLock(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A closer package can replace the inherited config even when the parent
+	// node_modules directory already exists and the two copies start identical.
+	nearer := "lintai-rules/node_modules/@fixture/compiler/"
+	writeTestFile(t, workspace, nearer+"package.json", packageConfig)
+	writeTestFile(t, workspace, nearer+"types.json", `{}`)
+	writeTestFile(t, workspace, nearer+"configs/node-options.json", configFor("a"))
+	writeTestFile(t, workspace, nearer+"configs/base-options.json", configFor("b"))
+	if _, err := warmEngine.Check(context.Background(), options); err != nil {
+		t.Fatal(err)
+	}
+	nearLock, _, err := BuildRulesLock(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outerLock.Rules["lintai-rules/alias.ts"].Hash == nearLock.Rules["lintai-rules/alias.ts"].Hash {
+		t.Fatal("a different inherited-config resolution must change the artifact identity")
+	}
+	writeTestFile(t, workspace, nearer+"configs/base-options.json", configFor("a"))
+	nearWarm, err := warmEngine.Check(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nearFreshEngine := Open(Options{}, newParallelFixtureProducer())
+	defer nearFreshEngine.Close()
+	nearFresh, err := nearFreshEngine.Check(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nearFresh.Diagnostics) != 3 || nearFresh.Diagnostics[0].Message != "from-a" || !reflect.DeepEqual(nearWarm, nearFresh) {
+		t.Fatalf("nearer extended config change: warm=%+v fresh=%+v", nearWarm.Diagnostics, nearFresh.Diagnostics)
+	}
 }
 
 func TestRuleCatalogListingDoesNotRunSetup(t *testing.T) {
@@ -176,12 +254,20 @@ export default rule("fixture.locked-out").version(1)
 	.report("violation").message((row) => row.Entity);
 `
 	writeTestFile(t, workspace, "lintai-rules/locked-out.ts", source)
-	if err := WriteRulesLock(context.Background(), filepath.Join(workspace, DefaultRulesLockFile), RulesLock{
-		Rules: map[string]RulesLockRule{"lintai-rules/locked-out.ts": {ID: "fixture.locked-out", Version: 1, Hash: "sha256:" + strings.Repeat("0", 64)}},
-	}); err != nil {
+	writeTestFile(t, workspace, "lintai-rules/tsconfig.json", `{"extends":"@fixture/lock-compiler"}`)
+	writeTestFile(t, workspace, "node_modules/@fixture/lock-compiler/package.json", `{
+		"name":"@fixture/lock-compiler", "tsconfig":"options.json", "exports":"./not-a-config.js"
+	}`)
+	writeTestFile(t, workspace, "node_modules/@fixture/lock-compiler/options.json", `{"compilerOptions":{"useDefineForClassFields":false}}`)
+	options := parallelFixtureOptions(repoRoot, workspace)
+	lockPath := filepath.Join(workspace, DefaultRulesLockFile)
+	lock, _, err := BuildRulesLock(context.Background(), options)
+	if err != nil {
 		t.Fatal(err)
 	}
-	options := parallelFixtureOptions(repoRoot, workspace)
+	if err := WriteRulesLock(context.Background(), lockPath, lock); err != nil {
+		t.Fatal(err)
+	}
 	options.RulesLock = DefaultRulesLockFile
 	engine := Open(Options{}, producer)
 	defer engine.Close()
@@ -189,10 +275,30 @@ export default rule("fixture.locked-out").version(1)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if len(result.Diagnostics) != 1 || result.Diagnostics[0].Phase != "setup" {
+		t.Fatalf("approved rule should reach setup, got %+v", result.Diagnostics)
+	}
+
+	writeTestFile(t, workspace, "node_modules/@fixture/lock-compiler/options.json", `{"compilerOptions":{"useDefineForClassFields":true}}`)
+	result, err = engine.Check(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(result.Diagnostics) != 1 || result.Diagnostics[0].Phase != "integrity" {
-		t.Fatalf("lock mismatch should be the only affected-rule failure, got %+v", result.Diagnostics)
+		t.Fatalf("config-only change should require lock approval before setup, got %+v", result.Diagnostics)
 	}
 	if producer.collectCalls.Load() != 0 {
 		t.Fatalf("producer facts were collected for a rule rejected by lock integrity (%d calls)", producer.collectCalls.Load())
+	}
+	lock, _, err = BuildRulesLock(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteRulesLock(context.Background(), lockPath, lock); err != nil {
+		t.Fatal(err)
+	}
+	result, err = engine.Check(context.Background(), options)
+	if err != nil || len(result.Diagnostics) != 1 || result.Diagnostics[0].Phase != "setup" {
+		t.Fatalf("reapproved rule should reach setup, got %+v %v", result.Diagnostics, err)
 	}
 }

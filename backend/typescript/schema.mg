@@ -1,4 +1,5 @@
 # TypeScript producer base relations and reporting roles.
+# Allowed names omit the leading slash; ambient names come from the ambient registry.
 
 Decl module(Module)
   descr [
@@ -40,7 +41,14 @@ Decl fn_kind(Fn, Kind)
     arg_role(Fn, "entity"),
     arg_report_support(Fn, "required"),
     arg(Kind, "Kind"),
-    arg_representation(Kind, "name")
+    arg_representation(Kind, "name"),
+    arg_allowed_name(Kind, "function"),
+    arg_allowed_name(Kind, "function_expression"),
+    arg_allowed_name(Kind, "arrow_function"),
+    arg_allowed_name(Kind, "method"),
+    arg_allowed_name(Kind, "constructor"),
+    arg_allowed_name(Kind, "get_accessor"),
+    arg_allowed_name(Kind, "set_accessor")
   ].
 
 Decl fn_container(Fn, Name)
@@ -102,7 +110,9 @@ Decl site_attribution_unsupported(Site, Reason)
     arg_role(Site, "entity"),
     arg_report_support(Site, "required"),
     arg(Reason, "Reason"),
-    arg_representation(Reason, "name")
+    arg_representation(Reason, "name"),
+    arg_allowed_name(Reason, "instance_construction"),
+    arg_allowed_name(Reason, "unsupported_context")
   ].
 
 Decl suspension_site(Site, Kind)
@@ -113,7 +123,10 @@ Decl suspension_site(Site, Kind)
     arg_role(Site, "entity"),
     arg_report_support(Site, "required"),
     arg(Kind, "Kind"),
-    arg_representation(Kind, "name")
+    arg_representation(Kind, "name"),
+    arg_allowed_name(Kind, "await"),
+    arg_allowed_name(Kind, "for_await"),
+    arg_allowed_name(Kind, "await_using")
   ].
 
 Decl meta_access(Site, AccessPath)
@@ -215,7 +228,10 @@ Decl config_adjusted(Config, Option, Action)
     arg_role(Config, "path"),
     arg(Option, "Option"),
     arg(Action, "Action"),
-    arg_representation(Action, "name")
+    arg_representation(Action, "name"),
+    arg_allowed_name(Action, "removed"),
+    arg_allowed_name(Action, "rewritten"),
+    arg_allowed_name(Action, "replaced")
   ].
 
 Decl import_edge(Site, From, To, Specifier)
@@ -239,7 +255,13 @@ Decl import_form(Site, Form)
     arg_role(Site, "entity"),
     arg_report_support(Site, "required"),
     arg(Form, "Form"),
-    arg_representation(Form, "name")
+    arg_representation(Form, "name"),
+    arg_allowed_name(Form, "static"),
+    arg_allowed_name(Form, "reexport"),
+    arg_allowed_name(Form, "dynamic"),
+    arg_allowed_name(Form, "require"),
+    arg_allowed_name(Form, "import_equals"),
+    arg_allowed_name(Form, "import_type")
   ].
 
 Decl import_internal(Site)
@@ -297,7 +319,10 @@ Decl import_symbol(Site, Name, Kind)
     arg_report_support(Site, "required"),
     arg(Name, "Name"),
     arg(Kind, "Kind"),
-    arg_representation(Kind, "name")
+    arg_representation(Kind, "name"),
+    arg_allowed_name(Kind, "default"),
+    arg_allowed_name(Kind, "namespace"),
+    arg_allowed_name(Kind, "named")
   ].
 
 Decl import_symbol_type_only(Site, Name)
@@ -370,6 +395,11 @@ Decl external_call(Site, OriginKind, Origin, Name)
     arg_report_support(Site, "required"),
     arg(OriginKind, "OriginKind"),
     arg_representation(OriginKind, "name"),
+    arg_allowed_name(OriginKind, "lib"),
+    arg_allowed_name(OriginKind, "package"),
+    arg_allowed_name(OriginKind, "ambient_module"),
+    arg_allowed_name(OriginKind, "declaration_file"),
+    arg_allowed_name(OriginKind, "source_file"),
     arg(Origin, "Origin"),
     arg(Name, "Name")
   ].
@@ -412,7 +442,11 @@ Decl call_declaration_incomplete(Site, Reason)
     arg_role(Site, "entity"),
     arg_report_support(Site, "required"),
     arg(Reason, "Reason"),
-    arg_representation(Reason, "name")
+    arg_representation(Reason, "name"),
+    arg_allowed_name(Reason, "unresolved"),
+    arg_allowed_name(Reason, "synthetic"),
+    arg_allowed_name(Reason, "unsupported"),
+    arg_allowed_name(Reason, "conflict")
   ].
 
 Decl declaration_member(Declaration, OwnerDeclaration, Name)
@@ -448,7 +482,8 @@ Decl fn_value_escape(Site, Kind)
     arg_role(Site, "entity"),
     arg_report_support(Site, "required"),
     arg(Kind, "Kind"),
-    arg_representation(Kind, "name")
+    arg_representation(Kind, "name"),
+    arg_allowed_name(Kind, "argument")
   ].
 
 Decl fn_value_escape_target(Site, Target)
@@ -560,7 +595,9 @@ Decl signature_incomplete(Signature, Reason)
     arg_role(Signature, "entity"),
     arg_report_support(Signature, "required"),
     arg(Reason, "Reason"),
-    arg_representation(Reason, "name")
+    arg_representation(Reason, "name"),
+    arg_allowed_name(Reason, "unresolved"),
+    arg_allowed_name(Reason, "unsupported")
   ].
 
 Decl fn_signature_omitted(Fn)
@@ -598,7 +635,27 @@ Decl type_kind(Type, Kind)
     arg_role(Type, "entity"),
     arg_report_support(Type, "optional"),
     arg(Kind, "Kind"),
-    arg_representation(Kind, "name")
+    arg_representation(Kind, "name"),
+    arg_allowed_name(Kind, "any"),
+    arg_allowed_name(Kind, "unknown"),
+    arg_allowed_name(Kind, "never"),
+    arg_allowed_name(Kind, "void"),
+    arg_allowed_name(Kind, "undefined"),
+    arg_allowed_name(Kind, "null"),
+    arg_allowed_name(Kind, "string"),
+    arg_allowed_name(Kind, "number"),
+    arg_allowed_name(Kind, "bigint"),
+    arg_allowed_name(Kind, "boolean"),
+    arg_allowed_name(Kind, "symbol"),
+    arg_allowed_name(Kind, "object_keyword"),
+    arg_allowed_name(Kind, "literal"),
+    arg_allowed_name(Kind, "type_param"),
+    arg_allowed_name(Kind, "union"),
+    arg_allowed_name(Kind, "intersection"),
+    arg_allowed_name(Kind, "tuple"),
+    arg_allowed_name(Kind, "function"),
+    arg_allowed_name(Kind, "object"),
+    arg_allowed_name(Kind, "other")
   ].
 
 Decl type_named(Type, Origin, Name)
@@ -620,7 +677,12 @@ Decl type_origin_kind(Type, Kind)
     arg_role(Type, "entity"),
     arg_report_support(Type, "optional"),
     arg(Kind, "Kind"),
-    arg_representation(Kind, "name")
+    arg_representation(Kind, "name"),
+    arg_allowed_name(Kind, "lib"),
+    arg_allowed_name(Kind, "package"),
+    arg_allowed_name(Kind, "ambient_module"),
+    arg_allowed_name(Kind, "declaration_file"),
+    arg_allowed_name(Kind, "source_file")
   ].
 
 Decl type_arg(Type, Position, Argument)
@@ -689,11 +751,17 @@ Decl type_literal(Type, Kind, Value)
     arg_report_support(Type, "optional"),
     arg(Kind, "Kind"),
     arg_representation(Kind, "name"),
+    arg_allowed_name(Kind, "string"),
+    arg_allowed_name(Kind, "number"),
+    arg_allowed_name(Kind, "bigint"),
+    arg_allowed_name(Kind, "boolean"),
     arg(Value, "Value"),
     arg_representation(Value, "string"),
     arg_representation(Value, "integer"),
     arg_representation(Value, "float"),
-    arg_representation(Value, "name")
+    arg_representation(Value, "name"),
+    arg_allowed_name(Value, "true"),
+    arg_allowed_name(Value, "false")
   ].
 
 Decl type_param_name(Type, Name)
@@ -795,7 +863,13 @@ Decl type_incomplete(Type, Reason)
     arg_role(Type, "entity"),
     arg_report_support(Type, "optional"),
     arg(Reason, "Reason"),
-    arg_representation(Reason, "name")
+    arg_representation(Reason, "name"),
+    arg_allowed_name(Reason, "truncated"),
+    arg_allowed_name(Reason, "unsupported"),
+    arg_allowed_name(Reason, "signatures"),
+    arg_allowed_name(Reason, "constraint"),
+    arg_allowed_name(Reason, "conflict"),
+    arg_allowed_name(Reason, "members_omitted")
   ].
 
 Decl type_display(Type, Text)
@@ -817,7 +891,19 @@ Decl declaration(Declaration, Name, Kind)
     arg_report_support(Declaration, "optional"),
     arg(Name, "Name"),
     arg(Kind, "Kind"),
-    arg_representation(Kind, "name")
+    arg_representation(Kind, "name"),
+    arg_allowed_name(Kind, "function"),
+    arg_allowed_name(Kind, "variable"),
+    arg_allowed_name(Kind, "type_alias"),
+    arg_allowed_name(Kind, "interface"),
+    arg_allowed_name(Kind, "class"),
+    arg_allowed_name(Kind, "enum"),
+    arg_allowed_name(Kind, "namespace"),
+    arg_allowed_name(Kind, "method"),
+    arg_allowed_name(Kind, "property"),
+    arg_allowed_name(Kind, "signature"),
+    arg_allowed_name(Kind, "export_expression"),
+    arg_allowed_name(Kind, "unknown")
   ].
 
 Decl declaration_origin(Declaration, OriginKind, Origin)
@@ -829,6 +915,11 @@ Decl declaration_origin(Declaration, OriginKind, Origin)
     arg_report_support(Declaration, "optional"),
     arg(OriginKind, "OriginKind"),
     arg_representation(OriginKind, "name"),
+    arg_allowed_name(OriginKind, "lib"),
+    arg_allowed_name(OriginKind, "package"),
+    arg_allowed_name(OriginKind, "ambient_module"),
+    arg_allowed_name(OriginKind, "declaration_file"),
+    arg_allowed_name(OriginKind, "source_file"),
     arg(Origin, "Origin")
   ].
 
@@ -840,7 +931,10 @@ Decl declaration_metadata_incomplete(Declaration, Reason)
     arg_role(Declaration, "entity"),
     arg_report_support(Declaration, "optional"),
     arg(Reason, "Reason"),
-    arg_representation(Reason, "name")
+    arg_representation(Reason, "name"),
+    arg_allowed_name(Reason, "unresolved"),
+    arg_allowed_name(Reason, "unsupported"),
+    arg_allowed_name(Reason, "conflict")
   ].
 
 Decl declaration_type_subject(Declaration, Space)
@@ -851,7 +945,9 @@ Decl declaration_type_subject(Declaration, Space)
     arg_role(Declaration, "entity"),
     arg_report_support(Declaration, "optional"),
     arg(Space, "Space"),
-    arg_representation(Space, "name")
+    arg_representation(Space, "name"),
+    arg_allowed_name(Space, "type"),
+    arg_allowed_name(Space, "value")
   ].
 
 Decl declaration_type(Declaration, Space, Type)
@@ -863,6 +959,8 @@ Decl declaration_type(Declaration, Space, Type)
     arg_report_support(Declaration, "optional"),
     arg(Space, "Space"),
     arg_representation(Space, "name"),
+    arg_allowed_name(Space, "type"),
+    arg_allowed_name(Space, "value"),
     arg(Type, "Type"),
     arg_role(Type, "entity"),
     arg_report_support(Type, "optional")
@@ -877,8 +975,13 @@ Decl declaration_type_incomplete(Declaration, Space, Reason)
     arg_report_support(Declaration, "optional"),
     arg(Space, "Space"),
     arg_representation(Space, "name"),
+    arg_allowed_name(Space, "type"),
+    arg_allowed_name(Space, "value"),
     arg(Reason, "Reason"),
-    arg_representation(Reason, "name")
+    arg_representation(Reason, "name"),
+    arg_allowed_name(Reason, "unresolved"),
+    arg_allowed_name(Reason, "unsupported"),
+    arg_allowed_name(Reason, "conflict")
   ].
 
 Decl declaration_fn(Declaration, Fn)
@@ -901,7 +1004,10 @@ Decl declaration_fn_incomplete(Declaration, Reason)
     arg_role(Declaration, "entity"),
     arg_report_support(Declaration, "optional"),
     arg(Reason, "Reason"),
-    arg_representation(Reason, "name")
+    arg_representation(Reason, "name"),
+    arg_allowed_name(Reason, "unresolved"),
+    arg_allowed_name(Reason, "unsupported"),
+    arg_allowed_name(Reason, "conflict")
   ].
 
 Decl module_export(Export, Module, Name, Space)
@@ -916,7 +1022,9 @@ Decl module_export(Export, Module, Name, Space)
     arg_report_support(Module, "required"),
     arg(Name, "Name"),
     arg(Space, "Space"),
-    arg_representation(Space, "name")
+    arg_representation(Space, "name"),
+    arg_allowed_name(Space, "type"),
+    arg_allowed_name(Space, "value")
   ].
 
 Decl export_target(Export, Declaration)
@@ -957,7 +1065,9 @@ Decl export_reexport(Export, Site, SourceModule, SourceName, Space)
     arg_role(SourceModule, "path"),
     arg(SourceName, "SourceName"),
     arg(Space, "Space"),
-    arg_representation(Space, "name")
+    arg_representation(Space, "name"),
+    arg_allowed_name(Space, "type"),
+    arg_allowed_name(Space, "value")
   ].
 
 Decl export_incomplete(Export, Reason)
@@ -968,7 +1078,10 @@ Decl export_incomplete(Export, Reason)
     arg_role(Export, "entity"),
     arg_report_support(Export, "required"),
     arg(Reason, "Reason"),
-    arg_representation(Reason, "name")
+    arg_representation(Reason, "name"),
+    arg_allowed_name(Reason, "unresolved"),
+    arg_allowed_name(Reason, "unsupported"),
+    arg_allowed_name(Reason, "conflict")
   ].
 
 Decl module_exports_incomplete(Module, Reason)
@@ -979,7 +1092,10 @@ Decl module_exports_incomplete(Module, Reason)
     arg_role(Module, "entity"),
     arg_report_support(Module, "required"),
     arg(Reason, "Reason"),
-    arg_representation(Reason, "name")
+    arg_representation(Reason, "name"),
+    arg_allowed_name(Reason, "unresolved"),
+    arg_allowed_name(Reason, "unsupported"),
+    arg_allowed_name(Reason, "conflict")
   ].
 
 Decl declaration_source_candidate(Checked, Source, Method)
@@ -993,7 +1109,8 @@ Decl declaration_source_candidate(Checked, Source, Method)
     arg_role(Source, "entity"),
     arg_report_support(Source, "optional"),
     arg(Method, "Method"),
-    arg_representation(Method, "name")
+    arg_representation(Method, "name"),
+    arg_allowed_name(Method, "declaration_map")
   ].
 
 Decl declaration_source(Checked, Source, Method)
@@ -1007,7 +1124,8 @@ Decl declaration_source(Checked, Source, Method)
     arg_role(Source, "entity"),
     arg_report_support(Source, "optional"),
     arg(Method, "Method"),
-    arg_representation(Method, "name")
+    arg_representation(Method, "name"),
+    arg_allowed_name(Method, "declaration_map")
   ].
 
 Decl declaration_source_outcome(Checked, Outcome)
@@ -1018,7 +1136,15 @@ Decl declaration_source_outcome(Checked, Outcome)
     arg_role(Checked, "entity"),
     arg_report_support(Checked, "optional"),
     arg(Outcome, "Outcome"),
-    arg_representation(Outcome, "name")
+    arg_representation(Outcome, "name"),
+    arg_allowed_name(Outcome, "missing_map"),
+    arg_allowed_name(Outcome, "unavailable_map"),
+    arg_allowed_name(Outcome, "malformed_map"),
+    arg_allowed_name(Outcome, "unavailable_source"),
+    arg_allowed_name(Outcome, "unsupported"),
+    arg_allowed_name(Outcome, "unresolved"),
+    arg_allowed_name(Outcome, "ambiguous"),
+    arg_allowed_name(Outcome, "conflict")
   ].
 
 Decl source_entry(Entry, CheckedEntry, SourceEntry)
@@ -1066,7 +1192,10 @@ Decl source_entry_incomplete(Entry, Reason)
     arg(Entry, "Entry"),
     arg_role(Entry, "entity"),
     arg(Reason, "Reason"),
-    arg_representation(Reason, "name")
+    arg_representation(Reason, "name"),
+    arg_allowed_name(Reason, "unresolved"),
+    arg_allowed_name(Reason, "unsupported"),
+    arg_allowed_name(Reason, "conflict")
   ].
 
 Decl source_binding_attempt(Binding, Entry, CheckedFile, Name, Space)
@@ -1081,7 +1210,9 @@ Decl source_binding_attempt(Binding, Entry, CheckedFile, Name, Space)
     arg_role(CheckedFile, "path"),
     arg(Name, "Name"),
     arg(Space, "Space"),
-    arg_representation(Space, "name")
+    arg_representation(Space, "name"),
+    arg_allowed_name(Space, "type"),
+    arg_allowed_name(Space, "value")
   ].
 
 Decl source_binding(Binding, SourceFile, SourceName, Space, Method)
@@ -1095,8 +1226,11 @@ Decl source_binding(Binding, SourceFile, SourceName, Space, Method)
     arg(SourceName, "SourceName"),
     arg(Space, "Space"),
     arg_representation(Space, "name"),
+    arg_allowed_name(Space, "type"),
+    arg_allowed_name(Space, "value"),
     arg(Method, "Method"),
-    arg_representation(Method, "name")
+    arg_representation(Method, "name"),
+    arg_allowed_name(Method, "source_entry")
   ].
 
 Decl source_binding_checked_decl(Binding, Declaration)
@@ -1128,7 +1262,10 @@ Decl source_binding_incomplete(Binding, Reason)
     arg(Binding, "Binding"),
     arg_role(Binding, "entity"),
     arg(Reason, "Reason"),
-    arg_representation(Reason, "name")
+    arg_representation(Reason, "name"),
+    arg_allowed_name(Reason, "unresolved"),
+    arg_allowed_name(Reason, "unsupported"),
+    arg_allowed_name(Reason, "conflict")
   ].
 
 Decl location(Entity, File, StartLine, StartColumn, EndLine, EndColumn)

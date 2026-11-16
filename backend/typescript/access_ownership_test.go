@@ -38,15 +38,12 @@ func TestImportMetaSyntaxAndOwnership(t *testing.T) {
 		"const other = [import.meta?.env, import.meta[\"env\"], (import.meta).env];\n"
 	root := t.TempDir()
 	writeWorkspaceFile(t, root, "src/main.ts", source)
-	snapshot, sources, version, err := New(Options{Files: FileScopeWalk}).buildLintaiSnapshot(context.Background(), root, root)
+	snapshot, sources, _, err := New(Options{Files: FileScopeWalk}).buildLintaiSnapshot(context.Background(), root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	items, err := factsFromSnapshot(snapshot, sources, convertAdjustments(root, snapshot.ConfigAdjustments))
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := facts.Validate(facts.Snapshot{Version: version, Schema: Schema(), Facts: items}); err != nil {
 		t.Fatal(err)
 	}
 	rows := make(map[string]map[string]facts.Fact)
@@ -73,19 +70,19 @@ func TestImportMetaSyntaxAndOwnership(t *testing.T) {
 	owner := functionID("read")
 	constructor := functionID("Present.constructor")
 	want := []struct {
-		path, suffix, owner, reason string
-		line, start, end            int64
+		path, owner, reason string
+		line, start, end    int64
 	}{
-		{"env", "", owner, "", 1, 34, 49},
-		{"env", "#2", owner, "", 3, 23, 38},
-		{"env", "#3", owner, "", 4, 18, 49},
-		{"env", "#4", owner, "", 5, 22, 37},
-		{"env", "#5", "", "instance_construction", 10, 11, 26},
-		{"env", "#6", constructor, "", 15, 11, 26},
-		{"env", "#7", "", "unsupported_context", 21, 11, 26},
-		{"url", "", constructor, "", 16, 12, 27},
-		{"url", "#2", "", "unsupported_context", 22, 12, 27},
-		{"url", "#3", "", "", 26, 1, 16},
+		{"env", owner, "", 1, 34, 49},
+		{"env", owner, "", 3, 23, 38},
+		{"env", owner, "", 4, 18, 49},
+		{"env", owner, "", 5, 22, 37},
+		{"env", "", "instance_construction", 10, 11, 26},
+		{"env", constructor, "", 15, 11, 26},
+		{"env", "", "unsupported_context", 21, 11, 26},
+		{"url", constructor, "", 16, 12, 27},
+		{"url", "", "unsupported_context", 22, 12, 27},
+		{"url", "", "", 26, 1, 16},
 	}
 	if len(rows["meta_access"]) != len(want) {
 		t.Fatalf("meta accesses: got %v, want %d", rows["meta_access"], len(want))

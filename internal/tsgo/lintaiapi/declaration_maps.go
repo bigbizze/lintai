@@ -98,6 +98,29 @@ type exactMapSegment struct {
 	sourcePos  int
 }
 
+// Recover maps for the retained declaration domain after it has been
+// registered. Mapped endpoints can themselves be declarations, so continue
+// until each newly retained endpoint has been visited once.
+func (e *extractor) recoverRetainedDeclarationMaps() {
+	visited := make(map[string]bool)
+	for {
+		var pending []string
+		for id := range e.declarationNodes {
+			if !visited[id] {
+				pending = append(pending, id)
+			}
+		}
+		if len(pending) == 0 {
+			return
+		}
+		slices.Sort(pending)
+		for _, id := range pending {
+			visited[id] = true
+			e.recoverDeclarationMap(e.declarationNodes[id], false, e.declarations[id].Name)
+		}
+	}
+}
+
 func (e *extractor) mapFile(path tspath.RootedFilePath) *declarationMapFile {
 	if e.declarationMaps == nil {
 		e.declarationMaps = &declarationMapCache{

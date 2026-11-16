@@ -448,18 +448,7 @@ type extractor struct {
 	functionNodes               map[*ast.Node]*Function
 	functionKeys                map[string]*Function
 	functionSyms                map[*ast.Symbol]*Function
-	functionCount               map[string]int
-	accessCount                 map[string]int
 	instanceOwners              map[*ast.Node]*functionState
-	importCount                 map[string]int
-	callCount                   map[string]int
-	externalCount               map[string]int
-	unresolvedCount             map[string]int
-	opaqueCount                 map[string]int
-	refCount                    map[string]int
-	typeRefCount                map[string]int
-	ambientCount                map[string]int
-	globalRefCount              map[string]int
 	functions                   []Function
 	declarations                map[string]*DeclarationFact
 	exports                     map[string]*ExportFact
@@ -1048,43 +1037,32 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 	defer func() { timing.walk += time.Since(walkStarted) }()
 
 	ex := &extractor{
-		workspaceRoot:   workspaceRoot,
-		host:            host,
-		program:         program,
-		resolver:        resolver,
-		checker:         typeChecker,
-		requestedFiles:  make(map[string]struct{}, len(requestedFiles)),
-		primaryFiles:    make(map[string]struct{}, len(group.PrimaryFiles)),
-		filesByPath:     make(map[string]*ast.SourceFile, len(requestedFiles)),
-		functionNodes:   make(map[*ast.Node]*Function),
-		functionKeys:    make(map[string]*Function),
-		functionSyms:    make(map[*ast.Symbol]*Function),
-		declarations:    make(map[string]*DeclarationFact),
-		exports:         make(map[string]*ExportFact),
-		functionCount:   make(map[string]int),
-		importCount:     make(map[string]int),
-		callCount:       make(map[string]int),
-		externalCount:   make(map[string]int),
-		unresolvedCount: make(map[string]int),
-		opaqueCount:     make(map[string]int),
-		refCount:        make(map[string]int),
-		typeRefCount:    make(map[string]int),
-		ambientCount:    make(map[string]int),
-		globalRefCount:  make(map[string]int),
-		ambientDone:     make(map[*ast.Node]struct{}),
-		globalSyms:      make(map[string]*ast.Symbol),
-		ambient:         newAmbientIndex(ambientMatchers),
-		typeFacts:       make(map[string]*TypeFact),
-		typeIDs:         make(map[*checker.Type]string),
-		typeKeys:        make(map[typeKeyAt]typeKeyResult),
-		typeFactSeen:    make(map[*checker.Type]struct{}),
-		typeShapes:      make(map[*checker.Type]*typeShape),
-		typeTruncated:   make(map[*checker.Type]struct{}),
-		timing:          timing,
-		sourceEntries:   sourceEntries,
-		accessCount:     make(map[string]int),
-		instanceOwners:  make(map[*ast.Node]*functionState),
-		operations:      operationsForRelations(nil),
+		workspaceRoot:  workspaceRoot,
+		host:           host,
+		program:        program,
+		resolver:       resolver,
+		checker:        typeChecker,
+		requestedFiles: make(map[string]struct{}, len(requestedFiles)),
+		primaryFiles:   make(map[string]struct{}, len(group.PrimaryFiles)),
+		filesByPath:    make(map[string]*ast.SourceFile, len(requestedFiles)),
+		functionNodes:  make(map[*ast.Node]*Function),
+		functionKeys:   make(map[string]*Function),
+		functionSyms:   make(map[*ast.Symbol]*Function),
+		declarations:   make(map[string]*DeclarationFact),
+		exports:        make(map[string]*ExportFact),
+		ambientDone:    make(map[*ast.Node]struct{}),
+		globalSyms:     make(map[string]*ast.Symbol),
+		ambient:        newAmbientIndex(ambientMatchers),
+		typeFacts:      make(map[string]*TypeFact),
+		typeIDs:        make(map[*checker.Type]string),
+		typeKeys:       make(map[typeKeyAt]typeKeyResult),
+		typeFactSeen:   make(map[*checker.Type]struct{}),
+		typeShapes:     make(map[*checker.Type]*typeShape),
+		typeTruncated:  make(map[*checker.Type]struct{}),
+		timing:         timing,
+		sourceEntries:  sourceEntries,
+		instanceOwners: make(map[*ast.Node]*functionState),
+		operations:     operationsForRelations(nil),
 	}
 	if len(demand) != 0 {
 		ex.operations = demand[0]
@@ -1149,6 +1127,9 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 		if err := ex.applyConfiguredSourceEntries(sourceEntries, auxiliary, resolutions); err != nil {
 			return nil, nil, err
 		}
+	}
+	if ex.operations.sourceRecovery {
+		ex.recoverRetainedDeclarationMaps()
 	}
 	ex.recordProgramInputs()
 
@@ -3306,16 +3287,4 @@ func nodeKey(node *ast.Node) string {
 		return ""
 	}
 	return fmt.Sprintf("%s:%d:%d:%d", normalizeSlash(file.FileName().AsString()), node.Kind, node.Pos(), node.End())
-}
-
-func nextOrdinal(counts map[string]int, base string) int {
-	counts[base]++
-	return counts[base]
-}
-
-func withOrdinal(base string, ordinal int) string {
-	if ordinal <= 1 {
-		return base
-	}
-	return fmt.Sprintf("%s#%d", base, ordinal)
 }

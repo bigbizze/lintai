@@ -122,7 +122,7 @@ To inspect the import facts behind this example:
 pnpm exec lintai facts --workspace-root . --relation import_edge --relation import_internal
 ```
 
-`lintai schema` lists the available facts and built-in queries. The [examples](docs/examples.md) cover call chains, public types, suspension syntax, required imports and more.
+`lintai schema` prints the configured producer catalog under its namespace bindings, along with `lintai` helpers. The [examples](docs/examples.md) cover call chains, public types, suspension syntax, required imports and more.
 
 ## Use it in your editor
 

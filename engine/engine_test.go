@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"codeberg.org/TauCeti/mangle-go/ast"
 	"github.com/bigbizze/lintai/backend/typescript"
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/facts"
@@ -774,22 +775,48 @@ export function choose(flag: boolean) {
 	root := t.TempDir()
 	writeTestFile(t, root, "src/scorecard/total.ts", source)
 	writeTestFile(t, root, "src/scorecard/only-unsupported.ts", `class Only { value = await unknown(); }`)
-	snapshot, err := typescript.New(typescript.Options{Files: typescript.FileScopeWalk}).BuildSnapshot(context.Background(), root, root)
+	session := Open(Options{}, typescript.New(typescript.Options{Files: typescript.FileScopeWalk}))
+	defer session.Close()
+	catalog, err := session.describeProducers()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := facts.Validate(snapshot); err != nil {
+	requested := map[string]map[facts.Predicate]struct{}{"ts": {}}
+	for _, relation := range catalog.entries[0].description.BaseRelations {
+		requested["ts"][relation.Predicate] = struct{}{}
+	}
+	assembled, err := catalog.collect(context.Background(), Options{RepoRoot: root, WorkspaceRoot: root}, requested, nil)
+	if err != nil {
 		t.Fatal(err)
 	}
+	var snapshotFacts []facts.Fact
+	for predicate := range requested["ts"] {
+		sym := ast.PredicateSym{Symbol: predicate.Name, Arity: predicate.Arity}
+		err := assembled.base.GetFacts(ast.NewQuery(sym), func(atom ast.Atom) error {
+			values := make([]facts.Value, len(atom.Args))
+			for index, arg := range atom.Args {
+				value, err := factValue(arg.(ast.Constant))
+				if err != nil {
+					return err
+				}
+				values[index] = value
+			}
+			snapshotFacts = append(snapshotFacts, facts.Fact{Relation: strings.TrimPrefix(predicate.Name, "ts."), Values: values})
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	lines := map[string]int{}
-	for _, fact := range snapshot.Facts {
+	for _, fact := range snapshotFacts {
 		if fact.Relation == "location" && fact.Values[1].String == "src/scorecard/total.ts" {
 			lines[fact.Values[0].String] = int(fact.Values[2].Number)
 		}
 	}
 	find := func(relation string, line int) []facts.Fact {
 		var result []facts.Fact
-		for _, fact := range snapshot.Facts {
+		for _, fact := range snapshotFacts {
 			if fact.Relation == relation && lines[fact.Values[0].String] == line {
 				result = append(result, fact)
 			}
@@ -797,13 +824,13 @@ export function choose(flag: boolean) {
 		return result
 	}
 	fnIDs := make(map[string]string)
-	for _, fact := range snapshot.Facts {
+	for _, fact := range snapshotFacts {
 		if fact.Relation == "fn" {
 			fnIDs[fact.Values[2].String] = fact.Values[0].String
 		}
 	}
 	owner := func(site string) string {
-		for _, fact := range snapshot.Facts {
+		for _, fact := range snapshotFacts {
 			if fact.Relation == "site_owner" && fact.Values[0].String == site {
 				return fact.Values[1].String
 			}
@@ -811,7 +838,7 @@ export function choose(flag: boolean) {
 		return ""
 	}
 	unsupported := func(site string) string {
-		for _, fact := range snapshot.Facts {
+		for _, fact := range snapshotFacts {
 			if fact.Relation == "site_attribution_unsupported" && fact.Values[0].String == site {
 				return fact.Values[1].String
 			}
@@ -876,12 +903,12 @@ export function choose(flag: boolean) {
 	} else {
 		site := rows[0].Values[0].String
 		found := false
-		for _, fact := range snapshot.Facts {
+		for _, fact := range snapshotFacts {
 			if fact.Relation == "site_owner" && fact.Values[0].String == site && fact.Values[1].String == callback {
 				found = true
 			}
 		}
-		if !found || !strings.HasPrefix(site, "site:") {
+		if !found || !strings.HasPrefix(site, "ts:site:") {
 			t.Errorf("callback suspension owner or ID: %v", rows)
 		}
 	}
@@ -890,7 +917,7 @@ export function choose(flag: boolean) {
 	} else if reason := unsupported(rows[0].Values[0].String); reason != "instance_construction" {
 		t.Errorf("unsupported suspension reason = %q", reason)
 	}
-	if rows := find("ambient_use", 27); len(rows) != 1 || owner(rows[0].Values[0].String) != "module:src/scorecard/total.ts" || unsupported(rows[0].Values[0].String) != "" {
+	if rows := find("ambient_use", 27); len(rows) != 1 || owner(rows[0].Values[0].String) != "ts:module:src/scorecard/total.ts" || unsupported(rows[0].Values[0].String) != "" {
 		t.Errorf("module ambient use: %v", rows)
 	}
 	choose := fnIDs["choose"]
@@ -920,7 +947,7 @@ export function choose(flag: boolean) {
 	if rows := find("fn_ref", 31); len(rows) != 0 {
 		t.Errorf("direct IIFE was also treated as a function value: %v", rows)
 	}
-	for _, fact := range snapshot.Facts {
+	for _, fact := range snapshotFacts {
 		if fact.Relation == "fn_ref" && fact.Values[1].String == fnIDs["total.nestedAlone"] {
 			t.Errorf("declaration created a reference: %v", fact)
 		}
@@ -934,12 +961,6 @@ export function choose(flag: boolean) {
 			t.Errorf("callback suspension attributed to module: %v", fact)
 		}
 	}
-	qualifiedFacts, anchors, reportable := qualifyTestFacts(t, snapshot.Facts)
-	base, err := facts.Store(qualifiedFacts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	catalog, decls := typeScriptCatalogForTest(t)
 	output := runtime.ProgramOutput{Text: `
 Decl direct(Fn).
 direct(Fn) :- ts.fn_suspends(Fn).
@@ -961,7 +982,7 @@ bad_owner(Site) :- ts.site_attribution_unsupported(Site, _), ts.site_owner(Site,
 Decl uncertain(Fn).
 uncertain(Fn) :- ts.fn(Fn, _, "choose"), ts.owner_has_unresolved_call(Fn).
 `}
-	violations, perr := evaluateProgram(base, catalog, decls, anchors, reportable, []string{"ts"}, output, []string{"call_only", "follow_refs", "module_seen", "bad_owner", "uncertain"}, nil, evalOptions{})
+	violations, perr := evaluateProgram(assembled.base, assembled.sources, assembled.schemaDecls, assembled.anchors, assembled.reportable, assembled.namespaces, output, []string{"call_only", "follow_refs", "module_seen", "bad_owner", "uncertain"}, nil, evalOptions{})
 	if perr != nil {
 		t.Fatal(perr)
 	}
@@ -970,7 +991,7 @@ uncertain(Fn) :- ts.fn(Fn, _, "choose"), ts.owner_has_unresolved_call(Fn).
 		got = append(got, item.predicate+":"+item.anchor)
 	}
 	slices.Sort(got)
-	want := []string{"follow_refs:ts:" + scorecard, "module_seen:ts:module:src/scorecard/only-unsupported.ts", "module_seen:ts:module:src/scorecard/total.ts", "uncertain:ts:" + choose}
+	want := []string{"follow_refs:" + scorecard, "module_seen:ts:module:src/scorecard/only-unsupported.ts", "module_seen:ts:module:src/scorecard/total.ts", "uncertain:" + choose}
 	if !slices.Equal(got, want) {
 		t.Fatalf("policy rows = %v, want %v", got, want)
 	}

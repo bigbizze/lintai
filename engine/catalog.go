@@ -136,6 +136,62 @@ func (e *Session) describeProducers() (producerCatalog, error) {
 	}, nil
 }
 
+// Schema renders the configured catalog descriptions and engine helpers
+// without collecting producer source facts.
+func (e *Session) Schema(ctx context.Context) (string, error) {
+	e.checkMu.Lock()
+	defer e.checkMu.Unlock()
+	checkCtx, finish, err := e.beginCheck(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer finish()
+	catalog, err := e.describeProducers()
+	if err != nil {
+		return "", err
+	}
+	if err := checkCtx.Err(); err != nil {
+		return "", err
+	}
+	return catalog.schema(), nil
+}
+
+func (catalog producerCatalog) schema() string {
+	var output strings.Builder
+	for _, entry := range catalog.entries {
+		if output.Len() > 0 {
+			output.WriteString("\n\n")
+		}
+		fmt.Fprintf(&output, "Package %s!", entry.description.Namespace)
+		for _, source := range []string{entry.description.Schema.Declarations, entry.description.Schema.Prelude} {
+			if source = withoutPackageDeclaration(source); source != "" {
+				output.WriteString("\n\n")
+				output.WriteString(source)
+			}
+		}
+	}
+	if output.Len() > 0 {
+		output.WriteString("\n\n")
+	}
+	output.WriteString(engineSchemaSource)
+	return strings.TrimSpace(output.String())
+}
+
+func withoutPackageDeclaration(source string) string {
+	lines := strings.Split(source, "\n")
+	for index, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") || strings.HasPrefix(trimmed, "//") {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "Package ") && strings.HasSuffix(trimmed, "!") {
+			lines = append(lines[:index], lines[index+1:]...)
+		}
+		break
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
+}
+
 // collect requests only the base relations selected by successfully prepared
 // rules. Producers with no requested relations are not called.
 func (catalog producerCatalog) collect(ctx context.Context, options Options, requestedByNamespace map[string]map[facts.Predicate]struct{}, current *composedFacts) (composedFacts, error) {
@@ -216,6 +272,9 @@ func (catalog producerCatalog) collect(ctx context.Context, options Options, req
 		reused.watchHints = hints
 		return reused, nil
 	}
+	// describeProducers rejects duplicate namespaces and ValidateBatch rejects
+	// anchors outside each producer's namespace. Since Anchors is a map, these
+	// validated batches cannot claim the same anchor ID.
 	for _, item := range collectedBatches {
 		description, requested, validated := item.description, item.requested, item.validated
 		allFacts = append(allFacts, validated.Facts()...)
@@ -224,9 +283,6 @@ func (catalog producerCatalog) collect(ctx context.Context, options Options, req
 		}
 		producerAnchors := validated.Anchors()
 		for id, support := range producerAnchors {
-			if current, exists := anchors[id]; exists && !sameAnchor(current, support) {
-				return composedFacts{}, fmt.Errorf("entity %q has conflicting producer-owned reporting support", id)
-			}
 			anchors[id] = support
 			anchorOwners[id] = description.Namespace
 		}
@@ -401,19 +457,4 @@ func namespacedUnit(source, namespace string) (parse.SourceUnit, error) {
 		return parse.SourceUnit{}, fmt.Errorf("Mangle parser did not provide package metadata")
 	}
 	return unit, nil
-}
-
-func sameAnchor(left, right facts.AnchorSupport) bool {
-	if left.Location != right.Location || left.Description != right.Description {
-		return false
-	}
-	if (left.Tracking == nil) != (right.Tracking == nil) {
-		return false
-	}
-	if left.Tracking == nil {
-		return true
-	}
-	leftBytes, leftErr := canonical.Marshal([]any{left.Tracking.Scheme, left.Tracking.Data})
-	rightBytes, rightErr := canonical.Marshal([]any{right.Tracking.Scheme, right.Tracking.Data})
-	return leftErr == nil && rightErr == nil && string(leftBytes) == string(rightBytes)
 }

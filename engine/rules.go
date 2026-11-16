@@ -171,7 +171,7 @@ func (catalog *ruleCatalog) buildWithEngineCache(ctx context.Context, options Op
 		}
 		key := toolContext + "\x00" + rulePath
 		engine.bundleCache[key] = cachedRuleBundle{
-			artifact: bundle.Artifacts{Hash: artifact.Hash, Inputs: cloneBundleInputs(artifact.Inputs)},
+			artifact: bundle.Artifacts{Hash: artifact.Hash, Inputs: cloneBundleInputs(artifact.Inputs), Probes: cloneConfigProbes(artifact.Probes)},
 			pureCode: string(pureCode), prepareCode: string(prepareCode), context: toolContext,
 			resolutionDirs: resolutionDirs,
 		}
@@ -193,7 +193,7 @@ func (catalog *ruleCatalog) materializeCachedBundle(index int, cached cachedRule
 	}
 	return bundle.Artifacts{
 		PureBundlePath: purePath, PrepareBundlePath: preparePath,
-		Hash: cached.artifact.Hash, Inputs: cloneBundleInputs(cached.artifact.Inputs),
+		Hash: cached.artifact.Hash, Inputs: cloneBundleInputs(cached.artifact.Inputs), Probes: cloneConfigProbes(cached.artifact.Probes),
 	}, nil
 }
 
@@ -204,11 +204,25 @@ func bundleCacheContext(options Options) (string, bool) {
 		return "", false
 	}
 	files := []string{script, filepath.Join(assetRoot, "package.json"), filepath.Join(options.RepoRoot, "package.json"), filepath.Join(options.RepoRoot, "pnpm-lock.yaml")}
-	for _, root := range []string{assetRoot, options.RepoRoot, options.WorkspaceRoot} {
-		candidate := filepath.Join(root, "node_modules", "esbuild", "package.json")
-		if _, err := os.Stat(candidate); err == nil {
-			files = append(files, candidate)
-			break
+	resolvedScript, err := filepath.EvalSymlinks(script)
+	if err != nil {
+		return "", false
+	}
+	for _, dependency := range []string{"esbuild", "typescript"} {
+		found := false
+		for directory := filepath.Dir(resolvedScript); ; directory = filepath.Dir(directory) {
+			candidate := filepath.Join(directory, "node_modules", dependency, "package.json")
+			if _, err := os.Stat(candidate); err == nil {
+				files = append(files, candidate)
+				found = true
+				break
+			}
+			if directory == filepath.Dir(directory) {
+				break
+			}
+		}
+		if !found {
+			return "", false
 		}
 	}
 	var identity strings.Builder
@@ -240,6 +254,25 @@ func resolveBundleScript(assetRoot string) (string, error) {
 }
 
 func bundleInputsUnchanged(cached cachedRuleBundle, options Options) bool {
+	for _, probe := range cached.artifact.Probes {
+		info, err := os.Stat(probe.Path)
+		if os.IsNotExist(err) {
+			if probe.Exists {
+				return false
+			}
+			continue
+		}
+		if err != nil {
+			return false
+		}
+		exists := info.Mode().IsRegular()
+		if probe.Directory {
+			exists = info.IsDir()
+		}
+		if exists != probe.Exists {
+			return false
+		}
+	}
 	currentDirs, ok := bundleResolutionDirectories(cached.artifact.Inputs, options)
 	if !ok || len(currentDirs) != len(cached.resolutionDirs) {
 		return false
@@ -255,19 +288,16 @@ func bundleInputsUnchanged(cached cachedRuleBundle, options Options) bool {
 func bundleResolutionDirectories(inputs []bundle.Input, options Options) (map[string]string, bool) {
 	directories := make(map[string]string)
 	for _, input := range inputs {
-		resolved := ""
-		for _, candidate := range bundleInputCandidates(input.Path, options) {
-			contents, err := os.ReadFile(candidate)
-			if err != nil {
-				continue
-			}
-			digest := sha256.Sum256(contents)
-			if hex.EncodeToString(digest[:]) == input.SHA256 {
-				resolved, _ = filepath.Abs(candidate)
-				break
-			}
+		if !filepath.IsAbs(input.AbsolutePath) {
+			return nil, false
 		}
-		if resolved == "" {
+		resolved := filepath.Clean(input.AbsolutePath)
+		contents, err := os.ReadFile(resolved)
+		if err != nil {
+			return nil, false
+		}
+		digest := sha256.Sum256(contents)
+		if hex.EncodeToString(digest[:]) != input.SHA256 {
 			return nil, false
 		}
 		boundary := bundleResolutionBoundary(resolved, options)
@@ -331,26 +361,12 @@ func bundleResolutionBoundary(file string, options Options) string {
 	return boundary
 }
 
-func bundleInputCandidates(inputPath string, options Options) []string {
-	switch {
-	case strings.HasPrefix(inputPath, "asset:"):
-		return []string{filepath.Clean(filepath.Join(assetRootOf(options), strings.TrimPrefix(inputPath, "asset:")))}
-	case strings.HasPrefix(inputPath, "node_modules/"):
-		relative := filepath.FromSlash(inputPath)
-		candidates := make([]string, 0, 3)
-		for _, root := range []string{options.WorkspaceRoot, options.RepoRoot, assetRootOf(options)} {
-			if root != "" {
-				candidates = append(candidates, filepath.Join(root, relative))
-			}
-		}
-		return candidates
-	default:
-		return []string{filepath.Join(options.WorkspaceRoot, filepath.FromSlash(inputPath))}
-	}
-}
-
 func cloneBundleInputs(inputs []bundle.Input) []bundle.Input {
 	return append([]bundle.Input(nil), inputs...)
+}
+
+func cloneConfigProbes(probes []bundle.ConfigProbe) []bundle.ConfigProbe {
+	return append([]bundle.ConfigProbe(nil), probes...)
 }
 
 func (catalog *ruleCatalog) loadMetadata(skip map[string]struct{}) {
