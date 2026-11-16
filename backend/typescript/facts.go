@@ -7,9 +7,9 @@ import (
 	"math"
 	"slices"
 
-	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/facts"
-	"github.com/bigbizze/lintai/internal/analysis"
+	"github.com/bigbizze/lintai/internal/ambient"
+	"github.com/bigbizze/lintai/internal/tsgo/lintaiapi"
 )
 
 //go:embed schema.mg
@@ -23,9 +23,8 @@ func Schema() facts.Schema {
 	return facts.Schema{Declarations: schemaText, Prelude: preludeText}
 }
 
-// factsFromAnalysis converts the TypeScript-specific analysis model into the
-// language-neutral backend contract.
-func factsFromAnalysis(snapshot *analysis.Snapshot) ([]facts.Fact, error) {
+// factsFromSnapshot projects completed TypeScript records into public facts.
+func factsFromSnapshot(snapshot *lintaiapi.Snapshot, sources []ambient.Source, adjustments []lintaiapi.ConfigAdjustment) ([]facts.Fact, error) {
 	b := builder{}
 	for _, module := range snapshot.Modules {
 		b.add("module", str(module.Path))
@@ -191,7 +190,7 @@ func factsFromAnalysis(snapshot *analysis.Snapshot) ([]facts.Fact, error) {
 		b.add("module_parse_error", str(parseError.SemanticKey), str(parseError.FilePath), str(parseError.Message))
 		b.location(parseError.SemanticKey, parseError.Range)
 	}
-	for _, adjustment := range snapshot.Adjustments {
+	for _, adjustment := range adjustments {
 		action, err := name(adjustment.Action)
 		if err != nil {
 			return nil, err
@@ -242,7 +241,7 @@ func factsFromAnalysis(snapshot *analysis.Snapshot) ([]facts.Fact, error) {
 			}
 			b.add("declaration_incomplete", id, value)
 		}
-		b.location(item.ID, item.Range)
+		b.location(item.ID, item.Location)
 	}
 	for _, item := range snapshot.Exports {
 		id := str(item.ID)
@@ -271,8 +270,8 @@ func factsFromAnalysis(snapshot *analysis.Snapshot) ([]facts.Fact, error) {
 			}
 			b.add("export_incomplete", id, value)
 		}
-		if item.Range != nil {
-			b.location(item.ID, *item.Range)
+		if item.Location != (lintaiapi.SourceLocation{}) {
+			b.location(item.ID, item.Location)
 		}
 	}
 	for _, item := range snapshot.ModuleExportsIncomplete {
@@ -347,7 +346,7 @@ func factsFromAnalysis(snapshot *analysis.Snapshot) ([]facts.Fact, error) {
 		}
 	}
 	for _, item := range snapshot.ExportSites {
-		b.location(item.ID, item.Range)
+		b.location(item.ID, item.Location)
 	}
 	for _, access := range snapshot.Accesses {
 		id := str(access.SemanticKey)
@@ -364,12 +363,18 @@ func factsFromAnalysis(snapshot *analysis.Snapshot) ([]facts.Fact, error) {
 		}
 		b.location(access.SemanticKey, access.Range)
 	}
-	for _, source := range snapshot.AmbientSources {
+	for _, source := range sources {
 		sourceName, err := name(source.ID)
 		if err != nil {
 			return nil, err
 		}
-		for _, capability := range source.Capabilities {
+		capabilities := make([]string, 0, len(source.Matchers))
+		for _, matcher := range source.Matchers {
+			if !slices.Contains(capabilities, matcher.Capability) {
+				capabilities = append(capabilities, matcher.Capability)
+			}
+		}
+		for _, capability := range capabilities {
 			capabilityName, err := name(capability)
 			if err != nil {
 				return nil, err
@@ -413,7 +418,7 @@ func factsFromAnalysis(snapshot *analysis.Snapshot) ([]facts.Fact, error) {
 	return b.items, nil
 }
 
-func (b *builder) typeFacts(item analysis.TypeFact) error {
+func (b *builder) typeFacts(item lintaiapi.TypeFact) error {
 	id := str(item.ID)
 	kind, err := name(item.Kind)
 	if err != nil {
@@ -503,7 +508,7 @@ func (b *builder) marks(id facts.Value, marks []string, optional, rest string) e
 
 // literalValue returns the type_literal value of a literal type: a string,
 // a number, /true or /false, or the digits of a bigint as a string.
-func literalValue(literal analysis.TypeLiteral) (facts.Value, error) {
+func literalValue(literal lintaiapi.TypeLiteral) (facts.Value, error) {
 	switch literal.Kind {
 	case "string", "bigint":
 		return str(literal.Text), nil
@@ -529,7 +534,7 @@ func (b *builder) add(predicate string, args ...facts.Value) {
 	b.items = append(b.items, facts.Fact{Relation: predicate, Values: args})
 }
 
-func (b *builder) location(entity string, location diagnostics.SourceLocation) {
+func (b *builder) location(entity string, location lintaiapi.SourceLocation) {
 	b.add("location",
 		str(entity),
 		str(location.File),

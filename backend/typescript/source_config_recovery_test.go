@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/bigbizze/lintai/backend"
-	"github.com/bigbizze/lintai/internal/analysis"
+	"github.com/bigbizze/lintai/internal/tsgo/lintaiapi"
 )
 
 func TestSourceConfigInputsInvalidateFailedAssociation(t *testing.T) {
@@ -52,25 +52,27 @@ func TestSourceConfigInputsInvalidateFailedAssociation(t *testing.T) {
 			}
 			writeWorkspaceFile(t, root, "source-links.json", `{"version":1,"entries":[{"checkedEntry":"contracts/dist/index.d.ts","sourceEntry":"contracts/src/index.ts","sourceTsconfig":"contracts/custom.json"}]}`)
 			options := backend.SnapshotOptions{Files: backend.FileScopeTsconfig, SourceLinks: "source-links.json"}
-			build := func() *analysis.Snapshot {
+			build := func() (*lintaiapi.Snapshot, string) {
 				t.Helper()
-				snapshot, err := New().buildAnalysisSnapshot(context.Background(), root, root, options)
+				snapshot, _, version, err := New().buildLintaiSnapshot(context.Background(), root, root, options)
 				if err != nil {
 					t.Fatal(err)
 				}
-				return snapshot
+				return snapshot, version
 			}
 
-			before := build()
+			before, beforeVersion := build()
 			changedPath := filepath.Join(root, test.changed)
-			if !slices.Contains(before.InputPaths, changedPath) {
-				t.Fatalf("failed association did not report the input that can repair it: %s, inputs=%v", changedPath, before.InputPaths)
+			if !hasSnapshotInput(before, changedPath) {
+				t.Fatalf("failed association did not report the input that can repair it: %s, inputs=%v", changedPath, before.Inputs)
 			}
 			if len(before.SourceEntries) != 1 || !before.SourceEntries[0].Applied || !slices.Contains(before.SourceEntries[0].Incomplete, "unsupported") {
 				t.Fatalf("invalid source config did not leave an unsupported association: %+v", before.SourceEntries)
 			}
 			for _, space := range []string{"type", "value"} {
-				index := slices.IndexFunc(before.SourceBindings, func(binding analysis.SourceBinding) bool { return binding.Name == "Widget" && binding.Space == space })
+				index := slices.IndexFunc(before.SourceBindings, func(binding lintaiapi.SourceBindingFact) bool {
+					return binding.Name == "Widget" && binding.Space == space
+				})
 				if index < 0 {
 					t.Fatalf("missing checked %s binding: %+v", space, before.SourceBindings)
 				}
@@ -81,16 +83,20 @@ func TestSourceConfigInputsInvalidateFailedAssociation(t *testing.T) {
 			}
 
 			writeWorkspaceFile(t, root, test.changed, test.repaired)
-			after := build()
-			if before.Version == after.Version {
-				t.Fatalf("repairing the observed input did not change the snapshot version: %s", before.Version)
+			after, afterVersion := build()
+			if beforeVersion == afterVersion {
+				t.Fatalf("repairing the observed input did not change the snapshot version: %s", beforeVersion)
 			}
 			if len(after.SourceEntries) != 1 || !after.SourceEntries[0].Applied || len(after.SourceEntries[0].Incomplete) != 0 {
 				t.Fatalf("repaired association remained incomplete: %+v", after.SourceEntries)
 			}
 			for _, space := range []string{"type", "value"} {
-				beforeIndex := slices.IndexFunc(before.SourceBindings, func(binding analysis.SourceBinding) bool { return binding.Name == "Widget" && binding.Space == space })
-				afterIndex := slices.IndexFunc(after.SourceBindings, func(binding analysis.SourceBinding) bool { return binding.Name == "Widget" && binding.Space == space })
+				beforeIndex := slices.IndexFunc(before.SourceBindings, func(binding lintaiapi.SourceBindingFact) bool {
+					return binding.Name == "Widget" && binding.Space == space
+				})
+				afterIndex := slices.IndexFunc(after.SourceBindings, func(binding lintaiapi.SourceBindingFact) bool {
+					return binding.Name == "Widget" && binding.Space == space
+				})
 				if afterIndex < 0 {
 					t.Fatalf("missing repaired %s binding: %+v", space, after.SourceBindings)
 				}
