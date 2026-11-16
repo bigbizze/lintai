@@ -271,10 +271,11 @@ export class LintAIClient {
 	private readonly inputWatchers: FileWatcher[] = [];
 	private inputPaths: string[] = [];
 	private inputPathSet = new Set<string>();
-	private inputDirectories = new Set<string>();
+	private inputDirectories = new Map<string, DirectoryIdentity | undefined>();
 	private inputWatchGeneration = 0;
 	private ruleInvalidationTimer: ReturnType<typeof setTimeout> | undefined;
 	private inputInvalidationTimer: ReturnType<typeof setTimeout> | undefined;
+	private inputInvalidationNeedsReinstall = false;
 	private pendingRuleInvalidation = false;
 	private analysisEpoch = 0;
 	private readonly processExitHandler = () => {
@@ -288,7 +289,7 @@ export class LintAIClient {
 		this.options = options;
 		this.dependencies = dependencies;
 		this.ensureRuleWatchers();
-		this.updateInputWatchers([]);
+		if (this.updateInputWatchers([])) this.scheduleInputInvalidation(false);
 		process.on("exit", this.processExitHandler);
 	}
 
@@ -870,16 +871,30 @@ export class LintAIClient {
 		this.diagnosticsByFile = indexed.byFile;
 		this.unlocated = indexed.unlocated;
 		this.analysisFailure = undefined;
-		this.updateInputWatchers(watchHints ?? []);
+		if (this.updateInputWatchers(watchHints ?? [])) {
+			// Keep the completed result, then check for changes during installation.
+			this.scheduleInputInvalidation(false);
+		}
 	}
 
-	private updateInputWatchers(inputPaths: string[]): void {
+	private updateInputWatchers(inputPaths: string[], force = false): boolean {
 		const paths = [
 			...new Set([
 				...inputPaths.map((item) => path.resolve(item)),
 				...(this.options.sourceLinks === undefined ? [] : [path.resolve(this.options.sourceLinks)]),
 			]),
 		];
+		// Stable watches need no handoff when an analysis returns the same inputs.
+		if (
+			!force &&
+			paths.length === this.inputPathSet.size &&
+			paths.every((item) => this.inputPathSet.has(item)) &&
+			[...this.inputDirectories].every(([directory, identity]) =>
+				sameDirectory(identity, directoryIdentity(directory)),
+			)
+		) {
+			return false;
+		}
 		this.inputPaths = paths;
 		this.inputPathSet = new Set(paths);
 		const generation = ++this.inputWatchGeneration;
@@ -919,16 +934,17 @@ export class LintAIClient {
 				child = parent;
 			}
 		}
-		this.inputDirectories = new Set(specs.keys());
+		this.inputDirectories = new Map(
+			[...specs].map(([directory, spec]) => [directory, spec.identity]),
+		);
 		for (const [target, spec] of specs) {
-			const directoryChanged = (changed?: string) =>
+			// A parent rename event can name the destination, not the watched child.
+			const directoryChanged = () =>
 				(this.inputDirectories.has(target) &&
 					!sameDirectory(spec.identity, directoryIdentity(target))) ||
 				[...spec.children].some(
 					([child, identity]) =>
-						(!changed || changed === child) &&
-						this.inputDirectories.has(child) &&
-						!sameDirectory(identity, directoryIdentity(child)),
+						this.inputDirectories.has(child) && !sameDirectory(identity, directoryIdentity(child)),
 				);
 			const onError = (error: unknown) => {
 				if (this.state === "disposed" || generation !== this.inputWatchGeneration) return;
@@ -948,7 +964,7 @@ export class LintAIClient {
 						if (this.state === "disposed") return;
 						const changed = filename && path.resolve(target, filename);
 						if (
-							directoryChanged(changed) ||
+							directoryChanged() ||
 							spec.inputs.some(
 								(input) =>
 									this.inputPathSet.has(input.path) &&
@@ -969,9 +985,11 @@ export class LintAIClient {
 				onError(error);
 			}
 		}
+		return this.inputWatchers.length > 0;
 	}
 
-	private scheduleInputInvalidation(): void {
+	private scheduleInputInvalidation(reinstall = true): void {
+		this.inputInvalidationNeedsReinstall ||= reinstall;
 		if (this.inputInvalidationTimer) {
 			clearTimeout(this.inputInvalidationTimer);
 		}
@@ -980,7 +998,13 @@ export class LintAIClient {
 			if (this.state === "disposed") {
 				return;
 			}
-			this.updateInputWatchers(this.inputPaths);
+			const reinstall = this.inputInvalidationNeedsReinstall;
+			this.inputInvalidationNeedsReinstall = false;
+			if (reinstall && this.updateInputWatchers(this.inputPaths, true)) {
+				// A change can land after the old watches close but before the new
+				// watches start reporting. Recheck once after the new watches exist.
+				this.scheduleInputInvalidation(false);
+			}
 			this.invalidateDiagnostics();
 		}, 200);
 	}
