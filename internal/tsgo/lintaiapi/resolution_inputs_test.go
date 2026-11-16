@@ -6,41 +6,7 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
-
-	"github.com/bigbizze/lintai/internal/workspace"
 )
-
-func TestBuildSnapshotValidatesUnchangedSymlinkMembership(t *testing.T) {
-	root := t.TempDir()
-	writeWorkspace(t, root, map[string]string{
-		"tsconfig.json": `{"include":["src/**/*.ts"]}`,
-		"src/a.ts":      `export const value = 1;`,
-	})
-	if err := os.Mkdir(filepath.Join(root, "empty"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	for _, link := range []struct{ target, name string }{
-		{"a.ts", "link.ts"},
-		{"../empty", "linked-dir"},
-		{"missing.ts", "dangling.ts"},
-	} {
-		if err := os.Symlink(link.target, filepath.Join(root, "src", link.name)); err != nil {
-			t.Skipf("symlinks unavailable: %v", err)
-		}
-	}
-	snapshot, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{
-		WorkspaceRoot: root, ScopeOptions: &workspace.ScopeOptions{}, TsconfigFiles: true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if snapshot.Validation.retries != 0 {
-		t.Fatalf("unchanged symlink membership caused %d validation retries", snapshot.Validation.retries)
-	}
-	if len(snapshot.Modules) != 1 || snapshot.Modules[0].Path != "src/a.ts" {
-		t.Fatalf("unexpected selected modules: %+v", snapshot.Modules)
-	}
-}
 
 func TestExternalNodeModulesDirectoryIsTracked(t *testing.T) {
 	parent := t.TempDir()

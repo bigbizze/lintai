@@ -19,7 +19,6 @@ import (
 	"github.com/bigbizze/lintai/bundle"
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/engine"
-	"github.com/bigbizze/lintai/internal/tsgo/lintaiapi"
 	"github.com/bigbizze/lintai/internal/workspace"
 	"github.com/bigbizze/lintai/server"
 	"github.com/bigbizze/lintai/suppressions"
@@ -330,19 +329,13 @@ func runScope(ctx context.Context, args []string, stdout io.Writer) error {
 		return err
 	}
 	type producerScope struct {
-		Producer string                     `json:"producer"`
-		Files    string                     `json:"files"`
-		Scope    lintaiapi.ScopeExplanation `json:"scope"`
+		Producer string                      `json:"producer"`
+		Files    string                      `json:"files"`
+		Scope    typescript.ScopeExplanation `json:"scope"`
 	}
 	reports := make([]producerScope, 0, len(settings))
 	for _, item := range settings {
-		options := workspace.ScopeOptions{
-			Exclude: item.WorkspaceExcludes, Include: item.Includes,
-			Sources: item.Sources, InvocationExclude: item.Excludes,
-		}
-		report, err := lintaiapi.ExplainScope(ctx, lintaiapi.BuildSnapshotRequest{
-			WorkspaceRoot: root, ScopeOptions: &options, TsconfigFiles: item.Files == typescript.FileScopeTsconfig,
-		})
+		report, err := typescript.ExplainScope(ctx, root, item)
 		if err != nil {
 			return err
 		}

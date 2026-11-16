@@ -24,6 +24,10 @@ func hasSnapshotInput(snapshot *lintaiapi.Snapshot, path string) bool {
 	return slices.ContainsFunc(snapshot.Inputs, func(input lintaiapi.SnapshotInput) bool { return input.Path == path })
 }
 
+func hasGenerationWatchHint(generation *producerGeneration, path string) bool {
+	return slices.Contains(generation.watchHints, filepath.ToSlash(path))
+}
+
 // Inspect the retained producer generation after collecting and validating the
 // complete public relation set. Observation tests use its local projection.
 func (b *Backend) buildTestGeneration(ctx context.Context, repoRoot, workspaceRoot string) (*producerGeneration, error) {
@@ -46,7 +50,12 @@ func (b *Backend) buildTestGeneration(ctx context.Context, repoRoot, workspaceRo
 }
 
 func (b *Backend) buildLintaiSnapshot(ctx context.Context, repoRoot, workspaceRoot string) (*lintaiapi.Snapshot, []ambient.Source, string, error) {
-	return b.extractSnapshot(ctx, workspaceRoot, nil, nil, nil)
+	var stats validationStats
+	generation, sources, err := b.extractSnapshot(ctx, workspaceRoot, nil, nil, &stats)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	return generation.snapshot, sources, generation.inputRevision, nil
 }
 
 // V04, V09, V10: relation demand must preserve rows and eligible reporting
@@ -338,10 +347,7 @@ func TestExactSourceAndExcludedGlobalUseOneProductionScope(t *testing.T) {
 	if !hasSnapshotInput(snapshot.snapshot, filepath.Join(root, "src/globals.ts")) {
 		t.Fatal("compiler-read excluded global was absent from captured dependency inputs")
 	}
-	scopeOptions := workspace.ScopeOptions{Exclude: options.WorkspaceExcludes, Sources: options.Sources}
-	explanation, err := lintaiapi.ExplainScope(context.Background(), lintaiapi.BuildSnapshotRequest{
-		WorkspaceRoot: root, ScopeOptions: &scopeOptions, TsconfigFiles: true,
-	})
+	explanation, err := ExplainScope(context.Background(), root, options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -619,18 +625,17 @@ func TestCapturedInputRevisionIgnoresAbsoluteRoot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if left.snapshot.InputRevision != right.snapshot.InputRevision {
-		t.Fatalf("expected stable input revision across roots, got %q != %q", left.snapshot.InputRevision, right.snapshot.InputRevision)
+	if left.inputRevision != right.inputRevision {
+		t.Fatalf("expected stable input revision across roots, got %q != %q", left.inputRevision, right.inputRevision)
 	}
-	if !hasSnapshotInput(left.snapshot, configOne) || !hasSnapshotInput(right.snapshot, configTwo) {
-		t.Fatalf("lintai.toml was missing from producer input evidence: left=%v right=%v", left.snapshot.Inputs, right.snapshot.Inputs)
+	if !hasGenerationWatchHint(left, configOne) || !hasGenerationWatchHint(right, configTwo) {
+		t.Fatalf("lintai.toml was missing from producer watch hints: left=%v right=%v", left.watchHints, right.watchHints)
 	}
 	for _, snapshot := range []*producerGeneration{left, right} {
-		seen := make(map[string]struct{}, len(snapshot.snapshot.Inputs))
-		for _, input := range snapshot.snapshot.Inputs {
-			path := input.Path
+		seen := make(map[string]struct{}, len(snapshot.watchHints))
+		for _, path := range snapshot.watchHints {
 			if _, exists := seen[path]; exists {
-				t.Fatalf("captured input %q was published more than once: %v", path, snapshot.snapshot.Inputs)
+				t.Fatalf("watch hint %q was published more than once: %v", path, snapshot.watchHints)
 			}
 			seen[path] = struct{}{}
 		}
@@ -659,8 +664,8 @@ func TestSymlinkedWorkspaceRootKeepsScopeAndIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if realSnapshot.snapshot.InputRevision != aliasSnapshot.snapshot.InputRevision || !reflect.DeepEqual(realSnapshot.snapshot.Scope, aliasSnapshot.snapshot.Scope) {
-		t.Fatalf("symlinked root changed scope or input revision: %q != %q", realSnapshot.snapshot.InputRevision, aliasSnapshot.snapshot.InputRevision)
+	if realSnapshot.inputRevision != aliasSnapshot.inputRevision || !reflect.DeepEqual(realSnapshot.scope, aliasSnapshot.scope) {
+		t.Fatalf("symlinked root changed scope or input revision: %q != %q", realSnapshot.inputRevision, aliasSnapshot.inputRevision)
 	}
 	if len(realSnapshot.items) != len(aliasSnapshot.items) {
 		t.Fatalf("symlinked root changed fact count: %d != %d", len(realSnapshot.items), len(aliasSnapshot.items))
@@ -675,10 +680,7 @@ func TestSymlinkedWorkspaceRootKeepsScopeAndIdentity(t *testing.T) {
 	}) {
 		t.Fatal("symlinked root did not produce the workspace-relative module path")
 	}
-	scopeOptions := workspace.ScopeOptions{Sources: options.Sources}
-	explanation, err := lintaiapi.ExplainScope(context.Background(), lintaiapi.BuildSnapshotRequest{
-		WorkspaceRoot: alias, ScopeOptions: &scopeOptions, TsconfigFiles: true,
-	})
+	explanation, err := ExplainScope(context.Background(), alias, options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -688,8 +690,8 @@ func TestSymlinkedWorkspaceRootKeepsScopeAndIdentity(t *testing.T) {
 	if got := workspace.RelativePath(alias, filepath.Join(root, "src/a.ts")); got != "src/a.ts" {
 		t.Fatalf("relative path from symlinked root = %q", got)
 	}
-	if !hasSnapshotInput(aliasSnapshot.snapshot, filepath.Join(alias, "src/a.ts")) {
-		t.Fatalf("symlinked root input paths = %v", aliasSnapshot.snapshot.Inputs)
+	if !hasGenerationWatchHint(aliasSnapshot, filepath.Join(alias, "src/a.ts")) {
+		t.Fatalf("symlinked root watch hints = %v", aliasSnapshot.watchHints)
 	}
 	plan, err := workspace.PlanSources(alias, workspace.ScopeOptions{Sources: []string{filepath.Join(alias, "src/a.ts")}})
 	if err != nil {
@@ -819,13 +821,13 @@ func TestMetadataPreservingInputEditChangesCapturedRevision(t *testing.T) {
 		t.Fatal(err)
 	}
 	after := build()
-	if before.snapshot.InputRevision == after.snapshot.InputRevision {
-		t.Fatalf("metadata-preserving content edit kept revision %q", before.snapshot.InputRevision)
+	if before.inputRevision == after.inputRevision {
+		t.Fatalf("metadata-preserving content edit kept revision %q", before.inputRevision)
 	}
 	if !info.ModTime().Equal(updatedInfo.ModTime()) {
 		t.Fatal("test edit did not preserve the file modification time")
 	}
-	if after.snapshot.InputRevision == "" {
+	if after.inputRevision == "" {
 		t.Fatal("captured input revision was empty")
 	}
 }
@@ -1327,5 +1329,36 @@ export const mapped = [1].map((n) => n);`,
 	}
 	if !partialArity || !partialKnown || !incomplete || !unresolved {
 		t.Fatalf("partial signature evidence: arity=%t known=%t incomplete=%t unresolved=%t", partialArity, partialKnown, incomplete, unresolved)
+	}
+}
+
+func TestGenerationValidatesUnchangedSymlinkMembership(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "tsconfig.json", `{"include":["src/**/*.ts"]}`)
+	writeWorkspaceFile(t, root, "src/a.ts", `export const value = 1;`)
+	if err := os.Mkdir(filepath.Join(root, "empty"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, link := range []struct{ target, name string }{
+		{"a.ts", "link.ts"},
+		{"../empty", "linked-dir"},
+		{"missing.ts", "dangling.ts"},
+	} {
+		if err := os.Symlink(link.target, filepath.Join(root, "src", link.name)); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+	}
+	producer := New(Options{Files: FileScopeTsconfig})
+	generation, err := producer.buildTestGeneration(context.Background(), root, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := producer.buildTestGeneration(context.Background(), root, root)
+	if err != nil || again != generation {
+		t.Fatalf("unchanged symlink membership was not reused: err=%v", err)
+	}
+	snapshot := generation.snapshot
+	if len(snapshot.Modules) != 1 || snapshot.Modules[0].Path != "src/a.ts" {
+		t.Fatalf("unexpected selected modules: %+v", snapshot.Modules)
 	}
 }

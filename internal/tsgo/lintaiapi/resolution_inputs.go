@@ -9,9 +9,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"time"
 
-	"github.com/bigbizze/lintai/internal/canonical"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/bundled"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/tspath"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/vfs"
@@ -30,10 +28,8 @@ type capturedDirectory struct {
 }
 
 type validationStats struct {
-	files   int
-	bytes   int64
-	retries int
-	elapsed time.Duration
+	files int
+	bytes int64
 }
 
 // resolutionInputFS captures the values the compiler actually reads and
@@ -41,24 +37,31 @@ type validationStats struct {
 // generation. Bundled lib files are covered by the implementation stamp.
 type resolutionInputFS struct {
 	vfs.FS
+	mu         sync.Mutex
+	statInfo   map[string]vfs.FileInfo
+	captureErr error
+	*compilerInputObservations
+}
+
+// compilerInputObservations is the one captured-input model, transferred
+// from the compiler filesystem to detached validity evidence after extraction.
+type compilerInputObservations struct {
 	workspaceRoot string
-	mu            sync.Mutex
 	reads         map[string]capturedFile
 	fileProbes    map[string]bool
 	dirProbes     map[string]bool
 	stats         map[string]string
-	statInfo      map[string]vfs.FileInfo
 	directories   map[string]capturedDirectory
 	realpaths     map[string]string
-	captureErr    error
 }
 
 func trackResolutionInputs(fs vfs.FS, workspaceRoot string) *resolutionInputFS {
 	return &resolutionInputFS{
-		FS: fs, workspaceRoot: normalizeSlash(workspaceRoot),
-		reads: make(map[string]capturedFile), fileProbes: make(map[string]bool),
-		dirProbes: make(map[string]bool), stats: make(map[string]string), statInfo: make(map[string]vfs.FileInfo),
-		directories: make(map[string]capturedDirectory), realpaths: make(map[string]string),
+		FS: fs, statInfo: make(map[string]vfs.FileInfo), compilerInputObservations: &compilerInputObservations{workspaceRoot: normalizeSlash(workspaceRoot),
+			reads: make(map[string]capturedFile), fileProbes: make(map[string]bool),
+			dirProbes: make(map[string]bool), stats: make(map[string]string),
+			directories: make(map[string]capturedDirectory), realpaths: make(map[string]string),
+		},
 	}
 }
 
@@ -232,13 +235,7 @@ func fileKind(info vfs.FileInfo) string {
 }
 
 func (fsys *resolutionInputFS) validate() (bool, validationStats, error) {
-	started := time.Now()
 	fsys.mu.Lock()
-	if fsys.captureErr != nil {
-		err := fsys.captureErr
-		fsys.mu.Unlock()
-		return false, validationStats{}, err
-	}
 	reads := cloneCapturedFiles(fsys.reads)
 	fileProbes := cloneBoolMap(fsys.fileProbes)
 	dirProbes := cloneBoolMap(fsys.dirProbes)
@@ -264,7 +261,6 @@ func (fsys *resolutionInputFS) validate() (bool, validationStats, error) {
 				} else if os.IsNotExist(err) {
 					valid = false
 				} else {
-					trace.elapsed = time.Since(started)
 					return false, trace, fmt.Errorf("validate input %s: %w", path, err)
 				}
 			}
@@ -277,7 +273,6 @@ func (fsys *resolutionInputFS) validate() (bool, validationStats, error) {
 				valid = false
 				continue
 			}
-			trace.elapsed = time.Since(started)
 			return false, trace, fmt.Errorf("validate input %s: %w", path, err)
 		}
 		trace.bytes += int64(len(current))
@@ -288,7 +283,6 @@ func (fsys *resolutionInputFS) validate() (bool, validationStats, error) {
 	for path, expected := range fileProbes {
 		actual, err := existsKind(path, false)
 		if err != nil {
-			trace.elapsed = time.Since(started)
 			return false, trace, err
 		}
 		if actual != expected {
@@ -298,7 +292,6 @@ func (fsys *resolutionInputFS) validate() (bool, validationStats, error) {
 	for path, expected := range dirProbes {
 		actual, err := existsKind(path, true)
 		if err != nil {
-			trace.elapsed = time.Since(started)
 			return false, trace, err
 		}
 		if actual != expected {
@@ -315,7 +308,6 @@ func (fsys *resolutionInputFS) validate() (bool, validationStats, error) {
 				actual = "file"
 			}
 		} else if !os.IsNotExist(err) {
-			trace.elapsed = time.Since(started)
 			return false, trace, fmt.Errorf("validate stat probe %s: %w", path, err)
 		}
 		if actual != expected {
@@ -329,7 +321,6 @@ func (fsys *resolutionInputFS) validate() (bool, validationStats, error) {
 				valid = false
 				continue
 			}
-			trace.elapsed = time.Since(started)
 			return false, trace, fmt.Errorf("validate directory membership %s: %w", path, err)
 		}
 		if !sameCapturedDirectory(actual, expected) {
@@ -343,14 +334,12 @@ func (fsys *resolutionInputFS) validate() (bool, validationStats, error) {
 				valid = false
 				continue
 			}
-			trace.elapsed = time.Since(started)
 			return false, trace, fmt.Errorf("validate resolved input %s: %w", path, err)
 		}
 		if normalizeSlash(actual) != expected {
 			valid = false
 		}
 	}
-	trace.elapsed = time.Since(started)
 	return valid, trace, nil
 }
 
@@ -426,7 +415,7 @@ func (fsys *resolutionInputFS) readPaths() []string {
 	return result
 }
 
-func (fsys *resolutionInputFS) revision() (string, error) {
+func (fsys *resolutionInputFS) identityRecords() []any {
 	fsys.mu.Lock()
 	defer fsys.mu.Unlock()
 	paths := make([]string, 0, len(fsys.reads))
@@ -481,12 +470,7 @@ func (fsys *resolutionInputFS) revision() (string, error) {
 	for _, path := range realpaths {
 		records = append(records, []any{"realpath", fsys.relativeInput(path), fsys.relativeInput(fsys.realpaths[path])})
 	}
-	encoded, err := canonical.Marshal(records)
-	if err != nil {
-		return "", err
-	}
-	digest := sha256.Sum256(encoded)
-	return "sha256:" + hex.EncodeToString(digest[:]), nil
+	return records
 }
 
 func (fsys *resolutionInputFS) relativeInput(path string) string {

@@ -3,7 +3,6 @@ package lintaiapi
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -297,109 +296,6 @@ func TestBuildSnapshotTracksMissingNearestTsconfigForCreation(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestBuildSnapshotRetriesControlledInputChangesBeforePublication(t *testing.T) {
-	root := t.TempDir()
-	file := filepath.Join(root, "src/main.ts")
-	writeWorkspace(t, root, map[string]string{"src/main.ts": "export const value = 1;"})
-	request := BuildSnapshotRequest{WorkspaceRoot: root, Files: []string{file}}
-	for _, test := range []struct {
-		name        string
-		mutations   int
-		wantRetries int
-		wantError   bool
-	}{
-		{name: "one change is recaptured", mutations: 1, wantRetries: 1},
-		{name: "second change fails", mutations: 2, wantRetries: 1, wantError: true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			if err := os.WriteFile(file, []byte("export const value = 1;"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			mutations := 0
-			req := request
-			req.beforeValidation = func() {
-				if mutations < test.mutations {
-					mutations++
-					contents := fmt.Sprintf("export const value = %d;", mutations+1)
-					info, err := os.Stat(file)
-					if err != nil {
-						t.Fatal(err)
-					}
-					if err := os.WriteFile(file, []byte(contents), 0o644); err != nil {
-						t.Fatal(err)
-					}
-					if err := os.Chtimes(file, info.ModTime(), info.ModTime()); err != nil {
-						t.Fatal(err)
-					}
-					preserved, err := os.Stat(file)
-					if err != nil {
-						t.Fatal(err)
-					}
-					if !preserved.ModTime().Equal(info.ModTime()) {
-						t.Fatalf("test mutation did not preserve mtime: %s != %s", preserved.ModTime(), info.ModTime())
-					}
-				}
-			}
-			got, err := BuildSnapshot(context.Background(), req)
-			if test.wantError {
-				if err == nil || !strings.Contains(err.Error(), "inputs_changed") {
-					t.Fatalf("expected inputs_changed, got %v", err)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got.capture != nil {
-				t.Fatal("published result retained the validation filesystem")
-			}
-			if got.Validation.retries != test.wantRetries {
-				t.Fatalf("validation retries = %d, want %d", got.Validation.retries, test.wantRetries)
-			}
-			fresh, err := BuildSnapshot(context.Background(), request)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if got.InputRevision != fresh.InputRevision {
-				t.Fatalf("published revision did not match fresh captured input: %s != %s", got.InputRevision, fresh.InputRevision)
-			}
-		})
-	}
-	t.Run("missing resolution candidate created before validation", func(t *testing.T) {
-		root := t.TempDir()
-		mainFile := filepath.Join(root, "src/main.ts")
-		writeWorkspace(t, root, map[string]string{"src/main.ts": `import { value } from "./late"; export const result = value;`})
-		request := BuildSnapshotRequest{WorkspaceRoot: root, Files: []string{mainFile}}
-		created := false
-		request.beforeValidation = func() {
-			if created {
-				return
-			}
-			created = true
-			if err := os.WriteFile(filepath.Join(root, "src/late.ts"), []byte("export const value = 1;"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-		}
-		got, err := BuildSnapshot(context.Background(), request)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got.capture != nil {
-			t.Fatal("published result retained the validation filesystem")
-		}
-		fresh, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{WorkspaceRoot: root, Files: []string{mainFile}})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got.InputRevision != fresh.InputRevision {
-			t.Fatalf("publication used a generation before an absent input appeared: %s != %s", got.InputRevision, fresh.InputRevision)
-		}
-		if got.Validation.retries != 1 {
-			t.Fatalf("retries = %d, want 1 after missing input creation", got.Validation.retries)
-		}
-	})
 }
 
 func TestBuildSnapshotExtractsExpandedMetadata(t *testing.T) {
