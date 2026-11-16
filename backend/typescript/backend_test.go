@@ -58,6 +58,7 @@ import { helper } from "./other";
 export { external } from "../dist/generated";
 export type Result = { value: string };
 export function calculate(value: Result): Result { return value; }
+export function choose(value: true | "ready"): true | "ready" { return value; }
 calculate({ value: helper("ok") });
 `)
 	writeWorkspaceFile(t, root, "src/other.ts", `export function helper(value: string): string { return value; }`)
@@ -90,6 +91,27 @@ calculate({ value: helper("ok") });
 		return batch
 	}
 	full := collect(all)
+	fnKind := byName["ts.fn_kind"].Predicate
+	if len(full.Relations[fnKind]) == 0 {
+		t.Fatal("fixture did not produce a function kind")
+	}
+	invalidKind := slices.Clone(full.Relations[fnKind][0])
+	invalidKind[1] = facts.Name("not_a_function_kind")
+	invalidBatch := facts.Batch{
+		Relations: map[facts.Predicate][]facts.Row{fnKind: {invalidKind}},
+		Anchors:   map[string]facts.AnchorSupport{invalidKind[0].String: full.Anchors[invalidKind[0].String]},
+	}
+	if _, err := facts.ValidateBatch(description, []facts.Predicate{fnKind}, invalidBatch); err == nil || !strings.Contains(err.Error(), "/not_a_function_kind") {
+		t.Fatalf("expected unaccepted function kind to be rejected, got %v", err)
+	}
+	var stringLiteral, booleanLiteral bool
+	for _, row := range full.Relations[byName["ts.type_literal"].Predicate] {
+		stringLiteral = stringLiteral || row[1] == facts.Name("string") && row[2] == facts.String("ready")
+		booleanLiteral = booleanLiteral || row[1] == facts.Name("boolean") && row[2] == facts.Name("true")
+	}
+	if !stringLiteral || !booleanLiteral {
+		t.Fatalf("fixture did not validate string and boolean literal values: %v", full.Relations[byName["ts.type_literal"].Predicate])
+	}
 	var calculate, signature, namedType string
 	for _, row := range full.Relations[byName["ts.fn"].Predicate] {
 		if row[2].String == "calculate" {
@@ -1103,12 +1125,12 @@ export function a() {
 }
 `)
 
-	snapshot, _, _, err := New(Options{}).buildLintaiSnapshot(context.Background(), root, root)
+	generation, err := New(Options{}).buildTestGeneration(context.Background(), root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var got []string
-	for _, use := range snapshot.AmbientUses {
+	for _, use := range generation.snapshot.AmbientUses {
 		got = append(got, use.Source+"."+use.Capability)
 	}
 	slices.Sort(got)

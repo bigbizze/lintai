@@ -11,8 +11,8 @@ import (
 )
 
 // DescribeSchema builds relation metadata from the producer's embedded
-// declaration and prelude files. Argument role, representation, and reporting
-// metadata live beside the declarations they describe.
+// declaration and prelude files. Argument role, representation, allowed-name,
+// and reporting metadata live beside the declarations they describe.
 func DescribeSchema(namespace, implementationID, implementationStamp, contractVersion string, configuration any, schema Schema) (ProducerDescription, error) {
 	declarations, err := parse.Unit(strings.NewReader(schema.Declarations))
 	if err != nil {
@@ -66,12 +66,16 @@ func relationDescription(namespace string, declaration ast.Decl) (RelationDescri
 		if err != nil {
 			return RelationDescription{}, err
 		}
+		allowedNames, err := descriptorValues(declaration, "arg_allowed_name", name)
+		if err != nil {
+			return RelationDescription{}, err
+		}
 		reportSupport, err := declaredReportSupport(declaration, name)
 		if err != nil {
 			return RelationDescription{}, err
 		}
 		arguments[index] = ArgumentDescription{
-			Name: name, Representations: representations,
+			Name: name, Representations: representations, AllowedNames: allowedNames,
 			Role: role, ReportSupport: reportSupport,
 		}
 	}

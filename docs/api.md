@@ -128,7 +128,7 @@ A failing rule contributes only its error diagnostic. Other rules still run. Dia
 
 ## Base relations and caveats
 
-`lintai schema` prints the catalog. Rule programs use qualified names such as `ts.fn`; `lintai.glob` belongs to the engine. Entity IDs are producer-owned strings and are distinct from file paths. A module ID is `ts:module:<file>`, not the file path. Location and tracking support are supplied by the producer for eligible anchors.
+`lintai schema` reads the configured producer descriptions without collecting source facts. Rule programs use qualified names such as `ts.fn` or `app.fn`, according to the producer's configured namespace; `lintai.glob` belongs to the engine. Entity IDs are producer-owned strings and are distinct from file paths. A module ID is `ts:module:<file>`, not the file path. Location and tracking support are supplied by the producer for eligible anchors.
 
 Source syntax has one `ts.site` identity and either one `ts.site_owner` or unsupported-attribution evidence. A call's classification is evidence about that site. A direct callback argument uses its own site and is not an invocation. Function signatures are grouped observations: join through `ts.fn_signature` before reading parameters and returns. Incompleteness and conflict rows describe uncertainty, rather than proving absence.
 
@@ -498,7 +498,7 @@ pnpm exec lintai \
   --json --explain
 ```
 
-`lintai schema` prints the base relation declarations, then the prelude.
+`lintai schema` prints each configured producer's declarations and prelude under its namespace, followed by the engine helper declarations.
 
 `lintai facts` builds the snapshot and prints its base facts in Mangle syntax, sorted. It accepts `--exclude`, `--files` and `--source-links`, and it accepts and ignores `--asset-root`. Use `--relation` one or more times to print only those relations:
 

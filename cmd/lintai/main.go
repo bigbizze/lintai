@@ -72,9 +72,7 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 		case "serve":
 			return runServe(ctx)
 		case "schema":
-			schema := typescript.Schema()
-			_, err := fmt.Fprintf(stdout, "%s\n%s", schema.Declarations, schema.Prelude)
-			return err
+			return runSchema(ctx, args[1:], stdout)
 		case "facts":
 			return runFacts(ctx, args[1:], stdout)
 		case "scope":
@@ -86,6 +84,37 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 		}
 	}
 	return runOnce(ctx, args, stdout)
+}
+
+func runSchema(ctx context.Context, args []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("lintai schema", flag.ContinueOnError)
+	flags.SetOutput(os.Stderr)
+	workspaceRoot := flags.String("workspace-root", ".", "workspace root whose configured producer catalog to print")
+	configPath := flags.String("config", "", "lintai.toml file (relative to the invocation directory)")
+	flags.String("asset-root", "", "ignored; the npm launcher passes it to every command")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	absoluteWorkspace, err := filepath.Abs(*workspaceRoot)
+	if err != nil {
+		return err
+	}
+	settings, err := loadTypeScriptSettings(absoluteWorkspace, *configPath, "", false, "", false, nil, nil)
+	if err != nil {
+		return err
+	}
+	producers := make([]backend.Producer, 0, len(settings))
+	for _, item := range settings {
+		producers = append(producers, newBackend(item))
+	}
+	session := engine.Open(engine.Options{RepoRoot: absoluteWorkspace, WorkspaceRoot: absoluteWorkspace}, producers...)
+	defer session.Close()
+	schema, err := session.Schema(ctx)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(stdout, schema)
+	return err
 }
 
 type stringList []string

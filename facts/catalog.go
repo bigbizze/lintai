@@ -42,8 +42,11 @@ const (
 type ArgumentDescription struct {
 	Name            string
 	Representations []ValueKind
-	Role            ArgumentRole
-	ReportSupport   ReportSupport
+	// AllowedNames contains name values without their leading slash; an empty
+	// set leaves name values open. Other representations are unaffected.
+	AllowedNames  []string
+	Role          ArgumentRole
+	ReportSupport ReportSupport
 }
 
 type RelationDescription struct {
@@ -229,6 +232,9 @@ func ValidateBatch(description ProducerDescription, requested []Predicate, batch
 				}
 				if _, err := value.constant(); err != nil {
 					return ValidatedFacts{}, fmt.Errorf("producer %q row %d of %s: %w", description.Namespace, rowIndex, predicate, err)
+				}
+				if value.Kind == NameKind && len(argument.AllowedNames) > 0 && !slices.Contains(argument.AllowedNames, value.String) {
+					return ValidatedFacts{}, fmt.Errorf("producer %q row %d of %s argument %s has unaccepted name %q", description.Namespace, rowIndex, predicate, argument.Name, "/"+value.String)
 				}
 				if argument.Role == EntityRole {
 					if value.Kind != StringKind || !ownsEntity(description.Namespace, value.String) {

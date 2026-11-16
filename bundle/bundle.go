@@ -15,20 +15,27 @@ import (
 type Artifacts struct {
 	PureBundlePath    string `json:"pureBundlePath"`
 	PrepareBundlePath string `json:"prepareBundlePath"`
-	// Hash is the rules-lock hash of the rule: "sha256:" and the hash of the
-	// sorted list of Inputs.
+	// Hash covers the bundle inputs and the bundler and entry-generation identity.
 	Hash string `json:"hash"`
-	// Inputs are the source files that the bundler read for the rule, with
-	// the sha256 of each file.
+	// Inputs are source, configuration, and resolution files with their sha256.
 	Inputs []Input `json:"inputs"`
+	// Probes capture the config resolver's file and directory existence checks.
+	Probes []ConfigProbe `json:"probes"`
 }
 
-// Input is a source file of a rule bundle. Path is workspace-relative, or
-// starts with node_modules/ for a file in a package, or with asset: for a
-// file of the lintai packages outside the workspace.
+// Input is a file consumed by a rule bundle or its config resolver. Path is
+// workspace-relative, repo: or asset: relative, or an external node_modules path.
 type Input struct {
-	Path   string `json:"path"`
-	SHA256 string `json:"sha256"`
+	Path         string `json:"path"`
+	SHA256       string `json:"sha256"`
+	AbsolutePath string `json:"absolutePath"`
+}
+
+// ConfigProbe is a resolver observation used to validate bundle reuse.
+type ConfigProbe struct {
+	Path      string `json:"path"`
+	Directory bool   `json:"directory"`
+	Exists    bool   `json:"exists"`
 }
 
 type PrepareResult struct {
@@ -52,12 +59,13 @@ type buildRequest struct {
 }
 
 type buildResponse struct {
-	RulePath          string  `json:"rulePath"`
-	PrepareBundlePath string  `json:"prepareBundlePath,omitempty"`
-	PureBundlePath    string  `json:"pureBundlePath,omitempty"`
-	Hash              string  `json:"hash,omitempty"`
-	Inputs            []Input `json:"inputs,omitempty"`
-	Error             string  `json:"error,omitempty"`
+	RulePath          string        `json:"rulePath"`
+	PrepareBundlePath string        `json:"prepareBundlePath,omitempty"`
+	PureBundlePath    string        `json:"pureBundlePath,omitempty"`
+	Hash              string        `json:"hash,omitempty"`
+	Inputs            []Input       `json:"inputs,omitempty"`
+	Probes            []ConfigProbe `json:"probes,omitempty"`
+	Error             string        `json:"error,omitempty"`
 }
 
 type prepareRequest struct {
@@ -145,6 +153,7 @@ func BuildAll(ctx context.Context, assetRoot, repoRoot, workspaceRoot, outDir st
 			PrepareBundlePath: row.PrepareBundlePath,
 			Hash:              row.Hash,
 			Inputs:            row.Inputs,
+			Probes:            row.Probes,
 		}
 	}
 

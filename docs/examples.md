@@ -1,6 +1,6 @@
 # Examples and Caveats
 
-These examples use the 0.2 rule API. A rule is a Datalog program that LintAI evaluates with mangle-go over the base facts of the workspace. Each row of a reported predicate is one violation. Run `lintai schema` to see every base relation and the prelude.
+These examples use the 0.2 rule API. A rule is a Datalog program that LintAI evaluates with mangle-go over the base facts of the workspace. Each row of a reported predicate is one violation. Run `lintai schema` to see configured producer relations and helpers under their namespaces, plus engine helpers.
 
 ## 1. Transitive purity rule
 

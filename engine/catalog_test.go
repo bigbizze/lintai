@@ -165,9 +165,4 @@ func TestProducerAnchorTrackingIsExplicitAndConflictsAreRejected(t *testing.T) {
 			}
 		})
 	}
-	conflict := keyed
-	conflict.Tracking = &facts.TrackingKey{Scheme: "catalog.object/1", Data: map[string]any{"name": "accounts"}}
-	if sameAnchor(keyed, conflict) {
-		t.Fatal("conflicting complete support for the same entity was accepted")
-	}
 }

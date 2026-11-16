@@ -243,7 +243,7 @@ func checkRulesLock(lock RulesLock, workspaceRoot string, rulePaths []string, ar
 			// unlisted bundles before treating them as unapproved rules.
 			continue
 		case locked.Hash != item.Hash:
-			failures[rulePath] = integrityFailure{key: key, message: fmt.Sprintf("rule %s or a file it imports changed since the rules lock was written (locked %s, now %s); review the change and run lintai lock", key, locked.Hash, item.Hash)}
+			failures[rulePath] = integrityFailure{key: key, message: fmt.Sprintf("rule %s bundle changed since the rules lock was written (locked %s, now %s); review the change and run lintai lock", key, locked.Hash, item.Hash)}
 		}
 	}
 	for key := range lock.Rules {

@@ -75,11 +75,33 @@ func (b *Backend) Describe() (facts.ProducerDescription, error) {
 	if err != nil {
 		return facts.ProducerDescription{}, err
 	}
+	// Ambient names come from the same registry used to extract ambient facts.
+	var ambientSources, ambientCapabilities []string
+	for _, source := range ambient.Builtin() {
+		ambientSources = append(ambientSources, source.ID)
+		for _, matcher := range source.Matchers {
+			ambientCapabilities = append(ambientCapabilities, matcher.Capability)
+		}
+	}
+	ambientSources = sortedUnique(ambientSources)
+	ambientCapabilities = sortedUnique(ambientCapabilities)
 	// Package is a reserved Mangle token, so the declaration uses Pkg as its
 	// variable while the public catalog retains Appendix A's argument name.
 	for index := range description.BaseRelations {
-		if description.BaseRelations[index].Predicate.Name == b.namespace+".import_package" {
-			description.BaseRelations[index].Arguments[1].Name = "Package"
+		relation := &description.BaseRelations[index]
+		switch relation.Predicate.Name {
+		case b.namespace + ".import_package":
+			relation.Arguments[1].Name = "Package"
+		case b.namespace + ".ambient_source", b.namespace + ".ambient_use":
+			for index := range relation.Arguments {
+				argument := &relation.Arguments[index]
+				switch argument.Name {
+				case "Source":
+					argument.AllowedNames = slices.Clone(ambientSources)
+				case "Capability":
+					argument.AllowedNames = slices.Clone(ambientCapabilities)
+				}
+			}
 		}
 	}
 	return description, nil

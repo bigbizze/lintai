@@ -21,8 +21,8 @@ const (
 	FloatKind
 )
 
-// Value is one typed Mangle constant. Name values are closed vocabulary
-// symbols and render with a leading slash; strings remain quoted strings.
+// Value is one typed Mangle constant. Name values render with a leading slash;
+// strings remain quoted strings.
 type Value struct {
 	Kind   ValueKind
 	String string
