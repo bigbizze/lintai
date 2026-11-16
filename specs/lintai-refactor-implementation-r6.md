@@ -346,6 +346,7 @@ Use one canonical encoding for IDs and hashes:
 
 - UTF-8 JSON arrays, without insignificant whitespace. Strings are escaped only for quotation marks, backslashes and control characters; other valid Unicode remains unchanged. No Unicode normalization or HTML escaping.
 - Records use fixed field order. A map is represented as an array of key/value pairs sorted by the canonical bytes of its key. Sets are sorted and deduplicated by canonical bytes.
+- Maps are encoded as sorted key/value pair arrays, so an empty map and an empty array have identical canonical bytes; producers must not rely on distinguishing them in tracking keys or other canonical data.
 - Fact values are tagged arrays: `['s', text]`, `['n', nameWithoutLeadingSlash]`, `['i', signedDecimal]`, or `['f', sixteenLowercaseHexDigitsOfIEEE754Bits]`. Normalize floating negative zero to positive zero; reject NaN and infinity. Integer and float values remain distinct.
 - Integers in identity records use decimal strings when their width could exceed JSON's interoperable integer range. Configuration numbers use the same typed numeric representation before hashing. Booleans and null have their JSON meaning.
 - Sort a predicate by its qualified name and then arity. Sort its rows by their complete typed canonical encoding. Do not sort only the first column.

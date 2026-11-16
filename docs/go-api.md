@@ -42,6 +42,6 @@ The TypeScript producer accepts `typescript.Options`, including `Files`, `Exclud
 
 ## Suppressions and rule integrity
 
-`Check` applies the workspace suppressions file to complete raw outcomes. `Options.SuppressionsLocation`, `SuppressAll`, `SuppressRules`, `PruneSuppressions`, and `PassOnUnprunedSuppressions` control the current policy. `Result.Diagnostics` contains presented findings and `Suppressed` contains suppressed findings. `UnusedSuppressions`, `SuppressionsPath`, and `SuppressionsWritten` describe the policy result. Reading a result never replays writes.
+`Check` applies the workspace suppressions file to complete raw outcomes. `Options.SuppressionsLocation`, `SuppressAll`, `SuppressRules`, and `PruneSuppressions` control the current policy. `Result.Diagnostics` contains presented findings and `Suppressed` contains suppressed findings. `UnusedSuppressions`, `SuppressionsPath`, and `SuppressionsWritten` describe the policy result. Reading a result never replays writes.
 
 `Options.RulesLock` selects a rules lock checked before setup and evaluation. `SetupSandbox` selects the Node permission policy for setup. `engine.BuildRulesLock` and `engine.WriteRulesLock` create the lock. The `diagnostics`, `runtime`, `bundle`, and `server` packages provide the diagnostic types, rule runtime, bundle operations, and JSON-RPC server respectively.

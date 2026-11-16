@@ -66,9 +66,6 @@ type Options struct {
 	// PruneSuppressions lowers or removes the entries of the suppressions
 	// file that allow more violations than the run found.
 	PruneSuppressions bool
-	// PassOnUnprunedSuppressions leaves out the unused_suppression
-	// diagnostics. Result.UnusedSuppressions still lists the entries.
-	PassOnUnprunedSuppressions bool
 	// beforeEvaluation is an in-package synchronization point for tests.
 	beforeEvaluation func()
 	// onDerivedFact is an in-package synchronization point inside evaluation.
@@ -90,8 +87,7 @@ type Result struct {
 	// suppressed. They are not in Diagnostics.
 	Suppressed []diagnostics.Diagnostic
 	// UnusedSuppressions are the entries of the suppressions file that
-	// allow more violations than the run found. Unless
-	// PassOnUnprunedSuppressions is set, each one is also an
+	// allow more violations than the run found. Each one is also an
 	// unused_suppression diagnostic in Diagnostics.
 	UnusedSuppressions []suppressions.Unused
 	// SuppressionsPath is the absolute path of the suppressions file.

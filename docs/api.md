@@ -16,11 +16,11 @@ Source associations report incomplete or ambiguous evidence instead of guessing.
 
 ## Bulk suppressions
 
-The CLI automatically reads workspace-root `lintai-suppressions.json` in the `lintai.suppressions/4` format. Use `--suppress-all` or repeatable `--suppress-rule <id>` to record current errors, `--prune-suppressions` to lower stale counts, `--suppressions-location <path>` to override the file, and `--pass-on-unpruned-suppressions` to ignore unused entries. Recording and pruning flags are mutually exclusive. Relative locations resolve from the workspace root. `lintai lock --suppressions-location <path>` approves that file in a `lintai.rules-lock/4` lock.
+The CLI automatically reads workspace-root `lintai-suppressions.json` in the `lintai.suppressions/4` format. Use `--suppress-all` or repeatable `--suppress-rule <id>` to record current errors, `--prune-suppressions` to lower stale counts, and `--suppressions-location <path>` to override the file. Unused entries are always reported. Recording and pruning flags are mutually exclusive. Relative locations resolve from the workspace root. `lintai lock --suppressions-location <path>` approves that file in a `lintai.rules-lock/4` lock.
 
-Both plugin factories and `@lintai/client` accept `suppressionsLocation?: string` and `passOnUnprunedSuppressions?: boolean`. Serve initialization uses the same parameter names. Unused entries appear under `lintai/analysis`; JSON stdout remains a diagnostic array with kind `unused_suppression` for stale entries. Rule errors take exit priority (3); violations and unused suppressions exit 1. Invalid saved policy exits 2.
+Both plugin factories and `@lintai/client` accept `suppressionsLocation?: string`. Serve initialization uses the same parameter name. Unused entries appear under `lintai/analysis`; JSON stdout remains a diagnostic array with kind `unused_suppression` for stale entries. Rule errors take exit priority (3); violations and unused suppressions exit 1. Invalid saved policy exits 2.
 
-Go `engine.Options` has `SuppressionsLocation`, `SuppressAll`, `SuppressRules`, `PruneSuppressions`, and `PassOnUnprunedSuppressions`. `engine.Result` exposes `Suppressed`, `UnusedSuppressions`, `SuppressionsPath`, and `SuppressionsWritten`. See [bulk suppressions](../specs/bulk-suppressions.md) for grouping, recording and lock approval.
+Go `engine.Options` has `SuppressionsLocation`, `SuppressAll`, `SuppressRules`, and `PruneSuppressions`. `engine.Result` exposes `Suppressed`, `UnusedSuppressions`, `SuppressionsPath`, and `SuppressionsWritten`. See the bulk suppressions section above for grouping, recording and lock approval.
 
 This page documents lintai's current rule-authoring and integration surface.
 
@@ -485,7 +485,6 @@ Flags for analysis:
 - `--suppress-all`, `--suppress-rule <id>`: record all or selected rules' current error findings. Repeat `--suppress-rule` for more rules.
 - `--prune-suppressions`: reduce unused allowances within completed rules' primary coverage.
 - `--suppressions-location <path>`: choose a suppressions file relative to the workspace root.
-- `--pass-on-unpruned-suppressions`: omit unused-allowance diagnostics and their failure status.
 - `--setup-sandbox auto|on|off`: run `setup()` under the Node permission model. See "Setup sandbox".
 
 Example:
@@ -634,7 +633,6 @@ type LintaiOptions = {
 	ruleWorkers?: number;
 	rulesLock?: string;
 	suppressionsLocation?: string;
-	passOnUnprunedSuppressions?: boolean;
 	setupSandbox?: "auto" | "on" | "off";
 };
 ```
@@ -645,7 +643,7 @@ type LintaiOptions = {
 - `sourceLinks` is the same as the CLI `--source-links` flag. A relative path is resolved from the workspace root
 - `ruleWorkers` is the same as the CLI `--rule-workers` flag
 - `rulesLock` is the same as the CLI `--rules-lock` flag. A relative path is resolved from the workspace root
-- `suppressionsLocation` and `passOnUnprunedSuppressions` correspond to the CLI suppression options
+- `suppressionsLocation` corresponds to the CLI suppression option
 - `setupSandbox` is the same as the CLI `--setup-sandbox` flag
 - relative roots resolve from the directory that the linter runs in
 

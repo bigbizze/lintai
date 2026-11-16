@@ -23,7 +23,6 @@ var (
 		"README.md",
 		"docs/api.md",
 		"docs/examples.md",
-		"specs/structural-type-facts.md",
 		"testdata/npm-smoke/lintai-rules/actions-return-action-result.ts",
 		"testdata/npm-smoke/lintai-rules/no-async.ts",
 		"testdata/oxlint-smoke/lintai-rules/actions-return-action-result.ts",
@@ -69,15 +68,11 @@ func TestDocumentedProgramsDeclareTheirRelations(t *testing.T) {
 					t.Errorf("%s: %s is defined without a Decl", path, head)
 				}
 			}
-			// The historical structural-type proposal describes an earlier
-			// vocabulary. Live examples must also prepare against today's catalog.
-			if path != "specs/structural-type-facts.md" {
-				program := templateInterpolation.ReplaceAllString(block[1], `"src/example/**"`)
-				program = interpolated.ReplaceAllString(program, `"src/example/**"`)
-				_, err := evaluateProgram(factstore.NewMultiIndexedArrayInMemoryStore(), catalog, declarations, nil, nil, []string{"ts"}, runtime.ProgramOutput{Text: program}, heads, nil, evalOptions{})
-				if err != nil {
-					t.Errorf("%s: example does not prepare (%s): %v", path, err.phase, err)
-				}
+			program := templateInterpolation.ReplaceAllString(block[1], `"src/example/**"`)
+			program = interpolated.ReplaceAllString(program, `"src/example/**"`)
+			_, err := evaluateProgram(factstore.NewMultiIndexedArrayInMemoryStore(), catalog, declarations, nil, nil, []string{"ts"}, runtime.ProgramOutput{Text: program}, heads, nil, evalOptions{})
+			if err != nil {
+				t.Errorf("%s: example does not prepare (%s): %v", path, err.phase, err)
 			}
 		}
 	}
