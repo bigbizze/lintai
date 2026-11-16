@@ -17,10 +17,10 @@ export default rule("arch.layers")
 		Decl layer_glob(Layer, Pattern) descr [extensional()].
 		Decl allowed(From, To) descr [extensional()].
 		Decl layer(File, Layer).
-		layer(File, Layer) :- module(File), layer_glob(Layer, Pattern), glob(File, Pattern).
+		layer(File, Layer) :- ts.module(Module), ts.location(Module, File, _, _, _, _), layer_glob(Layer, Pattern), lintai.glob(File, Pattern).
 		Decl violation(Imp, From, To, FromLayer, ToLayer).
 		violation(Imp, From, To, FromLayer, ToLayer) :-
-			import_edge(Imp, From, To, _), import_internal(Imp), import_runtime(Imp),
+			ts.import_edge(Imp, From, To, _), ts.import_internal(Imp), ts.import_runtime(Imp),
 			layer(From, FromLayer), layer(To, ToLayer), FromLayer != ToLayer,
 			!allowed(FromLayer, ToLayer).
 	`)

@@ -83,10 +83,10 @@ function parent() { return async () => { await task(); }; }
 		t.Fatal(err)
 	}
 	var output bytes.Buffer
-	if err := run(context.Background(), []string{"facts", "--workspace-root", workspace, "--relation", "fn_awaits"}, &output); err != nil {
+	if err := run(context.Background(), []string{"facts", "--workspace-root", workspace, "--relation", "ts.fn_awaits"}, &output); err != nil {
 		t.Fatal(err)
 	}
-	wantFacts := fmt.Sprintf("fn_awaits(\"source.ts::arrow_function::<anonymous@%d>\").\nfn_awaits(\"source.ts::function::ordinary\").\n", strings.Index(source, "async () =>"))
+	wantFacts := fmt.Sprintf("ts.fn_awaits(\"ts:source.ts::arrow_function::<anonymous@%d>\").\nts.fn_awaits(\"ts:source.ts::function::ordinary\").\n", strings.Index(source, "async () =>"))
 	if output.String() != wantFacts {
 		t.Fatalf("ordinary-await CLI facts = %q, want %q", output.String(), wantFacts)
 	}
@@ -126,7 +126,7 @@ func TestExitCodes(t *testing.T) {
 		{"bad file scope", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--rules", rule("layers.ts"), "--files", "all"}, exitUsage},
 		{"glob matches nothing", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--rules", "missing/*.ts"}, exitUsage},
 		{"unknown relation", []string{"facts", "--workspace-root", workspace, "--relation", "no_such_relation"}, exitUsage},
-		{"facts accepts --asset-root", []string{"facts", "--workspace-root", workspace, "--relation", "module", "--asset-root", repoRoot}, exitClean},
+		{"facts accepts --asset-root", []string{"facts", "--workspace-root", workspace, "--relation", "ts.module", "--asset-root", repoRoot}, exitClean},
 	}
 	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {
@@ -165,13 +165,13 @@ func TestAuthoringErrors(t *testing.T) {
 	rules := map[string]string{
 		"helper.ts": `export const shared = "src/**";`,
 		"no-version.ts": `import { dl, rule } from "@lintai/sdk";
-export default rule("t.no-version").program(dl` + "`Decl v(F). v(F) :- module(F).`" + `).report("v").message((row) => String(row.F));`,
+export default rule("t.no-version").program(dl` + "`Decl v(F). v(F) :- ts.module(F).`" + `).report("v").message((row) => String(row.F));`,
 		"negated-wildcard.ts": `import { dl, rule } from "@lintai/sdk";
-export default rule("t.negated-wildcard").version(1).program(dl` + "`Decl v(F). v(F) :- module(F), !import_edge(_, F, _, \"server-only\").`" + `).report("v").message((row) => String(row.F));`,
+export default rule("t.negated-wildcard").version(1).program(dl` + "`Decl v(F). v(F) :- ts.module(F), !ts.import_edge(_, F, _, \"server-only\").`" + `).report("v").message((row) => String(row.F));`,
 		"unknown-column.ts": `import { dl, rule } from "@lintai/sdk";
-export default rule("t.unknown-column").version(1).program(dl` + "`Decl v(F). v(F) :- module(F).`" + `).report("v").message((row) => String(row.Nope));`,
+export default rule("t.unknown-column").version(1).program(dl` + "`Decl v(F). v(F) :- ts.module(F).`" + `).report("v").message((row) => String(row.Nope));`,
 		"expect-all.ts": `import { dl, rule } from "@lintai/sdk";
-export default rule("t.expect-all").version(1).program(dl` + "`Decl a(F). a(F) :- module(F), glob(F, \"none/**\"). Decl b(F). b(F) :- module(F), glob(F, \"nada/**\").`" + `).report("a").expectNonEmpty("a", "b").message((row) => String(row.F));`,
+export default rule("t.expect-all").version(1).program(dl` + "`Decl a(M). a(M) :- ts.module(M), ts.location(M, F, _, _, _, _), lintai.glob(F, \"none/**\"). Decl b(M). b(M) :- ts.module(M), ts.location(M, F, _, _, _, _), lintai.glob(F, \"nada/**\").`" + `).report("a").expectNonEmpty("a", "b").message((row) => String(row.M));`,
 	}
 	for name, text := range rules {
 		if err := os.WriteFile(filepath.Join(rulesDir, name), []byte(text), 0o644); err != nil {
@@ -226,7 +226,7 @@ func TestRulesCommand(t *testing.T) {
 	workspace := t.TempDir()
 	ruleSource := func(id string) string {
 		return `import { dl, rule } from "@lintai/sdk";
-export default rule(` + strconvQuote(id) + `).version(1).program(dl` + "`Decl v(F). v(F) :- module(F), glob(F, \"src/**\").`" + `).report("v").message(() => "x");
+export default rule(` + strconvQuote(id) + `).version(1).program(dl` + "`Decl v(M). v(M) :- ts.module(M), ts.location(M, F, _, _, _, _), lintai.glob(F, \"src/**\").`" + `).report("v").message(() => "x");
 `
 	}
 	files := map[string]string{
@@ -246,7 +246,7 @@ export default rule("arch.metadata").version(7)
 		"lintai-rules/dup-one.ts": ruleSource("arch.dup"),
 		"lintai-rules/dup-two.ts": ruleSource("arch.dup"),
 		"lintai-rules/dup-setup.ts": `import { dl, rule } from "@lintai/sdk";
-export default rule("arch.dup-setup").version(1).setup(() => { throw new Error("setup failed"); }).program(dl` + "`Decl v(F). v(F) :- module(F), glob(F, \"src/**\").`" + `).report("v").message(() => "x");
+export default rule("arch.dup-setup").version(1).setup(() => { throw new Error("setup failed"); }).program(dl` + "`Decl v(M). v(M) :- ts.module(M), ts.location(M, F, _, _, _, _), lintai.glob(F, \"src/**\").`" + `).report("v").message(() => "x");
 `,
 		"lintai-rules/dup-setup-ok.ts":       ruleSource("arch.dup-setup"),
 		"lintai-rules/bad-id.ts":             "export default { id: \"Arch.Bad\", versionValue: 1 };\n",

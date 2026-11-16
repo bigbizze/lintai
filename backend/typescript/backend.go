@@ -13,6 +13,7 @@ import (
 	"sync"
 
 	"github.com/bigbizze/lintai/backend"
+	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/facts"
 	"github.com/bigbizze/lintai/internal/ambient"
 	"github.com/bigbizze/lintai/internal/tsgo/lintaiapi"
@@ -21,6 +22,8 @@ import (
 
 // Backend extracts facts from TypeScript and JavaScript files.
 type Backend struct {
+	settings Options
+
 	// Log receives one line for each tsconfig that lintai adjusted for
 	// TypeScript 7, once per config and adjustment set. Nil discards them.
 	Log io.Writer
@@ -29,19 +32,121 @@ type Backend struct {
 	reported   map[string]string
 }
 
-var _ backend.Backend = (*Backend)(nil)
+var _ backend.Producer = (*Backend)(nil)
 
-func New() *Backend {
-	return &Backend{}
+func producerEntityID(localID string) string { return "ts:" + localID }
+
+func New(settings ...Options) *Backend {
+	selected := Options{Files: FileScopeTsconfig}
+	if len(settings) > 0 {
+		selected = settings[0]
+		if scope, err := ParseFileScope(string(selected.Files)); err == nil {
+			selected.Files = scope
+		}
+		selected.Excludes = slices.Clone(selected.Excludes)
+	}
+	return &Backend{settings: selected}
 }
 
-func (b *Backend) ID() string {
-	return "typescript"
+func (b *Backend) Describe() (facts.ProducerDescription, error) {
+	configuration := map[string]any{
+		"excludes":    slices.Clone(b.settings.Excludes),
+		"files":       string(b.settings.Files),
+		"sourceLinks": b.settings.SourceLinks,
+	}
+	return facts.DescribeSchema("ts", "lintai.typescript", "typescript-producer-r1", "ts-vocabulary/1", configuration, Schema())
 }
+
+func (b *Backend) Collect(ctx context.Context, request backend.CollectionRequest) (facts.Batch, error) {
+	batch := facts.Batch{Relations: make(map[facts.Predicate][]facts.Row), Anchors: make(map[string]facts.AnchorSupport)}
+	if len(request.Predicates) == 0 {
+		return batch, nil
+	}
+	description, err := b.Describe()
+	if err != nil {
+		return facts.Batch{}, err
+	}
+	requested := make(map[facts.Predicate]struct{}, len(request.Predicates))
+	for _, predicate := range request.Predicates {
+		found := false
+		for _, relation := range description.BaseRelations {
+			if relation.Predicate == predicate {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return facts.Batch{}, fmt.Errorf("unknown TypeScript base predicate %s", predicate)
+		}
+		if _, exists := requested[predicate]; exists {
+			return facts.Batch{}, fmt.Errorf("duplicate requested TypeScript predicate %s", predicate)
+		}
+		requested[predicate] = struct{}{}
+	}
+	snapshot, err := b.BuildSnapshot(ctx, request.RepoRoot, request.WorkspaceRoot)
+	if err != nil {
+		return facts.Batch{}, err
+	}
+	metadata := make(map[facts.Predicate]facts.RelationDescription, len(description.BaseRelations))
+	for _, relation := range description.BaseRelations {
+		metadata[relation.Predicate] = relation
+	}
+	for predicate := range requested {
+		batch.Relations[predicate] = []facts.Row{}
+	}
+	for _, item := range snapshot.Facts {
+		predicate := facts.Predicate{Name: "ts." + item.Relation, Arity: len(item.Values)}
+		if _, wanted := requested[predicate]; !wanted {
+			continue
+		}
+		values := slices.Clone(item.Values)
+		for index, argument := range metadata[predicate].Arguments {
+			if argument.Role != facts.EntityRole {
+				continue
+			}
+			if values[index].Kind != facts.StringKind {
+				return facts.Batch{}, fmt.Errorf("TypeScript entity %s argument %s is not a string", predicate, argument.Name)
+			}
+			id := values[index].String
+			if id == "" && (argument.Name == "Caller" || argument.Name == "From" || argument.Name == "Owner") {
+				id = "unsupported"
+			}
+			values[index].String = producerEntityID(id)
+		}
+		batch.Relations[predicate] = append(batch.Relations[predicate], facts.Row(values))
+	}
+	locationPredicate := facts.Predicate{Name: "ts.location", Arity: 6}
+	if _, ok := metadata[locationPredicate]; ok {
+		for _, item := range snapshot.Facts {
+			if item.Relation != facts.LocationRelation || len(item.Values) != 6 {
+				continue
+			}
+			id := producerEntityID(item.Values[0].String)
+			file := item.Values[1].String
+			if strings.HasPrefix(file, "bundled://") {
+				continue
+			}
+			toInt := func(value facts.Value) int { return int(value.Number) }
+			batch.Anchors[id] = facts.AnchorSupport{
+				Location:    diagnostics.SourceLocation{File: file, StartLine: toInt(item.Values[2]), StartColumn: toInt(item.Values[3]), EndLine: toInt(item.Values[4]), EndColumn: toInt(item.Values[5])},
+				Description: "TypeScript source entity " + id,
+			}
+		}
+	}
+	for _, item := range snapshot.Facts {
+		if item.Relation == "module" && len(item.Values) > 0 && item.Values[0].Kind == facts.StringKind {
+			batch.AnalyzedFiles = append(batch.AnalyzedFiles, item.Values[0].String)
+		}
+	}
+	batch.InputRevision = snapshot.Version
+	return batch, nil
+}
+
+func (b *Backend) Close() error { return nil }
 
 // BuildSnapshot extracts the facts of the source files under workspaceRoot.
-func (b *Backend) BuildSnapshot(ctx context.Context, repoRoot, workspaceRoot string, options backend.SnapshotOptions) (facts.Snapshot, error) {
-	snapshot, sources, version, err := b.buildLintaiSnapshot(ctx, repoRoot, workspaceRoot, options)
+func (b *Backend) BuildSnapshot(ctx context.Context, repoRoot, workspaceRoot string) (facts.Snapshot, error) {
+	snapshot, sources, version, err := b.buildLintaiSnapshot(ctx, repoRoot, workspaceRoot)
 	if err != nil {
 		return facts.Snapshot{}, err
 	}
@@ -58,8 +163,9 @@ func (b *Backend) BuildSnapshot(ctx context.Context, repoRoot, workspaceRoot str
 	return facts.Snapshot{Version: version, Schema: Schema(), Facts: items, InputPaths: inputPaths}, nil
 }
 
-func (b *Backend) buildLintaiSnapshot(ctx context.Context, repoRoot, workspaceRoot string, options backend.SnapshotOptions) (*lintaiapi.Snapshot, []ambient.Source, string, error) {
-	scope, err := backend.ParseFileScope(string(options.Files))
+func (b *Backend) buildLintaiSnapshot(ctx context.Context, repoRoot, workspaceRoot string) (*lintaiapi.Snapshot, []ambient.Source, string, error) {
+	options := b.settings
+	scope, err := ParseFileScope(string(options.Files))
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -73,7 +179,7 @@ func (b *Backend) buildLintaiSnapshot(ctx context.Context, repoRoot, workspaceRo
 		Files:           walked,
 		SourceLinks:     options.SourceLinks,
 		AmbientMatchers: convertAmbientMatchers(sources),
-		TsconfigFiles:   scope == backend.FileScopeTsconfig,
+		TsconfigFiles:   scope == FileScopeTsconfig,
 	})
 	if err != nil {
 		return nil, nil, "", err

@@ -25,7 +25,7 @@ func TestBuildSnapshotExposesStableFunctionKeysAndCalls(t *testing.T) {
 	}
 	workspaceRoot := filepath.Join(repoRoot, "testdata/fixtures/workspace")
 
-	snapshot, _, _, err := New().buildLintaiSnapshot(context.Background(), repoRoot, workspaceRoot, backend.SnapshotOptions{})
+	snapshot, _, _, err := New(Options{}).buildLintaiSnapshot(context.Background(), repoRoot, workspaceRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,6 +42,58 @@ func TestBuildSnapshotExposesStableFunctionKeysAndCalls(t *testing.T) {
 	}
 	if !foundHelperEffect || !foundComputeHelper {
 		t.Fatalf("expected fixture call edges, got %+v", snapshot.CallEdges)
+	}
+}
+
+func TestTwoTypeScriptProducersKeepConstructionSettingsIndependent(t *testing.T) {
+	// R1 API fixture: two TypeScript producer instances use separate file
+	// scopes through the public producer contract, without shared settings.
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "tsconfig.json", `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler"},"files":["src/one.ts"]}`)
+	writeWorkspaceFile(t, root, "src/one.ts", "export const one = 1;\n")
+	writeWorkspaceFile(t, root, "src/two.ts", "export const two = 2;\n")
+
+	collectModules := func(producer *Backend) []string {
+		t.Helper()
+		description, err := producer.Describe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		requested := make([]facts.Predicate, len(description.BaseRelations))
+		for index, relation := range description.BaseRelations {
+			requested[index] = relation.Predicate
+		}
+		batch, err := producer.Collect(context.Background(), backend.CollectionRequest{
+			RepoRoot: root, WorkspaceRoot: root, Predicates: requested,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		validated, err := facts.ValidateBatch(description, requested, batch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var result []string
+		for _, row := range validated.Rows(facts.Predicate{Name: "ts.module", Arity: 1}) {
+			result = append(result, row[0].String)
+		}
+		slices.Sort(result)
+		return result
+	}
+
+	tsconfigProducer := New(Options{Files: FileScopeTsconfig})
+	walkProducer := New(Options{Files: FileScopeWalk})
+	if got := collectModules(tsconfigProducer); !slices.Equal(got, []string{"ts:src/one.ts"}) {
+		t.Fatalf("tsconfig producer modules = %v", got)
+	}
+	if got := collectModules(walkProducer); !slices.Equal(got, []string{"ts:src/one.ts", "ts:src/two.ts"}) {
+		t.Fatalf("walk producer modules = %v", got)
+	}
+	if got := collectModules(tsconfigProducer); !slices.Equal(got, []string{"ts:src/one.ts"}) {
+		t.Fatalf("second producer changed the first producer's settings: %v", got)
+	}
+	if foo, prefixedFoo := producerEntityID("foo.ts"), producerEntityID("ts:foo.ts"); foo == prefixedFoo || foo != "ts:foo.ts" || prefixedFoo != "ts:ts:foo.ts" {
+		t.Fatalf("producer-local entity IDs are not uniquely namespaced: %q and %q", foo, prefixedFoo)
 	}
 }
 
@@ -68,9 +120,9 @@ export function escape() { return [1].map(effect); }
 class Escaping { value = [1].map(effect); }
 `
 	writeWorkspaceFile(t, root, "src/main.ts", mainSource)
-	build := func(scope backend.FileScope) facts.Snapshot {
+	build := func(scope FileScope) facts.Snapshot {
 		t.Helper()
-		snapshot, err := New().BuildSnapshot(context.Background(), root, root, backend.SnapshotOptions{Files: scope})
+		snapshot, err := New(Options{Files: scope}).BuildSnapshot(context.Background(), root, root)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -79,7 +131,7 @@ class Escaping { value = [1].map(effect); }
 		}
 		return snapshot
 	}
-	walk, filtered := build(backend.FileScopeWalk), build(backend.FileScopeTsconfig)
+	walk, filtered := build(FileScopeWalk), build(FileScopeTsconfig)
 	index := func(snapshot facts.Snapshot) map[string]map[string]facts.Fact {
 		result := make(map[string]map[string]facts.Fact)
 		for _, fact := range snapshot.Facts {
@@ -189,12 +241,12 @@ class Escaping { value = [1].map(effect); }
 	writeWorkspaceFile(t, root, "lintai-rules/strict.ts", `import { dl, rule } from "@lintai/sdk";
 export default rule("test.filtered-callback").version(1)
   .program(dl`+"`"+`Decl indeterminate(Fn, Name).
-    indeterminate(Fn, Name) :- fn(Fn, _, Name), Name = "escape", fn_reaches_unresolved(Fn).`+"`"+`)
+    indeterminate(Fn, Name) :- ts.fn(Fn, _, Name), Name = "escape", ts.fn_reaches_unresolved(Fn).`+"`"+`)
   .report("indeterminate").message((row) => row.Name);
 `)
 	items, err := engine.New(New()).Run(context.Background(), engine.Options{
 		RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: root,
-		RuleGlobs: []string{"lintai-rules/*.ts"}, Files: backend.FileScopeTsconfig,
+		RuleGlobs: []string{"lintai-rules/*.ts"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -238,8 +290,8 @@ func TestLegacyTsconfigIsAdjusted(t *testing.T) {
 	}
 	workspaceRoot := filepath.Join(repoRoot, "testdata/fixtures/legacy-tsconfig")
 	before := listTree(t, workspaceRoot)
-	for _, files := range []backend.FileScope{backend.FileScopeTsconfig, backend.FileScopeWalk} {
-		snapshot, _, _, err := New().buildLintaiSnapshot(context.Background(), repoRoot, workspaceRoot, backend.SnapshotOptions{Files: files})
+	for _, files := range []FileScope{FileScopeTsconfig, FileScopeWalk} {
+		snapshot, _, _, err := New(Options{Files: files}).buildLintaiSnapshot(context.Background(), repoRoot, workspaceRoot)
 		if err != nil {
 			t.Fatalf("%s: %v", files, err)
 		}
@@ -277,7 +329,7 @@ func TestLegacyTsconfigIsAdjusted(t *testing.T) {
 func TestWalkModeWritesNothingIntoTheWorkspace(t *testing.T) {
 	root := t.TempDir()
 	writeWorkspaceFile(t, root, "src/a.ts", "export const a = 1;\n")
-	snapshot, _, _, err := New().buildLintaiSnapshot(context.Background(), root, root, backend.SnapshotOptions{Files: backend.FileScopeWalk})
+	snapshot, _, _, err := New(Options{Files: FileScopeWalk}).buildLintaiSnapshot(context.Background(), root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -335,10 +387,10 @@ func TestSnapshotVersionTracksAssociationConfigAndMissingInputs(t *testing.T) {
 	writeWorkspaceFile(t, root, "src/index.ts", `export const load = 1;`)
 	writeWorkspaceFile(t, root, "src/app.ts", `import { load } from "../dist"; export const result = load;`)
 	linksPath := writeWorkspaceFile(t, root, "source-links.json", `{"version":1,"entries":[{"checkedEntry":"dist/index.d.ts","sourceEntry":"src/index.ts"}]}`)
-	options := backend.SnapshotOptions{Files: backend.FileScopeTsconfig, SourceLinks: "source-links.json"}
+	options := Options{Files: FileScopeTsconfig, SourceLinks: "source-links.json"}
 	build := func() (*lintaiapi.Snapshot, string) {
 		t.Helper()
-		snapshot, _, version, err := New().buildLintaiSnapshot(context.Background(), root, root, options)
+		snapshot, _, version, err := New(options).buildLintaiSnapshot(context.Background(), root, root)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -381,7 +433,7 @@ func TestSourceLinksFactsKeepUnappliedEntriesVisible(t *testing.T) {
 		{"checkedEntry":"dist/index.d.ts","sourceEntry":"src/source.ts"},
 		{"checkedEntry":"unused/dist/index.d.ts","sourceEntry":"unused/src/index.ts"}
 	]}`)
-	snapshot, err := New().BuildSnapshot(context.Background(), root, root, backend.SnapshotOptions{Files: backend.FileScopeTsconfig, SourceLinks: "source-links.json"})
+	snapshot, err := New(Options{Files: FileScopeTsconfig, SourceLinks: "source-links.json"}).BuildSnapshot(context.Background(), root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -414,10 +466,10 @@ func TestSnapshotTracksMissingPackageDirectoryAndDeclaration(t *testing.T) {
 	root := t.TempDir()
 	writeWorkspaceFile(t, root, "tsconfig.json", `{"compilerOptions":{"strict":true,"module":"preserve","moduleResolution":"bundler"},"include":["src/**/*.ts"]}`)
 	writeWorkspaceFile(t, root, "src/app.ts", `import { value } from "latepkg"; export const result = value;`)
-	options := backend.SnapshotOptions{Files: backend.FileScopeTsconfig}
+	options := Options{Files: FileScopeTsconfig}
 	build := func() (*lintaiapi.Snapshot, string) {
 		t.Helper()
-		snapshot, _, version, err := New().buildLintaiSnapshot(context.Background(), root, root, options)
+		snapshot, _, version, err := New(options).buildLintaiSnapshot(context.Background(), root, root)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -482,7 +534,7 @@ export function mirror(config: LocalConfig): DbConfig {
 }
 `)
 
-	snapshot, _, _, err := New().buildLintaiSnapshot(context.Background(), root, root, backend.SnapshotOptions{})
+	snapshot, _, _, err := New(Options{}).buildLintaiSnapshot(context.Background(), root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -573,7 +625,7 @@ func TestBuildSnapshotExposesImportMetaAccessesAndIgnoresStrings(t *testing.T) {
 }
 `)
 
-	snapshot, _, _, err := New().buildLintaiSnapshot(context.Background(), root, root, backend.SnapshotOptions{})
+	snapshot, _, _, err := New(Options{}).buildLintaiSnapshot(context.Background(), root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -623,7 +675,7 @@ export function a() {
 }
 `)
 
-	snapshot, _, _, err := New().buildLintaiSnapshot(context.Background(), root, root, backend.SnapshotOptions{})
+	snapshot, _, _, err := New(Options{}).buildLintaiSnapshot(context.Background(), root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -669,8 +721,8 @@ func TestUnreadableOptionalMapKeepsCheckedFactsAndChangesVersionWhenReadable(t *
 	if _, err := os.ReadFile(mapPath); err == nil {
 		t.Skip("current user can read mode-000 files")
 	}
-	options := backend.SnapshotOptions{Files: backend.FileScopeTsconfig}
-	unreadable, _, unreadableVersion, err := New().buildLintaiSnapshot(context.Background(), root, root, options)
+	options := Options{Files: FileScopeTsconfig}
+	unreadable, _, unreadableVersion, err := New(options).buildLintaiSnapshot(context.Background(), root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -681,7 +733,7 @@ func TestUnreadableOptionalMapKeepsCheckedFactsAndChangesVersionWhenReadable(t *
 	if err := os.Chmod(mapPath, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	_, _, readableVersion, err := New().buildLintaiSnapshot(context.Background(), root, root, options)
+	_, _, readableVersion, err := New(options).buildLintaiSnapshot(context.Background(), root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -694,7 +746,7 @@ func TestUnreadableOptionalMapKeepsCheckedFactsAndChangesVersionWhenReadable(t *
 	}
 	t.Cleanup(func() { _ = os.Chmod(linksPath, 0o600) })
 	options.SourceLinks = "source-links.json"
-	if _, _, _, err := New().buildLintaiSnapshot(context.Background(), root, root, options); err == nil || !strings.Contains(err.Error(), "invalid --source-links") {
+	if _, _, _, err := New(options).buildLintaiSnapshot(context.Background(), root, root); err == nil || !strings.Contains(err.Error(), "invalid --source-links") {
 		t.Fatalf("unreadable requested configuration was not an error: %v", err)
 	}
 }

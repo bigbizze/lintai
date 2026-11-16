@@ -116,14 +116,14 @@ func runFacts(ctx context.Context, args []string, stdout io.Writer) error {
 	flags.String("asset-root", "", "ignored; the npm launcher passes it to every command")
 	var excludes stringList
 	flags.Var(&excludes, "exclude", "glob of workspace files to leave out of the snapshot (repeatable)")
-	files := flags.String("files", string(backend.FileScopeTsconfig), "files in the snapshot: tsconfig (files that tsc compiles) or walk (every walked file)")
+	files := flags.String("files", string(typescript.FileScopeTsconfig), "files in the snapshot: tsconfig (files that tsc compiles) or walk (every walked file)")
 	sourceLinks := flags.String("source-links", "", "JSON source-entry associations, relative to --workspace-root")
 	var relations stringList
-	flags.Var(&relations, "relation", "base relation to print (repeatable; default: all)")
+	flags.Var(&relations, "relation", "qualified base relation to print (repeatable; default: all)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	scope, err := backend.ParseFileScope(*files)
+	scope, err := typescript.ParseFileScope(*files)
 	if err != nil {
 		return err
 	}
@@ -131,11 +131,29 @@ func runFacts(ctx context.Context, args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	snapshot, err := newBackend().BuildSnapshot(ctx, absoluteWorkspace, absoluteWorkspace, backend.SnapshotOptions{Excludes: excludes, Files: scope, SourceLinks: *sourceLinks})
+	settings := typescript.Options{Excludes: excludes, Files: scope, SourceLinks: *sourceLinks}
+	producer := newBackend(settings)
+	description, err := producer.Describe()
 	if err != nil {
 		return err
 	}
-	text, err := facts.Format(snapshot, relations)
+	requested := make([]facts.Predicate, len(description.BaseRelations))
+	allowed := make([]string, len(description.BaseRelations))
+	for index, relation := range description.BaseRelations {
+		requested[index] = relation.Predicate
+		allowed[index] = relation.Predicate.Name
+	}
+	batch, err := producer.Collect(ctx, backend.CollectionRequest{
+		RepoRoot: absoluteWorkspace, WorkspaceRoot: absoluteWorkspace, Predicates: requested,
+	})
+	if err != nil {
+		return err
+	}
+	validated, err := facts.ValidateBatch(description, requested, batch)
+	if err != nil {
+		return err
+	}
+	text, err := facts.FormatFacts(validated.Facts(), allowed, relations)
 	if err != nil {
 		return err
 	}
@@ -146,8 +164,10 @@ func runFacts(ctx context.Context, args []string, stdout io.Writer) error {
 }
 
 func runServe(ctx context.Context) error {
-	runner := engine.New(newBackend())
-	instance := server.New(runner)
+	instance := server.NewWithFactory(func(params server.InitializeParams) server.Analyzer {
+		settings := typescript.Options{Excludes: params.Excludes, Files: typescript.FileScope(params.Files), SourceLinks: params.SourceLinks}
+		return engine.New(newBackend(settings))
+	})
 	instance.Log = os.Stderr
 	return instance.Serve(ctx, os.Stdin, os.Stdout)
 }
@@ -166,7 +186,7 @@ func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 	factLimit := flags.Int("fact-limit", engine.DefaultFactLimit, "maximum number of facts a rule may derive")
 	var excludes stringList
 	flags.Var(&excludes, "exclude", "glob of workspace files to leave out of the snapshot (repeatable)")
-	files := flags.String("files", string(backend.FileScopeTsconfig), "files in the snapshot: tsconfig (files that tsc compiles) or walk (every walked file)")
+	files := flags.String("files", string(typescript.FileScopeTsconfig), "files in the snapshot: tsconfig (files that tsc compiles) or walk (every walked file)")
 	sourceLinks := flags.String("source-links", "", "JSON source-entry associations, relative to --workspace-root")
 	var severities stringList
 	flags.Var(&severities, "severity", "rule severity as <rule-id>=error|warning|off (repeatable; default: error)")
@@ -195,7 +215,7 @@ func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 	if *factLimit <= 0 {
 		return fmt.Errorf("--fact-limit must be positive")
 	}
-	scope, err := backend.ParseFileScope(*files)
+	scope, err := typescript.ParseFileScope(*files)
 	if err != nil {
 		return err
 	}
@@ -217,15 +237,13 @@ func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 		return fmt.Errorf("invalid --env-json value: %w", err)
 	}
 	ruleGlobs := strings.Split(*rules, ",")
-	runner := engine.New(newBackend())
+	producerSettings := typescript.Options{Excludes: excludes, Files: scope, SourceLinks: *sourceLinks}
+	runner := engine.New(newBackend(producerSettings))
 	result, err := runner.Analyze(ctx, engine.Options{
 		RepoRoot:      absoluteRepo,
 		AssetRoot:     absoluteAssetRoot,
 		WorkspaceRoot: absoluteWorkspace,
 		RuleGlobs:     ruleGlobs,
-		Excludes:      excludes,
-		Files:         scope,
-		SourceLinks:   *sourceLinks,
 		Env:           env,
 		Severity:      diagnostics.SeverityError,
 		RuleSeverity:  ruleSeverity,
@@ -398,8 +416,10 @@ func runLock(ctx context.Context, args []string, stdout io.Writer) error {
 
 // newBackend returns the TypeScript backend that reports adjusted tsconfigs
 // on stderr.
-func newBackend() *typescript.Backend {
-	return &typescript.Backend{Log: os.Stderr}
+func newBackend(settings ...typescript.Options) *typescript.Backend {
+	producer := typescript.New(settings...)
+	producer.Log = os.Stderr
+	return producer
 }
 
 // runRules prints the id and path of each rule. A rule that does not bundle

@@ -12,8 +12,8 @@ export default rule("arch.pure-no-service-imports")
 	.program(({ env }) => dl`
 		Decl violation(Imp, From, To).
 		violation(Imp, From, To) :-
-			import_edge(Imp, From, To, _), import_internal(Imp),
-			glob(From, ${`${env.pureDir}/**`}), glob(To, ${`${env.serviceDir}/**`}).
+			ts.import_edge(Imp, From, To, _), ts.import_internal(Imp),
+			lintai.glob(From, ${`${env.pureDir}/**`}), lintai.glob(To, ${`${env.serviceDir}/**`}).
 	`)
 	.report("violation")
 	.message((row) => `Pure module ${row.From} must not import ${row.To}`);

@@ -80,7 +80,12 @@ func TestServerInitializeAndFileDiagnostics(t *testing.T) {
 	writeRequest(t, input, 2, "diagnostics/file", FileDiagnosticsParams{File: "/src/example.ts"})
 	output := &bytes.Buffer{}
 
-	if err := New(analyzer).Serve(context.Background(), input, output); err != nil {
+	var factoryParams InitializeParams
+	server := NewWithFactory(func(params InitializeParams) Analyzer {
+		factoryParams = params
+		return analyzer
+	})
+	if err := server.Serve(context.Background(), input, output); err != nil {
 		t.Fatal(err)
 	}
 
@@ -114,8 +119,8 @@ func TestServerInitializeAndFileDiagnostics(t *testing.T) {
 	if analyzer.calls[0].AssetRoot != "/assets" {
 		t.Fatalf("expected asset root to be propagated, got %q", analyzer.calls[0].AssetRoot)
 	}
-	if analyzer.calls[0].SourceLinks != "source-links.json" {
-		t.Fatalf("expected source-links to be propagated, got %q", analyzer.calls[0].SourceLinks)
+	if factoryParams.SourceLinks != "source-links.json" {
+		t.Fatalf("expected producer settings to reach construction, got %q", factoryParams.SourceLinks)
 	}
 }
 

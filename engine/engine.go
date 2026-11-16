@@ -11,7 +11,6 @@ import (
 	"github.com/bigbizze/lintai/backend"
 	"github.com/bigbizze/lintai/bundle"
 	"github.com/bigbizze/lintai/diagnostics"
-	"github.com/bigbizze/lintai/facts"
 	"github.com/bigbizze/lintai/internal/canonical"
 	"github.com/bigbizze/lintai/runtime"
 	"github.com/bigbizze/lintai/suppressions"
@@ -23,11 +22,7 @@ type Options struct {
 	AssetRoot     string
 	WorkspaceRoot string
 	RuleGlobs     []string
-	Excludes      []string
-	Files         backend.FileScope
-	// SourceLinks is an optional workspace-relative source association file.
-	SourceLinks string
-	Env         map[string]any
+	Env           map[string]any
 	// Severity is the severity of a violation of a rule that RuleSeverity
 	// does not name. The default is error.
 	Severity diagnostics.Severity
@@ -91,11 +86,21 @@ type Result struct {
 }
 
 type Engine struct {
-	backend backend.Backend
+	producers []backend.Producer
 }
 
-func New(selectedBackend backend.Backend) *Engine {
-	return &Engine{backend: selectedBackend}
+func New(producers ...backend.Producer) *Engine {
+	return &Engine{producers: append([]backend.Producer(nil), producers...)}
+}
+
+func (e *Engine) Close() error {
+	var first error
+	for _, producer := range e.producers {
+		if err := producer.Close(); err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
 }
 
 func (e *Engine) Run(ctx context.Context, options Options) ([]diagnostics.Diagnostic, error) {
@@ -125,10 +130,10 @@ func (e *Engine) Analyze(ctx context.Context, options Options) (Result, error) {
 }
 
 func (e *Engine) analyze(ctx context.Context, options Options) (Result, runInfo, error) {
+	producerNames := make([]string, 0, len(e.producers))
 	run := runInfo{
 		evaluated: make(map[string]struct{}),
 		known:     make(map[string]struct{}),
-		backendID: e.backend.ID(),
 	}
 	sandbox, sandboxWarning, err := bundle.ResolveSetupSandbox(options.SetupSandbox)
 	if err != nil {
@@ -143,38 +148,36 @@ func (e *Engine) analyze(ctx context.Context, options Options) (Result, runInfo,
 		lock = &loaded
 		run.lock = lock
 	}
-	snapshot, err := e.backend.BuildSnapshot(ctx, options.RepoRoot, options.WorkspaceRoot, backend.SnapshotOptions{Excludes: options.Excludes, Files: options.Files, SourceLinks: options.SourceLinks})
+	assembled, err := e.collect(ctx, options)
 	if err != nil {
 		return Result{}, run, err
 	}
-	if err := facts.Validate(snapshot); err != nil {
-		return Result{}, run, fmt.Errorf("backend %q returned an invalid snapshot: %w", e.backend.ID(), err)
-	}
-	schemaDecls, prelude, err := facts.ParseSchema(snapshot.Schema)
-	if err != nil {
-		return Result{}, run, fmt.Errorf("backend %q schema: %w", e.backend.ID(), err)
-	}
-	base, err := facts.Store(snapshot.Facts)
-	if err != nil {
-		return Result{}, run, fmt.Errorf("backend %q facts: %w", e.backend.ID(), err)
-	}
+	producerNames = assembled.namespaces
+	run.producerNames = append([]string(nil), producerNames...)
 	rulePaths, err := discoverRulePaths(options.WorkspaceRoot, options.RuleGlobs)
 	if err != nil {
 		return Result{}, run, err
 	}
-	run.files = snapshotFiles(snapshot)
-	run.snapshotVersion = snapshot.Version
+	run.files = assembled.analyzedFiles
+	run.snapshotVersion = assembled.snapshotID
+	inputPaths := make([]string, 0, len(assembled.analyzedFiles))
+	for path := range assembled.analyzedFiles {
+		inputPaths = append(inputPaths, path)
+	}
+	sort.Strings(inputPaths)
 	allDiagnostics := make([]diagnostics.Diagnostic, 0)
 	result := Result{
 		Diagnostics:     allDiagnostics,
-		SnapshotVersion: snapshot.Version,
+		SnapshotVersion: assembled.snapshotID,
 		RulesLoaded:     len(rulePaths),
-		InputPaths:      append([]string(nil), snapshot.InputPaths...),
+		InputPaths:      inputPaths,
 	}
 	if sandboxWarning != "" {
 		result.Warnings = append(result.Warnings, sandboxWarning)
 	}
 	if len(rulePaths) == 0 {
+		result.InputPaths = nil
+		run.files = make(map[string]struct{})
 		run.complete = true
 		return result, run, nil
 	}
@@ -193,10 +196,10 @@ func (e *Engine) analyze(ctx context.Context, options Options) (Result, runInfo,
 			if _, failed := buildFailures[rulePath]; failed {
 				continue
 			}
-			allDiagnostics = append(allDiagnostics, errorDiagnostic(filepath.Base(rulePath), "bundle", 0, snapshot.Version, e.backend.ID(), err.Error()))
+			allDiagnostics = append(allDiagnostics, errorDiagnostic(filepath.Base(rulePath), "bundle", 0, assembled.snapshotID, producerNames, err.Error()))
 		}
 		for rulePath, itemErr := range buildFailures {
-			allDiagnostics = append(allDiagnostics, errorDiagnostic(filepath.Base(rulePath), "bundle", 0, snapshot.Version, e.backend.ID(), itemErr.Error()))
+			allDiagnostics = append(allDiagnostics, errorDiagnostic(filepath.Base(rulePath), "bundle", 0, assembled.snapshotID, producerNames, itemErr.Error()))
 		}
 		sortDiagnostics(allDiagnostics)
 		result.Diagnostics = allDiagnostics
@@ -204,7 +207,7 @@ func (e *Engine) analyze(ctx context.Context, options Options) (Result, runInfo,
 	}
 
 	for rulePath, itemErr := range buildFailures {
-		allDiagnostics = append(allDiagnostics, errorDiagnostic(filepath.Base(rulePath), "bundle", 0, snapshot.Version, e.backend.ID(), itemErr.Error()))
+		allDiagnostics = append(allDiagnostics, errorDiagnostic(filepath.Base(rulePath), "bundle", 0, assembled.snapshotID, producerNames, itemErr.Error()))
 	}
 
 	integrityFailures := 0
@@ -213,7 +216,7 @@ func (e *Engine) analyze(ctx context.Context, options Options) (Result, runInfo,
 		integrityFailures = len(failures)
 		for rulePath, failure := range failures {
 			delete(artifactsByRule, rulePath)
-			allDiagnostics = append(allDiagnostics, errorDiagnostic(failure.key, "integrity", 0, snapshot.Version, e.backend.ID(), failure.message))
+			allDiagnostics = append(allDiagnostics, errorDiagnostic(failure.key, "integrity", 0, assembled.snapshotID, producerNames, failure.message))
 		}
 	}
 
@@ -223,13 +226,13 @@ func (e *Engine) analyze(ctx context.Context, options Options) (Result, runInfo,
 	})
 	if err != nil {
 		for rulePath, prepareErr := range prepareFailures {
-			allDiagnostics = append(allDiagnostics, errorDiagnostic(ruleIDForPrepareFailure(rulePath, prepareErr), "setup", prepareErr.RuleVersion, snapshot.Version, e.backend.ID(), prepareErr.Message))
+			allDiagnostics = append(allDiagnostics, errorDiagnostic(ruleIDForPrepareFailure(rulePath, prepareErr), "setup", prepareErr.RuleVersion, assembled.snapshotID, producerNames, prepareErr.Message))
 		}
 		for rulePath := range artifactsByRule {
 			if _, failed := prepareFailures[rulePath]; failed {
 				continue
 			}
-			allDiagnostics = append(allDiagnostics, errorDiagnostic(filepath.Base(rulePath), "setup", 0, snapshot.Version, e.backend.ID(), err.Error()))
+			allDiagnostics = append(allDiagnostics, errorDiagnostic(filepath.Base(rulePath), "setup", 0, assembled.snapshotID, producerNames, err.Error()))
 		}
 		sortDiagnostics(allDiagnostics)
 		result.Diagnostics = allDiagnostics
@@ -240,7 +243,7 @@ func (e *Engine) analyze(ctx context.Context, options Options) (Result, runInfo,
 		if severityOf(options, prepareErr.RuleID) == diagnostics.SeverityOff {
 			continue
 		}
-		allDiagnostics = append(allDiagnostics, errorDiagnostic(ruleIDForPrepareFailure(rulePath, prepareErr), "setup", prepareErr.RuleVersion, snapshot.Version, e.backend.ID(), prepareErr.Message))
+		allDiagnostics = append(allDiagnostics, errorDiagnostic(ruleIDForPrepareFailure(rulePath, prepareErr), "setup", prepareErr.RuleVersion, assembled.snapshotID, producerNames, prepareErr.Message))
 	}
 	result.RulesLoaded = len(preparedByRule) + len(prepareFailures)
 	knownRules := make(map[string]struct{}, len(preparedByRule)+len(prepareFailures))
@@ -250,7 +253,7 @@ func (e *Engine) analyze(ctx context.Context, options Options) (Result, runInfo,
 	for rulePath, failure := range invalidPreparedRules(options.WorkspaceRoot, preparedByRule, prepareFailures) {
 		delete(preparedByRule, rulePath)
 		knownRules[failure.ruleID] = struct{}{}
-		allDiagnostics = append(allDiagnostics, errorDiagnostic(failure.ruleID, failure.phase, failure.ruleVersion, snapshot.Version, e.backend.ID(), failure.message))
+		allDiagnostics = append(allDiagnostics, errorDiagnostic(failure.ruleID, failure.phase, failure.ruleVersion, assembled.snapshotID, producerNames, failure.message))
 	}
 
 	for _, rulePath := range rulePaths {
@@ -267,7 +270,7 @@ func (e *Engine) analyze(ctx context.Context, options Options) (Result, runInfo,
 			continue
 		}
 		fail := func(ruleID, phase string, ruleVersion int, message string) {
-			allDiagnostics = append(allDiagnostics, errorDiagnostic(ruleID, phase, ruleVersion, snapshot.Version, e.backend.ID(), message))
+			allDiagnostics = append(allDiagnostics, errorDiagnostic(ruleID, phase, ruleVersion, assembled.snapshotID, producerNames, message))
 		}
 		if _, err := canonical.Marshal(prepared.Setup); err != nil {
 			fail(prepared.RuleID, "setup", prepared.RuleVersion, err.Error())
@@ -295,7 +298,7 @@ func (e *Engine) analyze(ctx context.Context, options Options) (Result, runInfo,
 			fail(ruleID, "program", ruleVersion, err.Error())
 			continue
 		}
-		violations, perr := evaluateProgram(base, prelude, schemaDecls, output, loadedRule.Report(), loadedRule.ExpectNonEmpty(), evalOptions{
+		violations, perr := evaluateProgram(assembled.base, assembled.sources, assembled.schemaDecls, assembled.anchors, assembled.reportable, producerNames, output, loadedRule.Report(), loadedRule.ExpectNonEmpty(), evalOptions{
 			factLimit: options.FactLimit,
 			explain:   options.Explain,
 		})
@@ -322,9 +325,9 @@ func (e *Engine) analyze(ctx context.Context, options Options) (Result, runInfo,
 				SourceLocation: &location,
 				EntityIdentity: &diagnostics.EntityIdentity{SemanticKey: item.anchor},
 				Provenance: diagnostics.Provenance{
-					SnapshotVersion: snapshot.Version,
-					RuleVersion:     ruleVersion,
-					BackendID:       e.backend.ID(),
+					SnapshotVersion:    assembled.snapshotID,
+					RuleVersion:        ruleVersion,
+					ProducerNamespaces: append([]string(nil), producerNames...),
 				},
 				Explanation: item.explanation,
 			})
@@ -340,7 +343,7 @@ func (e *Engine) analyze(ctx context.Context, options Options) (Result, runInfo,
 	run.known = knownRules
 	run.complete = len(buildFailures) == 0 && integrityFailures == 0
 	if run.complete {
-		allDiagnostics = append(allDiagnostics, unknownSeverityRules(options, knownRules, snapshot.Version, e.backend.ID())...)
+		allDiagnostics = append(allDiagnostics, unknownSeverityRules(options, knownRules, assembled.snapshotID, producerNames)...)
 	}
 	sortDiagnostics(allDiagnostics)
 	result.Diagnostics = allDiagnostics
@@ -361,7 +364,7 @@ func severityOf(options Options, ruleID string) diagnostics.Severity {
 
 // unknownSeverityRules reports each RuleSeverity id that names no loaded
 // rule, so that a misspelled id does not leave a rule at its default.
-func unknownSeverityRules(options Options, known map[string]struct{}, snapshotVersion, backendID string) []diagnostics.Diagnostic {
+func unknownSeverityRules(options Options, known map[string]struct{}, snapshotVersion string, producers []string) []diagnostics.Diagnostic {
 	ids := make([]string, 0)
 	for id := range options.RuleSeverity {
 		if _, ok := known[id]; !ok {
@@ -371,7 +374,7 @@ func unknownSeverityRules(options Options, known map[string]struct{}, snapshotVe
 	sort.Strings(ids)
 	result := make([]diagnostics.Diagnostic, 0, len(ids))
 	for _, id := range ids {
-		result = append(result, errorDiagnostic(id, "config", 0, snapshotVersion, backendID, fmt.Sprintf("severity is configured for rule %q, but no loaded rule has this id", id)))
+		result = append(result, errorDiagnostic(id, "config", 0, snapshotVersion, producers, fmt.Sprintf("severity is configured for rule %q, but no loaded rule has this id", id)))
 	}
 	return result
 }
@@ -431,7 +434,7 @@ func ruleIDForPrepareFailure(rulePath string, prepareErr bundle.PrepareError) st
 // errorDiagnostic reports a rule that could not run. Its severity is always
 // error, whatever the configured severity of the rule, so a broken rule
 // cannot pass silently.
-func errorDiagnostic(ruleID, phase string, ruleVersion int, snapshotVersion, backendID, message string) diagnostics.Diagnostic {
+func errorDiagnostic(ruleID, phase string, ruleVersion int, snapshotVersion string, producers []string, message string) diagnostics.Diagnostic {
 	return diagnostics.Diagnostic{
 		RuleID:         ruleID,
 		AssertionID:    "default",
@@ -440,9 +443,9 @@ func errorDiagnostic(ruleID, phase string, ruleVersion int, snapshotVersion, bac
 		Message:        message,
 		Phase:          phase,
 		Provenance: diagnostics.Provenance{
-			SnapshotVersion: snapshotVersion,
-			RuleVersion:     ruleVersion,
-			BackendID:       backendID,
+			SnapshotVersion:    snapshotVersion,
+			RuleVersion:        ruleVersion,
+			ProducerNamespaces: append([]string(nil), producers...),
 		},
 	}
 }

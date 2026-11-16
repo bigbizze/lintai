@@ -56,12 +56,12 @@ assert.equal(
 	"legacySave must return Promise<ActionResult<T>>, but returns Promise<number>",
 );
 
-const facts = spawnSync("pnpm", ["exec", "lintai", "facts", "--workspace-root", ".", "--relation", "module"], {
+const facts = spawnSync("pnpm", ["exec", "lintai", "facts", "--workspace-root", ".", "--relation", "ts.module"], {
 	cwd: repoDir,
 	encoding: "utf8",
 });
 assert.equal(facts.status, 0, `expected lintai facts to succeed through the launcher, got ${facts.status}\n${facts.stderr}`);
-assert.ok(facts.stdout.includes(`module("src/example.ts").`), facts.stdout);
+assert.ok(facts.stdout.includes(`ts.module("ts:src/example.ts").`), facts.stdout);
 
 const schema = spawnSync("pnpm", ["exec", "lintai", "schema"], { cwd: repoDir, encoding: "utf8" });
 assert.equal(schema.status, 0, `expected lintai schema to succeed, got ${schema.status}\n${schema.stderr}`);
@@ -69,18 +69,18 @@ assert.ok(schema.stdout.includes("Decl config_adjusted("), "expected the schema 
 
 const walked = spawnSync(
 	"pnpm",
-	["exec", "lintai", "facts", "--workspace-root", ".", "--files", "walk", "--exclude", "lintai-rules/**", "--relation", "module"],
+	["exec", "lintai", "facts", "--workspace-root", ".", "--files", "walk", "--exclude", "lintai-rules/**", "--relation", "ts.module"],
 	{ cwd: repoDir, encoding: "utf8" },
 );
 assert.equal(walked.status, 0, `expected lintai facts --files walk to succeed, got ${walked.status}\n${walked.stderr}`);
 assert.equal(
 	walked.stdout.trim(),
 	[
-		`module("src/actions/save.ts").`,
-		`module("src/core/result.ts").`,
-		`module("src/disabled.ts").`,
-		`module("src/example.ts").`,
-		`module("src/legacy.ts").`,
+		`ts.module("ts:src/actions/save.ts").`,
+		`ts.module("ts:src/core/result.ts").`,
+		`ts.module("ts:src/disabled.ts").`,
+		`ts.module("ts:src/example.ts").`,
+		`ts.module("ts:src/legacy.ts").`,
 	].join("\n"),
 );
 

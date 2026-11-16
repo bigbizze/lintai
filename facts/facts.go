@@ -5,7 +5,6 @@ package facts
 import (
 	"fmt"
 	"math"
-	"slices"
 	"sort"
 	"strings"
 
@@ -166,20 +165,34 @@ func Format(snapshot Snapshot, relations []string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	wanted := make(map[string]struct{}, len(decls))
+	return FormatFacts(snapshot.Facts, decls, relations)
+}
+
+// FormatFacts renders already validated, qualified facts. allowedRelations is
+// the exact public catalog view accepted by the caller, so unqualified names
+// cannot act as aliases for a producer namespace.
+func FormatFacts(items []Fact, allowedRelations, relations []string) (string, error) {
+	allowed := make(map[string]struct{}, len(allowedRelations))
+	for _, relation := range allowedRelations {
+		if _, duplicate := allowed[relation]; duplicate {
+			return "", fmt.Errorf("relation %q appears more than once in the catalog", relation)
+		}
+		allowed[relation] = struct{}{}
+	}
+	wanted := make(map[string]struct{}, len(allowed))
 	if len(relations) == 0 {
-		for _, relation := range decls {
+		for relation := range allowed {
 			wanted[relation] = struct{}{}
 		}
 	} else {
 		for _, relation := range relations {
-			if !slices.Contains(decls, relation) {
+			if _, ok := allowed[relation]; !ok {
 				return "", fmt.Errorf("unknown base relation %q", relation)
 			}
 			wanted[relation] = struct{}{}
 		}
 	}
-	store, err := Store(snapshot.Facts)
+	store, err := Store(items)
 	if err != nil {
 		return "", err
 	}

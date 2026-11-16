@@ -11,7 +11,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bigbizze/lintai/backend"
 	"github.com/bigbizze/lintai/backend/typescript"
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/facts"
@@ -35,7 +34,7 @@ func TestRuleErrorPhases(t *testing.T) {
 			phase:   "program",
 			message: "cannot interpolate",
 			source: `export default rule("t.program-throws").version(1)
-	.program(() => dl` + "`" + `Decl v(F). v(F) :- module(F), glob(F, ${[1] as never}).` + "`" + `)
+	.program(() => dl` + "`" + `Decl v(F). v(F) :- ts.module(F), lintai.glob(F, ${[1] as never}).` + "`" + `)
 	.report("v").message(() => "x");`,
 		},
 		{
@@ -43,7 +42,7 @@ func TestRuleErrorPhases(t *testing.T) {
 			phase:   "program_parse",
 			message: "",
 			source: `export default rule("t.parse").version(1)
-	.program(dl` + "`" + `Decl v(F). v(F) :- module(F)` + "`" + `)
+	.program(dl` + "`" + `Decl v(F). v(F) :- ts.module(F)` + "`" + `)
 	.report("v").message(() => "x");`,
 		},
 		{
@@ -51,7 +50,7 @@ func TestRuleErrorPhases(t *testing.T) {
 			phase:   "program_analysis",
 			message: "calls_reach",
 			source: `export default rule("t.redefine").version(1)
-	.program(dl` + "`" + `Decl v(F). v(F) :- module(F). calls_reach(A, B) :- fn(A, _, _), fn(B, _, _).` + "`" + `)
+	.program(dl` + "`" + `Decl v(F). v(F) :- ts.module(F). ts.calls_reach(A, B) :- ts.fn(A, _, _), ts.fn(B, _, _).` + "`" + `)
 	.report("v").message(() => "x");`,
 		},
 		{
@@ -59,7 +58,7 @@ func TestRuleErrorPhases(t *testing.T) {
 			phase:   "evaluation",
 			message: "fact size limit",
 			source: `export default rule("t.limit").version(1)
-	.program(dl` + "`" + `Decl v(A, B). v(A, B) :- module(A), module(B).` + "`" + `)
+	.program(dl` + "`" + `Decl v(A, B). v(A, B) :- ts.module(A), ts.module(B).` + "`" + `)
 	.report("v").message(() => "x");`,
 		},
 		{
@@ -67,15 +66,15 @@ func TestRuleErrorPhases(t *testing.T) {
 			phase:   "premise",
 			message: "nothing",
 			source: `export default rule("t.premise").version(1)
-	.program(dl` + "`" + `Decl nothing(F). nothing(F) :- module(F), glob(F, "no/such/dir/**"). Decl v(F). v(F) :- module(F).` + "`" + `)
+	.program(dl` + "`" + `Decl nothing(F). nothing(F) :- ts.module(F), lintai.glob(F, "no/such/dir/**"). Decl v(F). v(F) :- ts.module(F).` + "`" + `)
 	.report("v").expectNonEmpty("nothing").message(() => "x");`,
 		},
 		{
 			name:    "anchor-without-location",
 			phase:   "report",
-			message: "no location",
+			message: "no eligible producer-owned location",
 			source: `export default rule("t.report").version(1)
-	.program(dl` + "`" + `Decl v(F). v("not-an-entity") :- module(_).` + "`" + `)
+	.program(dl` + "`" + `Decl v(F). v("not-an-entity") :- ts.module(_).` + "`" + `)
 	.report("v").message(() => "x");`,
 		},
 		{
@@ -83,7 +82,7 @@ func TestRuleErrorPhases(t *testing.T) {
 			phase:   "message",
 			message: "message exploded",
 			source: `export default rule("t.message").version(1)
-	.program(dl` + "`" + `Decl v(F). v(F) :- module(F).` + "`" + `)
+	.program(dl` + "`" + `Decl v(F). v(F) :- ts.module(F).` + "`" + `)
 	.report("v").message(() => { throw new Error("message exploded"); });`,
 		},
 	}
@@ -123,7 +122,7 @@ func TestRuleErrorPhases(t *testing.T) {
 	for _, item := range cases {
 		got := byRule[ruleIDs[item.name]]
 		if len(got) != 1 {
-			t.Fatalf("%s: expected only one error diagnostic, got %+v", item.name, got)
+			t.Fatalf("%s: expected only one error diagnostic, got %+v (all: %+v)", item.name, got, items)
 		}
 		if got[0].DiagnosticKind != diagnostics.KindRuleExecutionError || got[0].Phase != item.phase {
 			t.Fatalf("%s: expected phase %s, got %+v", item.name, item.phase, got[0])
@@ -146,7 +145,7 @@ func TestRelativeRuleGlobsResolveFromWorkspaceRoot(t *testing.T) {
 	writeTestFile(t, workspaceRoot, "src/bad.ts", "export async function bad() {\n\treturn 1;\n}\n")
 	writeTestFile(t, workspaceRoot, "lintai-rules/no-async.ts", `import { dl, rule } from "@lintai/sdk";
 export default rule("arch.no-async").version(1)
-	.program(dl`+"`"+`Decl v(Fn). v(Fn) :- fn_async(Fn).`+"`"+`)
+	.program(dl`+"`"+`Decl v(Fn). v(Fn) :- ts.fn_async(Fn).`+"`"+`)
 	.report("v").message(() => "no async");
 `)
 	items, err := New(typescript.New()).Run(context.Background(), Options{
@@ -219,10 +218,10 @@ func TestDeclaredWriterCapabilityPolicy(t *testing.T) {
 				}
 				writeTestFile(t, root, file, source)
 			}
-			items, err := New(typescript.New()).Run(context.Background(), Options{
+			items, err := New(typescript.New(typescript.Options{Files: typescript.FileScopeWalk})).Run(context.Background(), Options{
 				RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages", "client"),
 				WorkspaceRoot: root, RuleGlobs: []string{filepath.Join(fixture, "writer-policy.ts")},
-				Files: backend.FileScopeWalk, Severity: diagnostics.SeverityError,
+				Severity: diagnostics.SeverityError,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -272,11 +271,11 @@ func TestDlStringsRoundTripThroughMangle(t *testing.T) {
 	rulePath := writeTestFile(t, t.TempDir(), "round-trip.ts", `import { dl, rule } from "@lintai/sdk";
 const tricky = `+string(tricky)+`;
 export default rule("t.round-trip").version(1)
-	.program(dl`+"`"+`Decl v(F, S, N, K). v(F, ${tricky}, ${-12}, ${dl.name("a/b_c")}) :- module(F), F = "src/pure/math.ts".`+"`"+`)
+	.program(dl`+"`"+`Decl v(M, S, N, K). v(M, ${tricky}, ${-12}, ${dl.name("a/b_c")}) :- ts.module(M), ts.location(M, F, _, _, _, _), F = "src/pure/math.ts".`+"`"+`)
 	.report("v")
 	.message((row) => JSON.stringify([row.S === tricky, row.N, row.K]));
 `)
-	items, err := New(typescript.New()).Run(context.Background(), Options{
+	items, err := New(typescript.New(typescript.Options{Files: typescript.FileScopeWalk})).Run(context.Background(), Options{
 		RepoRoot:      repoRoot,
 		AssetRoot:     filepath.Join(repoRoot, "packages", "client"),
 		WorkspaceRoot: filepath.Join(repoRoot, "testdata/fixtures/workspace"),
@@ -292,7 +291,7 @@ export default rule("t.round-trip").version(1)
 	}
 }
 
-// !glob(P, X) holds when P does not match X, a clause can end with a name
+// !lintai.glob(P, X) holds when P does not match X, a clause can end with a name
 // constant (Layer != /core.), and with verbatimModuleSyntax an
 // import { type X } is a runtime import. Before this, the first was an
 // error, the second did not parse, and the third was not a runtime import.
@@ -307,15 +306,15 @@ func TestNegatedGlobAndTrailingNameConstant(t *testing.T) {
 	writeTestFile(t, workspaceRoot, "src/ui/b.ts", "import { type A } from \"../core/a\";\nexport const b: A = 1;\n")
 	writeTestFile(t, workspaceRoot, "lintai-rules/runtime.ts", `import { dl, rule } from "@lintai/sdk";
 export default rule("t.runtime").version(1)
-	.program(dl`+"`"+`Decl r(Imp). r(Imp) :- import_edge(Imp, F, _, _), glob(F, "src/**"), import_runtime(Imp).`+"`"+`)
+	.program(dl`+"`"+`Decl r(Imp). r(Imp) :- ts.import_edge(Imp, F, _, _), lintai.glob(F, "src/**"), ts.import_runtime(Imp).`+"`"+`)
 	.report("r").message(() => "runtime");
 `)
 	writeTestFile(t, workspaceRoot, "lintai-rules/outside.ts", `import { dl, rule } from "@lintai/sdk";
 export default rule("t.outside").version(1)
-	.program(dl`+"`"+`Decl layer(F, L). layer(F, /ui) :- module(F), glob(F, "src/ui/**"). layer(F, /core) :- module(F), glob(F, "src/core/**").
-Decl v(F). v(F) :- module(F), !glob(F, "src/core/**"), layer(F, L), L != /core.
+	.program(dl`+"`"+`Decl layer(M, L). layer(M, /ui) :- ts.module(M), ts.location(M, F, _, _, _, _), lintai.glob(F, "src/ui/**"). layer(M, /core) :- ts.module(M), ts.location(M, F, _, _, _, _), lintai.glob(F, "src/core/**").
+Decl v(M). v(M) :- ts.module(M), ts.location(M, F, _, _, _, _), !lintai.glob(F, "src/core/**"), layer(M, L), L != /core.
 # a comment with /core. in it
-Decl w(F). w(F) :- module(F), F = "src/a/b.c", layer(F, /ui.x).`+"`"+`)
+Decl w(M). w(M) :- ts.module(M), ts.location(M, F, _, _, _, _), F = "src/a/b.c", layer(M, /ui.x).`+"`"+`)
 	.report("v").message(() => "outside");
 `)
 	items, err := New(typescript.New()).Run(context.Background(), Options{
@@ -331,6 +330,9 @@ Decl w(F). w(F) :- module(F), F = "src/a/b.c", layer(F, /ui.x).`+"`"+`)
 	}
 	byRule := map[string][]string{}
 	for _, item := range items {
+		if item.SourceLocation == nil {
+			t.Fatalf("rule execution failed: %+v", item)
+		}
 		byRule[item.RuleID] = append(byRule[item.RuleID], item.SourceLocation.File)
 	}
 	if got := byRule["t.outside"]; len(got) != 1 || got[0] != "src/ui/b.ts" {
@@ -353,17 +355,17 @@ func TestRuleSeverity(t *testing.T) {
 	writeTestFile(t, workspaceRoot, "src/a.ts", "export async function a() {\n\treturn 1;\n}\n")
 	writeTestFile(t, workspaceRoot, "lintai-rules/rules.ts", `import { dl, rule } from "@lintai/sdk";
 export const soft = rule("t.soft").version(1)
-	.program(dl`+"`"+`Decl v(Fn). v(Fn) :- fn_async(Fn).`+"`"+`)
+	.program(dl`+"`"+`Decl v(Fn). v(Fn) :- ts.fn_async(Fn).`+"`"+`)
 	.report("v").message(() => "soft");
 `)
 	writeTestFile(t, workspaceRoot, "lintai-rules/broken-off.ts", `import { dl, rule } from "@lintai/sdk";
 export default rule("t.broken-off").version(1)
-	.program(dl`+"`"+`Decl v(F). v(F) :- module(F)`+"`"+`)
+	.program(dl`+"`"+`Decl v(F). v(F) :- ts.module(F)`+"`"+`)
 	.report("v").message(() => "x");
 `)
 	writeTestFile(t, workspaceRoot, "lintai-rules/broken-warning.ts", `import { dl, rule } from "@lintai/sdk";
 export default rule("t.broken-warning").version(1)
-	.program(dl`+"`"+`Decl v(F). v(F) :- module(F)`+"`"+`)
+	.program(dl`+"`"+`Decl v(F). v(F) :- ts.module(F)`+"`"+`)
 	.report("v").message(() => "x");
 `)
 	writeTestFile(t, workspaceRoot, "lintai-rules/soft.ts", `export { soft as default } from "./rules";
@@ -444,11 +446,11 @@ export default rule("arch.domain-signatures").version(1)
 		Decl violation(Fn, Name).
 		Decl signature_type(Fn, T).
 		Decl mentions_infra(Fn).
-		signature_type(Fn, T) :- fn_param(Fn, _, T).
-		signature_type(Fn, T) :- fn_returns(Fn, T).
-		mentions_infra(Fn) :- signature_type(Fn, T), type_named(T, Origin, _), glob(Origin, "src/infra/**").
-		mentions_infra(Fn) :- signature_type(Fn, T), type_contains(T, Inner), type_named(Inner, Origin, _), glob(Origin, "src/infra/**").
-		violation(Fn, Name) :- fn(Fn, File, Name), fn_exported(Fn), glob(File, "src/domain/**"), mentions_infra(Fn).
+		signature_type(Fn, T) :- ts.fn_param(Fn, _, T).
+		signature_type(Fn, T) :- ts.fn_returns(Fn, T).
+		mentions_infra(Fn) :- signature_type(Fn, T), ts.type_named(T, Origin, _), lintai.glob(Origin, "src/infra/**").
+		mentions_infra(Fn) :- signature_type(Fn, T), ts.type_contains(T, Inner), ts.type_named(Inner, Origin, _), lintai.glob(Origin, "src/infra/**").
+		violation(Fn, Name) :- ts.fn(Fn, File, Name), ts.fn_exported(Fn), lintai.glob(File, "src/domain/**"), mentions_infra(Fn).
 	`+"`"+`)
 	.report("violation")
 	.message((row) => row.Name);
@@ -458,9 +460,9 @@ export default rule("arch.domain-signatures-strict").version(1)
 	.program(dl`+"`"+`
 		Decl violation(Fn, Name).
 		Decl signature_type(Fn, T).
-		signature_type(Fn, T) :- fn_param(Fn, _, T).
-		signature_type(Fn, T) :- fn_returns(Fn, T).
-		violation(Fn, Name) :- fn(Fn, File, Name), fn_exported(Fn), glob(File, "src/domain/**"), signature_type(Fn, T), type_reaches_incomplete(T).
+		signature_type(Fn, T) :- ts.fn_param(Fn, _, T).
+		signature_type(Fn, T) :- ts.fn_returns(Fn, T).
+		violation(Fn, Name) :- ts.fn(Fn, File, Name), ts.fn_exported(Fn), lintai.glob(File, "src/domain/**"), signature_type(Fn, T), ts.type_reaches_incomplete(T).
 	`+"`"+`)
 	.report("violation")
 	.message((row) => row.Name);
@@ -469,7 +471,7 @@ export default rule("arch.domain-signatures-strict").version(1)
 export default rule("t.awaited").version(1)
 	.program(dl`+"`"+`
 		Decl v(Fn, Name, Text).
-		v(Fn, Name, Text) :- fn(Fn, _, Name), fn_returns_awaited(Fn, T), type_display(T, Text).
+		v(Fn, Name, Text) :- ts.fn(Fn, _, Name), ts.fn_returns_awaited(Fn, T), ts.type_display(T, Text).
 	`+"`"+`)
 	.report("v")
 	.message((row) => `+"`${row.Name}:${row.Text}`"+`);
@@ -627,17 +629,17 @@ export function bound() { return (stable as () => number)(); }
 export default rule("test.strict").version(1)
   .program(dl`+"`"+`
     Decl selected(Fn, Name).
-    selected(Fn, Name) :- fn(Fn, _, Name), fn_exported(Fn), Name != "replace".
+    selected(Fn, Name) :- ts.fn(Fn, _, Name), ts.fn_exported(Fn), Name != "replace".
     Decl ambient(Fn, Name).
-    ambient(Fn, Name) :- selected(Fn, Name), fn_reaches_ambient_strict(Fn, _).
+    ambient(Fn, Name) :- selected(Fn, Name), ts.fn_reaches_ambient_strict(Fn, _).
     Decl indeterminate(Fn, Name).
-    indeterminate(Fn, Name) :- selected(Fn, Name), fn_reaches_unresolved(Fn).
+    indeterminate(Fn, Name) :- selected(Fn, Name), ts.fn_reaches_unresolved(Fn).
   `+"`"+`)
   .report("ambient", "indeterminate").message((row, ctx) => `+"`${row.Name}:${ctx.assertion_id}`"+`);
 `)
 	items, err := New(typescript.New()).Run(context.Background(), Options{
 		RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: root,
-		RuleGlobs: []string{"lintai-rules/*.ts"}, Files: backend.FileScopeWalk,
+		RuleGlobs: []string{"lintai-rules/*.ts"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -685,10 +687,10 @@ export type { EventMessage } from "./rpc";
 export default rule("arch.public-api-infrastructure-types").version(1)
 	.program(dl` + "`" + `
 		Decl api_root(Export, File, Name, Type).
-		api_root(E, F, N, T) :- module_export(E, F, N, /type), glob(F, "src/common/index.ts"), export_target(E, D), declaration_type(D, /type, T).
+		api_root(E, F, N, T) :- ts.module_export(E, F, N, /type), lintai.glob(F, "src/common/index.ts"), ts.export_target(E, D), ts.declaration_type(D, /type, T).
 		Decl reaches_knex(Type).
-		reaches_knex(T) :- type_named(T, "knex", _), type_origin_kind(T, /package).
-		reaches_knex(T) :- type_child(T, Child), reaches_knex(Child).
+		reaches_knex(T) :- ts.type_named(T, "knex", _), ts.type_origin_kind(T, /package).
+		reaches_knex(T) :- ts.type_child(T, Child), reaches_knex(Child).
 		Decl violation(Export, Name).
 		violation(Export, Name) :- api_root(Export, _, Name, Type), reaches_knex(Type).
 	` + "`" + `)
@@ -761,7 +763,7 @@ export function choose(flag: boolean) {
 	root := t.TempDir()
 	writeTestFile(t, root, "src/scorecard/total.ts", source)
 	writeTestFile(t, root, "src/scorecard/only-unsupported.ts", `class Only { value = await unknown(); }`)
-	snapshot, err := typescript.New().BuildSnapshot(context.Background(), root, root, backend.SnapshotOptions{Files: backend.FileScopeWalk})
+	snapshot, err := typescript.New(typescript.Options{Files: typescript.FileScopeWalk}).BuildSnapshot(context.Background(), root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -919,36 +921,34 @@ export function choose(flag: boolean) {
 			t.Errorf("callback suspension attributed to module: %v", fact)
 		}
 	}
-	base, err := facts.Store(snapshot.Facts)
+	qualifiedFacts, anchors, reportable := qualifyTestFacts(t, snapshot.Facts)
+	base, err := facts.Store(qualifiedFacts)
 	if err != nil {
 		t.Fatal(err)
 	}
-	decls, prelude, err := facts.ParseSchema(snapshot.Schema)
-	if err != nil {
-		t.Fatal(err)
-	}
+	catalog, decls := typeScriptCatalogForTest(t)
 	output := runtime.ProgramOutput{Text: `
 Decl direct(Fn).
-direct(Fn) :- fn_suspends(Fn).
-direct(Fn) :- call_edge(Site, Fn, To), !site_attribution_unknown(Site), direct(To).
+direct(Fn) :- ts.fn_suspends(Fn).
+direct(Fn) :- ts.call_edge(Site, Fn, To), !ts.site_attribution_unknown(Site), direct(To).
 Decl with_refs(Fn).
-with_refs(Fn) :- fn_suspends(Fn).
-with_refs(Fn) :- call_edge(Site, Fn, To), !site_attribution_unknown(Site), with_refs(To).
-with_refs(Fn) :- fn_ref(Site, Fn, To), !site_attribution_unknown(Site), with_refs(To).
+with_refs(Fn) :- ts.fn_suspends(Fn).
+with_refs(Fn) :- ts.call_edge(Site, Fn, To), !ts.site_attribution_unknown(Site), with_refs(To).
+with_refs(Fn) :- ts.fn_ref(Site, Fn, To), !ts.site_attribution_unknown(Site), with_refs(To).
 Decl selected(Fn).
-selected(Fn) :- fn(Fn, File, _), fn_exported(Fn), glob(File, "src/scorecard/**").
+selected(Fn) :- ts.fn(Fn, File, _), ts.fn_exported(Fn), lintai.glob(File, "src/scorecard/**").
 Decl call_only(Fn).
 call_only(Fn) :- selected(Fn), direct(Fn).
 Decl follow_refs(Fn).
 follow_refs(Fn) :- selected(Fn), with_refs(Fn).
 Decl module_seen(File).
-module_seen(File) :- module_has_suspension(File).
+module_seen(Module) :- ts.module(Module), ts.location(Module, File, _, _, _, _), ts.module_has_suspension(File).
 Decl bad_owner(Site).
-bad_owner(Site) :- site_attribution_unsupported(Site, _), call_edge(Site, "", _), calls_reach("", _).
+bad_owner(Site) :- ts.site_attribution_unsupported(Site, _), ts.call_edge(Site, "", _), ts.calls_reach("", _).
 Decl uncertain(Fn).
-uncertain(Fn) :- fn(Fn, _, "choose"), fn_has_unresolved_call(Fn).
+uncertain(Fn) :- ts.fn(Fn, _, "choose"), ts.fn_has_unresolved_call(Fn).
 `}
-	violations, perr := evaluateProgram(base, prelude, decls, output, []string{"call_only", "follow_refs", "module_seen", "bad_owner", "uncertain"}, nil, evalOptions{})
+	violations, perr := evaluateProgram(base, catalog, decls, anchors, reportable, []string{"ts"}, output, []string{"call_only", "follow_refs", "module_seen", "bad_owner", "uncertain"}, nil, evalOptions{})
 	if perr != nil {
 		t.Fatal(perr)
 	}
@@ -957,7 +957,7 @@ uncertain(Fn) :- fn(Fn, _, "choose"), fn_has_unresolved_call(Fn).
 		got = append(got, item.predicate+":"+item.anchor)
 	}
 	slices.Sort(got)
-	want := []string{"follow_refs:" + scorecard, "module_seen:src/scorecard/only-unsupported.ts", "module_seen:src/scorecard/total.ts", "uncertain:" + choose}
+	want := []string{"follow_refs:ts:" + scorecard, "module_seen:ts:src/scorecard/only-unsupported.ts", "module_seen:ts:src/scorecard/total.ts", "uncertain:ts:" + choose}
 	if !slices.Equal(got, want) {
 		t.Fatalf("policy rows = %v, want %v", got, want)
 	}
