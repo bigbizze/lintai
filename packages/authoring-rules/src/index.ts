@@ -86,12 +86,6 @@ const requireRuleShape: Rule.RuleModule = {
 						message: `Rule default export must include ${requiredCall}`,
 					});
 				}
-				if (source.includes(".assert(")) {
-					context.report({
-						node,
-						message: "Rule default export must not use .assert(); write the rule as a Datalog program with .program() and .report()",
-					});
-				}
 			},
 		};
 	},

@@ -35,14 +35,18 @@ func requireCode(t *testing.T, check func(...string) (int, []diagnostics.Diagnos
 	return items
 }
 
-// V32, V34, V35, V38: real TypeScript keys, null-key counted duplicates,
-// independent assertions, prune coverage and whole-group fail-closed matching.
+// V25, V32, V34, V35, V38: configured rule selection, real TypeScript keys,
+// null-key counted duplicates, independent assertions, excluded-file prune
+// coverage and whole-group fail-closed matching.
 func TestSuppressionTrackingAndCounts(t *testing.T) {
 	rule := `import { dl, rule } from '@lintai/sdk';
 export default rule('sample').version(1).program(dl`
 	rule += "`" + `Decl named(Fn). Decl calls(Site). Decl other(Site).
 named(Fn) :- ts.fn_async(Fn). calls(Site) :- ts.call_site(Site), ts.site(Site, File), lintai.glob(File, "src/**"). other(Site) :- ts.call_site(Site), ts.site(Site, File), lintai.glob(File, "src/**").` + "`" + `).report('named','calls','other').message(() => 'violation');`
-	_, workspace, check := suppressionFixture(t, map[string]string{"src/a.ts": "declare function work(): void;\nexport async function first() { work(); work(); }\n", "lintai-rules/sample.ts": rule})
+	_, workspace, runCheck := suppressionFixture(t, map[string]string{"src/a.ts": "declare function work(): void;\nexport async function first() { work(); work(); }\n", "policy/sample.ts": rule})
+	check := func(flags ...string) (int, []diagnostics.Diagnostic) {
+		return runCheck(append([]string{"--rules", "policy/**/*.ts"}, flags...)...)
+	}
 	requireCode(t, check, exitClean, "--suppress-all")
 	file, err := suppressions.Load(filepath.Join(workspace, suppressions.DefaultFile))
 	if err != nil {
@@ -72,6 +76,16 @@ named(Fn) :- ts.fn_async(Fn). calls(Site) :- ts.call_site(Site), ts.site(Site, F
 	items := requireCode(t, check, exitViolations)
 	if len(items) != 2 {
 		t.Fatalf("want two unused counts: %+v", items)
+	}
+	path := filepath.Join(workspace, suppressions.DefaultFile)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireCode(t, check, exitClean, "--exclude", "src/a.ts", "--prune-suppressions")
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("excluded file granted prune authority: %v", err)
 	}
 	requireCode(t, check, exitClean, "--prune-suppressions")
 	writeFiles(t, workspace, map[string]string{"src/a.ts": "declare function work(): void;\nexport async function first() { work(); work(); work(); }\n"})

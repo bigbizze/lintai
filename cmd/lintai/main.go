@@ -501,11 +501,9 @@ func diagnosticsOutcome(items []diagnostics.Diagnostic) error {
 	return nil
 }
 
-// suppressionsOutcome returns an error with exit code 2 when the
-// suppressions file allows more violations than the run found, as ESLint
-// does. diagnosticsOutcome runs first, so a rule error (3) or a violation
-// (1) takes priority. The message names the suppressions file, so it is not
-// mistaken for a usage error, which also exits with code 2.
+// suppressionsOutcome returns a policy failure (exit 1) when the
+// suppressions file allows more violations than the run found.
+// diagnosticsOutcome runs first so execution failures take priority.
 func suppressionsOutcome(result engine.Result, passOnUnpruned bool) error {
 	if passOnUnpruned || len(result.UnusedSuppressions) == 0 {
 		return nil

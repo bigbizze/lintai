@@ -1,61 +1,83 @@
-# Bulk suppressions (0.6.3)
+# Bulk suppressions
 
-`lintai-suppressions.json` records known violations to fix later. Policy exceptions belong in rule configuration or `.facts()` ratchet rules instead.
+`lintai-suppressions.json` records current error-severity findings to fix later. Rule execution errors and warnings are not suppression candidates. Put policy exceptions in rule configuration or facts instead.
 
-## Format and matching
+## Groups and reasons
 
-The default file is at the workspace root, beside `lintai-rules.lock.json`. Relative `--suppressions-location` paths resolve from that root. File keys are workspace-relative `SourceLocation.File` paths with forward slashes, using the same normalization as serve diagnostics. Rule keys are lintai IDs without the `lintai/` plugin prefix.
+Every finding belongs to one group identified by its diagnostic file, rule ID, assertion name and arity, anchor producer namespace, producer-supplied tracking key (or null), and ordered reason values. The analysis entity ID, source position, message and description do not define the group. A named TypeScript function's tracking key survives ordinary body edits; an anonymous site can have a null key. Null-key findings with the same file, rule, assertion, namespace and reasons share a count.
+
+A rule can choose which stable reported columns distinguish reasons:
+
+```ts
+.report("violation")
+.suppression("violation", { by: ["ForbiddenSource"] })
+```
+
+For `violation(Anchor, ForbiddenSource)`, `/clock` and `/network` form separate groups. `by` is optional; `{}` or no declaration selects no reason columns. Declare at most one policy per reported assertion. Each selected name must identify one non-anchor column in its `Decl`; unknown fields, duplicate names, the first column, and unknown or unreported predicates fail program analysis. Values are typed: names and strings differ, as do integers and floats. Select stable classifications rather than message or presentation text.
+
+For a saved count `A` and current count `C`, lintai suppresses the group when `C <= A` and reports the unused quantity `A - C` within valid pruning coverage. If `C > A`, it reports every current finding in the group. Findings in different assertions or reason groups cannot use each other's allowances. Replacing a finding with another in the same group at the same count remains covered.
+
+## Saved format
+
+The default file is at the workspace root. Relative `--suppressions-location` paths resolve from that root. An example of `lintai.suppressions/4` is:
 
 ```json
 {
-  "src/legacy.ts": {
-    "no-async": {
-      "count": 2,
-      "entities": {
-        "src/legacy.ts::function::first": 1,
-        "src/legacy.ts::function::second": 1
-      }
+  "format": "lintai.suppressions/4",
+  "entries": [
+    {
+      "file": "src/db/users.ts",
+      "rule": "architecture.layers",
+      "assertion": { "name": "violation", "arity": 3 },
+      "groups": [
+        {
+          "namespace": "ts",
+          "key": {
+            "scheme": "lintai.typescript.subject/1",
+            "data": {
+              "category": "site",
+              "kind": "ImportDeclaration",
+              "scope": [],
+              "subject": ["module_reference", "static", "knex"]
+            }
+          },
+          "reasons": [["Target", ["s", "database"]]],
+          "description": "import from knex; Target=database",
+          "count": 2
+        },
+        {
+          "namespace": "ts",
+          "key": null,
+          "reasons": [["Target", ["s", "database"]]],
+          "description": "untracked anchors; Target=database",
+          "count": 1
+        }
+      ]
     }
-  }
+  ]
 }
 ```
 
-There is no version field. Counts must be positive integers. An optional `entities` object maps nonempty semantic keys to positive integer counts whose sum equals `count`. Unknown entry fields, malformed JSON, nonpositive counts and mismatched sums are usage errors. Output has sorted keys, two-space indentation and a trailing newline.
+Each entry has a nonempty group list; each group has a namespace, a key or explicit null, an ordered reason list, a description and a positive safe-integer count. The description helps review and is not matching authority. All groups in an entry use the same reason columns in the same order. Typed values use `s` for strings, `n` for names, `i` for integers and `f` for finite floats. Malformed files, unknown fields, duplicate entries or groups, invalid paths and unsupported formats are errors.
 
-Only error-severity `architecture_violation` diagnostics with a source location are candidates. Rule execution errors, warnings and analysis problems are never suppressed. Without `entities`, all candidates for a file and rule are suppressed when their count is at most the allowance; when it exceeds the allowance, all are reported. With `entities`, that comparison happens independently for each semantic key. Unlisted or empty diagnostic keys are reported.
+## Recording and pruning
 
-Entity keys use `EntityIdentity.SemanticKey`: the first argument of the reported row. The engine deterministically resolves its location and sorts diagnostics. Changing argument order can change suppression keys. Keys survive line moves when the backend preserves entity identity; hashes are accepted, although readable keys are recommended.
-
-The count-only format and flags follow [ESLint bulk suppressions](https://eslint.org/docs/latest/use/suppressions). Per-entity matching closes the [same-count swap gap](https://github.com/eslint/eslint/issues/21226): fixing one entity and adding another reports the new entity even when the total stays unchanged.
-
-## Commands and scope
-
-- `--suppress-all` records every current candidate.
+- `--suppress-all` records every current eligible finding.
 - Repeatable `--suppress-rule <id>` records selected rules.
-- `--prune-suppressions` lowers or removes unused counts, never raises them, and removes empty objects.
+- `--prune-suppressions` lowers or removes unused counts and never raises them.
 - `--suppressions-location <path>` selects a different file.
-- `--pass-on-unpruned-suppressions` omits unused-entry diagnostics and their failure status.
+- `--pass-on-unpruned-suppressions` omits unused-allowance diagnostics and their failure status.
 
-The three writing modes are mutually exclusive. Recording replaces entries for file/rule groups with current candidates, preserving other entries. It does not prune zero-candidate groups, following ESLint. It writes entities only when every candidate in the group has a nonempty semantic key; otherwise it writes count-only entries. Missing default files suppress nothing. An explicit missing location is an error except during recording, which may create it. This includes `lintai lock --suppressions-location`. Parent directories must exist.
+The writing modes are mutually exclusive. Recording uses current raw findings and replaces each affected file/rule/assertion entry in full with the current groups and `by` policy. Entries with no current findings are preserved; pruning is separate. Ordinary checks use each saved entry's reason columns even when the rule's policy has changed. If a saved column no longer resolves to a distinct non-anchor column, ordinary checks fail with `suppression_policy_mismatch`; re-recording an affected entry replaces it. An error in a preserved entry blocks the entire write.
 
-A suppression is unused by the amount its allowance exceeds actual candidates. Files are analyzed when they occur in snapshot `location` facts. Entries outside that set, including excluded files and files outside the selected `--files tsconfig|walk` scope, are not reported unused. Known rules must finish successfully at error severity to have their entries evaluated. Warning/off overrides and failed rules leave entries out of scope. Unknown IDs are unused only for a successful full default `lintai-rules/**/*.ts` selection, including its absolute equivalent. Custom rule selections conservatively keep unknown IDs out of scope. Pruning also removes in-scope rule entries for missing, unanalyzed disk files, following ESLint's deleted-file cleanup while preserving rule scope; external backends should provide location facts for analyzed virtual files.
+Unused counts and pruning are limited to primary-file coverage of completed, enabled error-severity rules. A finding at an auxiliary location can match an allowance, but that location grants no prune authority. Excluded or unvisited files and failed or disabled rules are not considered fixed. A selected rule failure blocks its requested write, and any rule failure blocks record-all or prune-all. Missing default files mean no allowances; an explicitly selected missing file is an error except while recording. Parent directories must exist.
 
-Recording or pruning refuses affected rule failures. Suppress-all and prune refuse any rule execution error. Suppress-rule refuses errors in selected rules and errors whose rule ID cannot be identified as a loaded rule. The file remains unchanged on refusal. An unknown suppress-rule ID is a configuration error, and the file remains unchanged.
+The whole proposal is validated before a guarded atomic replacement. A concurrent edit to the file or enforced approval blocks the write. Ordinary checks do not write. JSON output contains `unused_suppression` diagnostics; unused allowances and violations exit 1, invalid saved policy exits 2, and execution or integrity failure takes priority with exit 3.
 
-Exit priority is rule errors (3), unsuppressed error violations (1), unused suppressions (2), then clean (0). This preserves lintai's explicit violation priority; ESLint checks unused suppressions before violations. Code 2 for unused suppressions has a message naming stale entries and suggesting pruning, distinct from malformed-file usage errors.
+## Rules lock and integrations
 
-JSON stdout remains an array of reported diagnostics. Unused entries have kind `unused_suppression`, severity error, the affected rule ID, assertion `suppression`, and a location at line 1 of the affected file. `--explain` describes exceeded or unlisted entity allowances on reported diagnostics. Suppressed diagnostics are available separately through the Go result.
+`lintai lock` writes `lintai.rules-lock/4` and approves current suppression entries, using `--suppressions-location` when supplied. Each lock rule has `path`, `id`, `version`, and `artifact_hash`. A new group or increased count requires approval; lower counts and removed groups do not. Descriptions are ignored for approval. An unapproved proposed update fails before writing, and checking, recording and pruning do not regenerate the lock. Record without enforcing the prior lock, review the changes and explicitly run `lintai lock` to approve them. Protect both files with owner review. See [trust.md](../docs/trust.md).
 
-## Engine, server and plugins
+`Session.Check` applies policy to complete raw results. `engine.Options` exposes suppression location, recording, pruning and unused-allowance options; `engine.Result` exposes suppressed findings, unused allowances, the path and write status. Serve initialization and client/plugin options accept `suppressionsLocation` and `passOnUnprunedSuppressions`. Both plugins report unused entries through `lintai/analysis`.
 
-`engine.Analyze` owns application, recording and pruning, so external backends share the same implementation. `Options` adds `SuppressionsLocation`, `SuppressAll`, `SuppressRules`, `PruneSuppressions` and `PassOnUnprunedSuppressions`. `Result` adds `Suppressed`, `UnusedSuppressions`, `SuppressionsPath` and `SuppressionsWritten`.
-
-Serve initialization and client/plugin options accept `suppressionsLocation` and `passOnUnprunedSuppressions`. The client forwards them to oneshot flags or initialize parameters. Exit 2 with JSON stdout is parsed normally. Suppressed findings do not enter per-file server results. Both plugins report unused entries through `lintai/analysis`.
-
-At plugin creation, the shared client reads workspace-root `eslint-suppressions.json` and `oxlint-suppressions.json`. Any `lintai/*` keys produce an analysis problem directing users to lintai's suppression file. These files are never edited. Custom host suppression locations are not inspected. Restart the linter after changing those host files.
-
-## Rules lock
-
-`lintai lock` writes version 2 and records current suppression entries, using `--suppressions-location` when supplied. With a v2 lock, new entries, increased counts, new/increased entity counts, and replacing a locked entity map with count-only matching are integrity errors (exit 3). A locked count-only entry permits an entity map within its total allowance. Lower counts and removed entries require no re-lock. On an integrity failure the approved locked entry is used for matching, while the run still fails.
-
-Version 1 locks remain readable and contain no approved suppression entries. Adding suppressions under a version 1 lock therefore fails integrity until the lock is regenerated with 0.6.3. A recording run under a lock can write new entries and then fail integrity; review them and regenerate the lock. Protect both the suppression file and lock with CODEOWNERS and required reviews.
+At plugin creation, the shared client reads workspace-root `eslint-suppressions.json` and `oxlint-suppressions.json`. Any `lintai/*` entries produce an analysis problem directing users to lintai's suppression file. These host files are never edited. Custom host suppression locations are not inspected; restart the linter after changing its host suppression file.

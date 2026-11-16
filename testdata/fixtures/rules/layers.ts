@@ -25,4 +25,5 @@ export default rule("arch.layers")
 			!allowed(FromLayer, ToLayer).
 	`)
 	.report("violation")
+	.suppression("violation", { by: ["ToLayer"] })
 	.message((row) => `Layer ${row.FromLayer} must not import layer ${row.ToLayer} (${row.From} -> ${row.To})`);

@@ -8,21 +8,21 @@ Rules can identify the checked signature and lexical contract member at a call s
 
 This release adds public export and declaration inventories, checked-to-source declaration associations, explicit type-opacity facts, and suspension sites for `await`, `for await`, and module-scope suspension. Shared lexical ownership keeps call, reference, and suspension facts attached to the correct function or module. Rule listings expose validated versions, reported predicates, and `expectNonEmpty` declarations.
 
-Source associations report incomplete or ambiguous evidence instead of guessing. The client tracks semantic inputs and verifies changes during analysis before caching results. Library-type opacity remains explicit; accepting it also trusts any merged augmentations. See the predicate reference below and [examples.md](examples.md) for rule-author guidance.
+Source associations report incomplete or ambiguous evidence instead of guessing. The session validates producer inputs before reusing analysis; clients request checks when watched inputs change. Library-type opacity remains explicit; accepting it also trusts any merged augmentations. See the predicate reference below and [examples.md](examples.md) for rule-author guidance.
 
 ## Linear reachability predicates (0.6.4)
 
 `owner_reaches_ambient`, `owner_reaches_ambient_strict`, `owner_reaches_unresolved`, `module_reaches_ambient` and `type_reaches_incomplete` now propagate backward from their targets one edge at a time. They no longer build `calls_reach`, `calls_or_refs_reach`, `imports_reach` or `type_contains`, so their cost grows with nodes × targets instead of nodes². Their results are unchanged. The closure predicates remain for rules that need both ends of a pair. See example 16 in [examples.md](examples.md) for the same pattern with your own target relation.
 
-## Bulk suppressions (0.6.3)
+## Bulk suppressions
 
-The CLI automatically reads workspace-root `lintai-suppressions.json`. Use `--suppress-all` or repeatable `--suppress-rule <id>` to record current errors, `--prune-suppressions` to lower stale counts, `--suppressions-location <path>` to override the file, and `--pass-on-unpruned-suppressions` to ignore unused entries. Recording and pruning flags are mutually exclusive. Relative locations resolve from the workspace root. `lintai lock --suppressions-location <path>` includes that file in a version 2 rules lock.
+The CLI automatically reads workspace-root `lintai-suppressions.json` in the `lintai.suppressions/4` format. Use `--suppress-all` or repeatable `--suppress-rule <id>` to record current errors, `--prune-suppressions` to lower stale counts, `--suppressions-location <path>` to override the file, and `--pass-on-unpruned-suppressions` to ignore unused entries. Recording and pruning flags are mutually exclusive. Relative locations resolve from the workspace root. `lintai lock --suppressions-location <path>` approves that file in a `lintai.rules-lock/4` lock.
 
-Both plugin factories and `@lintai/client` accept `suppressionsLocation?: string` and `passOnUnprunedSuppressions?: boolean`. Serve initialization uses the same parameter names. Unused entries appear under `lintai/analysis`; JSON stdout remains a diagnostic array with kind `unused_suppression` for stale entries. Rule errors take exit priority (3), then violations (1), then unused suppressions (2).
+Both plugin factories and `@lintai/client` accept `suppressionsLocation?: string` and `passOnUnprunedSuppressions?: boolean`. Serve initialization uses the same parameter names. Unused entries appear under `lintai/analysis`; JSON stdout remains a diagnostic array with kind `unused_suppression` for stale entries. Rule errors take exit priority (3); violations and unused suppressions exit 1. Invalid saved policy exits 2.
 
-Go `engine.Options` adds `SuppressionsLocation`, `SuppressAll`, `SuppressRules`, `PruneSuppressions`, and `PassOnUnprunedSuppressions`. `engine.Result` exposes `Suppressed`, `UnusedSuppressions`, `SuppressionsPath`, and `SuppressionsWritten`. See the [complete specification](../specs/bulk-suppressions.md) for scope, entity keys, overlap checking and lock compatibility.
+Go `engine.Options` has `SuppressionsLocation`, `SuppressAll`, `SuppressRules`, `PruneSuppressions`, and `PassOnUnprunedSuppressions`. `engine.Result` exposes `Suppressed`, `UnusedSuppressions`, `SuppressionsPath`, and `SuppressionsWritten`. See [bulk suppressions](../specs/bulk-suppressions.md) for grouping, recording and lock approval.
 
-This page documents the rule-authoring and integration surface of LintAI 0.2.
+This page documents lintai's current rule-authoring and integration surface.
 
 ## Rule module shape and caveats
 
@@ -68,12 +68,15 @@ export default rule("arch.pure-no-effects")
 | `.facts(fn)` | pure | no | Receives `{ env, setup }`. Returns `Record<string, Array<Array<string \| number \| Name>>>`: extra extensional relations for this rule. Declare each relation in the program with `descr [extensional()]`. Each tuple must match the declared arity. Booleans are not allowed; use the presence of a fact. |
 | `.program(p)` | pure | yes | A `dl` fragment, or a function `({ env, setup }) => Fragment`. |
 | `.report(...predicates)` | — | yes | One or more predicates defined in the program. Each one needs a `Decl` that names its arguments. Each row is one violation. The first argument is the anchor. |
+| `.suppression(assertion, { by: [...] })` | — | no | Select stable non-anchor column names whose typed values distinguish suppression groups for this reported predicate. No declaration or `{}` selects none. |
 | `.expectNonEmpty(...predicates)` | — | no | After evaluation, each listed predicate (base, prelude or rule-defined) must have at least one fact. If one is empty, the rule reports a `rule_execution_error` with phase `premise` and no violations. Use this to catch a glob or layer table that stopped matching. |
 | `.message(fn)` | pure | yes | Receives `(row, ctx)`. `row` is keyed by the argument names in the reported predicate's `Decl`. Reading a key that is not an argument name throws, and the error lists the argument names. `ctx.assertion_id` is the reported predicate's name. |
 
 ### The anchor
 
 The first argument of a reported predicate is the anchor. It must be an entity ID with eligible producer-supplied location support from a base relation required by the rule. The producer location supplies the diagnostic range. A nonlocatable or ineligible anchor causes a `rule_execution_error` with phase `report`.
+
+An anchor also has one producer-supplied tracking key or a null key. The key groups recorded allowances across ordinary edits; it is separate from the analysis entity ID. `.suppression("violation", { by: ["ForbiddenSource"] })` selects typed values from named columns of the reported predicate. Each assertion may have one declaration. Unknown fields, predicates, duplicate or missing column names, and selecting the anchor column fail program analysis. Names, strings, integers and finite floats are distinct typed values. Use stable classifications, not presentation text.
 
 ### `dl` and values
 
@@ -364,7 +367,7 @@ Matching rules:
 6. **Key** (`member` only). `.K`, `?.K`, `["K"]` and `"K" in path` give key `K`. `[expr]` with a non-literal `expr` gives a dynamic site. A destructuring declaration or assignment gives one site per named property, and one more dynamic site for a rest element. Any other use of the object (argument, spread, assignment, return) gives one dynamic site.
 7. **Write.** When the keyed member is the target of an assignment, a compound assignment or `delete`, the site also has `ambient_write`.
 8. **One site per use.** When matchers overlap, only the matcher with the longest `Path` records a site. `process.env.FOO` is one `env` site.
-9. **Site identity.** The entity id is `<file>::ambient::<source>.<capability>::<key-or-*>`, with an ordinal suffix for repeats. The range covers the matched expression, including the key access.
+9. **Site identity.** Each use belongs to a producer-owned source site; its range covers the matched expression, including the key access.
 10. **Scope.** Every primary file is scanned, including module scope and class field initializers.
 
 ### Built-in sources
@@ -436,7 +439,7 @@ Caveats:
 lintai [flags]
 lintai schema
 lintai facts --workspace-root <dir> [--exclude <glob>]... [--files tsconfig|walk] [--source-links <file>] [--relation <name>]...
-lintai lock [--workspace-root <dir>] [--rules <globs>] [--lock-file <path>]
+lintai lock [--workspace-root <dir>] [--rules <globs>] [--lock-file <path>] [--suppressions-location <path>]
 lintai rules [--workspace-root <dir>] [--repo-root <dir>] [--rules <globs>] [--json]
 lintai serve
 ```
@@ -479,6 +482,10 @@ Flags for analysis:
 - `--rule-workers N`: maximum concurrent rule jobs; `0` (the default) uses `GOMAXPROCS`, and `1` runs jobs sequentially
 - `--severity <rule-id>=<level>`: the severity of the violations of one rule. `<level>` is `error` (the default for every rule), `warning` or `off`. Repeat the flag for more rules. See "Rule severity".
 - `--rules-lock <path>`: a rules lock file, relative to the workspace root, that `lintai lock` wrote. See "Rules lock".
+- `--suppress-all`, `--suppress-rule <id>`: record all or selected rules' current error findings. Repeat `--suppress-rule` for more rules.
+- `--prune-suppressions`: reduce unused allowances within completed rules' primary coverage.
+- `--suppressions-location <path>`: choose a suppressions file relative to the workspace root.
+- `--pass-on-unpruned-suppressions`: omit unused-allowance diagnostics and their failure status.
 - `--setup-sandbox auto|on|off`: run `setup()` under the Node permission model. See "Setup sandbox".
 
 Example:
@@ -543,14 +550,15 @@ Rules lock:
 
 ```json
 {
-  "version": 1,
-  "rules": {
-    "lintai-rules/no-service-imports.ts": { "hash": "sha256:..." }
-  }
+  "format": "lintai.rules-lock/4",
+  "rules": [
+    { "path": "lintai-rules/no-service-imports.ts", "id": "arch.no-service-imports", "version": 1, "artifact_hash": "sha256:..." }
+  ],
+  "approved_suppressions": []
 }
 ```
 
-The hash of a rule covers every source file that the bundler read for it: the rule file, the files it imports, the package files it imports and the `@lintai/sdk` files. Package files are recorded from the outermost `node_modules` directory, so the hash does not depend on the machine. The bundler output is not hashed. An upgrade of lintai changes every hash, so run `lintai lock` again after an upgrade.
+The artifact hash covers the rule's bundled source inputs, including imported `@lintai/sdk` code and its suppression policy. The lock also approves the current suppression groups and counts. New groups or increased counts require approval; reduced counts and removed groups do not. A recording under an enforced lock that would exceed approval fails without writing. To approve changes, record without the prior lock, review the suppression file, and explicitly regenerate the lock.
 
 With `--rules-lock`, lintai checks each rule against the lock after bundling and before `setup()`. These are `rule_execution_error` diagnostics with phase `integrity`, and exit code 3:
 
@@ -582,9 +590,9 @@ Exit codes:
 | Code | Meaning |
 |---|---|
 | 0 | No error diagnostics. |
-| 1 | At least one rule reported an error-severity violation, and every rule ran. |
-| 2 | Usage or configuration error: a bad flag, a bad `--severity` value, a bad root, a rule glob that matches no file, an invalid exclude glob, an invalid `--source-links` file. No rules ran. |
-| 3 | At least one rule could not run, a rule does not match the rules lock, or `--severity` names an unknown rule (`rule_execution_error`). Violations from the other rules are still in the output. |
+| 1 | At least one error-severity violation or unused suppression remains, and no execution failure took priority. |
+| 2 | Invalid arguments, configuration, saved format or suppression policy, including `suppression_policy_mismatch`. |
+| 3 | Integrity, setup, rule, producer, cancellation or input-instability failure. Violations from other rules may still be in the output. |
 
 CLI caveats:
 
@@ -600,7 +608,7 @@ Each plugin package exports `createLintaiPlugin(options)`. It runs `lintai rules
 
 - `lintai/<rule-id>` for each rule that `lintai rules` lists. It reports the violations of that rule. It has no options.
 - `lintai/analysis`: everything that is not a violation of a configured rule. This is every `rule_execution_error` (any phase), a failed analysis, a `serve` process that fell back to one `oneshot` run, each rule file that `lintai rules` could not load, the "save this file" message in `serve` mode, and a violation of a rule that has no linter rule in the plugin (see the caveats). Keep `lintai/analysis` at `"error"`.
-- the authoring rules `lintai/no-ambient-in-pure-phase` (forbids ambient APIs in callbacks passed to `.program(`, `.facts(` and `.message(`), `lintai/no-top-level-node-imports` and `lintai/require-rule-shape` (requires `.version(`, `.program(`, `.report(` and `.message(`, and rejects `.assert(`).
+- the authoring rules `lintai/no-ambient-in-pure-phase` (forbids ambient APIs in callbacks passed to `.program(`, `.facts(` and `.message(`), `lintai/no-top-level-node-imports` and `lintai/require-rule-shape` (requires `.version(`, `.program(`, `.report(` and `.message(`).
 
 The plugin object also has two configs:
 
@@ -625,6 +633,8 @@ type LintaiOptions = {
 	factLimit?: number;
 	ruleWorkers?: number;
 	rulesLock?: string;
+	suppressionsLocation?: string;
+	passOnUnprunedSuppressions?: boolean;
 	setupSandbox?: "auto" | "on" | "off";
 };
 ```
@@ -635,6 +645,7 @@ type LintaiOptions = {
 - `sourceLinks` is the same as the CLI `--source-links` flag. A relative path is resolved from the workspace root
 - `ruleWorkers` is the same as the CLI `--rule-workers` flag
 - `rulesLock` is the same as the CLI `--rules-lock` flag. A relative path is resolved from the workspace root
+- `suppressionsLocation` and `passOnUnprunedSuppressions` correspond to the CLI suppression options
 - `setupSandbox` is the same as the CLI `--setup-sandbox` flag
 - relative roots resolve from the directory that the linter runs in
 
@@ -789,19 +800,19 @@ CLI `--json` output emits diagnostics like:
       "endColumn": 42
     },
     "entity_identity": {
-      "semantic_key": "src/pure/a.ts::import::../services/b"
+      "semantic_key": "ts:site:..."
     },
     "provenance": {
       "snapshot_version": "abc123",
       "rule_version": 1,
-      "backend_id": "typescript"
+      "producer_namespaces": ["ts"]
     },
     "explanation": [
-      "violation(\"src/pure/a.ts::import::../services/b\",\"src/pure/a.ts\",\"src/services/b.ts\")",
-      "import_edge(\"src/pure/a.ts::import::../services/b\",\"src/pure/a.ts\",\"src/services/b.ts\",\"../services/b\")",
-      "import_internal(\"src/pure/a.ts::import::../services/b\")",
-      "glob(\"src/pure/a.ts\",\"src/pure/**\")",
-      "glob(\"src/services/b.ts\",\"src/services/**\")"
+      "violation(\"ts:site:...\",\"src/pure/a.ts\",\"src/services/b.ts\")",
+      "ts.import_edge(\"ts:site:...\",\"src/pure/a.ts\",\"src/services/b.ts\",\"../services/b\")",
+      "ts.import_internal(\"ts:site:...\")",
+      "lintai.glob(\"src/pure/a.ts\",\"src/pure/**\")",
+      "lintai.glob(\"src/services/b.ts\",\"src/services/**\")"
     ]
   }
 ]
@@ -811,13 +822,13 @@ Fields:
 
 - `rule_id`
 - `assertion_id`: the reported predicate, or `default` for execution errors
-- `diagnostic_kind`: `architecture_violation` or `rule_execution_error`
+- `diagnostic_kind`: `architecture_violation`, `rule_execution_error`, or `unused_suppression`
 - `severity`
 - `message`
 - `source_location`
-- `entity_identity`: the anchor
+- `entity_identity.semantic_key`: the producer's analysis anchor ID, not the cross-edit suppression tracking key
 - `provenance`
-- `phase`: for execution errors, one of `config`, `bundle`, `setup`, `program`, `program_parse`, `program_analysis`, `evaluation`, `premise`, `report`, `message`
+- `phase`: for execution errors, one of `config`, `bundle`, `integrity`, `setup`, `program`, `program_parse`, `program_analysis`, `evaluation`, `premise`, `report`, `message`
 - `explanation`: with `--explain`, the proof of the violation as ground atoms in depth-first order; `!atom` marks a negated premise that holds because the atom is absent
 
 Diagnostic caveat:

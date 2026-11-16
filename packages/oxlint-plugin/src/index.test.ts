@@ -61,15 +61,26 @@ const loadErrorReport = { message: loadError, line: 1, column: 1 };
 
 const bridge = { binary: "/tmp/lintai", workspaceRoot: workspace, repoRoot: workspace };
 
+// V25, V31: policy findings and worker options agree with the CLI contract.
 it("unused suppressions report through analysis rather than the generated rule", () => {
 	resetClientsForTest();
 	const options = { ...bridge, mode: "oneshot" as const, ruleWorkers: 2 };
 	const resolved = resolveBridgeOptions(options, process.cwd(), oxlintHostDefaults());
 	const unused = { ...violation, diagnostic_kind: "unused_suppression", message: "unused suppression" };
-	const dependencies = createTestDependencies({ spawnSync: (_binary, args) => {
-		if (args[0] !== "rules") deepEqual(args[args.indexOf("--rule-workers") + 1], "2");
-		return { status: args[0] === "rules" ? 0 : 2, stderr: "", stdout: JSON.stringify(args[0] === "rules" ? { rules: [{ id: "arch.no-async", path: "rule.ts" }], errors: [] } : [unused]) };
-	} });
+	const dependencies = createTestDependencies({
+		spawnSync: (_binary, args) => {
+			if (args[0] !== "rules") deepEqual(args[args.indexOf("--rule-workers") + 1], "2");
+			return {
+				status: args[0] === "rules" ? 0 : 1,
+				stderr: "",
+				stdout: JSON.stringify(
+					args[0] === "rules"
+						? { rules: [{ id: "arch.no-async", path: "rule.ts" }], errors: [] }
+						: [unused],
+				),
+			};
+		},
+	});
 	loadRuleIds(resolved, dependencies);
 	getClient(resolved, dependencies);
 	const plugin = createLintaiPlugin(options);
@@ -111,7 +122,7 @@ function withHost(argv: string[], fresh: boolean) {
 								error: undefined,
 								status: 0,
 							}
-						: { stdout: JSON.stringify(diagnostics), stderr: "", error: undefined, status: 1 },
+						: { stdout: JSON.stringify(diagnostics), stderr: "", error: undefined, status: 3 },
 				spawnServe: () => createTestProcess(),
 				readServeSync: () =>
 					createFramedResponse({
@@ -296,8 +307,8 @@ type AuthoringCases = {
 	invalid: Array<{ code: string; errors: Array<{ message: string }> }>;
 };
 
-const ruleShape = `import { rule } from "@lintai/sdk";
-export default rule("arch.x").version(1).program(() => "").report(() => []).message(() => "x");
+const ruleShape = `import { dl, rule } from "@lintai/sdk";
+export default rule("arch.x").version(1).program(dl\`Decl violation(Fn). violation(Fn) :- ts.fn_async(Fn).\`).report("violation").message(() => "x");
 `;
 
 const authoringCases: Record<keyof typeof authoringRules, AuthoringCases> = {
@@ -342,17 +353,8 @@ const authoringCases: Record<keyof typeof authoringRules, AuthoringCases> = {
 		valid: [ruleShape],
 		invalid: [
 			{
-				code: `export default rule("arch.x").version(1).program(() => "").report(() => []);`,
+				code: ruleShape.replace('.message(() => "x")', ""),
 				errors: [{ message: "Rule default export must include .message(" }],
-			},
-			{
-				code: ruleShape.replace(".message(", ".assert(() => true).message("),
-				errors: [
-					{
-						message:
-							"Rule default export must not use .assert(); write the rule as a Datalog program with .program() and .report()",
-					},
-				],
 			},
 		],
 	},

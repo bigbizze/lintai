@@ -538,10 +538,12 @@ export class LintAIClient {
 		if (result.status !== 0 && result.status !== 1 && result.status !== 2 && result.status !== 3) {
 			return fail(`lintai exited with status ${result.status ?? "null"}: ${result.stderr?.trim() ?? ""}`);
 		}
+		if (result.status === 2) {
+			return fail(result.stderr?.trim() || `lintai exited with status ${result.status}`);
+		}
 		try {
 			const diagnostics = JSON.parse(result.stdout) as Diagnostic[];
-			if ((result.status === 2 && !diagnostics.some((item) => item.diagnostic_kind === "unused_suppression")) ||
-				(result.status === 3 && !diagnostics.some((item) => item.diagnostic_kind === "rule_execution_error"))) {
+			if (result.status === 3 && !diagnostics.some((item) => item.diagnostic_kind === "rule_execution_error")) {
 				return fail(result.stderr?.trim() || `lintai exited with status ${result.status}`);
 			}
 			return indexDiagnostics(diagnostics);

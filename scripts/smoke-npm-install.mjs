@@ -98,7 +98,12 @@ const lock = spawnSync("pnpm", ["exec", "lintai", "lock", "--workspace-root", ".
 });
 assert.equal(lock.status, 0, `expected lintai lock to succeed, got ${lock.status}\n${lock.stderr}`);
 const lockFile = JSON.parse(await fs.readFile(path.join(repoDir, "lintai-rules.lock.json"), "utf8"));
-assert.match(lockFile.rules["lintai-rules/no-async.ts"]?.hash ?? "", /^sha256:[0-9a-f]{64}$/);
+assert.equal(lockFile.format, "lintai.rules-lock/4");
+assert.deepEqual(lockFile.approved_suppressions, []);
+const lockedRule = lockFile.rules.find((entry) => entry.path === "lintai-rules/no-async.ts");
+assert.equal(lockedRule?.id, "arch.no-async");
+assert.equal(lockedRule?.version, 1);
+assert.match(lockedRule?.artifact_hash ?? "", /^sha256:[0-9a-f]{64}$/);
 const lockedRunArgs = [
 	"exec",
 	"lintai",
