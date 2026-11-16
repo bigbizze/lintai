@@ -65,7 +65,18 @@ func (b *Backend) Describe() (facts.ProducerDescription, error) {
 		"files":            string(b.settings.Files),
 		"sourceLinks":      b.settings.SourceLinks,
 	}
-	return facts.DescribeSchema(b.namespace, "lintai.typescript", "typescript-producer-semantic-ownership-1", "ts-vocabulary/2", configuration, Schema())
+	description, err := facts.DescribeSchema(b.namespace, "lintai.typescript", "typescript-producer-semantic-ownership-1", "ts-vocabulary/2", configuration, Schema())
+	if err != nil {
+		return facts.ProducerDescription{}, err
+	}
+	// Package is a reserved Mangle token, so the declaration uses Pkg as its
+	// variable while the public catalog retains Appendix A's argument name.
+	for index := range description.BaseRelations {
+		if description.BaseRelations[index].Predicate.Name == b.namespace+".import_package" {
+			description.BaseRelations[index].Arguments[1].Name = "Package"
+		}
+	}
+	return description, nil
 }
 
 func (b *Backend) Collect(ctx context.Context, request backend.CollectionRequest) (facts.Batch, error) {
@@ -135,6 +146,25 @@ func (b *Backend) Collect(ctx context.Context, request backend.CollectionRequest
 	}
 	locationPredicate := facts.Predicate{Name: b.namespace + ".location", Arity: 6}
 	if _, ok := metadata[locationPredicate]; ok {
+		descriptions := make(map[string]string)
+		for _, fn := range snapshot.Functions {
+			description := snapshot.Tracking[fn.SemanticKey].Description
+			if strings.HasPrefix(description, "function") {
+				description = "signature" + strings.TrimPrefix(description, "function")
+			} else if description != "" {
+				description = "signature " + description
+			} else {
+				description = "signature"
+			}
+			for _, observation := range fn.SignatureObservations {
+				descriptions[lintaiapi.SignatureID(fn.SemanticKey, observation, b.namespace)] = description
+			}
+		}
+		for _, item := range snapshot.Types {
+			if item.Description != "" {
+				descriptions[item.ID] = item.Description
+			}
+		}
 		for _, item := range items {
 			if item.Relation != facts.LocationRelation || len(item.Values) != 6 {
 				continue
@@ -147,6 +177,9 @@ func (b *Backend) Collect(ctx context.Context, request backend.CollectionRequest
 			toInt := func(value facts.Value) int { return int(value.Number) }
 			support := snapshot.Tracking[item.Values[0].String]
 			description := support.Description
+			if description == "" {
+				description = descriptions[item.Values[0].String]
+			}
 			if description == "" {
 				description = "TypeScript " + strings.SplitN(item.Values[0].String, ":", 2)[0]
 			}

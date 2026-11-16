@@ -421,6 +421,11 @@ type configGroup struct {
 	PrimaryFiles []string
 }
 
+type groupProgram struct {
+	program  *compiler.Program
+	resolver module.Resolver
+}
+
 type extractor struct {
 	sites                       map[string]SourceSite
 	siteConflict                string
@@ -508,6 +513,7 @@ type semanticOperations struct {
 	sourceRecovery   bool
 	trackingCache    map[string]TrackingSupport
 	trackingPrevious map[string]TrackingSupport
+	moduleFiles      map[string]bool
 }
 
 func operationsForRelations(relations []string) semanticOperations {
@@ -755,8 +761,28 @@ func buildSnapshotAttempt(ctx context.Context, req BuildSnapshotRequest) (*Snaps
 	operations.trackingCache = req.trackingCache
 	operations.trackingPrevious = req.trackingPrevious
 	merged.trackingCache = req.trackingCache
-	for _, group := range groups {
-		partial, groupMissing, err := buildSnapshotForGroup(ctx, host, workspaceRoot, files, group, req.AmbientMatchers, sourceEntries, configs, auxiliary, entryResolutions, timing, operations)
+	// Determine the final module domain before classifying calls. A file can
+	// be visible as an import in one program but excluded by its own config.
+	programs := make([]groupProgram, len(groups))
+	if req.TsconfigFiles {
+		operations.moduleFiles = make(map[string]bool)
+	}
+	for index, group := range groups {
+		programs[index], err = prepareGroupProgram(host, workspaceRoot, group, timing)
+		if err != nil {
+			return nil, err
+		}
+		if req.TsconfigFiles {
+			for _, file := range group.PrimaryFiles {
+				if group.Config == nil || programs[index].program.GetSourceFile(tspath.RootedFilePathFromAbsolute(file)) != nil {
+					operations.moduleFiles[file] = true
+				}
+			}
+		}
+	}
+	for index, group := range groups {
+		partial, groupMissing, err := buildSnapshotForGroup(ctx, host, workspaceRoot, files, group, programs[index], req.AmbientMatchers, sourceEntries, configs, auxiliary, entryResolutions, timing, operations)
+		programs[index] = groupProgram{}
 		if err != nil {
 			return nil, err
 		}
@@ -774,7 +800,12 @@ func buildSnapshotAttempt(ctx context.Context, req BuildSnapshotRequest) (*Snaps
 			fallbackFiles = append(fallbackFiles, file)
 		}
 		slices.Sort(fallbackFiles)
-		partial, _, err := buildSnapshotForGroup(ctx, host, workspaceRoot, files, configGroup{PrimaryFiles: fallbackFiles}, req.AmbientMatchers, sourceEntries, configs, auxiliary, entryResolutions, timing, operations)
+		fallback := configGroup{PrimaryFiles: fallbackFiles}
+		program, err := prepareGroupProgram(host, workspaceRoot, fallback, timing)
+		if err != nil {
+			return nil, err
+		}
+		partial, _, err := buildSnapshotForGroup(ctx, host, workspaceRoot, files, fallback, program, req.AmbientMatchers, sourceEntries, configs, auxiliary, entryResolutions, timing, operations)
 		if err != nil {
 			return nil, err
 		}
@@ -973,14 +1004,14 @@ func keepRetainedSemantics(snap *Snapshot) {
 	snap.ExportSites = slices.DeleteFunc(snap.ExportSites, func(item ExportSiteFact) bool { return !sites[item.ID] })
 }
 
-func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, workspaceRoot string, requestedFiles []string, group configGroup, ambientMatchers []AmbientMatcher, sourceEntries []configuredSourceEntry, configs *configCache, auxiliary *auxiliarySourcePrograms, resolutions *sourceEntryResolutions, timing *extractTiming, demand ...semanticOperations) (*Snapshot, []string, error) {
+func prepareGroupProgram(host compiler.CompilerHost, workspaceRoot string, group configGroup, timing *extractTiming) (groupProgram, error) {
 	programStarted := time.Now()
 	timing.programs++
 	config := group.Config
 	if config == nil {
 		synthetic, err := syntheticConfig(host, workspaceRoot, group.PrimaryFiles)
 		if err != nil {
-			return nil, nil, err
+			return groupProgram{}, err
 		}
 		config = synthetic
 	}
@@ -996,12 +1027,19 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 		},
 	})
 	if diags := program.GetConfigFileParsingDiagnostics(); len(diags) > 0 {
-		return nil, nil, fmt.Errorf("tsgo config diagnostics: %s", joinDiagnostics(diags))
+		return groupProgram{}, fmt.Errorf("tsgo config diagnostics: %s", joinDiagnostics(diags))
 	}
 	program.BindSourceFiles()
+	timing.program += time.Since(programStarted)
+	return groupProgram{program: program, resolver: resolver}, nil
+}
+
+func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, workspaceRoot string, requestedFiles []string, group configGroup, prepared groupProgram, ambientMatchers []AmbientMatcher, sourceEntries []configuredSourceEntry, configs *configCache, auxiliary *auxiliarySourcePrograms, resolutions *sourceEntryResolutions, timing *extractTiming, demand ...semanticOperations) (*Snapshot, []string, error) {
+	program, resolver := prepared.program, prepared.resolver
+	checkerStarted := time.Now()
 	typeChecker, done := program.GetTypeChecker(ctx)
 	defer done()
-	timing.program += time.Since(programStarted)
+	timing.program += time.Since(checkerStarted)
 	walkStarted := time.Now()
 	defer func() { timing.walk += time.Since(walkStarted) }()
 
@@ -2036,6 +2074,9 @@ func (e *extractor) recordRuntimeCall(source callSource, node *ast.Node) string 
 	semanticKey := e.registerSite(node, source)
 	target, declaration := e.resolveCallTarget(node)
 	location := e.nodeLocation(file, node)
+	if target != nil && e.operations.moduleFiles != nil && !e.operations.moduleFiles[normalizeSlash(filepath.Join(e.workspaceRoot, filepath.FromSlash(target.FilePath)))] {
+		return e.recordUnresolvedCall(source, node)
+	}
 	workspaceClass := e.constructedWorkspaceClass(node)
 	if workspaceClass != nil && hasInstanceInitializer(workspaceClass) {
 		return e.recordUnresolvedCall(source, node)
@@ -2603,6 +2644,28 @@ func (e *extractor) moduleParseError(file *ast.SourceFile, relative string) (Par
 		e.sites = make(map[string]SourceSite)
 	}
 	e.sites[semanticKey] = SourceSite{ID: semanticKey, File: relative, Owner: moduleID(relative), Range: e.location(file, first.Pos(), first.End())}
+	if e.tracking == nil {
+		e.tracking = make(map[string]TrackingSupport)
+	}
+	start, end := max(0, first.Pos()), min(len(file.Text()), first.End())
+	if start > len(file.Text()) {
+		start = len(file.Text())
+	}
+	if end <= start {
+		end = min(len(file.Text()), start+120)
+	}
+	preview := strings.TrimSpace(file.Text()[start:end])
+	if line, _, found := strings.Cut(preview, "\n"); found {
+		preview = line
+	}
+	if len(preview) > 120 {
+		preview = preview[:120]
+	}
+	description := "parse error"
+	if preview != "" {
+		description += fmt.Sprintf(": %q", preview)
+	}
+	e.tracking[semanticKey] = TrackingSupport{Description: description}
 	return ParseError{
 		EntityID:    semanticKey,
 		SemanticKey: semanticKey,

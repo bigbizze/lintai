@@ -129,6 +129,26 @@ func trackingPreview(node *ast.Node) string {
 	return preview
 }
 
+func trackingDescription(category, name string, scope []any, preview string) string {
+	var names []string
+	for _, raw := range scope {
+		part := raw.([]any)
+		if descriptor, ok := part[1].([]any); ok {
+			text := descriptor[1].(string)
+			if descriptor[0] == "private" {
+				text = "#" + text
+			}
+			names = append(names, text)
+		}
+	}
+	names = append(names, name)
+	description := fmt.Sprintf("%s %q", category, strings.Join(names, "."))
+	if preview != "" {
+		description += fmt.Sprintf(": %q", preview)
+	}
+	return description
+}
+
 func (e *extractor) putTracking(id, category, kind string, scope []any, subject []any, name, preview string) {
 	if id == "" {
 		return
@@ -139,10 +159,7 @@ func (e *extractor) putTracking(id, category, kind string, scope []any, subject 
 	if existing, exists := e.tracking[id]; exists && existing.Data != nil {
 		return
 	}
-	description := fmt.Sprintf("%s %q", category, name)
-	if preview != "" {
-		description += fmt.Sprintf(": %q", preview)
-	}
+	description := trackingDescription(category, name, scope, preview)
 	data := map[string]any{"category": category, "kind": kind, "scope": scope, "subject": subject}
 	e.tracking[id] = TrackingSupport{Description: description, Data: data}
 	e.trackingKeyBuilds++
@@ -157,7 +174,11 @@ func (e *extractor) trackNamed(id, category string, node *ast.Node) {
 	if name == nil {
 		return
 	}
-	e.putTracking(id, category, syntaxKindName(node), trackingScope(node), []any{"named", name, trackingPlacement(node)}, name[1].(string), trackingPreview(node))
+	display := name[1].(string)
+	if name[0] == "private" {
+		display = "#" + display
+	}
+	e.putTracking(id, category, syntaxKindName(node), trackingScope(node), []any{"named", name, trackingPlacement(node)}, display, trackingPreview(node))
 	e.rememberTracking(cacheKey, id)
 }
 

@@ -110,6 +110,8 @@ type TypeFact struct {
 	Incomplete []string
 	Display    string
 	Location   *SourceLocation
+	// Description is captured source context for a locatable type anchor.
+	Description string
 }
 
 // typeShape is the classification of one checker type.
@@ -236,6 +238,9 @@ func (e *extractor) newTypeFact(t *checker.Type, id string, display string) *Typ
 		fact.OriginKind = shape.originKind
 	}
 	fact.Location = e.typeLocation(t)
+	if fact.Location != nil && shape.nameDecl != nil {
+		fact.Description = trackingDescription("type", shape.name, trackingScope(shape.nameDecl), trackingPreview(shape.nameDecl))
+	}
 	if e.isTruncated(t) {
 		fact.Kind = TypeKindOther
 		fact.Incomplete = []string{IncompleteTruncated}
@@ -998,8 +1003,12 @@ func mergeTypes(existing []TypeFact, incoming []TypeFact) []TypeFact {
 func mergeTypeFact(left TypeFact, right TypeFact) TypeFact {
 	display := min(left.Display, right.Display)
 	location := left.Location
+	description := left.Description
 	if location == nil || (right.Location != nil && locationLess(*right.Location, *location)) {
 		location = right.Location
+		description = right.Description
+	} else if right.Location != nil && *right.Location == *location && right.Description != "" && (description == "" || right.Description < description) {
+		description = right.Description
 	}
 	if !sameStructure(left, right) {
 		kind := left.Kind
@@ -1022,6 +1031,7 @@ func mergeTypeFact(left TypeFact, right TypeFact) TypeFact {
 	}
 	left.Display = display
 	left.Location = location
+	left.Description = description
 	return left
 }
 
@@ -1030,6 +1040,7 @@ func mergeTypeFact(left TypeFact, right TypeFact) TypeFact {
 func sameStructure(left TypeFact, right TypeFact) bool {
 	left.Display, right.Display = "", ""
 	left.Location, right.Location = nil, nil
+	left.Description, right.Description = "", ""
 	return reflect.DeepEqual(left, right)
 }
 

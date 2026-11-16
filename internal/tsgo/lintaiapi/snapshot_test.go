@@ -47,25 +47,34 @@ export const result = [1].map((x) => x);
 		}
 		return string(encoded)
 	}
-	named := func(s *Snapshot) string {
+	named := func(s *Snapshot, name string) string {
 		for _, fn := range s.Functions {
-			if fn.Name == "named" {
+			if fn.Name == name {
 				return data(s, fn.SemanticKey)
 			}
 		}
-		t.Fatal("missing named function")
+		t.Fatalf("missing function %q", name)
 		return ""
 	}
-	importKey := func(s *Snapshot) string {
+	importKey := func(s *Snapshot, specifier string) string {
 		for _, edge := range s.ImportEdges {
-			if edge.Specifier == "./dep" {
+			if edge.Specifier == specifier {
 				return data(s, edge.SemanticKey)
 			}
 		}
-		t.Fatal("missing import")
+		t.Fatalf("missing import %q", specifier)
 		return ""
 	}
-	if named(first) == "" || importKey(first) == "" {
+	declarationKey := func(s *Snapshot, name string) string {
+		for _, declaration := range s.Declarations {
+			if declaration.Name == name && declaration.Kind == "variable" {
+				return data(s, declaration.ID)
+			}
+		}
+		t.Fatalf("missing variable declaration %q", name)
+		return ""
+	}
+	if named(first, "named") == "" || importKey(first, "./dep") == "" {
 		t.Fatal("missing named or module-reference key")
 	}
 	var distinct = make(map[string]bool)
@@ -73,6 +82,9 @@ export const result = [1].map((x) => x);
 	for _, fn := range first.Functions {
 		if strings.HasPrefix(fn.Name, "Sample.") {
 			distinct[data(first, fn.SemanticKey)] = true
+			if !strings.Contains(first.Tracking[fn.SemanticKey].Description, "Sample.") {
+				t.Errorf("member description omits its readable scope: %q", first.Tracking[fn.SemanticKey].Description)
+			}
 		}
 		if strings.HasPrefix(fn.Name, "<anonymous@") {
 			anonymous = true
@@ -99,8 +111,10 @@ export const result = [1].map((x) => x);
 			t.Fatal("ordinary site received a key")
 		}
 	}
-	changed := strings.Replace(source, "{ value }", "{ value as renamed }", 1)
+	changed := strings.Replace(source, "{ value }", "{ type value as renamed }", 1)
 	changed = strings.Replace(changed, "return 1;", "return 2;", 1)
+	changed = strings.Replace(changed, "[1].map", "[2].map", 1)
+	changed = "// unrelated insertion\nimport \"./unrelated\";\n" + changed
 	if err := os.WriteFile(filepath.Join(root, "src/main.ts"), []byte(changed), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -108,9 +122,62 @@ export const result = [1].map((x) => x);
 	if err != nil {
 		t.Fatal(err)
 	}
-	if named(first) != named(third) || importKey(first) != importKey(third) {
-		t.Fatal("body edit or import binding change altered its tracking key")
+	if named(first, "named") != named(third, "named") || declarationKey(first, "result") == "" || declarationKey(first, "result") != declarationKey(third, "result") || importKey(first, "./dep") != importKey(third, "./dep") {
+		t.Fatal("movement, body/initializer edit, or import binding/type-only change altered its tracking key")
 	}
+	changed = strings.Replace(changed, "function named()", "function renamed()", 1)
+	changed = strings.Replace(changed, "\"./dep\"", "\"./new-dep\"", 1)
+	if err := os.WriteFile(filepath.Join(root, "src/main.ts"), []byte(changed), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fourth, err := BuildSnapshotReusingTracking(context.Background(), request, third)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if named(first, "named") == named(fourth, "renamed") || importKey(first, "./dep") == importKey(fourth, "./new-dep") {
+		t.Fatal("rename or module specifier change kept its old tracking key")
+	}
+	t.Run("parse error", func(t *testing.T) {
+		root := t.TempDir()
+		files := writeWorkspace(t, root, map[string]string{"src/bad.ts": "export const = ;\n"})
+		snapshot, err := BuildSnapshotReusingTracking(context.Background(), BuildSnapshotRequest{WorkspaceRoot: root, Files: files}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(snapshot.ParseErrors) == 0 {
+			t.Fatal("missing parse-error site")
+		}
+		support := snapshot.Tracking[snapshot.ParseErrors[0].SemanticKey]
+		if support.Data != nil || !strings.HasPrefix(support.Description, "parse error:") {
+			t.Fatalf("parse-error tracking support = %+v", support)
+		}
+	})
+	t.Run("auxiliary source declaration", func(t *testing.T) {
+		root := t.TempDir()
+		writeWorkspace(t, root, map[string]string{
+			"app/main.ts":       `import { parse } from "../dist/index"; export const value = parse("x");`,
+			"dist/index.d.ts":   `export declare function parse(value: string): string;`,
+			"source/index.ts":   `export function parse(value: string): string { return value; }`,
+			"source-links.json": `{"version":1,"entries":[{"checkedEntry":"dist/index.d.ts","sourceEntry":"source/index.ts"}]}`,
+		})
+		request := BuildSnapshotRequest{WorkspaceRoot: root, Files: []string{filepath.Join(root, "app/main.ts")}, SourceLinks: "source-links.json"}
+		cold, err := BuildSnapshotReusingTracking(context.Background(), request, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		warm, err := BuildSnapshotReusingTracking(context.Background(), request, cold)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(cold.SourceBindings) != 1 || len(cold.SourceBindings[0].SourceDeclarations) != 1 {
+			t.Fatalf("missing auxiliary declaration: %+v", cold.SourceBindings)
+		}
+		id := cold.SourceBindings[0].SourceDeclarations[0]
+		if data(cold, id) == "" || data(cold, id) != data(warm, id) || warm.trackingKeyBuilds != 0 {
+			t.Fatalf("auxiliary tracking was not reused: cold=%q warm=%q builds=%d", data(cold, id), data(warm, id), warm.trackingKeyBuilds)
+		}
+		t.Logf("auxiliary tracking key constructions: cold=%d, no-change=%d", cold.trackingKeyBuilds, warm.trackingKeyBuilds)
+	})
 }
 
 func TestBuildSnapshotUsesNearestTsConfigForAliasImports(t *testing.T) {

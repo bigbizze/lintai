@@ -267,7 +267,7 @@ Decl import_package(Site, Pkg)
     arg(Site, "Site"),
     arg_role(Site, "entity"),
     arg_report_support(Site, "required"),
-    arg(Pkg, "Pkg")
+    arg(Pkg, "Package")
   ].
 
 Decl import_type_only(Site)

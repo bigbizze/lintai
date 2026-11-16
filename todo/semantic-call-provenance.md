@@ -1,6 +1,6 @@
 # Declared call provenance implementation
 
-Status: implemented in 0.8.0. The detailed requirements below remain authoritative. Final review and CI passed before merge.
+Status: historical 0.8.0 implementation record. The current contracts and relation vocabulary are in [the refactor specification](../specs/lintai-refactor-implementation-r6.md); older requirements and observations below describe that earlier implementation.
 
 This specification implements section 7 of [semantic extraction completeness](../specs/semantic-extraction-completeness.md#7-declared-call-provenance). It uses the declaration identity contract in [semantic source associations](../specs/semantic-source-associations.md#2-entity-identity-and-locations). It adds evidence about the declaration selected by the checker, not evidence about which runtime implementation executes.
 

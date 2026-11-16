@@ -6,16 +6,20 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"codeberg.org/TauCeti/mangle-go/factstore"
+	"github.com/bigbizze/lintai/runtime"
 )
 
 var (
-	dlBlock      = regexp.MustCompile("(?s)\\.program\\((?:\\([^)]*\\)\\s*=>\\s*)?dl`(.*?)`")
-	quoted       = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
-	comment      = regexp.MustCompile(`(?m)#.*$`)
-	interpolated = regexp.MustCompile(`\$\{[^}]*\}`)
-	clauseEnd    = regexp.MustCompile(`\.(?:\s|$)`)
-	relationName = regexp.MustCompile(`^(?:Decl\s+)?([a-z_][A-Za-z0-9_]*)\s*\(`)
-	docSources   = []string{
+	dlBlock               = regexp.MustCompile("(?s)\\.program\\((?:\\([^)]*\\)\\s*=>\\s*)?dl`(.*?)`\\s*\\)")
+	quoted                = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
+	comment               = regexp.MustCompile(`(?m)#.*$`)
+	interpolated          = regexp.MustCompile(`\$\{[^}]*\}`)
+	templateInterpolation = regexp.MustCompile("\\$\\{`[^\\n]*?`\\}")
+	clauseEnd             = regexp.MustCompile(`\.(?:\s|$)`)
+	relationName          = regexp.MustCompile(`^(?:Decl\s+)?([a-z_][A-Za-z0-9_]*)\s*\(`)
+	docSources            = []string{
 		"README.md",
 		"docs/api.md",
 		"docs/examples.md",
@@ -31,6 +35,7 @@ var (
 // reader who copies an example gets a program that declares its relations.
 func TestDocumentedProgramsDeclareTheirRelations(t *testing.T) {
 	checked := 0
+	catalog, declarations := typeScriptCatalogForTest(t)
 	for _, path := range docSources {
 		data, err := os.ReadFile(filepath.Join("..", path))
 		if err != nil {
@@ -60,6 +65,16 @@ func TestDocumentedProgramsDeclareTheirRelations(t *testing.T) {
 				checked++
 				if !declared[head] {
 					t.Errorf("%s: %s is defined without a Decl", path, head)
+				}
+			}
+			// The historical structural-type proposal describes an earlier
+			// vocabulary. Live examples must also prepare against today's catalog.
+			if path != "specs/structural-type-facts.md" {
+				program := templateInterpolation.ReplaceAllString(block[1], `"src/example/**"`)
+				program = interpolated.ReplaceAllString(program, `"src/example/**"`)
+				_, err := evaluateProgram(factstore.NewMultiIndexedArrayInMemoryStore(), catalog, declarations, nil, nil, []string{"ts"}, runtime.ProgramOutput{Text: program}, heads, nil, evalOptions{})
+				if err != nil {
+					t.Errorf("%s: example does not prepare (%s): %v", path, err.phase, err)
 				}
 			}
 		}
