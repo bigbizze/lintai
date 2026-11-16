@@ -34,15 +34,16 @@ const (
 )
 
 type BuildSnapshotRequest struct {
-	WorkspaceRoot   string
-	Files           []string
-	ExactFiles      []string
-	ScopeOptions    *workspace.ScopeOptions
-	ConfigPath      string
-	ConfigDigest    string
-	ConfigPresent   bool
-	SourceLinks     string
-	AmbientMatchers []AmbientMatcher
+	WorkspaceRoot      string
+	Files              []string
+	ExactFiles         []string
+	ScopeOptions       *workspace.ScopeOptions
+	ConfigPath         string
+	ConfigDigest       string
+	ConfigPresent      bool
+	SourceLinks        string
+	AmbientMatchers    []AmbientMatcher
+	PreviousValidation *InputValidation
 	// TsconfigFiles limits the modules to the files that tsc compiles. A
 	// file under a tsconfig.json is a module only when the program of that
 	// tsconfig contains it, as a root file or as an imported file. When it
@@ -385,6 +386,9 @@ type Snapshot struct {
 	// Inputs includes program, configuration, and association inputs, including
 	// absent paths. ConfigFiles remains the list of present configs.
 	Inputs []SnapshotInput
+	// WatchHints include captured inputs and directories whose membership
+	// selects the primary scope. They request checks but do not prove validity.
+	WatchHints []string
 	// ConfigAdjustments are the compiler options that lintai changed because
 	// TypeScript 7 rejects them, sorted by config path and option.
 	ConfigAdjustments []ConfigAdjustment
@@ -394,7 +398,9 @@ type Snapshot struct {
 	Scope        any
 	ContextPaths []string
 	Validation   validationStats
-	capture      *resolutionInputFS
+	// Validity retains only the observations needed to validate this generation.
+	Validity *InputValidity
+	capture  *resolutionInputFS
 }
 
 type configGroup struct {
@@ -512,6 +518,9 @@ type extractTiming struct {
 
 func BuildSnapshot(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, error) {
 	var total validationStats
+	if req.PreviousValidation != nil {
+		total = req.PreviousValidation.stats
+	}
 	defer func() { printValidationTrace(validationStats{}, total) }()
 	for attempt := 0; attempt < 2; attempt++ {
 		attemptReq := req
@@ -610,6 +619,16 @@ func BuildSnapshot(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, er
 				}
 				snapshot.Inputs = uniqueSnapshotInputs(snapshot.Inputs)
 			}
+			for _, input := range snapshot.Inputs {
+				snapshot.WatchHints = append(snapshot.WatchHints, input.Path)
+			}
+			if plan != nil {
+				for _, directory := range plan.Membership {
+					snapshot.WatchHints = append(snapshot.WatchHints, directory.Path)
+				}
+			}
+			slices.Sort(snapshot.WatchHints)
+			snapshot.WatchHints = slices.Compact(snapshot.WatchHints)
 			if plan != nil {
 				capturedRevision = combineInputRevisions(capturedRevision, plan.Revision)
 				snapshot.Scope = scopeIdentity(plan, snapshot, req.TsconfigFiles)
@@ -623,6 +642,7 @@ func BuildSnapshot(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, er
 			}
 			snapshot.InputRevision = capturedRevision
 			snapshot.Validation = total
+			snapshot.Validity = retainInputValidity(snapshot.capture, plan, req)
 			snapshot.capture = nil
 			return snapshot, nil
 		}

@@ -90,11 +90,20 @@ func TestTwoTypeScriptProducersKeepConstructionSettingsIndependent(t *testing.T)
 	if got := collectModules(tsconfigProducer); !slices.Equal(got, []string{"ts:src/one.ts"}) {
 		t.Fatalf("tsconfig producer modules = %v", got)
 	}
+	generation := tsconfigProducer.current
 	if got := collectModules(walkProducer); !slices.Equal(got, []string{"ts:src/one.ts", "ts:src/two.ts"}) {
 		t.Fatalf("walk producer modules = %v", got)
 	}
 	if got := collectModules(tsconfigProducer); !slices.Equal(got, []string{"ts:src/one.ts"}) {
 		t.Fatalf("second producer changed the first producer's settings: %v", got)
+	}
+	if tsconfigProducer.current != generation {
+		t.Fatal("V20: unchanged producer generation was extracted again")
+	}
+	writeWorkspaceFile(t, root, "src/one.ts", "export const one = 2;\n")
+	collectModules(tsconfigProducer)
+	if tsconfigProducer.current == generation {
+		t.Fatal("V18: changed content did not replace the producer generation")
 	}
 	if foo, prefixedFoo := producerEntityID("foo.ts"), producerEntityID("ts:foo.ts"); foo == prefixedFoo || foo != "ts:foo.ts" || prefixedFoo != "ts:ts:foo.ts" {
 		t.Fatalf("producer-local entity IDs are not uniquely namespaced: %q and %q", foo, prefixedFoo)
@@ -303,13 +312,14 @@ export default rule("test.filtered-callback").version(1)
     indeterminate(Fn, Name) :- ts.fn(Fn, _, Name), Name = "escape", ts.fn_reaches_unresolved(Fn).`+"`"+`)
   .report("indeterminate").message((row) => row.Name);
 `)
-	items, err := engine.New(New()).Run(context.Background(), engine.Options{
+	result, err := engine.Open(engine.Options{}, New()).Check(context.Background(), engine.Options{
 		RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: root,
 		RuleGlobs: []string{"lintai-rules/*.ts"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	items := result.Diagnostics
 	if len(items) != 1 || items[0].RuleID != "test.filtered-callback" || items[0].Message != "escape" {
 		t.Fatalf("filtered callback strict rule = %+v, want escape indeterminate", items)
 	}

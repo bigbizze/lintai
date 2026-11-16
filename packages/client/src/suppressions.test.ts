@@ -19,6 +19,7 @@ test("oneshot forwards suppression options and parses exit 2 diagnostics", () =>
 			workspaceRoot: "/workspace",
 			suppressionsLocation: "counts.json",
 			passOnUnprunedSuppressions: true,
+			ruleWorkers: 2,
 		},
 		"/workspace",
 		{ defaultMode: "oneshot", reportProblemsOnce: true },
@@ -37,6 +38,7 @@ test("oneshot forwards suppression options and parses exit 2 diagnostics", () =>
 			spawnSync: (_binary, args) => {
 				assert.equal(args[args.indexOf("--suppressions-location") + 1], "/workspace/counts.json");
 				assert.ok(args.includes("--pass-on-unpruned-suppressions"));
+				assert.equal(args[args.indexOf("--rule-workers") + 1], "2");
 				return { status: 2, stdout: JSON.stringify([diagnostic]), stderr: "unused suppressions" };
 			},
 		}),
@@ -50,6 +52,8 @@ test("oneshot forwards suppression options and parses exit 2 diagnostics", () =>
 });
 
 test("serve forwards suppression initialization parameters", () => {
+	assert.throws(() => resolveBridgeOptions({ ruleWorkers: -1 }, "/workspace", { defaultMode: "serve", reportProblemsOnce: false }), /ruleWorkers/);
+	assert.throws(() => resolveBridgeOptions({ ruleWorkers: 1.5 }, "/workspace", { defaultMode: "serve", reportProblemsOnce: false }), /ruleWorkers/);
 	const child = createTestProcess();
 	const options = resolveBridgeOptions(
 		{
@@ -57,6 +61,7 @@ test("serve forwards suppression initialization parameters", () => {
 			workspaceRoot: "/workspace",
 			suppressionsLocation: "counts.json",
 			passOnUnprunedSuppressions: true,
+			ruleWorkers: 2,
 		},
 		"/workspace",
 		{ defaultMode: "serve", reportProblemsOnce: false },
@@ -79,6 +84,7 @@ test("serve forwards suppression initialization parameters", () => {
 		const request = JSON.parse(frame.slice(frame.indexOf("\r\n\r\n") + 4));
 		assert.equal(request.params.suppressionsLocation, "/workspace/counts.json");
 		assert.equal(request.params.passOnUnprunedSuppressions, true);
+		assert.equal(request.params.ruleWorkers, 2);
 	} finally {
 		client.dispose();
 	}

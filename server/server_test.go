@@ -22,7 +22,8 @@ type fakeAnalyzer struct {
 	calls   []engine.Options
 }
 
-func (f *fakeAnalyzer) Analyze(_ context.Context, options engine.Options) (engine.Result, error) {
+func (f *fakeAnalyzer) Check(_ context.Context, requests ...engine.Options) (engine.Result, error) {
+	options := requests[0]
 	f.calls = append(f.calls, options)
 	if len(f.errors) > 0 {
 		err := f.errors[0]
@@ -43,6 +44,8 @@ func (f *fakeAnalyzer) Analyze(_ context.Context, options engine.Options) (engin
 	}
 	return result, nil
 }
+
+func (f *fakeAnalyzer) Close() error { return nil }
 
 func TestServerInitializeAndFileDiagnostics(t *testing.T) {
 	analyzer := &fakeAnalyzer{
@@ -76,6 +79,7 @@ func TestServerInitializeAndFileDiagnostics(t *testing.T) {
 		RuleGlobs:     []string{"lintai-rules/**/*.ts"},
 		SourceLinks:   "source-links.json",
 		Env:           map[string]any{"mode": "test"},
+		RuleWorkers:   2,
 	})
 	writeRequest(t, input, 2, "diagnostics/file", FileDiagnosticsParams{File: "/src/example.ts"})
 	output := &bytes.Buffer{}
@@ -118,6 +122,9 @@ func TestServerInitializeAndFileDiagnostics(t *testing.T) {
 	}
 	if analyzer.calls[0].AssetRoot != "/assets" {
 		t.Fatalf("expected asset root to be propagated, got %q", analyzer.calls[0].AssetRoot)
+	}
+	if analyzer.calls[0].RuleWorkers != 2 {
+		t.Fatalf("ruleWorkers not forwarded: %+v", analyzer.calls[0])
 	}
 	if factoryParams.SourceLinks != "source-links.json" {
 		t.Fatalf("expected producer settings to reach construction, got %q", factoryParams.SourceLinks)
@@ -173,9 +180,12 @@ func TestServerReanalyzeSwapsCachedState(t *testing.T) {
 		WorkspaceRoot: "/workspace",
 		RuleGlobs:     []string{"lintai-rules/**/*.ts"},
 		Env:           map[string]any{},
+		RuleWorkers:   2,
 	})
-	writeRequest(t, input, 2, "reanalyze", ReanalyzeParams{Reason: "test"})
-	writeRequest(t, input, 3, "diagnostics/file", FileDiagnosticsParams{File: "src/example.ts"})
+	one := 1
+	writeRequest(t, input, 2, "reanalyze", ReanalyzeParams{Reason: "test", RuleWorkers: &one})
+	writeRequest(t, input, 3, "reanalyze", ReanalyzeParams{Reason: "default again"})
+	writeRequest(t, input, 4, "diagnostics/file", FileDiagnosticsParams{File: "src/example.ts"})
 	output := &bytes.Buffer{}
 
 	if err := New(analyzer).Serve(context.Background(), input, output); err != nil {
@@ -193,6 +203,12 @@ func TestServerReanalyzeSwapsCachedState(t *testing.T) {
 	decodeResult(t, reanalyzeResponse.Result, &reanalyzeResult)
 	if reanalyzeResult.SnapshotVersion != "snap-2" {
 		t.Fatalf("expected snapshot swap, got %+v", reanalyzeResult)
+	}
+	if response := readResponse(t, reader); response.Error != nil {
+		t.Fatalf("default reanalyze failed: %+v", response.Error)
+	}
+	if len(analyzer.calls) != 3 || analyzer.calls[0].RuleWorkers != 2 || analyzer.calls[1].RuleWorkers != 1 || analyzer.calls[2].RuleWorkers != 2 {
+		t.Fatalf("worker request override did not preserve session default: %+v", analyzer.calls)
 	}
 
 	fileResponse := readResponse(t, reader)

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -18,7 +19,6 @@ import (
 	"github.com/bigbizze/lintai/bundle"
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/engine"
-	"github.com/bigbizze/lintai/facts"
 	"github.com/bigbizze/lintai/internal/tsgo/lintaiapi"
 	"github.com/bigbizze/lintai/internal/workspace"
 	"github.com/bigbizze/lintai/server"
@@ -67,6 +67,8 @@ func exitCode(err error, stderr io.Writer) int {
 func run(ctx context.Context, args []string, stdout io.Writer) error {
 	if len(args) > 0 {
 		switch args[0] {
+		case "check":
+			return runOnce(ctx, args[1:], stdout)
 		case "serve":
 			return runServe(ctx)
 		case "schema":
@@ -140,67 +142,64 @@ func runFacts(ctx context.Context, args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	allAllowed := make(map[string]struct{})
-	lines := make([]string, 0)
-	for _, producerSettings := range settings {
-		producer := newBackend(producerSettings)
-		description, err := producer.Describe()
-		if err != nil {
-			return err
-		}
-		requested := make([]facts.Predicate, len(description.BaseRelations))
-		allowed := make([]string, len(description.BaseRelations))
-		for index, relation := range description.BaseRelations {
-			requested[index] = relation.Predicate
-			allowed[index] = relation.Predicate.Name
-			allAllowed[relation.Predicate.Name] = struct{}{}
-		}
-		batch, err := producer.Collect(ctx, backend.CollectionRequest{
-			RepoRoot: absoluteWorkspace, WorkspaceRoot: absoluteWorkspace, Predicates: requested,
-		})
-		if err != nil {
-			return err
-		}
-		validated, err := facts.ValidateBatch(description, requested, batch)
-		if err != nil {
-			return err
-		}
-		wanted := make([]string, 0, len(relations))
-		for _, relation := range relations {
-			if strings.HasPrefix(relation, description.Namespace+".") {
-				wanted = append(wanted, relation)
-			}
-		}
-		if len(relations) > 0 && len(wanted) == 0 {
-			continue
-		}
-		text, err := facts.FormatFacts(validated.Facts(), allowed, wanted)
-		if err != nil {
-			return err
-		}
-		if text != "" {
-			lines = append(lines, strings.Split(text, "\n")...)
-		}
+	producers := make([]backend.Producer, 0, len(settings))
+	for _, item := range settings {
+		producers = append(producers, newBackend(item))
 	}
-	for _, relation := range relations {
-		if _, ok := allAllowed[relation]; !ok {
-			return fmt.Errorf("unknown base relation %q", relation)
-		}
+	session := engine.Open(engine.Options{RepoRoot: absoluteWorkspace, WorkspaceRoot: absoluteWorkspace}, producers...)
+	defer session.Close()
+	output, err := session.Facts(ctx, relations)
+	if err != nil {
+		return err
 	}
-	if len(lines) > 0 {
-		slices.Sort(lines)
-		fmt.Fprintln(stdout, strings.Join(lines, "\n"))
+	if output != "" {
+		fmt.Fprintln(stdout, output)
 	}
 	return nil
 }
 
 func runServe(ctx context.Context) error {
 	instance := server.NewWithFactory(func(params server.InitializeParams) server.Analyzer {
-		settings := typescript.Options{Excludes: params.Excludes, Files: typescript.FileScope(params.Files), SourceLinks: params.SourceLinks}
-		return engine.New(newBackend(settings))
+		return &serveSession{params: params}
 	})
 	instance.Log = os.Stderr
 	return instance.Serve(ctx, os.Stdin, os.Stdout)
+}
+
+// Configuration belongs to this TypeScript composition root, not the session.
+// Re-resolve it before each check and replace producer instances when it changes.
+type serveSession struct {
+	params   server.InitializeParams
+	settings []typescript.Options
+	session  *engine.Session
+}
+
+func (s *serveSession) Check(ctx context.Context, requests ...engine.Options) (engine.Result, error) {
+	settings, err := loadTypeScriptSettings(s.params.WorkspaceRoot, "", s.params.Files, s.params.Files != "", s.params.SourceLinks, s.params.SourceLinks != "", s.params.Excludes, nil)
+	if err != nil {
+		return engine.Result{}, err
+	}
+	if s.session == nil || !reflect.DeepEqual(settings, s.settings) {
+		if s.session != nil {
+			if err := s.session.Close(); err != nil {
+				return engine.Result{}, err
+			}
+		}
+		producers := make([]backend.Producer, 0, len(settings))
+		for _, item := range settings {
+			producers = append(producers, newBackend(item))
+		}
+		s.session = engine.Open(engine.Options{}, producers...)
+		s.settings = settings
+	}
+	return s.session.Check(ctx, requests...)
+}
+
+func (s *serveSession) Close() error {
+	if s.session != nil {
+		return s.session.Close()
+	}
+	return nil
 }
 
 func flagProvided(flags *flag.FlagSet, name string) bool {
@@ -365,6 +364,7 @@ func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 	jsonOutput := flags.Bool("json", false, "emit diagnostics as JSON")
 	explain := flags.Bool("explain", false, "attach the proof of each violation to JSON diagnostics (requires --json)")
 	factLimit := flags.Int("fact-limit", engine.DefaultFactLimit, "maximum number of facts a rule may derive")
+	ruleWorkers := flags.Int("rule-workers", 0, "maximum concurrent rule jobs (0 uses GOMAXPROCS)")
 	var excludes stringList
 	flags.Var(&excludes, "exclude", "glob of workspace files to leave out of the snapshot (repeatable)")
 	var sources stringList
@@ -398,6 +398,9 @@ func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 	if *factLimit <= 0 {
 		return fmt.Errorf("--fact-limit must be positive")
 	}
+	if *ruleWorkers < 0 {
+		return fmt.Errorf("--rule-workers must be zero or a positive integer")
+	}
 	absoluteWorkspace, err := filepath.Abs(*workspaceRoot)
 	if err != nil {
 		return err
@@ -423,8 +426,9 @@ func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 	for _, settings := range producerSettings {
 		producers = append(producers, newBackend(settings))
 	}
-	runner := engine.New(producers...)
-	result, err := runner.Analyze(ctx, engine.Options{
+	runner := engine.Open(engine.Options{}, producers...)
+	defer runner.Close()
+	result, err := runner.Check(ctx, engine.Options{
 		RepoRoot:      absoluteRepo,
 		AssetRoot:     absoluteAssetRoot,
 		WorkspaceRoot: absoluteWorkspace,
@@ -433,6 +437,7 @@ func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 		Severity:      diagnostics.SeverityError,
 		RuleSeverity:  ruleSeverity,
 		FactLimit:     *factLimit,
+		RuleWorkers:   *ruleWorkers,
 		Explain:       *explain,
 		RulesLock:     *rulesLock,
 		SetupSandbox:  sandbox,

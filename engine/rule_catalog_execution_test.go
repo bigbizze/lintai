@@ -2,8 +2,10 @@ package engine
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"reflect"
+	"sync/atomic"
 	"testing"
 )
 
@@ -21,7 +23,7 @@ export default rule("fixture.generated-program").version(1)
 	.report("violation").message((row) => row.Code);
 `
 	writeTestFile(t, workspace, "lintai-rules/generated.ts", source)
-	engine := New(newParallelFixtureProducer())
+	engine := Open(Options{}, newParallelFixtureProducer())
 	defer engine.Close()
 	options := parallelFixtureOptions(repoRoot, workspace)
 	options.RuleWorkers = 1
@@ -59,17 +61,20 @@ func TestRuleBundleInvalidatedByResolutionConfigChange(t *testing.T) {
 	workspace := t.TempDir()
 	writeTestFile(t, workspace, "rules-support/a.ts", `export const message = "from-a";`)
 	writeTestFile(t, workspace, "rules-support/b.ts", `export const message = "from-b";`)
-	writeTestFile(t, workspace, "lintai-rules/alias.ts", `import { dl, rule } from "@lintai/sdk";
+	source := `import { dl, rule } from "@lintai/sdk";
 import { message } from "@fixture/policy";
 export default rule("fixture.alias").version(1)
 	.program(dl`+"`"+`Decl violation(Entity, Code). violation(Entity, Code) :- catalog.usable(Entity, Code).`+"`"+`)
 	.report("violation").message(() => message);
-`)
+`
+	rulePath := writeTestFile(t, workspace, "lintai-rules/alias.ts", source)
 	writeTestFile(t, workspace, "lintai-rules/tsconfig.json", `{"compilerOptions":{"baseUrl":".","paths":{"@fixture/policy":["../rules-support/a.ts"]}}}`)
 	options := parallelFixtureOptions(repoRoot, workspace)
-	warmEngine := New(newParallelFixtureProducer())
+	var evaluations atomic.Int64
+	options.beforeEvaluation = func() { evaluations.Add(1) }
+	warmEngine := Open(Options{}, newParallelFixtureProducer())
 	defer warmEngine.Close()
-	first, err := warmEngine.Analyze(context.Background(), options)
+	first, err := warmEngine.Check(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,13 +82,13 @@ export default rule("fixture.alias").version(1)
 		t.Fatalf("initial alias did not resolve to a.ts: %+v", first.Diagnostics)
 	}
 	writeTestFile(t, workspace, "lintai-rules/tsconfig.json", `{"compilerOptions":{"baseUrl":".","paths":{"@fixture/policy":["../rules-support/b.ts"]}}}`)
-	warm, err := warmEngine.Analyze(context.Background(), options)
+	warm, err := warmEngine.Check(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
-	freshEngine := New(newParallelFixtureProducer())
+	freshEngine := Open(Options{}, newParallelFixtureProducer())
 	defer freshEngine.Close()
-	fresh, err := freshEngine.Analyze(context.Background(), options)
+	fresh, err := freshEngine.Check(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -92,6 +97,23 @@ export default rule("fixture.alias").version(1)
 	}
 	if !reflect.DeepEqual(warm, fresh) {
 		t.Fatalf("warm result differs from a fresh engine after the alias change:\nwarm:  %+v\nfresh: %+v", warm, fresh)
+	}
+	beforeFailureBuilds := warmEngine.executionObservation().bundleArtifacts
+	beforeFailureEvaluations := evaluations.Load()
+	if err := os.WriteFile(rulePath, []byte("export ???"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	failed, err := warmEngine.Check(context.Background(), options)
+	if err != nil || len(failed.Diagnostics) != 1 || failed.Diagnostics[0].Phase != "bundle" {
+		t.Fatalf("invalid replacement did not publish a bundle failure: %+v %v", failed.Diagnostics, err)
+	}
+	if err := os.WriteFile(rulePath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := warmEngine.Check(context.Background(), options)
+	if err != nil || !reflect.DeepEqual(recovered, fresh) ||
+		warmEngine.executionObservation().bundleArtifacts != beforeFailureBuilds+1 || evaluations.Load() != beforeFailureEvaluations+1 {
+		t.Fatalf("recovery used an obsolete artifact or outcome: %+v %v", recovered.Diagnostics, err)
 	}
 }
 
@@ -125,9 +147,9 @@ func TestRulesWithoutBaseDependenciesSkipProducerCollection(t *testing.T) {
 	workspace := t.TempDir()
 	producer := newParallelFixtureProducer()
 	writeTestFile(t, workspace, "lintai-rules/no-facts.ts", parallelRuleSource("fixture.no-facts", "Decl violation(Entity).", "(row) => row.Entity"))
-	engine := New(producer)
+	engine := Open(Options{}, producer)
 	defer engine.Close()
-	result, err := engine.Analyze(context.Background(), parallelFixtureOptions(repoRoot, workspace))
+	result, err := engine.Check(context.Background(), parallelFixtureOptions(repoRoot, workspace))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,9 +183,9 @@ export default rule("fixture.locked-out").version(1)
 	}
 	options := parallelFixtureOptions(repoRoot, workspace)
 	options.RulesLock = DefaultRulesLockFile
-	engine := New(producer)
+	engine := Open(Options{}, producer)
 	defer engine.Close()
-	result, err := engine.Analyze(context.Background(), options)
+	result, err := engine.Check(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}

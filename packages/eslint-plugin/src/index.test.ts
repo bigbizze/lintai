@@ -38,6 +38,7 @@ const options: LintaiOptions = {
 	binary: "/tmp/lintai",
 	repoRoot: "/workspace",
 	workspaceRoot: "/workspace",
+	ruleWorkers: 2,
 };
 
 test("unused suppressions report only through lintai/analysis", () => {
@@ -182,6 +183,7 @@ test("each lintai rule is its own ESLint rule with the configured level; analysi
 		["rules", "--json"],
 	);
 	assert.ok(!runs.some((args) => args.includes("--severity")));
+	assert.equal(runs[1]?.[runs[1].indexOf("--rule-workers") + 1], "2");
 });
 
 test("configs.all enables every lintai rule, and a later config overrides one rule or one file", () => {
