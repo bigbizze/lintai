@@ -59,35 +59,32 @@ func BuildRulesLock(ctx context.Context, options Options) (RulesLock, []LockedRu
 	if err != nil && !errors.Is(err, suppressions.ErrNotExist) {
 		return RulesLock{}, nil, err
 	}
-	rulePaths, err := discoverRulePaths(options.WorkspaceRoot, options.RuleGlobs)
+	catalog, err := openRuleCatalog(ctx, options)
 	if err != nil {
-		return RulesLock{}, nil, err
+		if catalog == nil {
+			return RulesLock{}, nil, err
+		}
 	}
-	bundleDir, err := os.MkdirTemp("", "lintai-bundle-*")
-	if err != nil {
-		return RulesLock{}, nil, err
+	defer catalog.close()
+	if catalog.bundleError != nil {
+		return RulesLock{}, nil, catalog.bundleError
 	}
-	defer os.RemoveAll(bundleDir)
-	artifacts, failures, err := bundle.BuildAll(ctx, assetRootOf(options), options.RepoRoot, options.WorkspaceRoot, bundleDir, rulePaths)
-	if err != nil {
-		return RulesLock{}, nil, err
-	}
-	if len(failures) > 0 {
-		messages := make([]string, 0, len(failures))
-		for rulePath, failure := range failures {
+	if len(catalog.bundleFailures) > 0 {
+		messages := make([]string, 0, len(catalog.bundleFailures))
+		for rulePath, failure := range catalog.bundleFailures {
 			messages = append(messages, fmt.Sprintf("%s: %v", lockKey(options.WorkspaceRoot, rulePath), failure))
 		}
 		sort.Strings(messages)
 		return RulesLock{}, nil, fmt.Errorf("could not bundle rules:\n%s", strings.Join(messages, "\n"))
 	}
-	lock := RulesLock{Version: RulesLockVersion, Rules: make(map[string]RulesLockRule, len(rulePaths))}
+	lock := RulesLock{Version: RulesLockVersion, Rules: make(map[string]RulesLockRule, len(catalog.paths))}
 	if len(suppressionsFile) > 0 {
 		lock.Suppressions = suppressionsFile
 	}
-	locked := make([]LockedRule, 0, len(rulePaths))
-	for _, rulePath := range rulePaths {
+	locked := make([]LockedRule, 0, len(catalog.paths))
+	for _, rulePath := range catalog.paths {
 		key := lockKey(options.WorkspaceRoot, rulePath)
-		hash := artifacts[rulePath].Hash
+		hash := catalog.artifacts[rulePath].Hash
 		lock.Rules[key] = RulesLockRule{Hash: hash}
 		locked = append(locked, LockedRule{Path: key, Hash: hash})
 	}

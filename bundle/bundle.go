@@ -65,6 +65,7 @@ type prepareRequest struct {
 	WorkspaceRoot string `json:"workspaceRoot"`
 	BundlePath    string `json:"bundlePath"`
 	Env           any    `json:"env"`
+	RunSetup      bool   `json:"runSetup"`
 	// RestrictRequire limits require() in the prepare bundle to Node
 	// built-ins and makes dynamic import() fail.
 	RestrictRequire bool `json:"restrictRequire"`
@@ -164,6 +165,9 @@ type PrepareOptions struct {
 	// RestrictRequire limits require() in setup() to Node built-ins and
 	// makes dynamic import() fail. It is always on when Sandbox is on.
 	RestrictRequire bool
+	// SkipSetup identifies rules that need config parsing but do not declare
+	// setup(). Their setup bundle still validates defaults without invoking it.
+	SkipSetup map[string]struct{}
 }
 
 // PrepareAll runs setup() for each rule. A file under the rule globs that has
@@ -192,8 +196,12 @@ func PrepareAll(ctx context.Context, assetRoot, repoRoot, workspaceRoot string, 
 			WorkspaceRoot:   workspaceRoot,
 			BundlePath:      item.PrepareBundlePath,
 			Env:             rawEnv,
+			RunSetup:        true,
 			RestrictRequire: options.Sandbox || options.RestrictRequire,
 		})
+		if _, skip := options.SkipSetup[rulePath]; skip {
+			requests[len(requests)-1].RunSetup = false
+		}
 	}
 
 	payload, err := json.Marshal(requests)

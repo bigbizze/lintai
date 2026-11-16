@@ -273,7 +273,7 @@ const tricky = `+string(tricky)+`;
 export default rule("t.round-trip").version(1)
 	.program(dl`+"`"+`Decl v(M, S, N, K). v(M, ${tricky}, ${-12}, ${dl.name("a/b_c")}) :- ts.module(M), ts.location(M, F, _, _, _, _), F = "src/pure/math.ts".`+"`"+`)
 	.report("v")
-	.message((row) => JSON.stringify([row.S === tricky, row.N, row.K]));
+		.message((row) => JSON.stringify([row.S === tricky, row.N, row.K]));
 `)
 	items, err := New(typescript.New(typescript.Options{Files: typescript.FileScopeWalk})).Run(context.Background(), Options{
 		RepoRoot:      repoRoot,

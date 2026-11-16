@@ -495,7 +495,7 @@ export default rule("arch.dup-setup").version(1).setup(() => { throw new Error("
 		"arch.dup rule_execution_error config",
 		"arch.dup rule_execution_error config",
 		"arch.dup-setup rule_execution_error config",
-		"arch.dup-setup rule_execution_error setup",
+		"arch.dup-setup rule_execution_error config",
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("normal run:\ngot  %q\nwant %q", got, want)
