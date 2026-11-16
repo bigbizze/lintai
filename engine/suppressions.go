@@ -22,10 +22,13 @@ type runInfo struct {
 	// evaluated are the rules that ran with severity error and had no
 	// rule execution error.
 	evaluated map[string]struct{}
+	// completed includes successful rules at any enabled severity, so current
+	// suppression eligibility can be assembled from retained outcomes.
+	completed map[string]struct{}
 	// known are the ids of every loaded rule.
 	known map[string]struct{}
-	// complete is true when every rule file bundled and matched the rules
-	// lock, so known has every rule id.
+	// complete is true when every rule file bundled, matched the rules lock,
+	// and loaded its metadata, so known has every rule id.
 	complete        bool
 	snapshotVersion string
 	producerNames   []string

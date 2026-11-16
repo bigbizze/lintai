@@ -43,6 +43,7 @@ func TestDocumentedProgramsDeclareTheirRelations(t *testing.T) {
 		}
 		for _, block := range dlBlock.FindAllStringSubmatch(string(data), -1) {
 			declared := map[string]bool{}
+			reported := map[string]bool{}
 			var heads []string
 			text := interpolated.ReplaceAllString(comment.ReplaceAllString(quoted.ReplaceAllString(block[1], `""`), ""), "x")
 			for _, clause := range clauseEnd.Split(text, -1) {
@@ -57,8 +58,9 @@ func TestDocumentedProgramsDeclareTheirRelations(t *testing.T) {
 				}
 				if strings.HasPrefix(clause, "Decl") {
 					declared[match[1]] = true
-				} else {
+				} else if !reported[match[1]] {
 					heads = append(heads, match[1])
+					reported[match[1]] = true
 				}
 			}
 			for _, head := range heads {

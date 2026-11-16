@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/bigbizze/lintai/backend"
+	"github.com/bigbizze/lintai/engine"
 	"github.com/bigbizze/lintai/facts"
 	"github.com/bigbizze/lintai/internal/tsgo/lintaiapi"
 	"github.com/bigbizze/lintai/internal/workspace"
@@ -131,6 +132,25 @@ calculate({ value: helper("ok") });
 			}
 		}
 	}
+	// V04, V20, V36, V40: demand is order-independent, the retained
+	// generation is reused, and returned support cannot mutate its cache.
+	requested := []facts.Predicate{byName["ts.fn"].Predicate, byName["ts.site_owner"].Predicate}
+	first := collect(requested)
+	generation := producer.current
+	baseline := collect([]facts.Predicate{requested[1], requested[0]})
+	if producer.current != generation {
+		t.Fatal("reordered unchanged demand rebuilt the producer generation")
+	}
+	if len(first.Relations[requested[0]]) == 0 || first.Anchors[calculate].Tracking == nil {
+		t.Fatal("fixture did not produce a tracked function")
+	}
+	first.Relations[requested[0]][0][0].String = "changed by caller"
+	first.Anchors[calculate].Tracking.Data.(map[string]any)["subject"].([]any)[0] = "changed by caller"
+	first.Scope.(map[string]any)["primary"].([]string)[0] = "changed by caller"
+	after := collect(requested)
+	if producer.current != generation || !reflect.DeepEqual(after, baseline) {
+		t.Fatal("caller mutation changed the retained producer generation")
+	}
 }
 
 func TestBuildSnapshotExposesStableFunctionKeysAndCalls(t *testing.T) {
@@ -201,11 +221,20 @@ func TestTwoTypeScriptProducersKeepConstructionSettingsIndependent(t *testing.T)
 	if got := collectModules(tsconfigProducer); !slices.Equal(got, []string{"ts:module:src/one.ts"}) {
 		t.Fatalf("tsconfig producer modules = %v", got)
 	}
+	generation := tsconfigProducer.current
 	if got := collectModules(walkProducer); !slices.Equal(got, []string{"ts:module:src/one.ts", "ts:module:src/two.ts"}) {
 		t.Fatalf("walk producer modules = %v", got)
 	}
 	if got := collectModules(tsconfigProducer); !slices.Equal(got, []string{"ts:module:src/one.ts"}) {
 		t.Fatalf("second producer changed the first producer's settings: %v", got)
+	}
+	if tsconfigProducer.current != generation {
+		t.Fatal("V20: unchanged producer generation was extracted again")
+	}
+	writeWorkspaceFile(t, root, "src/one.ts", "export const one = 2;\n")
+	collectModules(tsconfigProducer)
+	if tsconfigProducer.current == generation {
+		t.Fatal("V18: changed content did not replace the producer generation")
 	}
 	if foo, prefixedFoo := producerEntityID("foo.ts"), producerEntityID("ts:foo.ts"); foo == prefixedFoo || foo != "ts:foo.ts" || prefixedFoo != "ts:ts:foo.ts" {
 		t.Fatalf("producer-local entity IDs are not uniquely namespaced: %q and %q", foo, prefixedFoo)
@@ -402,7 +431,31 @@ export function passing() { effect(kept); }
 			t.Errorf("missing callback event on line %d", line)
 		}
 	}
-
+	// Strict policy handles callback transfer explicitly; an unknown callback
+	// does not by itself make the containing invocation unresolved.
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeWorkspaceFile(t, root, "lintai-rules/strict.ts", `import { dl, rule } from "@lintai/sdk";
+export default rule("test.filtered-callback").version(1)
+  .program(dl`+"`"+`Decl indeterminate(Fn, Name).
+    indeterminate(Fn, Name) :- ts.fn(Fn, _, Name), Name = "escape", ts.site_owner(Site, Fn), ts.fn_value_escape_unknown(Site).`+"`"+`)
+  .report("indeterminate").message((row) => row.Name);
+`)
+	session := engine.Open(engine.Options{}, New())
+	defer session.Close()
+	result, err := session.Check(context.Background(), engine.Options{
+		RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: root,
+		RuleGlobs: []string{"lintai-rules/*.ts"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := result.Diagnostics
+	if len(items) != 1 || items[0].RuleID != "test.filtered-callback" || items[0].Message != "escape" {
+		t.Fatalf("filtered callback strict rule = %+v, want escape indeterminate", items)
+	}
 }
 
 // V06, V08: direct callback arguments have their own source identity and are

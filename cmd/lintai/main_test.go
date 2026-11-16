@@ -14,6 +14,8 @@ import (
 
 	"github.com/bigbizze/lintai/backend/typescript"
 	"github.com/bigbizze/lintai/diagnostics"
+	"github.com/bigbizze/lintai/engine"
+	"github.com/bigbizze/lintai/server"
 )
 
 // The fixture workspace contains planted violations of every fixture rule.
@@ -76,6 +78,52 @@ func TestFixtureRulesReportPlantedViolations(t *testing.T) {
 
 }
 
+// V15/V18: serve re-resolves producer configuration and replaces the old
+// producer when scope changes, including retraction of its previous files.
+func TestServeSessionReplacesChangedProducerConfiguration(t *testing.T) {
+	repo, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	for _, name := range []string{"a.ts", "b.ts"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("export const value = 1;\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	config := filepath.Join(root, "lintai.toml")
+	setConfig := func(excluded string) {
+		t.Helper()
+		if err := os.WriteFile(config, []byte("[workspace]\nexclude = [\""+excluded+"\"]\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setConfig("b.ts")
+	options := engine.Options{RepoRoot: repo, AssetRoot: filepath.Join(repo, "packages/client"), WorkspaceRoot: root,
+		RuleGlobs: []string{filepath.Join(repo, "testdata/fixtures/rules/layers.ts")}, RuleWorkers: 2}
+	instance := &serveSession{params: server.InitializeParams{WorkspaceRoot: root}}
+	defer instance.Close()
+	first, err := instance.Check(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(first.AnalyzedFiles, "a.ts") || slices.Contains(first.AnalyzedFiles, "b.ts") {
+		t.Fatalf("initial scope: %v", first.AnalyzedFiles)
+	}
+	previous := instance.session
+	setConfig("a.ts")
+	second, err := instance.Check(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if instance.session == previous || slices.Contains(second.AnalyzedFiles, "a.ts") || !slices.Contains(second.AnalyzedFiles, "b.ts") {
+		t.Fatalf("changed configuration retained old producer scope: %v", second.AnalyzedFiles)
+	}
+	if _, err := previous.Current(); err == nil {
+		t.Fatal("old producer session was not closed")
+	}
+}
+
 func runJSON(t *testing.T, args []string) []byte {
 	t.Helper()
 	var stdout bytes.Buffer
@@ -101,6 +149,9 @@ func TestExitCodes(t *testing.T) {
 		want int
 	}{
 		{"violations", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--rules", rule("layers.ts")}, exitViolations},
+		{"parallel check", []string{"check", "--workspace-root", workspace, "--repo-root", repoRoot, "--rules", rule("layers.ts"), "--rule-workers", "1", "--rule-workers", "2"}, exitViolations},
+		{"negative workers", []string{"--rule-workers", "-1"}, exitUsage},
+		{"noninteger workers", []string{"--rule-workers", "1.5"}, exitUsage},
 		{"clean", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--rules", rule("layers.ts"), "--exclude", "src/pure/**"}, exitClean},
 		{"warnings do not fail", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--rules", rule("layers.ts"), "--severity", "arch.layers=warning"}, exitClean},
 		{"rule off", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--rules", rule("layers.ts"), "--severity", "arch.layers=off"}, exitClean},
@@ -478,7 +529,7 @@ export default rule("arch.dup-setup").version(1).setup(() => { throw new Error("
 		"arch.dup rule_execution_error config",
 		"arch.dup rule_execution_error config",
 		"arch.dup-setup rule_execution_error config",
-		"arch.dup-setup rule_execution_error setup",
+		"arch.dup-setup rule_execution_error config",
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("normal run:\ngot  %q\nwant %q", got, want)

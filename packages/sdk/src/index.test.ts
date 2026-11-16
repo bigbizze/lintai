@@ -35,3 +35,19 @@ test("rule validates its id", () => {
 		assert.throws(() => rule(value), TypeError);
 	}
 });
+
+test("suppression declarations retain the typed by columns", () => {
+	const columns = ["Reason"];
+	const definition = rule("arch.reasoned")
+		.version(1)
+		.program(dl`Decl violation(Entity, Reason).`)
+		.report("violation")
+		.message((row) => String(row.Reason))
+		.suppression("violation", { by: columns });
+	columns[0] = "ChangedAfterDeclaration";
+	assert.deepEqual(definition.suppressionDeclarations, [
+		{ assertion: "violation", options: { by: ["Reason"] } },
+	]);
+	assert.ok(Object.isFrozen(definition.suppressionDeclarations));
+	assert.ok(Object.isFrozen(definition.suppressionDeclarations?.[0]?.options.by));
+});

@@ -56,7 +56,7 @@ func TestSuppressionLifecycle(t *testing.T) {
 			}
 			fmt.Fprintf(&input, "Content-Length: %d\r\n\r\n%s", len(payload), payload)
 		}
-		if err := server.New(engine.New(newBackend())).Serve(context.Background(), &input, &output); err != nil {
+		if err := server.New(engine.Open(engine.Options{}, newBackend())).Serve(context.Background(), &input, &output); err != nil {
 			t.Fatal(err)
 		}
 		reader := bufio.NewReader(&output)

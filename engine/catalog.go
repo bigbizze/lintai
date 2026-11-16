@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"slices"
 	"sort"
@@ -25,9 +26,11 @@ type composedFacts struct {
 	schemaDecls   map[ast.PredicateSym]ast.Decl
 	anchors       map[string]facts.AnchorSupport
 	reportable    map[facts.Predicate]map[string]struct{}
+	factCounts    map[ast.PredicateSym]int
 	analyzedFiles map[string]struct{}
 	namespaces    []string
 	snapshotID    string
+	watchHints    []string
 }
 
 type producerEntry struct {
@@ -35,20 +38,31 @@ type producerEntry struct {
 	description facts.ProducerDescription
 }
 
-func (e *Engine) collect(ctx context.Context, options Options) (composedFacts, error) {
+type producerCatalog struct {
+	entries     []producerEntry
+	sources     []parse.SourceUnit
+	schemaDecls map[ast.PredicateSym]ast.Decl
+	namespaces  []string
+	identity    string
+}
+
+// describeProducers constructs the validated catalog without collecting any
+// source facts. Rule programs use this view to determine the exact producer
+// relations they need before extraction begins.
+func (e *Session) describeProducers() (producerCatalog, error) {
 	entries := make([]producerEntry, 0, len(e.producers))
 	owned := make(map[string]struct{}, len(e.producers))
 	for _, producer := range e.producers {
 		description, err := producer.Describe()
 		if err != nil {
-			return composedFacts{}, fmt.Errorf("describe producer: %w", err)
+			return producerCatalog{}, fmt.Errorf("describe producer: %w", err)
 		}
 		if _, duplicate := owned[description.Namespace]; duplicate {
-			return composedFacts{}, fmt.Errorf("producer namespace %q is registered more than once", description.Namespace)
+			return producerCatalog{}, fmt.Errorf("producer namespace %q is registered more than once", description.Namespace)
 		}
 		owned[description.Namespace] = struct{}{}
 		if _, err := facts.ValidateBatch(description, nil, facts.Batch{Relations: map[facts.Predicate][]facts.Row{}}); err != nil {
-			return composedFacts{}, fmt.Errorf("invalid producer description %q: %w", description.Namespace, err)
+			return producerCatalog{}, fmt.Errorf("invalid producer description %q: %w", description.Namespace, err)
 		}
 		entries = append(entries, producerEntry{producer: producer, description: description})
 	}
@@ -56,15 +70,17 @@ func (e *Engine) collect(ctx context.Context, options Options) (composedFacts, e
 
 	var sourceUnits []parse.SourceUnit
 	schemaDecls := make(map[ast.PredicateSym]ast.Decl)
+	identityRecords := make([]any, 0, len(entries)+1)
 	for _, entry := range entries {
 		description := entry.description
+		identityRecords = append(identityRecords, description)
 		declarations, err := namespacedUnit(description.Schema.Declarations, description.Namespace)
 		if err != nil {
-			return composedFacts{}, fmt.Errorf("producer %q declarations: %w", description.Namespace, err)
+			return producerCatalog{}, fmt.Errorf("producer %q declarations: %w", description.Namespace, err)
 		}
 		prelude, err := namespacedUnit(description.Schema.Prelude, description.Namespace)
 		if err != nil {
-			return composedFacts{}, fmt.Errorf("producer %q prelude: %w", description.Namespace, err)
+			return producerCatalog{}, fmt.Errorf("producer %q prelude: %w", description.Namespace, err)
 		}
 		sourceUnits = append(sourceUnits, declarations, prelude)
 		for _, unit := range []parse.SourceUnit{declarations, prelude} {
@@ -77,7 +93,7 @@ func (e *Engine) collect(ctx context.Context, options Options) (composedFacts, e
 				copy := declaration
 				copy.DeclaredAtom.Predicate = key
 				if _, duplicate := schemaDecls[key]; duplicate {
-					return composedFacts{}, fmt.Errorf("catalog declares %s more than once", key)
+					return producerCatalog{}, fmt.Errorf("catalog declares %s more than once", key)
 				}
 				schemaDecls[key] = copy
 			}
@@ -85,7 +101,7 @@ func (e *Engine) collect(ctx context.Context, options Options) (composedFacts, e
 	}
 	engineUnit, err := engineSchemaUnit()
 	if err != nil {
-		return composedFacts{}, fmt.Errorf("engine helper schema: %w", err)
+		return producerCatalog{}, fmt.Errorf("engine helper schema: %w", err)
 	}
 	sourceUnits = append(sourceUnits, engineUnit)
 	for _, declaration := range engineUnit.Decls {
@@ -97,20 +113,61 @@ func (e *Engine) collect(ctx context.Context, options Options) (composedFacts, e
 		copy.DeclaredAtom.Predicate = key
 		schemaDecls[key] = copy
 	}
+	engineSchemaRaw, err := json.Marshal(engineSchemaSource)
+	if err != nil {
+		return producerCatalog{}, fmt.Errorf("engine schema identity: %w", err)
+	}
+	identityRecords = append(identityRecords, string(engineSchemaRaw))
+	identityRaw, err := json.Marshal(identityRecords)
+	if err != nil {
+		return producerCatalog{}, fmt.Errorf("producer catalog identity: %w", err)
+	}
+	identityHash := sha256.Sum256(identityRaw)
 
+	namespaces := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		namespaces = append(namespaces, entry.description.Namespace)
+	}
+	return producerCatalog{
+		entries: entries, sources: sourceUnits, schemaDecls: schemaDecls, namespaces: namespaces,
+		identity: hex.EncodeToString(identityHash[:]),
+	}, nil
+}
+
+// collect requests only the base relations selected by successfully prepared
+// rules. Producers with no requested relations are not called.
+func (catalog producerCatalog) collect(ctx context.Context, options Options, requestedByNamespace map[string]map[facts.Predicate]struct{}, current *composedFacts) (composedFacts, error) {
 	allFacts := make([]facts.Fact, 0)
 	anchors := make(map[string]facts.AnchorSupport)
 	reportable := make(map[facts.Predicate]map[string]struct{})
+	factCounts := make(map[ast.PredicateSym]int)
 	analyzedFiles := make(map[string]struct{})
-	producerRecords := make([]any, 0, len(entries))
-	namespaces := make([]string, 0, len(entries))
-	for _, entry := range entries {
+	producerRecords := make([]any, 0, len(catalog.entries))
+	usedNamespaces := make([]string, 0, len(requestedByNamespace))
+	type collected struct {
+		description facts.ProducerDescription
+		requested   []facts.Predicate
+		validated   facts.ValidatedFacts
+	}
+	collectedBatches := make([]collected, 0, len(catalog.entries))
+	watchHints := make(map[string]struct{})
+	for _, entry := range catalog.entries {
 		producer := entry.producer
 		description := entry.description
-		requested := make([]facts.Predicate, len(description.BaseRelations))
-		for i, relation := range description.BaseRelations {
-			requested[i] = relation.Predicate
+		requestedSet := requestedByNamespace[description.Namespace]
+		if len(requestedSet) == 0 {
+			continue
 		}
+		requested := make([]facts.Predicate, 0, len(requestedSet))
+		for _, relation := range description.BaseRelations {
+			if _, selected := requestedSet[relation.Predicate]; selected {
+				requested = append(requested, relation.Predicate)
+			}
+		}
+		if len(requested) != len(requestedSet) {
+			return composedFacts{}, fmt.Errorf("requested facts include an unknown base relation for producer %q", description.Namespace)
+		}
+		usedNamespaces = append(usedNamespaces, description.Namespace)
 		sort.Slice(requested, func(i, j int) bool {
 			if requested[i].Name != requested[j].Name {
 				return requested[i].Name < requested[j].Name
@@ -125,7 +182,42 @@ func (e *Engine) collect(ctx context.Context, options Options) (composedFacts, e
 		if err != nil {
 			return composedFacts{}, fmt.Errorf("producer %q returned an invalid batch: %w", description.Namespace, err)
 		}
+		for _, hint := range batch.WatchHints {
+			watchHints[hint] = struct{}{}
+		}
+		requestedNames := make([]string, len(requested))
+		for i, predicate := range requested {
+			requestedNames[i] = predicate.Name
+		}
+		producerRecords = append(producerRecords, []any{
+			"producer-result-v2", description.Namespace, description.ImplementationID,
+			description.ImplementationStamp, description.ContractVersion, description.EffectiveConfiguration,
+			validated.InputRevision(), validated.Scope(), requestedNames,
+		})
+		collectedBatches = append(collectedBatches, collected{description, requested, validated})
+	}
+	encoded, err := canonical.Marshal([]any{"lintai-facts-v1", producerRecords})
+	if err != nil {
+		return composedFacts{}, fmt.Errorf("snapshot identity: %w", err)
+	}
+	digest := sha256.Sum256(encoded)
+	snapshotID := "sha256:" + hex.EncodeToString(digest[:])
+	hints := make([]string, 0, len(watchHints))
+	for hint := range watchHints {
+		hints = append(hints, hint)
+	}
+	sort.Strings(hints)
+	if current != nil && current.snapshotID == snapshotID {
+		reused := *current
+		reused.watchHints = hints
+		return reused, nil
+	}
+	for _, item := range collectedBatches {
+		description, requested, validated := item.description, item.requested, item.validated
 		allFacts = append(allFacts, validated.Facts()...)
+		for _, predicate := range requested {
+			factCounts[ast.PredicateSym{Symbol: predicate.Name, Arity: predicate.Arity}] = len(validated.Rows(predicate))
+		}
 		producerAnchors := validated.Anchors()
 		for id, support := range producerAnchors {
 			if current, exists := anchors[id]; exists && !sameAnchor(current, support) {
@@ -153,27 +245,11 @@ func (e *Engine) collect(ctx context.Context, options Options) (composedFacts, e
 		for _, file := range validated.AnalyzedFiles() {
 			analyzedFiles[suppressions.NormalizePath(file)] = struct{}{}
 		}
-		namespaces = append(namespaces, description.Namespace)
-		requestedNames := make([]string, len(requested))
-		for i, predicate := range requested {
-			requestedNames[i] = predicate.Name
-		}
-		producerRecords = append(producerRecords, []any{
-			"producer-result-v2", description.Namespace, description.ImplementationID,
-			description.ImplementationStamp, description.ContractVersion, description.EffectiveConfiguration,
-			validated.InputRevision(), validated.Scope(), requestedNames,
-		})
 	}
 	base, err := facts.Store(allFacts)
 	if err != nil {
 		return composedFacts{}, fmt.Errorf("assembled facts: %w", err)
 	}
-	record := []any{"lintai-facts-v1", producerRecords}
-	encoded, err := canonical.Marshal(record)
-	if err != nil {
-		return composedFacts{}, fmt.Errorf("snapshot identity: %w", err)
-	}
-	digest := sha256.Sum256(encoded)
 	files := make([]string, 0, len(analyzedFiles))
 	for file := range analyzedFiles {
 		files = append(files, file)
@@ -184,15 +260,34 @@ func (e *Engine) collect(ctx context.Context, options Options) (composedFacts, e
 		fileSet[file] = struct{}{}
 	}
 	return composedFacts{
-		base: base, sources: sourceUnits, schemaDecls: schemaDecls, anchors: anchors, reportable: reportable,
-		analyzedFiles: fileSet, namespaces: namespaces, snapshotID: "sha256:" + hex.EncodeToString(digest[:]),
+		base: base, sources: catalog.sources, schemaDecls: catalog.schemaDecls, anchors: anchors, reportable: reportable,
+		factCounts: factCounts, analyzedFiles: fileSet, namespaces: usedNamespaces, snapshotID: snapshotID, watchHints: hints,
 	}, nil
 }
 
-func engineSchemaUnit() (parse.SourceUnit, error) {
-	return parse.Unit(strings.NewReader(`Package lintai!
+func emptyComposedFacts() (composedFacts, error) {
+	base, err := facts.Store(nil)
+	if err != nil {
+		return composedFacts{}, err
+	}
+	encoded, err := canonical.Marshal([]any{"lintai-facts-v1", []any{}})
+	if err != nil {
+		return composedFacts{}, err
+	}
+	digest := sha256.Sum256(encoded)
+	return composedFacts{
+		base: base, schemaDecls: make(map[ast.PredicateSym]ast.Decl), anchors: make(map[string]facts.AnchorSupport),
+		reportable: make(map[facts.Predicate]map[string]struct{}), factCounts: make(map[ast.PredicateSym]int),
+		analyzedFiles: make(map[string]struct{}), snapshotID: "sha256:" + hex.EncodeToString(digest[:]),
+	}, nil
+}
+
+const engineSchemaSource = `Package lintai!
 Decl glob(Path, Pattern) descr [external(), mode('+', '+')].
-Decl not_glob(Path, Pattern) descr [external(), mode('+', '+')].`))
+Decl not_glob(Path, Pattern) descr [external(), mode('+', '+')].`
+
+func engineSchemaUnit() (parse.SourceUnit, error) {
+	return parse.Unit(strings.NewReader(engineSchemaSource))
 }
 
 func catalogForRule(catalog []parse.SourceUnit, rule parse.SourceUnit, roots []string) ([]parse.SourceUnit, map[string]struct{}) {

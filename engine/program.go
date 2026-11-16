@@ -1,12 +1,15 @@
 package engine
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	mangleanalysis "codeberg.org/TauCeti/mangle-go/analysis"
@@ -18,6 +21,7 @@ import (
 	"codeberg.org/TauCeti/mangle-go/symbols"
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/facts"
+	"github.com/bigbizze/lintai/internal/canonical"
 	"github.com/bigbizze/lintai/runtime"
 	"github.com/bmatcuk/doublestar/v4"
 )
@@ -45,19 +49,116 @@ func failPhase(phase string, format string, args ...any) *phaseError {
 }
 
 type violation struct {
+	ruleID      string
 	predicate   string
 	anchor      string
 	location    diagnostics.SourceLocation
 	row         map[string]any
+	typedRow    []facts.Value
+	columns     []string
 	explanation []string
 }
 
 type evalOptions struct {
-	factLimit int
-	explain   bool
+	factLimit    int
+	explain      bool
+	createdFacts *int64
+	// beforeEvaluation is an in-package synchronization point for tests. It is
+	// called from the production evaluator immediately before Mangle runs.
+	beforeEvaluation func()
+}
+
+type suppressionPolicy struct {
+	assertion string
+	by        []string
+}
+
+type rulePlan struct {
+	info             *mangleanalysis.ProgramInfo
+	strata           []mangleanalysis.Nodeset
+	predToStratum    map[ast.PredicateSym]int
+	ruleFacts        factstore.ReadOnlyFactStore
+	required         map[string]struct{}
+	basePredicates   map[ast.PredicateSym]struct{}
+	reportDecls      []ast.Decl
+	expectSyms       []ast.PredicateSym
+	suppressionRules []suppressionPolicy
+}
+
+type restrictedFactStore struct {
+	base  factstore.ReadOnlyFactStore
+	allow map[ast.PredicateSym]struct{}
+	list  []ast.PredicateSym
+	count int
+}
+
+func newRestrictedFactStore(base factstore.ReadOnlyFactStore, allowed map[ast.PredicateSym]struct{}, counts map[ast.PredicateSym]int) restrictedFactStore {
+	list := make([]ast.PredicateSym, 0, len(allowed))
+	count := 0
+	for predicate := range allowed {
+		list = append(list, predicate)
+		if value, known := counts[predicate]; known {
+			count += value
+			continue
+		}
+		_ = base.GetFacts(ast.NewQuery(predicate), func(ast.Atom) error {
+			count++
+			return nil
+		})
+	}
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].Symbol != list[j].Symbol {
+			return list[i].Symbol < list[j].Symbol
+		}
+		return list[i].Arity < list[j].Arity
+	})
+	return restrictedFactStore{base: base, allow: allowed, list: list, count: count}
+}
+
+func (view restrictedFactStore) GetFacts(query ast.Atom, callback func(ast.Atom) error) error {
+	if _, allowed := view.allow[query.Predicate]; !allowed {
+		return nil
+	}
+	return view.base.GetFacts(query, callback)
+}
+
+func (view restrictedFactStore) Contains(atom ast.Atom) bool {
+	if _, allowed := view.allow[atom.Predicate]; !allowed {
+		return false
+	}
+	return view.base.Contains(atom)
+}
+
+func (view restrictedFactStore) ListPredicates() []ast.PredicateSym {
+	return slices.Clone(view.list)
+}
+
+func (view restrictedFactStore) EstimateFactCount() int {
+	return view.count
+}
+
+type createdFactStore struct {
+	factstore.FactStore
+	count int64
+}
+
+func (store *createdFactStore) Add(atom ast.Atom) bool {
+	added := store.FactStore.Add(atom)
+	if added {
+		store.count++
+	}
+	return added
 }
 
 func evaluateProgram(base factstore.ReadOnlyFactStore, catalog []parse.SourceUnit, schemaDecls map[ast.PredicateSym]ast.Decl, anchors map[string]facts.AnchorSupport, reportable map[facts.Predicate]map[string]struct{}, namespaces []string, output runtime.ProgramOutput, report, expectNonEmpty []string, options evalOptions) ([]violation, *phaseError) {
+	plan, perr := prepareProgram(catalog, schemaDecls, namespaces, output, report, expectNonEmpty, nil)
+	if perr != nil {
+		return nil, perr
+	}
+	return plan.evaluate(base, nil, anchors, reportable, options)
+}
+
+func prepareProgram(catalog []parse.SourceUnit, schemaDecls map[ast.PredicateSym]ast.Decl, namespaces []string, output runtime.ProgramOutput, report, expectNonEmpty []string, suppressionDeclarations []runtime.SuppressionDeclaration) (*rulePlan, *phaseError) {
 	unit, err := parse.Unit(strings.NewReader(splitConstantTerminators(output.Text)))
 	if err != nil {
 		return nil, failPhase("program_parse", "%v", err)
@@ -81,6 +182,9 @@ func evaluateProgram(base factstore.ReadOnlyFactStore, catalog []parse.SourceUni
 	}
 	catalogView, requiredPredicates := catalogForRule(catalog, unit, append(slices.Clone(report), expectNonEmpty...))
 	program := append(catalogView, unit)
+	if perr := checkPureTimeFunctions(program); perr != nil {
+		return nil, perr
+	}
 	info, err := mangleanalysis.Analyze(program, nil)
 	if err != nil {
 		return nil, failPhase("program_analysis", "%v", err)
@@ -92,6 +196,16 @@ func evaluateProgram(base factstore.ReadOnlyFactStore, catalog []parse.SourceUni
 			return nil, failPhase("program_analysis", "reported predicate %q has no Decl in the program", name)
 		}
 		reportDecls = append(reportDecls, decl)
+	}
+	sort.Slice(reportDecls, func(i, j int) bool {
+		if reportDecls[i].DeclaredAtom.Predicate.Symbol != reportDecls[j].DeclaredAtom.Predicate.Symbol {
+			return reportDecls[i].DeclaredAtom.Predicate.Symbol < reportDecls[j].DeclaredAtom.Predicate.Symbol
+		}
+		return reportDecls[i].DeclaredAtom.Predicate.Arity < reportDecls[j].DeclaredAtom.Predicate.Arity
+	})
+	policies, perr := validateSuppressionPolicies(suppressionDeclarations, reportDecls)
+	if perr != nil {
+		return nil, perr
 	}
 	expectSyms := make([]ast.PredicateSym, 0, len(expectNonEmpty))
 	for _, name := range expectNonEmpty {
@@ -109,18 +223,105 @@ func evaluateProgram(base factstore.ReadOnlyFactStore, catalog []parse.SourceUni
 	if err != nil {
 		return nil, failPhase("program_analysis", "%v", err)
 	}
+	basePredicates := make(map[ast.PredicateSym]struct{})
+	for predicate, declaration := range schemaDecls {
+		if declaration.IsExtensional() && !strings.HasPrefix(predicate.Symbol, "lintai.") {
+			if _, needed := requiredPredicates[predicate.Symbol]; needed {
+				basePredicates[predicate] = struct{}{}
+			}
+		}
+	}
+	return &rulePlan{
+		info: info, strata: strata, predToStratum: predToStratum, ruleFacts: ruleFacts,
+		required: requiredPredicates, basePredicates: basePredicates, reportDecls: reportDecls, expectSyms: expectSyms,
+		suppressionRules: policies,
+	}, nil
+}
 
-	derived := factstore.NewMultiIndexedArrayInMemoryStore()
-	for _, fact := range info.InitialFacts {
+func generatedRulePlanKey(catalogIdentity string, output runtime.ProgramOutput, report, expectNonEmpty []string, suppressions []runtime.SuppressionDeclaration) (string, error) {
+	relationNames := make([]string, 0, len(output.Facts))
+	for name := range output.Facts {
+		relationNames = append(relationNames, name)
+	}
+	sort.Strings(relationNames)
+	factRecords := make([]any, 0, len(relationNames))
+	for _, name := range relationNames {
+		rows := make([]string, 0, len(output.Facts[name]))
+		for _, row := range output.Facts[name] {
+			values := make([]any, len(row))
+			for index, cell := range row {
+				constant, err := encodeCell(cell)
+				if err != nil {
+					return "", err
+				}
+				values[index] = canonicalFactValue(constant)
+			}
+			encoded, err := canonical.Marshal(values)
+			if err != nil {
+				return "", err
+			}
+			rows = append(rows, string(encoded))
+		}
+		sort.Strings(rows)
+		rowRecords := make([]any, len(rows))
+		for index, row := range rows {
+			rowRecords[index] = row
+		}
+		factRecords = append(factRecords, []any{name, rowRecords})
+	}
+	policyRecords := make([]any, len(suppressions))
+	for index, suppression := range suppressions {
+		options, err := canonical.Normalize(suppression.Options)
+		if err != nil {
+			return "", err
+		}
+		policyRecords[index] = []any{suppression.Assertion, options}
+	}
+	encoded, err := canonical.Marshal([]any{
+		"rule-plan-v1", catalogIdentity, output.Text, factRecords,
+		report, expectNonEmpty, policyRecords,
+	})
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.Sum256(encoded)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func prepareExtraFacts(output runtime.ProgramOutput, namespaces []string) (factstore.ReadOnlyFactStore, *phaseError) {
+	unit, err := parse.Unit(strings.NewReader(splitConstantTerminators(output.Text)))
+	if err != nil {
+		return nil, failPhase("program_parse", "%v", err)
+	}
+	if perr := bindRuleUnit(&unit, output.Text, namespaces); perr != nil {
+		return nil, perr
+	}
+	return ruleFactStore(unit, output.Facts)
+}
+
+func planWithExtraFacts(plan *rulePlan, extraFacts factstore.ReadOnlyFactStore) *rulePlan {
+	owned := *plan
+	owned.ruleFacts = extraFacts
+	return &owned
+}
+
+func (plan *rulePlan) evaluate(base factstore.ReadOnlyFactStore, factCounts map[ast.PredicateSym]int, anchors map[string]facts.AnchorSupport, reportable map[facts.Predicate]map[string]struct{}, options evalOptions) ([]violation, *phaseError) {
+	derived := &createdFactStore{FactStore: factstore.NewMultiIndexedArrayInMemoryStore()}
+	for _, fact := range plan.info.InitialFacts {
 		derived.Add(fact)
 	}
-	store := factstore.NewMergedStore([]factstore.ReadOnlyFactStore{base, ruleFacts}, derived)
-	if err := runEvaluation(info, strata, predToStratum, store, options.factLimit); err != nil {
-		return nil, failPhase("evaluation", "%v", err)
+	baseView := newRestrictedFactStore(base, plan.basePredicates, factCounts)
+	store := factstore.NewMergedStore([]factstore.ReadOnlyFactStore{baseView, plan.ruleFacts}, derived)
+	evaluationErr := runEvaluation(plan.info, plan.strata, plan.predToStratum, store, options.factLimit, options.beforeEvaluation)
+	if options.createdFacts != nil {
+		*options.createdFacts = derived.count
+	}
+	if evaluationErr != nil {
+		return nil, failPhase("evaluation", "%v", evaluationErr)
 	}
 
 	empty := make([]string, 0)
-	for _, sym := range expectSyms {
+	for _, sym := range plan.expectSyms {
 		if !hasFacts(store, sym) {
 			empty = append(empty, sym.Symbol)
 		}
@@ -130,7 +331,7 @@ func evaluateProgram(base factstore.ReadOnlyFactStore, catalog []parse.SourceUni
 	}
 	eligibleAnchors := make(map[string]struct{})
 	for predicate, eligible := range reportable {
-		if _, required := requiredPredicates[predicate.Name]; !required {
+		if _, required := plan.required[predicate.Name]; !required {
 			continue
 		}
 		for id := range eligible {
@@ -141,7 +342,7 @@ func evaluateProgram(base factstore.ReadOnlyFactStore, catalog []parse.SourceUni
 	}
 
 	violations := make([]violation, 0)
-	for _, decl := range reportDecls {
+	for _, decl := range plan.reportDecls {
 		sym := decl.DeclaredAtom.Predicate
 		argNames := make([]string, 0, sym.Arity)
 		for _, arg := range decl.DeclaredAtom.Args {
@@ -152,6 +353,9 @@ func evaluateProgram(base factstore.ReadOnlyFactStore, catalog []parse.SourceUni
 			rows = append(rows, atom)
 			return nil
 		}); err != nil {
+			return nil, failPhase("report", "%v", err)
+		}
+		if err := sortReportRows(rows); err != nil {
 			return nil, failPhase("report", "%v", err)
 		}
 		for _, atom := range rows {
@@ -165,14 +369,23 @@ func evaluateProgram(base factstore.ReadOnlyFactStore, catalog []parse.SourceUni
 			}
 			support := anchors[anchor]
 			row := make(map[string]any, len(argNames))
+			typedRow := make([]facts.Value, len(atom.Args))
 			for index, argName := range argNames {
-				constant, _ := atom.Args[index].(ast.Constant)
+				constant, ok := atom.Args[index].(ast.Constant)
+				if !ok {
+					return nil, failPhase("report", "reported row %s contains a non-constant argument", atom)
+				}
+				value, err := factValue(constant)
+				if err != nil {
+					return nil, failPhase("report", "%v", err)
+				}
+				typedRow[index] = value
 				row[argName] = decodeConstant(constant)
 			}
 			location := support.Location
-			item := violation{predicate: sym.Symbol, anchor: anchor, location: location, row: row}
+			item := violation{predicate: sym.Symbol, anchor: anchor, location: location, row: row, typedRow: typedRow, columns: append([]string(nil), argNames...)}
 			if options.explain {
-				item.explanation = explain(info, store, atom)
+				item.explanation = explain(plan.info, store, atom)
 			}
 			violations = append(violations, item)
 		}
@@ -180,7 +393,7 @@ func evaluateProgram(base factstore.ReadOnlyFactStore, catalog []parse.SourceUni
 	return violations, nil
 }
 
-func runEvaluation(info *mangleanalysis.ProgramInfo, strata []mangleanalysis.Nodeset, predToStratum map[ast.PredicateSym]int, store factstore.FactStore, factLimit int) (err error) {
+func runEvaluation(info *mangleanalysis.ProgramInfo, strata []mangleanalysis.Nodeset, predToStratum map[ast.PredicateSym]int, store factstore.FactStore, factLimit int, beforeEvaluation func()) (err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			err = fmt.Errorf("evaluation failed: %v", recovered)
@@ -188,6 +401,9 @@ func runEvaluation(info *mangleanalysis.ProgramInfo, strata []mangleanalysis.Nod
 	}()
 	if factLimit <= 0 {
 		factLimit = DefaultFactLimit
+	}
+	if beforeEvaluation != nil {
+		beforeEvaluation()
 	}
 	externalPredicates := make(map[ast.PredicateSym]mangleengine.ExternalPredicateCallback)
 	if decl := info.Decls[globSym]; decl != nil && decl.IsExternal() {
@@ -202,6 +418,243 @@ func runEvaluation(info *mangleanalysis.ProgramInfo, strata []mangleanalysis.Nod
 		mangleengine.WithExternalPredicates(externalPredicates),
 	)
 	return err
+}
+
+func checkPureTimeFunctions(units []parse.SourceUnit) *phaseError {
+	forbidden := map[string]struct{}{
+		"fn:time:now": {}, "fn:time:parse_civil": {}, "fn:time:format_civil": {},
+		"fn:time:trunc_civil": {}, "fn:time:add_civil": {}, "fn:time:weekday_civil": {},
+	}
+	var visitTerm func(ast.BaseTerm) *phaseError
+	visitTerm = func(term ast.BaseTerm) *phaseError {
+		call, ok := term.(ast.ApplyFn)
+		if !ok {
+			return nil
+		}
+		if _, denied := forbidden[call.Function.Symbol]; denied {
+			return failPhase("program_analysis", "%s is unavailable in the pure runtime; supply time as explicit data", call.Function.Symbol)
+		}
+		for _, argument := range call.Args {
+			if perr := visitTerm(argument); perr != nil {
+				return perr
+			}
+		}
+		return nil
+	}
+	visitAtom := func(atom ast.Atom) *phaseError {
+		for _, argument := range atom.Args {
+			if perr := visitTerm(argument); perr != nil {
+				return perr
+			}
+		}
+		return nil
+	}
+	var visitTransform func(*ast.Transform) *phaseError
+	visitTransform = func(transform *ast.Transform) *phaseError {
+		for _, statement := range transform.Statements {
+			if _, denied := forbidden[statement.Fn.Function.Symbol]; denied {
+				return failPhase("program_analysis", "%s is unavailable in the pure runtime; supply time as explicit data", statement.Fn.Function.Symbol)
+			}
+			for _, argument := range statement.Fn.Args {
+				if perr := visitTerm(argument); perr != nil {
+					return perr
+				}
+			}
+		}
+		if transform.Next != nil {
+			return visitTransform(transform.Next)
+		}
+		return nil
+	}
+	for _, unit := range units {
+		for _, clause := range unit.Clauses {
+			if perr := visitAtom(clause.Head); perr != nil {
+				return perr
+			}
+			for _, premise := range clause.Premises {
+				switch typed := premise.(type) {
+				case ast.Atom:
+					if perr := visitAtom(typed); perr != nil {
+						return perr
+					}
+				case ast.NegAtom:
+					if perr := visitAtom(typed.Atom); perr != nil {
+						return perr
+					}
+				case ast.Eq:
+					if perr := visitTerm(typed.Left); perr != nil {
+						return perr
+					}
+					if perr := visitTerm(typed.Right); perr != nil {
+						return perr
+					}
+				case ast.Ineq:
+					if perr := visitTerm(typed.Left); perr != nil {
+						return perr
+					}
+					if perr := visitTerm(typed.Right); perr != nil {
+						return perr
+					}
+				}
+			}
+			if clause.Transform != nil {
+				if perr := visitTransform(clause.Transform); perr != nil {
+					return perr
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func validateSuppressionPolicies(declarations []runtime.SuppressionDeclaration, reportDecls []ast.Decl) ([]suppressionPolicy, *phaseError) {
+	reports := make(map[string]ast.Decl, len(reportDecls))
+	for _, declaration := range reportDecls {
+		name := declaration.DeclaredAtom.Predicate.Symbol
+		if _, duplicate := reports[name]; duplicate {
+			return nil, failPhase("program_analysis", "reported predicate %q is declared more than once", name)
+		}
+		reports[name] = declaration
+	}
+	byAssertion := make(map[string][]string, len(declarations))
+	for _, declaration := range declarations {
+		if declaration.Assertion == "" {
+			return nil, failPhase("program_analysis", "suppression declaration has an empty assertion")
+		}
+		if _, duplicate := byAssertion[declaration.Assertion]; duplicate {
+			return nil, failPhase("program_analysis", "suppression declaration for %q is duplicated", declaration.Assertion)
+		}
+		report, reported := reports[declaration.Assertion]
+		if !reported {
+			return nil, failPhase("program_analysis", "suppression declaration names unknown or unreported predicate %q", declaration.Assertion)
+		}
+		options, ok := declaration.Options.(map[string]any)
+		if !ok && declaration.Options != nil {
+			return nil, failPhase("program_analysis", "suppression declaration for %q must be an options object", declaration.Assertion)
+		}
+		for key := range options {
+			if key != "by" {
+				return nil, failPhase("program_analysis", "suppression declaration for %q has unknown option %q", declaration.Assertion, key)
+			}
+		}
+		var columns []string
+		if raw, exists := options["by"]; exists {
+			values, ok := raw.([]any)
+			if !ok {
+				return nil, failPhase("program_analysis", "suppression declaration for %q: by must be an array of column names", declaration.Assertion)
+			}
+			columns = make([]string, len(values))
+			seen := make(map[string]struct{}, len(values))
+			argNames := make([]string, len(report.DeclaredAtom.Args))
+			for index, arg := range report.DeclaredAtom.Args {
+				argNames[index] = fmt.Sprint(arg)
+			}
+			for index, value := range values {
+				column, ok := value.(string)
+				if !ok || column == "" {
+					return nil, failPhase("program_analysis", "suppression declaration for %q: by entries must be nonempty column names", declaration.Assertion)
+				}
+				if _, duplicate := seen[column]; duplicate {
+					return nil, failPhase("program_analysis", "suppression declaration for %q selects column %q more than once", declaration.Assertion, column)
+				}
+				seen[column] = struct{}{}
+				if len(argNames) > 0 && column == argNames[0] {
+					return nil, failPhase("program_analysis", "suppression declaration for %q cannot select its anchor column %q", declaration.Assertion, column)
+				}
+				matches := 0
+				for _, name := range argNames {
+					if name == column {
+						matches++
+					}
+				}
+				if matches == 0 {
+					return nil, failPhase("program_analysis", "suppression declaration for %q selects unknown column %q", declaration.Assertion, column)
+				}
+				if matches > 1 {
+					return nil, failPhase("program_analysis", "suppression declaration for %q selects ambiguous column %q", declaration.Assertion, column)
+				}
+				columns[index] = column
+			}
+		}
+		byAssertion[declaration.Assertion] = columns
+	}
+	policies := make([]suppressionPolicy, 0, len(reportDecls))
+	for _, declaration := range reportDecls {
+		name := declaration.DeclaredAtom.Predicate.Symbol
+		policies = append(policies, suppressionPolicy{assertion: name, by: append([]string(nil), byAssertion[name]...)})
+	}
+	return policies, nil
+}
+
+func sortReportRows(rows []ast.Atom) error {
+	keys := make([]string, len(rows))
+	for index, row := range rows {
+		values := make([]any, len(row.Args))
+		for argIndex, arg := range row.Args {
+			constant, ok := arg.(ast.Constant)
+			if !ok {
+				return fmt.Errorf("reported row %s contains a non-constant argument", row)
+			}
+			values[argIndex] = canonicalFactValue(constant)
+		}
+		encoded, err := canonical.Marshal(values)
+		if err != nil {
+			return fmt.Errorf("canonicalize report row %s: %w", row, err)
+		}
+		keys[index] = string(encoded)
+	}
+	order := make([]int, len(rows))
+	for index := range order {
+		order[index] = index
+	}
+	sort.Slice(order, func(i, j int) bool { return keys[order[i]] < keys[order[j]] })
+	sorted := make([]ast.Atom, len(rows))
+	for index, source := range order {
+		sorted[index] = rows[source]
+	}
+	copy(rows, sorted)
+	return nil
+}
+
+func canonicalFactValue(constant ast.Constant) any {
+	switch constant.Type {
+	case ast.StringType:
+		value, _ := constant.StringValue()
+		return []any{"s", value}
+	case ast.NameType:
+		value, _ := constant.NameValue()
+		return []any{"n", strings.TrimPrefix(value, "/")}
+	case ast.NumberType:
+		value, _ := constant.NumberValue()
+		return []any{"i", strconv.FormatInt(value, 10)}
+	case ast.Float64Type:
+		value, _ := constant.Float64Value()
+		if value == 0 {
+			value = 0
+		}
+		return []any{"f", fmt.Sprintf("%016x", math.Float64bits(value))}
+	default:
+		return []any{"?", constant.String()}
+	}
+}
+
+func factValue(constant ast.Constant) (facts.Value, error) {
+	switch constant.Type {
+	case ast.StringType:
+		value, err := constant.StringValue()
+		return facts.String(value), err
+	case ast.NameType:
+		value, err := constant.NameValue()
+		return facts.Name(strings.TrimPrefix(value, "/")), err
+	case ast.NumberType:
+		value, err := constant.NumberValue()
+		return facts.Number(value), err
+	case ast.Float64Type:
+		value, err := constant.Float64Value()
+		return facts.Float(value), err
+	default:
+		return facts.Value{}, fmt.Errorf("unsupported reported Mangle value %s", constant)
+	}
 }
 
 type globPredicate struct {
@@ -586,7 +1039,7 @@ func decodeConstant(constant ast.Constant) any {
 		return value
 	case ast.NameType:
 		value, _ := constant.NameValue()
-		return value
+		return runtime.Name{Value: strings.TrimPrefix(value, "/")}
 	}
 	return constant.String()
 }

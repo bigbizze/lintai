@@ -476,6 +476,7 @@ Flags for analysis:
 - `--json`
 - `--explain`: with `--json`, attach `explanation` to each violation
 - `--fact-limit`: the maximum number of facts that one rule may derive (default 5,000,000)
+- `--rule-workers N`: maximum concurrent rule jobs; `0` (the default) uses `GOMAXPROCS`, and `1` runs jobs sequentially
 - `--severity <rule-id>=<level>`: the severity of the violations of one rule. `<level>` is `error` (the default for every rule), `warning` or `off`. Repeat the flag for more rules. See "Rule severity".
 - `--rules-lock <path>`: a rules lock file, relative to the workspace root, that `lintai lock` wrote. See "Rules lock".
 - `--setup-sandbox auto|on|off`: run `setup()` under the Node permission model. See "Setup sandbox".
@@ -622,6 +623,7 @@ type LintaiOptions = {
 	sourceLinks?: string;
 	env?: Record<string, unknown>;
 	factLimit?: number;
+	ruleWorkers?: number;
 	rulesLock?: string;
 	setupSandbox?: "auto" | "on" | "off";
 };
@@ -631,6 +633,7 @@ type LintaiOptions = {
 - `exclude` is the same as the CLI `--exclude` flag
 - `files` is the same as the CLI `--files` flag
 - `sourceLinks` is the same as the CLI `--source-links` flag. A relative path is resolved from the workspace root
+- `ruleWorkers` is the same as the CLI `--rule-workers` flag
 - `rulesLock` is the same as the CLI `--rules-lock` flag. A relative path is resolved from the workspace root
 - `setupSandbox` is the same as the CLI `--setup-sandbox` flag
 - relative roots resolve from the directory that the linter runs in
@@ -688,7 +691,7 @@ Plugin caveats:
 - `oneshot` is the default under plain ESLint CLI detection
 - lintai reads the saved files on disk, not the editor buffer. In `serve` mode, when the editor text of a file is different from the saved file, `lintai/analysis` shows one message on line 1 that asks you to save the file, and the other lintai rules report nothing for that file. When the editor lints a file that was saved after the last analysis started, the plugin runs a new analysis first, so the diagnostics of the saved file are current. On a file system that stores modification times in whole seconds, a second save in the same second can show the diagnostics of the first save until the next background refresh.
 - rule-file edits force invalidation on the next lint pass. A new rule id still needs a restart (see "Linter rules").
-- in `serve` mode, the plugin also watches the extra files that the last analysis depended on: the source-links file, declaration maps, source entries, auxiliary tsconfig files and resolution candidates. Some of these files may not exist yet, because creating one, such as a new `.d.ts.map`, can change the facts. For a missing file or directory the plugin watches the nearest existing parent directory, without watching its subfolders. It also checks parent directories for replacement, so rebuilding a `dist` folder does not leave it watching the old folder. When one of these files changes, the plugin clears its diagnostics and the next lint pass runs a fresh analysis. After analysis it checks the parent directories again, even if the input list is unchanged. Before reusing cached diagnostics, it also checks input file metadata once per event-loop turn. This catches changes missed while a watcher starts, without checking every input again for each file in the same synchronous lint pass. If an input watcher fails, the plugin reports the problem and falls back to one-shot analysis.
+- in `serve` mode, the plugin also watches the extra files that the last analysis depended on: the source-links file, declaration maps, source entries, auxiliary tsconfig files and resolution candidates. Some of these files may not exist yet, because creating one, such as a new `.d.ts.map`, can change the facts. For a missing file or directory the plugin watches the nearest existing parent directory, without watching its subfolders. It also checks parent directories for replacement, so rebuilding a `dist` folder does not leave it watching the old folder. When one of these files changes, the plugin clears its diagnostics and the next lint pass runs a fresh analysis. After a check it updates the watches from producer-provided hints, including relevant source-membership directories. Events request another check; the producer validates captured contents and membership when that check runs. A newly discovered hint does not reject the completed result. If an input watcher fails, the plugin reports the problem and falls back to one-shot analysis.
 - when lintai cannot produce diagnostics, `lintai/analysis` reports the reason on line 1 of each linted file, so a broken setup does not look like a clean workspace. In an `eslint` CLI run, these messages appear on the first linted file only.
 - the ESLint path never computes `explanation`
 

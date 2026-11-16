@@ -14,7 +14,9 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	result, err := engine.New(typescript.New()).Analyze(context.Background(), engine.Options{
+	session := engine.Open(engine.Options{}, typescript.New())
+	defer session.Close()
+	result, err := session.Check(context.Background(), engine.Options{
 		RepoRoot:      repoRoot,
 		WorkspaceRoot: filepath.Join(repoRoot, "testdata", "fixtures", "workspace"),
 	})

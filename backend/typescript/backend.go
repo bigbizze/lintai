@@ -25,11 +25,17 @@ type Backend struct {
 	// TypeScript 7, once per config and adjustment set. Nil discards them.
 	Log io.Writer
 
-	collectMu        sync.Mutex
-	previousSnapshot *lintaiapi.Snapshot
-
 	reportedMu sync.Mutex
 	reported   map[string]string
+	collectMu  sync.Mutex
+	current    *producerGeneration
+}
+
+type producerGeneration struct {
+	repoRoot, workspaceRoot string
+	relations               []string
+	snapshot                *lintaiapi.Snapshot
+	items                   []facts.Fact
 }
 
 var _ backend.Producer = (*Backend)(nil)
@@ -80,6 +86,8 @@ func (b *Backend) Describe() (facts.ProducerDescription, error) {
 }
 
 func (b *Backend) Collect(ctx context.Context, request backend.CollectionRequest) (facts.Batch, error) {
+	b.collectMu.Lock()
+	defer b.collectMu.Unlock()
 	batch := facts.Batch{Relations: make(map[facts.Predicate][]facts.Row), Anchors: make(map[string]facts.AnchorSupport)}
 	if len(request.Predicates) == 0 {
 		return batch, nil
@@ -109,16 +117,12 @@ func (b *Backend) Collect(ctx context.Context, request backend.CollectionRequest
 	for predicate := range requested {
 		relations = append(relations, strings.TrimPrefix(predicate.Name, b.namespace+"."))
 	}
-	snapshot, sources, _, err := b.buildLintaiSnapshotForRelations(ctx, request.RepoRoot, request.WorkspaceRoot, relations)
+	slices.Sort(relations)
+	generation, err := b.generation(ctx, request.RepoRoot, request.WorkspaceRoot, relations)
 	if err != nil {
 		return facts.Batch{}, err
 	}
-	adjustments := convertAdjustments(request.WorkspaceRoot, snapshot.ConfigAdjustments)
-	b.reportAdjustments(adjustments)
-	items, err := factsFromSnapshot(snapshot, sources, adjustments, b.namespace)
-	if err != nil {
-		return facts.Batch{}, err
-	}
+	snapshot, items := generation.snapshot, generation.items
 	metadata := make(map[facts.Predicate]facts.RelationDescription, len(description.BaseRelations))
 	for _, relation := range description.BaseRelations {
 		metadata[relation.Predicate] = relation
@@ -188,7 +192,7 @@ func (b *Backend) Collect(ctx context.Context, request backend.CollectionRequest
 				Description: description,
 			}
 			if support.Data != nil {
-				anchor.Tracking = &facts.TrackingKey{Scheme: "lintai.typescript.subject/1", Data: support.Data}
+				anchor.Tracking = &facts.TrackingKey{Scheme: "lintai.typescript.subject/1", Data: cloneProducerValue(support.Data)}
 			}
 			batch.Anchors[id] = anchor
 		}
@@ -197,42 +201,103 @@ func (b *Backend) Collect(ctx context.Context, request backend.CollectionRequest
 		batch.AnalyzedFiles = append(batch.AnalyzedFiles, module.Path)
 	}
 	batch.InputRevision = snapshot.InputRevision
-	batch.Scope = snapshot.Scope
+	batch.Scope = cloneProducerValue(snapshot.Scope)
+	batch.WatchHints = slices.Clone(snapshot.WatchHints)
 	return batch, nil
 }
 
-func (b *Backend) Close() error { return nil }
+func (b *Backend) Close() error {
+	b.collectMu.Lock()
+	defer b.collectMu.Unlock()
+	b.current = nil
+	return nil
+}
 
 // BuildSnapshot extracts the facts of the source files under workspaceRoot.
 func (b *Backend) BuildSnapshot(ctx context.Context, repoRoot, workspaceRoot string) (facts.Snapshot, error) {
-	return b.buildSnapshot(ctx, repoRoot, workspaceRoot, nil)
-}
-
-func (b *Backend) buildSnapshot(ctx context.Context, repoRoot, workspaceRoot string, relations []string) (facts.Snapshot, error) {
-	snapshot, sources, version, err := b.buildLintaiSnapshotForRelations(ctx, repoRoot, workspaceRoot, relations)
+	b.collectMu.Lock()
+	defer b.collectMu.Unlock()
+	generation, err := b.generation(ctx, repoRoot, workspaceRoot, nil)
 	if err != nil {
 		return facts.Snapshot{}, err
 	}
-	adjustments := convertAdjustments(workspaceRoot, snapshot.ConfigAdjustments)
-	b.reportAdjustments(adjustments)
-	items, err := factsFromSnapshot(snapshot, sources, adjustments, b.namespace)
-	if err != nil {
-		return facts.Snapshot{}, err
+	snapshot := generation.snapshot
+	items := make([]facts.Fact, len(generation.items))
+	for index, item := range generation.items {
+		items[index] = facts.Fact{Relation: item.Relation, Values: slices.Clone(item.Values)}
 	}
 	inputPaths := make([]string, 0, len(snapshot.Inputs))
 	for _, input := range snapshot.Inputs {
 		inputPaths = append(inputPaths, input.Path)
 	}
-	return facts.Snapshot{Version: version, InputRevision: snapshot.InputRevision, Scope: snapshot.Scope, Schema: Schema(), Facts: items, InputPaths: inputPaths}, nil
+	return facts.Snapshot{Version: snapshot.InputRevision, InputRevision: snapshot.InputRevision, Scope: cloneProducerValue(snapshot.Scope), Schema: Schema(), Facts: items, InputPaths: inputPaths, WatchHints: slices.Clone(snapshot.WatchHints)}, nil
+}
+
+// generation is called with collectMu held. A changed relation demand needs a
+// new extraction, whose own validation covers the new inputs. The prior
+// snapshot only supplies tracking keys whose captured source bytes still match.
+func (b *Backend) generation(ctx context.Context, repoRoot, workspaceRoot string, relations []string) (*producerGeneration, error) {
+	var previousSnapshot *lintaiapi.Snapshot
+	var previousValidation *lintaiapi.InputValidation
+	if b.current != nil && b.current.repoRoot == repoRoot && b.current.workspaceRoot == workspaceRoot {
+		previousSnapshot = b.current.snapshot
+		if (relations == nil) == (b.current.relations == nil) && slices.Equal(relations, b.current.relations) {
+			valid, validation, err := previousSnapshot.Validity.Validate(ctx)
+			if err != nil {
+				b.current = nil
+				return nil, err
+			}
+			if valid {
+				return b.current, nil
+			}
+			previousValidation = validation
+		}
+	}
+	b.current = nil
+	snapshot, sources, _, err := b.extractSnapshot(ctx, workspaceRoot, relations, previousSnapshot, previousValidation)
+	if err != nil {
+		return nil, err
+	}
+	adjustments := convertAdjustments(workspaceRoot, snapshot.ConfigAdjustments)
+	b.reportAdjustments(adjustments)
+	items, err := factsFromSnapshot(snapshot, sources, adjustments, b.namespace)
+	if err != nil {
+		return nil, err
+	}
+	b.current = &producerGeneration{repoRoot: repoRoot, workspaceRoot: workspaceRoot, relations: slices.Clone(relations), snapshot: snapshot, items: items}
+	return b.current, nil
+}
+
+// cloneProducerValue detaches the JSON-shaped scope and tracking data that
+// callers receive from the producer's retained generation.
+func cloneProducerValue(value any) any {
+	switch value := value.(type) {
+	case map[string]any:
+		clone := make(map[string]any, len(value))
+		for key, item := range value {
+			clone[key] = cloneProducerValue(item)
+		}
+		return clone
+	case []any:
+		clone := make([]any, len(value))
+		for index, item := range value {
+			clone[index] = cloneProducerValue(item)
+		}
+		return clone
+	case []string:
+		return slices.Clone(value)
+	default:
+		return value
+	}
 }
 
 func (b *Backend) buildLintaiSnapshot(ctx context.Context, repoRoot, workspaceRoot string) (*lintaiapi.Snapshot, []ambient.Source, string, error) {
-	return b.buildLintaiSnapshotForRelations(ctx, repoRoot, workspaceRoot, nil)
-}
-
-func (b *Backend) buildLintaiSnapshotForRelations(ctx context.Context, repoRoot, workspaceRoot string, relations []string) (*lintaiapi.Snapshot, []ambient.Source, string, error) {
 	b.collectMu.Lock()
 	defer b.collectMu.Unlock()
+	return b.extractSnapshot(ctx, workspaceRoot, nil, nil, nil)
+}
+
+func (b *Backend) extractSnapshot(ctx context.Context, workspaceRoot string, relations []string, previousSnapshot *lintaiapi.Snapshot, previousValidation *lintaiapi.InputValidation) (*lintaiapi.Snapshot, []ambient.Source, string, error) {
 	options := b.settings
 	scope, err := ParseFileScope(string(options.Files))
 	if err != nil {
@@ -252,12 +317,12 @@ func (b *Backend) buildLintaiSnapshotForRelations(ctx context.Context, repoRoot,
 		SourceLinks:        options.SourceLinks,
 		AmbientMatchers:    convertAmbientMatchers(sources),
 		RequestedRelations: relations,
+		PreviousValidation: previousValidation,
 		TsconfigFiles:      scope == FileScopeTsconfig,
-	}, b.previousSnapshot)
+	}, previousSnapshot)
 	if err != nil {
 		return nil, nil, "", err
 	}
-	b.previousSnapshot = extracted
 	return extracted, sources, extracted.InputRevision, nil
 }
 
