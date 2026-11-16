@@ -612,7 +612,7 @@ test("watcher installation failure during an invalidated refresh falls back to o
 				analyses += 1;
 				return createInitializeResult(
 					analyses === 1 ? "arch.initial" : "arch.refreshed",
-					[input],
+					analyses === 1 ? [input] : [input, path.join(workspaceRoot, "additional.json")],
 					"src/example.ts",
 					analyses,
 				);
@@ -718,6 +718,8 @@ test("an event queued on a replaced input watcher still invalidates diagnostics"
 	);
 	try {
 		client.getDiagnostics("src/app.ts");
+		listeners[0].onChange("input.json");
+		t.mock.timers.runAll();
 		assert.ok(listeners.length >= 2);
 		assert.equal(listeners[0].closed, true);
 		listeners[0].onChange("input.json");
@@ -727,6 +729,133 @@ test("an event queued on a replaced input watcher still invalidates diagnostics"
 	} finally {
 		client.dispose();
 		rmSync(workspaceRoot, { recursive: true, force: true });
+	}
+});
+
+test("input changes around watch installation invalidate diagnostics", (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	for (const kind of [
+		"replacement",
+		"edit",
+		"after-install",
+		"after-reinstall",
+		"missing-directory",
+	] as const) {
+		const workspaceRoot = mkdtempSync(path.join(os.tmpdir(), "lintai-input-watch-gap-"));
+		const directory = path.join(workspaceRoot, "dist");
+		const input = path.join(directory, "input.d.ts");
+		if (kind !== "missing-directory") {
+			mkdirSync(directory);
+			writeFileSync(input, "initial");
+		}
+		const child = createTestProcess();
+		let analyses = 0;
+		let watchers = 0;
+		let changeOnClose = false;
+		let inputChanged: ((filename?: string) => void) | undefined;
+		const client = new LintAIClient(
+			resolveBridgeOptions(
+				{
+					mode: "serve",
+					binary: "/tmp/lintai",
+					workspaceRoot,
+					...(kind === "missing-directory" ? {} : { sourceLinks: input }),
+				},
+				workspaceRoot,
+				editorHost,
+			),
+			createTestDependencies({
+				spawnServe: () => child,
+				readServeSync: () =>
+					createInputResult(
+						++analyses,
+						[input, path.join(workspaceRoot, "extra")],
+						existsSync(input) ? readFileSync(input, "utf8") : "missing",
+					),
+				watchInputPath: (target, onChange) => {
+					if (kind === "missing-directory" && target === workspaceRoot && !existsSync(directory)) {
+						// The directory appears while its ancestor watcher is still being installed.
+						mkdirSync(directory);
+						writeFileSync(input, "initial");
+					}
+					if (target === directory) inputChanged = onChange;
+					watchers++;
+					return {
+						close() {
+							watchers--;
+							if (changeOnClose && watchers === 0) {
+								changeOnClose = false;
+								if (kind === "replacement") {
+									renameSync(directory, path.join(workspaceRoot, "old-dist"));
+									mkdirSync(directory);
+								}
+								writeFileSync(input, kind);
+							}
+						},
+					};
+				},
+				log: () => undefined,
+			}),
+		);
+		try {
+			changeOnClose = kind === "replacement" || kind === "edit";
+			assert.equal(
+				client.getDiagnostics("src/app.ts")[0]?.message,
+				kind === "missing-directory" ? "missing" : "initial",
+			);
+			assert.equal(changeOnClose, false);
+			if (kind === "missing-directory") {
+				t.mock.timers.tick(200);
+				assert.equal(client.getDiagnostics("src/app.ts")[0]?.message, "initial");
+				assert.equal(analyses, 2);
+				t.mock.timers.runAll();
+				assert.equal(client.getDiagnostics("src/app.ts")[0]?.message, "initial");
+				assert.equal(analyses, 3);
+				assert.ok(inputChanged);
+				writeFileSync(input, "nested edit");
+				inputChanged("input.d.ts");
+				t.mock.timers.tick(200);
+				assert.equal(client.getDiagnostics("src/app.ts")[0]?.message, "nested edit");
+				assert.equal(analyses, 4);
+				continue;
+			}
+			if (kind === "after-reinstall") {
+				t.mock.timers.tick(200);
+				assert.equal(client.getDiagnostics("src/app.ts")[0]?.message, "initial");
+				assert.ok(inputChanged);
+				const oldInputChanged = inputChanged;
+				oldInputChanged("input.d.ts");
+				t.mock.timers.tick(200);
+				assert.notEqual(inputChanged, oldInputChanged);
+				assert.equal(client.getDiagnostics("src/app.ts")[0]?.message, "initial");
+				writeFileSync(input, kind);
+				t.mock.timers.tick(200);
+				assert.equal(client.getDiagnostics("src/app.ts")[0]?.message, kind);
+				assert.equal(analyses, 4);
+				t.mock.timers.runAll();
+				client.getDiagnostics("src/app.ts");
+				assert.equal(analyses, 4);
+				continue;
+			}
+			if (kind === "after-install") {
+				renameSync(directory, path.join(workspaceRoot, "old-dist"));
+				mkdirSync(directory);
+				writeFileSync(input, kind);
+			}
+			t.mock.timers.runAll();
+			assert.equal(client.getDiagnostics("src/app.ts")[0]?.message, kind);
+			assert.equal(analyses, 2);
+			t.mock.timers.runAll();
+			assert.equal(client.getDiagnostics("src/app.ts")[0]?.message, kind);
+			const settledAnalyses = kind === "after-install" ? 3 : 2;
+			assert.equal(analyses, settledAnalyses);
+			t.mock.timers.runAll();
+			assert.equal(client.getDiagnostics("src/app.ts")[0]?.message, kind);
+			assert.equal(analyses, settledAnalyses);
+		} finally {
+			client.dispose();
+			rmSync(workspaceRoot, { recursive: true, force: true });
+		}
 	}
 });
 
@@ -825,27 +954,31 @@ test("missing semantic inputs invalidate diagnostics as their parent directories
 		assert.equal(client.getDiagnostics("src/app.ts")[0]?.rule_id, "arch.missing-map");
 		const inputWrite = Buffer.concat(initializeWrites).toString("utf8");
 		assert.ok(inputWrite.includes(`"sourceLinks":${JSON.stringify(path.join(workspaceRoot, "source-links.json"))}`));
+		// Let the one-time post-install check settle before testing unrelated events.
+		await new Promise((resolve) => setTimeout(resolve, 250));
+		assert.equal(client.getDiagnostics("src/app.ts")[0]?.rule_id, "arch.missing-map");
+		assert.equal(analyses, 2);
 		writeFileSync(path.join(workspaceRoot, "unrelated.txt"), "unrelated");
 		changed(path.join(workspaceRoot, "unrelated.txt"));
 		await new Promise((resolve) => setTimeout(resolve, 250));
 		assert.equal(client.getDiagnostics("src/app.ts")[0]?.rule_id, "arch.missing-map");
-		assert.equal(analyses, 1);
+		assert.equal(analyses, 2);
 
 		writeFileSync(watchHints[0], "map");
 		changed(watchHints[0]);
-		await waitForAnalysis(2);
+		await waitForAnalysis(3);
 		assert.equal(client.getDiagnostics("src/app.ts")[0]?.rule_id, "arch.missing-source");
 
 		mkdirSync(sourceDirectory);
 		changed(sourceDirectory);
-		await waitForAnalysis(3);
+		await waitForAnalysis(4);
 		assert.equal(client.getDiagnostics("src/app.ts")[0]?.rule_id, "arch.missing-source");
 
 		mkdirSync(path.dirname(source));
 		writeFileSync(source, "export const value = 1;");
 		changed(path.dirname(source));
 		changed(source);
-		await waitForAnalysis(4);
+		await waitForAnalysis(5);
 		assert.deepEqual(client.getDiagnostics("src/app.ts"), []);
 	} finally {
 		client.dispose();
@@ -936,7 +1069,9 @@ test("input watches follow replaced directories and later edits", async () => {
 		renameSync(dist, path.join(contracts, "old-dist"));
 		mkdirSync(dist);
 		writeFileSync(input, declaration("replacement"));
-		listeners.get(contracts)?.("dist");
+		// A parent watcher may report the rename destination rather than the
+		// name of the directory that was replaced.
+		listeners.get(contracts)?.("old-dist");
 		await waitForMessage(declaration("replacement"));
 		let previousAnalyses = analyses;
 		assert.ok(previousAnalyses > 1);
@@ -950,7 +1085,7 @@ test("input watches follow replaced directories and later edits", async () => {
 		renameSync(contracts, path.join(workspaceRoot, "old-contracts"));
 		mkdirSync(dist, { recursive: true });
 		writeFileSync(input, declaration("replacement ancestor"));
-		listeners.get(workspaceRoot)?.("contracts");
+		listeners.get(workspaceRoot)?.("old-contracts");
 		await waitForMessage(declaration("replacement ancestor"));
 		assert.ok(analyses > previousAnalyses);
 
@@ -1028,6 +1163,7 @@ test("native input watches follow replaced directories and later edits", async (
 			await withTimeout(new Promise<void>((resolve, reject) => {
 				const check = () => {
 					try {
+						assert.deepEqual(client.problems(), []);
 						if (client.getDiagnostics("src/app.ts")[0]?.message === expected) resolve();
 					} catch (error) {
 						reject(error);
