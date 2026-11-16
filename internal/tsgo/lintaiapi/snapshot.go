@@ -111,8 +111,6 @@ type Access struct {
 	Range                                  SourceLocation
 }
 
-type UnsupportedAttribution struct{ Site, Reason string }
-
 // FunctionEscape is direct evidence about a function-valued argument.
 type FunctionEscape struct {
 	Site, Target string
@@ -371,7 +369,6 @@ type Snapshot struct {
 	FnRefs                    []FnRef
 	SuspensionSites           []SuspensionSite
 	Accesses                  []Access
-	UnsupportedAttributions   []UnsupportedAttribution
 	TypeRefs                  []TypeRef
 	AmbientUses               []AmbientUse
 	GlobalRefs                []GlobalRef
@@ -483,7 +480,6 @@ type extractor struct {
 	functionEscapes             []FunctionEscape
 	suspensionSites             []SuspensionSite
 	accesses                    []Access
-	unsupportedAttributions     []UnsupportedAttribution
 	typeRefs                    []TypeRef
 	ambientUses                 []AmbientUse
 	globalRefs                  []GlobalRef
@@ -901,10 +897,8 @@ func keepModuleFiles(snap *Snapshot) {
 	keepSource := func(path, key string, module bool) bool {
 		return isModule(path) && (module || key == "" || hasFunction(key))
 	}
-	removedSites := make(map[string]bool)
 	snap.CallEdges = slices.DeleteFunc(snap.CallEdges, func(item CallEdge) bool {
 		if !keepSource(item.FromPath, item.FromSemanticKey, item.FromModule) {
-			removedSites[item.SemanticKey] = true
 			return true
 		}
 		if isModule(item.ToPath) && hasFunction(item.ToSemanticKey) {
@@ -918,28 +912,13 @@ func keepModuleFiles(snap *Snapshot) {
 		return true
 	})
 	snap.ExternalCalls = slices.DeleteFunc(snap.ExternalCalls, func(item ExternalCall) bool {
-		remove := !keepSource(item.FromPath, item.FromSemanticKey, item.FromModule)
-		if remove {
-			removedSites[item.SemanticKey] = true
-		}
-		return remove
+		return !keepSource(item.FromPath, item.FromSemanticKey, item.FromModule)
 	})
 	snap.CallsUnresolved = slices.DeleteFunc(snap.CallsUnresolved, func(item CallUnresolved) bool {
-		remove := !keepSource(item.FromPath, item.FromSemanticKey, item.FromModule)
-		if remove {
-			removedSites[item.SemanticKey] = true
-		}
-		return remove
+		return !keepSource(item.FromPath, item.FromSemanticKey, item.FromModule)
 	})
 	snap.FnRefs = slices.DeleteFunc(snap.FnRefs, func(item FnRef) bool {
-		remove := !keepSource(item.FromPath, item.FromSemanticKey, item.FromModule) || !isModule(item.ToPath) || !hasFunction(item.ToSemanticKey)
-		if remove {
-			removedSites[item.SemanticKey] = true
-		}
-		return remove
-	})
-	snap.UnsupportedAttributions = slices.DeleteFunc(snap.UnsupportedAttributions, func(item UnsupportedAttribution) bool {
-		return removedSites[item.Site]
+		return !keepSource(item.FromPath, item.FromSemanticKey, item.FromModule) || !isModule(item.ToPath) || !hasFunction(item.ToSemanticKey)
 	})
 	for index := range snap.FunctionEscapes {
 		if snap.FunctionEscapes[index].Target != "" && !hasFunction(snap.FunctionEscapes[index].Target) {
@@ -998,14 +977,19 @@ func keepRetainedSemantics(snap *Snapshot) {
 			keep[id] = true
 		}
 	}
-	for _, item := range snap.DeclarationSourceCandidates {
-		if keep[item.CheckedDecl] {
-			keep[item.SourceDecl] = true
+	mapTargets := make(map[string][]string)
+	for _, links := range [][]DeclarationSourceFact{snap.DeclarationSourceCandidates, snap.DeclarationSources} {
+		for _, link := range links {
+			mapTargets[link.CheckedDecl] = append(mapTargets[link.CheckedDecl], link.SourceDecl)
 		}
 	}
-	for _, item := range snap.DeclarationSources {
-		if keep[item.CheckedDecl] {
-			keep[item.SourceDecl] = true
+	queue := slices.Sorted(maps.Keys(keep))
+	for index := 0; index < len(queue); index++ {
+		for _, source := range mapTargets[queue[index]] {
+			if !keep[source] {
+				keep[source] = true
+				queue = append(queue, source)
+			}
 		}
 	}
 	snap.DeclarationSourceCandidates = slices.DeleteFunc(snap.DeclarationSourceCandidates, func(item DeclarationSourceFact) bool { return !keep[item.CheckedDecl] })
@@ -1187,7 +1171,6 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 		FunctionEscapes:             ex.functionEscapes,
 		SuspensionSites:             ex.suspensionSites,
 		Accesses:                    ex.accesses,
-		UnsupportedAttributions:     ex.unsupportedAttributions,
 		TypeRefs:                    ex.typeRefs,
 		AmbientUses:                 ex.ambientUses,
 		GlobalRefs:                  ex.globalRefs,
@@ -1582,7 +1565,6 @@ func mergeSnapshot(into *Snapshot, partial *Snapshot) {
 	})
 	into.SuspensionSites = mergeByEntityID(into.SuspensionSites, partial.SuspensionSites, func(item SuspensionSite) string { return item.EntityID })
 	into.Accesses = mergeByEntityID(into.Accesses, partial.Accesses, func(item Access) string { return item.EntityID })
-	into.UnsupportedAttributions = mergeByEntityID(into.UnsupportedAttributions, partial.UnsupportedAttributions, func(item UnsupportedAttribution) string { return item.Site })
 	into.TypeRefs = mergeByEntityID(into.TypeRefs, partial.TypeRefs, func(item TypeRef) string { return item.EntityID })
 	into.AmbientUses = mergeByEntityID(into.AmbientUses, partial.AmbientUses, func(item AmbientUse) string {
 		return item.EntityID + "\x00" + item.Source + "\x00" + item.Capability + "\x00" + item.Key
@@ -1820,12 +1802,6 @@ func (e *extractor) collectAccess(node *ast.Node, owner *functionState) {
 		entry.FunctionSemanticKey = source.key
 	}
 	e.accesses = append(e.accesses, entry)
-}
-
-func (e *extractor) markUnsupported(site, reason string) {
-	if reason != "" {
-		e.unsupportedAttributions = append(e.unsupportedAttributions, UnsupportedAttribution{Site: site, Reason: reason})
-	}
 }
 
 func (e *extractor) collectFunction(node *ast.Node) *Function {
@@ -2117,7 +2093,6 @@ func (e *extractor) recordRuntimeCall(source callSource, node *ast.Node) string 
 					return e.recordUnresolvedCall(source, node)
 				}
 				e.externalCalls = append(e.externalCalls, external)
-				e.markUnsupported(external.SemanticKey, source.reason)
 				e.collectEscapingCallbacks(source, file, node)
 				return external.SemanticKey
 			}
@@ -2136,7 +2111,6 @@ func (e *extractor) recordRuntimeCall(source callSource, node *ast.Node) string 
 		ToPath:          target.FilePath,
 		Range:           location,
 	})
-	e.markUnsupported(semanticKey, source.reason)
 	return semanticKey
 }
 
@@ -2245,7 +2219,6 @@ func (e *extractor) recordFnRef(source callSource, target *Function, node *ast.N
 		ToPath:          target.FilePath,
 		Range:           location,
 	})
-	e.markUnsupported(semanticKey, source.reason)
 }
 
 // recordUnresolvedCall records a call whose target is not known: a call
@@ -2257,7 +2230,6 @@ func (e *extractor) recordUnresolvedCall(source callSource, node *ast.Node) stri
 		EntityID: semanticKey, SemanticKey: semanticKey, FromSemanticKey: source.key,
 		FromModule: source.module, FromPath: source.path, Range: e.nodeLocation(file, node),
 	})
-	e.markUnsupported(semanticKey, source.reason)
 	e.collectEscapingCallbacks(source, file, node)
 	return semanticKey
 }

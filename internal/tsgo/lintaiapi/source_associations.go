@@ -252,7 +252,7 @@ func (e *extractor) applyConfiguredSourceEntries(entries []configuredSourceEntry
 			// cache as the primary context, including on an unchanged check.
 			sourceProgram.ex.operations.trackingCache = e.operations.trackingCache
 			sourceProgram.ex.operations.trackingPrevious = e.operations.trackingPrevious
-			e.inputs = append(e.inputs, sourceProgram.ex.inputs...)
+			sourceProgram.ex.operations.sourceRecovery = e.operations.sourceRecovery
 			for _, reason := range sourceProgram.ex.exportInventoryIncomplete(sourceProgram.file) {
 				e.sourceEntryFacts = append(e.sourceEntryFacts, SourceEntryFact{ID: entry.ID, Incomplete: []string{reason}})
 			}
@@ -304,6 +304,10 @@ func (e *extractor) applyConfiguredSourceEntries(entries []configuredSourceEntry
 		}
 		if sourceOutcome == "" {
 			e.sourceProgramDeclarations = append(e.sourceProgramDeclarations, sourceProgram.ex.sortedDeclarations()...)
+			e.declarationSourceCandidates = append(e.declarationSourceCandidates, sourceProgram.ex.declarationSourceCandidates...)
+			e.declarationSources = append(e.declarationSources, sourceProgram.ex.declarationSources...)
+			e.declarationSourceOutcomes = append(e.declarationSourceOutcomes, sourceProgram.ex.declarationSourceOutcomes...)
+			e.inputs = append(e.inputs, sourceProgram.ex.inputs...)
 			e.trackingKeyBuilds += sourceProgram.ex.trackingKeyBuilds
 			for id, support := range sourceProgram.ex.tracking {
 				if e.tracking == nil {
