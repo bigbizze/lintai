@@ -68,6 +68,7 @@ type evalOptions struct {
 	// beforeEvaluation is an in-package synchronization point for tests. It is
 	// called from the production evaluator immediately before Mangle runs.
 	beforeEvaluation func()
+	onDerivedFact    func()
 }
 
 type suppressionPolicy struct {
@@ -141,13 +142,18 @@ func (view restrictedFactStore) EstimateFactCount() int {
 
 type createdFactStore struct {
 	factstore.FactStore
-	count int64
+	count         int64
+	onDerivedFact func()
 }
 
 func (store *createdFactStore) Add(atom ast.Atom) bool {
 	added := store.FactStore.Add(atom)
 	if added {
 		store.count++
+		if hook := store.onDerivedFact; hook != nil {
+			store.onDerivedFact = nil
+			hook()
+		}
 	}
 	return added
 }
@@ -312,6 +318,7 @@ func (plan *rulePlan) evaluate(base factstore.ReadOnlyFactStore, factCounts map[
 	for _, fact := range plan.info.InitialFacts {
 		derived.Add(fact)
 	}
+	derived.onDerivedFact = options.onDerivedFact
 	baseView := newRestrictedFactStore(base, plan.basePredicates, factCounts)
 	store := factstore.NewMergedStore([]factstore.ReadOnlyFactStore{baseView, plan.ruleFacts}, derived)
 	evaluationErr := runEvaluation(plan.info, plan.strata, plan.predToStratum, store, options.factLimit, options.beforeEvaluation)

@@ -106,6 +106,16 @@ func ReadRuleMetadata(code string) (metadata RuleMetadata, ok bool, err error) {
 	if _, err := vm.RunString(code); err != nil {
 		return RuleMetadata{}, false, err
 	}
+	// Property access and export can invoke JavaScript getters outside RunString.
+	if exception := vm.Try(func() {
+		metadata, ok, err = readRuleMetadata(vm)
+	}); exception != nil {
+		return metadata, true, fmt.Errorf("read rule metadata: %w", exception)
+	}
+	return metadata, ok, err
+}
+
+func readRuleMetadata(vm *goja.Runtime) (metadata RuleMetadata, ok bool, err error) {
 	moduleValue := vm.Get("LintAIPureModule")
 	if moduleValue == nil || goja.IsUndefined(moduleValue) || goja.IsNull(moduleValue) {
 		return RuleMetadata{}, false, fmt.Errorf("pure bundle did not initialize LintAIPureModule")
@@ -116,6 +126,9 @@ func ReadRuleMetadata(code string) (metadata RuleMetadata, ok bool, err error) {
 	}
 	ruleObject := ruleValue.ToObject(vm)
 	idValue := ruleObject.Get("id")
+	if idValue == nil {
+		return RuleMetadata{}, true, fmt.Errorf("the default export is not a lintai rule; create it with rule(id) from @lintai/sdk")
+	}
 	id, validID := idValue.Export().(string)
 	if !validID || id == "" {
 		return RuleMetadata{}, true, fmt.Errorf("the default export is not a lintai rule; create it with rule(id) from @lintai/sdk")
@@ -133,8 +146,16 @@ func ReadRuleMetadata(code string) (metadata RuleMetadata, ok bool, err error) {
 		return metadata, true, fmt.Errorf("rule %s must call .version(n) with a positive integer", id)
 	}
 	metadata.Version = int(version)
-	metadata.HasSetup = ruleObject.Get("hasSetup").ToBoolean()
-	metadata.HasConfig = ruleObject.Get("hasConfig").ToBoolean()
+	setupValue, configValue := ruleObject.Get("hasSetup"), ruleObject.Get("hasConfig")
+	if setupValue == nil || configValue == nil {
+		return metadata, true, fmt.Errorf("rule %s has invalid setup or config metadata", id)
+	}
+	var validSetup, validConfig bool
+	metadata.HasSetup, validSetup = setupValue.Export().(bool)
+	metadata.HasConfig, validConfig = configValue.Export().(bool)
+	if !validSetup || !validConfig {
+		return metadata, true, fmt.Errorf("rule %s has invalid setup or config metadata", id)
+	}
 	if programValue := ruleObject.Get("programValue"); programValue == nil || goja.IsUndefined(programValue) || goja.IsNull(programValue) {
 		return metadata, true, fmt.Errorf("rule is missing program()")
 	}

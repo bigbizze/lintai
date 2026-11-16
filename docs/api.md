@@ -597,7 +597,7 @@ Exit codes:
 CLI caveats:
 
 - relative rule globs are resolved from `workspaceRoot`
-- each rule glob must match at least one file; otherwise the run fails with an error
+- each rule glob must match at least one file; otherwise the run fails with an error. If no files match and a rules lock contains rules, a check reports those missing rules as integrity errors instead
 - `lintai serve` is for editor integration; it keeps the base facts of the current snapshot and rebuilds them when the snapshot changes
 
 ## Linter rules
