@@ -12,7 +12,8 @@ import {
 } from "./client.js";
 import { suppressionOverlaps } from "./suppressions.js";
 
-test("oneshot forwards suppression options and parses exit 2 diagnostics", () => {
+// V25, V31: current policy findings exit 1, and invalid policy exits 2.
+test("oneshot forwards suppression options and handles policy exit codes", () => {
 	const options = resolveBridgeOptions(
 		{
 			mode: "oneshot",
@@ -39,7 +40,7 @@ test("oneshot forwards suppression options and parses exit 2 diagnostics", () =>
 				assert.equal(args[args.indexOf("--suppressions-location") + 1], "/workspace/counts.json");
 				assert.ok(args.includes("--pass-on-unpruned-suppressions"));
 				assert.equal(args[args.indexOf("--rule-workers") + 1], "2");
-				return { status: 2, stdout: JSON.stringify([diagnostic]), stderr: "unused suppressions" };
+				return { status: 1, stdout: JSON.stringify([diagnostic]), stderr: "unused suppressions" };
 			},
 		}),
 	);
@@ -49,11 +50,43 @@ test("oneshot forwards suppression options and parses exit 2 diagnostics", () =>
 	} finally {
 		client.dispose();
 	}
+
+	const invalid = new LintAIClient(
+		options,
+		createTestDependencies({
+			spawnSync: () => ({
+				status: 2,
+				stdout: JSON.stringify([diagnostic]),
+				stderr: "invalid suppressions",
+			}),
+			log: () => undefined,
+		}),
+	);
+	try {
+		assert.deepEqual(invalid.getDiagnostics("src/a.ts"), []);
+		assert.match(invalid.problems().join("\n"), /invalid suppressions/);
+	} finally {
+		invalid.dispose();
+	}
 });
 
 test("serve forwards suppression initialization parameters", () => {
-	assert.throws(() => resolveBridgeOptions({ ruleWorkers: -1 }, "/workspace", { defaultMode: "serve", reportProblemsOnce: false }), /ruleWorkers/);
-	assert.throws(() => resolveBridgeOptions({ ruleWorkers: 1.5 }, "/workspace", { defaultMode: "serve", reportProblemsOnce: false }), /ruleWorkers/);
+	assert.throws(
+		() =>
+			resolveBridgeOptions({ ruleWorkers: -1 }, "/workspace", {
+				defaultMode: "serve",
+				reportProblemsOnce: false,
+			}),
+		/ruleWorkers/,
+	);
+	assert.throws(
+		() =>
+			resolveBridgeOptions({ ruleWorkers: 1.5 }, "/workspace", {
+				defaultMode: "serve",
+				reportProblemsOnce: false,
+			}),
+		/ruleWorkers/,
+	);
 	const child = createTestProcess();
 	const options = resolveBridgeOptions(
 		{

@@ -148,6 +148,7 @@ export default rule("arch.layers")
 			!allowed(FromLayer, ToLayer).
 	`)
 	.report("violation")
+	.suppression("violation", { by: ["ToLayer"] })
 	.message((row) => `Layer ${row.FromLayer} must not import layer ${row.ToLayer} (${row.From} -> ${row.To})`);
 ```
 
@@ -156,6 +157,7 @@ Caveats:
 - each `.facts()` relation must have a `Decl` with `descr [extensional()]`, and every tuple must match its arity
 - the program cannot add clauses to an extensional predicate
 - `row.FromLayer` is `"/pure"`: name constants keep their leading slash in `message()`
+- `ToLayer` separates recorded allowances by target layer; choose stable classification columns for `by`
 - add `.expectNonEmpty("layer")` to fail the rule when the globs stop matching any module
 
 ## 4. Ambient sources

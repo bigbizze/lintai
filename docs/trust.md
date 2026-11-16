@@ -16,7 +16,7 @@ What the lock covers:
 
 - the rule file
 - every file that the rule imports, directly or through other files, in the workspace and in `node_modules`
-- the `@lintai/sdk` files that the rule imports. Thus an upgrade of lintai changes every rule hash, and you must run `lintai lock` again after the upgrade.
+- the `@lintai/sdk` files that the rule imports, including its suppression policy. Review and regenerate the lock when those inputs change.
 
 What the lock does not cover:
 
@@ -27,9 +27,9 @@ With `--rules-lock`, `require()` in `setup()` loads only Node built-ins other th
 
 ## Suppressions
 
-Suppression allowances can weaken enforcement just as rule edits can. Version 2 locks written by lintai 0.6.3 record the current suppression entries. New entries, increased counts and weakened entity matching produce integrity errors with exit 3. Lower counts and removed entries are allowed without re-locking. The lock keeps the earlier allowance until `lintai lock` runs again, so a violation that was fixed and pruned can be recorded again without an integrity error. Run `lintai lock` after pruning to remove the allowance. Review newly recorded suppressions before running `lintai lock` again.
+Suppression allowances can weaken enforcement just as rule edits can. The `lintai.rules-lock/4` lock records the current suppression groups. New groups and increased counts produce integrity errors with exit 3. Lower counts and removed groups are allowed without re-locking. The lock keeps the earlier allowance until `lintai lock` runs again, so a violation that was fixed and pruned can be recorded again within that approval. Run `lintai lock` after pruning to remove the allowance. An unapproved proposed write under an enforced lock leaves the suppression file unchanged. To approve a new allowance, record without enforcing the prior lock, review it, and run `lintai lock`.
 
-Version 1 locks remain readable and allow no suppression entries because none were recorded. Regenerate them with 0.6.3 to approve suppression allowances. Put `lintai-suppressions.json` under CODEOWNERS and require owner review. Protect custom suppression locations in the same way. The ESLint and oxlint plugins also report overlapping `lintai/*` entries in their hosts' default suppression files; they only read those files.
+Put `lintai-suppressions.json` under CODEOWNERS and require owner review. Protect custom suppression locations in the same way. The ESLint and oxlint plugins also report overlapping `lintai/*` entries in their hosts' default suppression files; they only read those files.
 
 ## The lock must be outside the writable scope
 

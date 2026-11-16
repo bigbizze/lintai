@@ -295,21 +295,30 @@ func (e *Session) Check(ctx context.Context, requests ...Options) (Result, error
 		return Result{}, err
 	}
 	raw := cloneResult(result)
-	if err := applySuppressions(options, state, run, &result); err != nil {
+	write, err := applySuppressions(options, state, run, evidence, &result)
+	if err != nil {
 		return Result{}, err
-	}
-	if err := checkCtx.Err(); err != nil {
-		return Result{}, err
-	}
-	if e.pendingRawKey != "" {
-		e.currentRaw = &retainedRaw{key: e.pendingRawKey, result: raw, run: run, evidence: evidence}
-	} else {
-		e.currentRaw = nil
 	}
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
 		return Result{}, fmt.Errorf("session is closed")
+	}
+	if err := checkCtx.Err(); err != nil {
+		e.mu.Unlock()
+		return Result{}, err
+	}
+	if write != nil {
+		if err := commitSuppression(checkCtx, write); err != nil {
+			e.mu.Unlock()
+			return Result{}, err
+		}
+		result.SuppressionsWritten = true
+	}
+	if e.pendingRawKey != "" {
+		e.currentRaw = &retainedRaw{key: e.pendingRawKey, result: raw, run: run, evidence: evidence}
+	} else {
+		e.currentRaw = nil
 	}
 	published := cloneResult(result)
 	e.currentResult = &published
@@ -374,9 +383,11 @@ func cloneResult(result Result) Result {
 
 func (e *Session) analyzeWithEvidence(ctx context.Context, options Options) (Result, runInfo, executionEvidence, error) {
 	run := runInfo{
-		evaluated: make(map[string]struct{}),
-		completed: make(map[string]struct{}),
-		known:     make(map[string]struct{}),
+		evaluated:  make(map[string]struct{}),
+		completed:  make(map[string]struct{}),
+		known:      make(map[string]struct{}),
+		coverage:   make(map[string]map[string]struct{}),
+		assertions: make(map[string]map[string]assertionSchema),
 	}
 	evidence := executionEvidence{createdFactCounts: make(map[string]int64)}
 	if err := ctx.Err(); err != nil {
@@ -463,6 +474,27 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options) (Res
 		lockedOut[rulePath] = struct{}{}
 	}
 	ruleCatalog.loadMetadata(lockedOut)
+	if lock != nil {
+		for _, rulePath := range ruleCatalog.paths {
+			entry, exists := ruleCatalog.entries[rulePath]
+			if !exists || !entry.isRule {
+				continue
+			}
+			key := lockKey(options.WorkspaceRoot, rulePath)
+			locked, approved := lock.Rules[key]
+			message := ""
+			if !approved {
+				message = fmt.Sprintf("rule %s is not in the rules lock; review it and run lintai lock", key)
+			} else if entry.loadError == nil && (locked.ID != entry.metadata.ID || locked.Version != entry.metadata.Version) {
+				message = fmt.Sprintf("rule %s metadata does not match the rules lock", key)
+			}
+			if message != "" {
+				integrityByPath[rulePath] = integrityFailure{key: key, message: message}
+				allDiagnostics = append(allDiagnostics, errorDiagnostic(key, "integrity", 0, assembled.snapshotID, nil, message))
+				run.complete = false
+			}
+		}
+	}
 
 	knownRules := make(map[string]struct{})
 	pathsByID := make(map[string][]string)
@@ -686,6 +718,7 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options) (Res
 	producerNames := append([]string(nil), assembled.namespaces...)
 	run.producerNames = producerNames
 	evidence.anchors = assembled.anchors
+	evidence.anchorOwners = assembled.anchorOwners
 	run.files = assembled.analyzedFiles
 	run.snapshotVersion = assembled.snapshotID
 	result.SnapshotVersion = assembled.snapshotID
@@ -731,6 +764,8 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options) (Res
 		evidence.createdFactCounts[outcome.ruleID] = outcome.createdFacts
 		if outcome.completed {
 			run.completed[outcome.ruleID] = struct{}{}
+			run.coverage[outcome.ruleID] = outcome.coverage
+			run.assertions[outcome.ruleID] = outcome.assertions
 		}
 	}
 	restampDiagnostics(allDiagnostics, assembled.snapshotID, producerNames)
@@ -779,11 +814,14 @@ type ruleOutcome struct {
 	createdFacts int64
 	diagnostics  []diagnostics.Diagnostic
 	findings     []violation
+	coverage     map[string]struct{}
+	assertions   map[string]assertionSchema
 }
 
 type executionEvidence struct {
 	findings          []violation
 	anchors           map[string]facts.AnchorSupport
+	anchorOwners      map[string]string
 	createdFactCounts map[string]int64
 }
 
@@ -863,7 +901,7 @@ func runPreparedRule(job *preparedRuleJob, assembled composedFacts, options Opti
 		violations[index].ruleID = job.ruleID
 	}
 	provisional := make([]diagnostics.Diagnostic, 0, len(violations))
-	for _, item := range violations {
+	for index, item := range violations {
 		message, err := job.loaded.Message(item.row, item.predicate)
 		if err != nil {
 			outcome.diagnostics = []diagnostics.Diagnostic{errorDiagnostic(job.ruleID, "message", job.version, assembled.snapshotID, assembled.namespaces, err.Error())}
@@ -881,6 +919,23 @@ func runPreparedRule(job *preparedRuleJob, assembled composedFacts, options Opti
 			},
 			Explanation: append([]string(nil), item.explanation...),
 		})
+		violations[index].diagnostic = provisional[len(provisional)-1]
+	}
+	outcome.coverage = make(map[string]struct{})
+	for pred := range job.plan.basePredicates {
+		namespace, _, _ := strings.Cut(pred.Symbol, ".")
+		for file := range assembled.producerFiles[namespace] {
+			outcome.coverage[file] = struct{}{}
+		}
+	}
+	outcome.assertions = make(map[string]assertionSchema)
+	for _, decl := range job.plan.reportDecls {
+		sym := decl.DeclaredAtom.Predicate
+		columns := make([]string, len(decl.DeclaredAtom.Args))
+		for i, arg := range decl.DeclaredAtom.Args {
+			columns[i] = fmt.Sprint(arg)
+		}
+		outcome.assertions[sym.Symbol] = assertionSchema{arity: sym.Arity, columns: columns}
 	}
 	outcome.findings = violations
 	outcome.diagnostics = provisional

@@ -32,16 +32,34 @@ execFileSync(
 
 const cli = spawnSync(
 	"pnpm",
-	["exec", "lintai", "--json", "--repo-root", ".", "--workspace-root", ".", "--rules", "lintai-rules/**/*.ts"],
+	[
+		"exec",
+		"lintai",
+		"--json",
+		"--repo-root",
+		".",
+		"--workspace-root",
+		".",
+		"--rules",
+		"lintai-rules/**/*.ts",
+	],
 	{
 		cwd: repoDir,
 		encoding: "utf8",
 	},
 );
-assert.equal(cli.status, 1, `expected lintai CLI to exit with diagnostics, got ${cli.status}\n${cli.stderr}`);
+assert.equal(
+	cli.status,
+	1,
+	`expected lintai CLI to exit with diagnostics, got ${cli.status}\n${cli.stderr}`,
+);
 const cliDiagnostics = JSON.parse(cli.stdout);
 assert.deepEqual(
-	cliDiagnostics.map((diagnostic) => [diagnostic.rule_id, diagnostic.source_location?.file, diagnostic.source_location?.startLine]),
+	cliDiagnostics.map((diagnostic) => [
+		diagnostic.rule_id,
+		diagnostic.source_location?.file,
+		diagnostic.source_location?.startLine,
+	]),
 	[
 		["arch.actions-return-action-result", "src/actions/save.ts", 7],
 		["arch.no-async", "src/disabled.ts", 2],
@@ -62,24 +80,55 @@ function sourceRange(location) {
 assert.deepEqual(sourceRange(cliDiagnostics[0].source_location), [7, 1, 9, 2]);
 assert.deepEqual(sourceRange(cliDiagnostics[2].source_location), [1, 1, 3, 2]);
 
-const facts = spawnSync("pnpm", ["exec", "lintai", "facts", "--workspace-root", ".", "--relation", "ts.module"], {
-	cwd: repoDir,
-	encoding: "utf8",
-});
-assert.equal(facts.status, 0, `expected lintai facts to succeed through the launcher, got ${facts.status}\n${facts.stderr}`);
+const facts = spawnSync(
+	"pnpm",
+	["exec", "lintai", "facts", "--workspace-root", ".", "--relation", "ts.module"],
+	{
+		cwd: repoDir,
+		encoding: "utf8",
+	},
+);
+assert.equal(
+	facts.status,
+	0,
+	`expected lintai facts to succeed through the launcher, got ${facts.status}\n${facts.stderr}`,
+);
 // Spec §3.4: TypeScript module IDs contain the module kind and canonical file identity.
 assert.ok(facts.stdout.includes(`ts.module("ts:module:src/example.ts").`), facts.stdout);
 
 const schema = spawnSync("pnpm", ["exec", "lintai", "schema"], { cwd: repoDir, encoding: "utf8" });
-assert.equal(schema.status, 0, `expected lintai schema to succeed, got ${schema.status}\n${schema.stderr}`);
-assert.ok(schema.stdout.includes("Decl config_adjusted("), "expected the schema to declare config_adjusted");
+assert.equal(
+	schema.status,
+	0,
+	`expected lintai schema to succeed, got ${schema.status}\n${schema.stderr}`,
+);
+assert.ok(
+	schema.stdout.includes("Decl config_adjusted("),
+	"expected the schema to declare config_adjusted",
+);
 
 const walked = spawnSync(
 	"pnpm",
-	["exec", "lintai", "facts", "--workspace-root", ".", "--files", "walk", "--exclude", "lintai-rules/**", "--relation", "ts.module"],
+	[
+		"exec",
+		"lintai",
+		"facts",
+		"--workspace-root",
+		".",
+		"--files",
+		"walk",
+		"--exclude",
+		"lintai-rules/**",
+		"--relation",
+		"ts.module",
+	],
 	{ cwd: repoDir, encoding: "utf8" },
 );
-assert.equal(walked.status, 0, `expected lintai facts --files walk to succeed, got ${walked.status}\n${walked.stderr}`);
+assert.equal(
+	walked.status,
+	0,
+	`expected lintai facts --files walk to succeed, got ${walked.status}\n${walked.stderr}`,
+);
 assert.equal(
 	walked.stdout.trim(),
 	[
@@ -92,13 +141,24 @@ assert.equal(
 );
 
 // Rules lock and setup sandbox through the installed package layout.
-const lock = spawnSync("pnpm", ["exec", "lintai", "lock", "--workspace-root", ".", "--rules", "lintai-rules/**/*.ts"], {
-	cwd: repoDir,
-	encoding: "utf8",
-});
+const lock = spawnSync(
+	"pnpm",
+	["exec", "lintai", "lock", "--workspace-root", ".", "--rules", "lintai-rules/**/*.ts"],
+	{
+		cwd: repoDir,
+		encoding: "utf8",
+	},
+);
 assert.equal(lock.status, 0, `expected lintai lock to succeed, got ${lock.status}\n${lock.stderr}`);
-const lockFile = JSON.parse(await fs.readFile(path.join(repoDir, "lintai-rules.lock.json"), "utf8"));
-assert.match(lockFile.rules["lintai-rules/no-async.ts"]?.hash ?? "", /^sha256:[0-9a-f]{64}$/);
+const lockFile = JSON.parse(
+	await fs.readFile(path.join(repoDir, "lintai-rules.lock.json"), "utf8"),
+);
+assert.equal(lockFile.format, "lintai.rules-lock/4");
+assert.deepEqual(lockFile.approved_suppressions, []);
+const lockedRule = lockFile.rules.find((entry) => entry.path === "lintai-rules/no-async.ts");
+assert.equal(lockedRule?.id, "arch.no-async");
+assert.equal(lockedRule?.version, 1);
+assert.match(lockedRule?.artifact_hash ?? "", /^sha256:[0-9a-f]{64}$/);
 const lockedRunArgs = [
 	"exec",
 	"lintai",
@@ -113,7 +173,11 @@ const lockedRunArgs = [
 	"on",
 ];
 const locked = spawnSync("pnpm", lockedRunArgs, { cwd: repoDir, encoding: "utf8" });
-assert.equal(locked.status, 1, `expected a locked, sandboxed run to report the violation, got ${locked.status}\n${locked.stderr}`);
+assert.equal(
+	locked.status,
+	1,
+	`expected a locked, sandboxed run to report the violation, got ${locked.status}\n${locked.stderr}`,
+);
 assert.deepEqual(
 	JSON.parse(locked.stdout).map((diagnostic) => diagnostic.rule_id),
 	["arch.actions-return-action-result", "arch.no-async", "arch.no-async", "arch.no-async"],
@@ -122,7 +186,11 @@ const rulePath = path.join(repoDir, "lintai-rules", "no-async.ts");
 const ruleSource = await fs.readFile(rulePath, "utf8");
 await fs.writeFile(rulePath, ruleSource.replace("must not be async", "should not be async"));
 const changed = spawnSync("pnpm", lockedRunArgs, { cwd: repoDir, encoding: "utf8" });
-assert.equal(changed.status, 3, `expected a changed rule to fail the lock check, got ${changed.status}\n${changed.stderr}`);
+assert.equal(
+	changed.status,
+	3,
+	`expected a changed rule to fail the lock check, got ${changed.status}\n${changed.stderr}`,
+);
 assert.ok(
 	JSON.parse(changed.stdout).some((diagnostic) => diagnostic.phase === "integrity"),
 	changed.stdout,
@@ -130,11 +198,19 @@ assert.ok(
 await fs.writeFile(rulePath, ruleSource);
 
 // lintai rules lists the rule ids that the plugins create rules for.
-const listed = spawnSync("pnpm", ["exec", "lintai", "rules", "--json", "--workspace-root", ".", "--rules", "lintai-rules/**/*.ts"], {
-	cwd: repoDir,
-	encoding: "utf8",
-});
-assert.equal(listed.status, 0, `expected lintai rules to succeed, got ${listed.status}\n${listed.stderr}`);
+const listed = spawnSync(
+	"pnpm",
+	["exec", "lintai", "rules", "--json", "--workspace-root", ".", "--rules", "lintai-rules/**/*.ts"],
+	{
+		cwd: repoDir,
+		encoding: "utf8",
+	},
+);
+assert.equal(
+	listed.status,
+	0,
+	`expected lintai rules to succeed, got ${listed.status}\n${listed.stderr}`,
+);
 assert.deepEqual(JSON.parse(listed.stdout), {
 	rules: [
 		{
@@ -163,14 +239,17 @@ const realRepoDir = await fs.realpath(repoDir);
 // turns arch.no-async off for src/legacy.ts, and src/disabled.ts has a
 // disable comment for arch.no-async.
 function eslintMessages(args) {
-	const result = spawnSync("pnpm", ["exec", "eslint", ...args, "src/", "-f", "json"], { cwd: repoDir, encoding: "utf8" });
+	const result = spawnSync("pnpm", ["exec", "eslint", ...args, "src/", "-f", "json"], {
+		cwd: repoDir,
+		encoding: "utf8",
+	});
 	const messages = JSON.parse(result.stdout).flatMap((file) =>
 		(file.messages ?? []).map((message) => ({
 			file: path.relative(realRepoDir, file.filePath),
 			ruleId: message.ruleId,
 			severity: message.severity,
 			message: String(message.message ?? ""),
-				range: [message.line, message.column, message.endLine, message.endColumn],
+			range: [message.line, message.column, message.endLine, message.endColumn],
 		})),
 	);
 	return { status: result.status, stderr: result.stderr, messages };
@@ -183,12 +262,29 @@ const expectedESLint = [
 	"lintai/arch.no-async 2 src/example.ts",
 ];
 const eslint = eslintMessages([]);
-assert.equal(eslint.status, 1, `expected eslint to report the lintai error, got ${eslint.status}\n${eslint.stderr}`);
-assert.deepEqual(summary(eslint.messages), expectedESLint, JSON.stringify(eslint.messages, null, 2));
-assert.deepEqual(eslint.messages.find((message) => message.ruleId === "lintai/arch.no-async").range, [1, 1, 3, 2]);
-assert.deepEqual(eslint.messages.find((message) => message.ruleId === "lintai/arch.actions-return-action-result").range, [7, 1, 9, 2]);
+assert.equal(
+	eslint.status,
+	1,
+	`expected eslint to report the lintai error, got ${eslint.status}\n${eslint.stderr}`,
+);
+assert.deepEqual(
+	summary(eslint.messages),
+	expectedESLint,
+	JSON.stringify(eslint.messages, null, 2),
+);
+assert.deepEqual(
+	eslint.messages.find((message) => message.ruleId === "lintai/arch.no-async").range,
+	[1, 1, 3, 2],
+);
+assert.deepEqual(
+	eslint.messages.find((message) => message.ruleId === "lintai/arch.actions-return-action-result")
+		.range,
+	[7, 1, 9, 2],
+);
 assert.ok(
-	eslint.messages.some((message) => message.message.includes("[arch.actions-return-action-result/violation] legacySave")),
+	eslint.messages.some((message) =>
+		message.message.includes("[arch.actions-return-action-result/violation] legacySave"),
+	),
 	JSON.stringify(eslint.messages),
 );
 
@@ -220,11 +316,26 @@ export default [
 `,
 );
 const served = eslintMessages(["-c", "eslint.serve.config.mjs"]);
-assert.equal(served.status, 1, `expected eslint in serve mode to report the lintai error, got ${served.status}\n${served.stderr}`);
-assert.deepEqual(summary(served.messages), expectedESLint, JSON.stringify(served.messages, null, 2));
-assert.ok(!served.messages.some((message) => message.message.includes("falling back")), JSON.stringify(served.messages));
+assert.equal(
+	served.status,
+	1,
+	`expected eslint in serve mode to report the lintai error, got ${served.status}\n${served.stderr}`,
+);
+assert.deepEqual(
+	summary(served.messages),
+	expectedESLint,
+	JSON.stringify(served.messages, null, 2),
+);
+assert.ok(
+	!served.messages.some((message) => message.message.includes("falling back")),
+	JSON.stringify(served.messages),
+);
 const runs = (await fs.readFile(countFile, "utf8")).trim().split("\n");
-assert.deepEqual(runs, ["rules", "serve"], `expected one lintai rules run and one lintai serve process, got ${runs}`);
+assert.deepEqual(
+	runs,
+	["rules", "serve"],
+	`expected one lintai rules run and one lintai serve process, got ${runs}`,
+);
 
 // A misspelled lintai rule name fails the lint run.
 await fs.writeFile(
@@ -235,6 +346,14 @@ const lintai = createLintaiPlugin({ rules: ["lintai-rules/**/*.ts"] });
 export default [{ files: ["src/**/*.ts"], languageOptions: { parser: tsParser }, plugins: { lintai }, rules: { "lintai/arch.no-asnyc": "error" } }];
 `,
 );
-const typo = spawnSync("pnpm", ["exec", "eslint", "-c", "eslint.typo.config.mjs", "src/example.ts"], { cwd: repoDir, encoding: "utf8" });
-assert.equal(typo.status, 2, `expected a misspelled rule to fail eslint, got ${typo.status}\n${typo.stdout}\n${typo.stderr}`);
+const typo = spawnSync(
+	"pnpm",
+	["exec", "eslint", "-c", "eslint.typo.config.mjs", "src/example.ts"],
+	{ cwd: repoDir, encoding: "utf8" },
+);
+assert.equal(
+	typo.status,
+	2,
+	`expected a misspelled rule to fail eslint, got ${typo.status}\n${typo.stdout}\n${typo.stderr}`,
+);
 assert.match(typo.stdout + typo.stderr, /Could not find "arch\.no-asnyc" in plugin "lintai"/);

@@ -1,11 +1,11 @@
-import { spawn, spawnSync, type SpawnSyncReturns } from "node:child_process";
-import { PassThrough, type Readable, type Writable } from "node:stream";
+import { type SpawnSyncReturns, spawn, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, readSync, statSync, watch } from "node:fs";
 import path from "node:path";
-import chokidar from "chokidar";
+import { PassThrough, type Readable, type Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
+import chokidar from "chokidar";
 
-import { activeSpawner, spawnerFor, type SpawnedProcess } from "./spawner.js";
+import { type SpawnedProcess, activeSpawner, spawnerFor } from "./spawner.js";
 
 export type Diagnostic = {
 	rule_id: string;
@@ -99,7 +99,10 @@ type ClientProcess = {
 	stdin: Writable;
 	stdout: Readable;
 	stderr?: Readable;
-	on(event: "exit", listener: (code: number | null, signal: NodeJS.Signals | null) => void): ClientProcess;
+	on(
+		event: "exit",
+		listener: (code: number | null, signal: NodeJS.Signals | null) => void,
+	): ClientProcess;
 	kill(signal?: NodeJS.Signals | number): boolean;
 	unref?(): void;
 };
@@ -246,7 +249,10 @@ export class LintAIClient {
 	private state: ClientState = "idle";
 	private child: ClientProcess | undefined;
 	private nextRequestID = 1;
-	private pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
+	private pending = new Map<
+		number,
+		{ resolve: (value: unknown) => void; reject: (error: Error) => void }
+	>();
 	private stdoutBuffer = Buffer.alloc(0);
 	private diagnosticsByFile = new Map<string, Diagnostic[]>();
 	private unlocated: Diagnostic[] = [];
@@ -275,7 +281,10 @@ export class LintAIClient {
 		this.dispose();
 	};
 
-	constructor(options: ResolvedBridgeOptions, dependencies: ClientDependencies = defaultDependencies) {
+	constructor(
+		options: ResolvedBridgeOptions,
+		dependencies: ClientDependencies = defaultDependencies,
+	) {
 		this.options = options;
 		this.dependencies = dependencies;
 		this.ensureRuleWatchers();
@@ -328,10 +337,13 @@ export class LintAIClient {
 		if (this.analysisFailure) {
 			items.push(`[lintai] lintai could not analyze the workspace: ${this.analysisFailure}`);
 		}
-		const unlocated = this.state === "fallback" ? (this.oneshotCache?.unlocated ?? []) : this.unlocated;
+		const unlocated =
+			this.state === "fallback" ? (this.oneshotCache?.unlocated ?? []) : this.unlocated;
 		for (const diagnostic of unlocated) {
 			const phase = diagnostic.phase ? ` (phase ${diagnostic.phase})` : "";
-			items.push(`[lintai] rule ${diagnostic.rule_id} could not run${phase}: ${diagnostic.message}`);
+			items.push(
+				`[lintai] rule ${diagnostic.rule_id} could not run${phase}: ${diagnostic.message}`,
+			);
 		}
 		if (items.length) this.problemsReported = true;
 		return items;
@@ -407,7 +419,12 @@ export class LintAIClient {
 					}),
 					"utf8",
 				);
-				child.stdin.write(Buffer.concat([Buffer.from(`Content-Length: ${payload.length}\r\n\r\n`, "utf8"), payload]));
+				child.stdin.write(
+					Buffer.concat([
+						Buffer.from(`Content-Length: ${payload.length}\r\n\r\n`, "utf8"),
+						payload,
+					]),
+				);
 			} catch {
 				// Ignore best-effort shutdown failures.
 			}
@@ -434,13 +451,19 @@ export class LintAIClient {
 	private startServe(): void {
 		this.state = "starting";
 		let finishInitialization: () => void = () => undefined;
-			try {
-				const child = this.dependencies.spawnServe(this.options.binary, ["serve"], this.options.repoRoot);
-				this.child = child;
-				child.unref?.();
+		try {
+			const child = this.dependencies.spawnServe(
+				this.options.binary,
+				["serve"],
+				this.options.repoRoot,
+			);
+			this.child = child;
+			child.unref?.();
 
 			child.on("exit", (code, signal) => {
-				const error = new Error(`lintai serve exited unexpectedly (code=${code ?? "null"}, signal=${signal ?? "null"})`);
+				const error = new Error(
+					`lintai serve exited unexpectedly (code=${code ?? "null"}, signal=${signal ?? "null"})`,
+				);
 				this.handleServeFailure(error);
 			});
 
@@ -455,10 +478,14 @@ export class LintAIClient {
 				ruleGlobs: this.options.ruleGlobs,
 				excludes: this.options.excludes,
 				...(this.options.files === undefined ? {} : { files: this.options.files }),
-				...(this.options.sourceLinks === undefined ? {} : { sourceLinks: this.options.sourceLinks }),
+				...(this.options.sourceLinks === undefined
+					? {}
+					: { sourceLinks: this.options.sourceLinks }),
 				env: this.options.env,
 				...(this.options.factLimit === undefined ? {} : { factLimit: this.options.factLimit }),
-				...(this.options.ruleWorkers === undefined ? {} : { ruleWorkers: this.options.ruleWorkers }),
+				...(this.options.ruleWorkers === undefined
+					? {}
+					: { ruleWorkers: this.options.ruleWorkers }),
 				...(this.options.rulesLock === undefined ? {} : { rulesLock: this.options.rulesLock }),
 				...(this.options.suppressionsLocation === undefined
 					? {}
@@ -466,7 +493,9 @@ export class LintAIClient {
 				...(this.options.passOnUnprunedSuppressions === undefined
 					? {}
 					: { passOnUnprunedSuppressions: this.options.passOnUnprunedSuppressions }),
-				...(this.options.setupSandbox === undefined ? {} : { setupSandbox: this.options.setupSandbox }),
+				...(this.options.setupSandbox === undefined
+					? {}
+					: { setupSandbox: this.options.setupSandbox }),
 			});
 			this.attachStdoutListener();
 			this.setDiagnostics(resultValue.diagnostics, startedAt, resultValue.watchHints);
@@ -506,17 +535,25 @@ export class LintAIClient {
 				this.options.ruleGlobs.join(","),
 				...this.options.excludes.flatMap((glob) => ["--exclude", glob]),
 				...(this.options.files === undefined ? [] : ["--files", this.options.files]),
-				...(this.options.sourceLinks === undefined ? [] : ["--source-links", this.options.sourceLinks]),
+				...(this.options.sourceLinks === undefined
+					? []
+					: ["--source-links", this.options.sourceLinks]),
 				"--env-json",
 				JSON.stringify(this.options.env),
-				...(this.options.factLimit === undefined ? [] : ["--fact-limit", String(this.options.factLimit)]),
-				...(this.options.ruleWorkers === undefined ? [] : ["--rule-workers", String(this.options.ruleWorkers)]),
+				...(this.options.factLimit === undefined
+					? []
+					: ["--fact-limit", String(this.options.factLimit)]),
+				...(this.options.ruleWorkers === undefined
+					? []
+					: ["--rule-workers", String(this.options.ruleWorkers)]),
 				...(this.options.rulesLock === undefined ? [] : ["--rules-lock", this.options.rulesLock]),
 				...(this.options.suppressionsLocation === undefined
 					? []
 					: ["--suppressions-location", this.options.suppressionsLocation]),
 				...(this.options.passOnUnprunedSuppressions ? ["--pass-on-unpruned-suppressions"] : []),
-				...(this.options.setupSandbox === undefined ? [] : ["--setup-sandbox", this.options.setupSandbox]),
+				...(this.options.setupSandbox === undefined
+					? []
+					: ["--setup-sandbox", this.options.setupSandbox]),
 			],
 			{
 				cwd: this.options.repoRoot,
@@ -533,15 +570,24 @@ export class LintAIClient {
 		}
 		if (!result.stdout) {
 			const stderr = result.stderr?.trim();
-			return fail(`lintai exited with status ${result.status ?? "null"} and no output${stderr ? `: ${stderr}` : ""}`);
+			return fail(
+				`lintai exited with status ${result.status ?? "null"} and no output${stderr ? `: ${stderr}` : ""}`,
+			);
 		}
 		if (result.status !== 0 && result.status !== 1 && result.status !== 2 && result.status !== 3) {
-			return fail(`lintai exited with status ${result.status ?? "null"}: ${result.stderr?.trim() ?? ""}`);
+			return fail(
+				`lintai exited with status ${result.status ?? "null"}: ${result.stderr?.trim() ?? ""}`,
+			);
+		}
+		if (result.status === 2) {
+			return fail(result.stderr?.trim() || `lintai exited with status ${result.status}`);
 		}
 		try {
 			const diagnostics = JSON.parse(result.stdout) as Diagnostic[];
-			if ((result.status === 2 && !diagnostics.some((item) => item.diagnostic_kind === "unused_suppression")) ||
-				(result.status === 3 && !diagnostics.some((item) => item.diagnostic_kind === "rule_execution_error"))) {
+			if (
+				result.status === 3 &&
+				!diagnostics.some((item) => item.diagnostic_kind === "rule_execution_error")
+			) {
 				return fail(result.stderr?.trim() || `lintai exited with status ${result.status}`);
 			}
 			return indexDiagnostics(diagnostics);
@@ -682,7 +728,11 @@ export class LintAIClient {
 	// the rule files changed, or a newer analysis (for a saved file) finished
 	// while the refresh ran.
 	private isOutdated(targetEpoch: number, startedAt: number): boolean {
-		return targetEpoch !== this.analysisEpoch || this.state !== "ready" || startedAt < this.diagnosticsAnalyzedAt;
+		return (
+			targetEpoch !== this.analysisEpoch ||
+			this.state !== "ready" ||
+			startedAt < this.diagnosticsAnalyzedAt
+		);
 	}
 
 	// savedSinceAnalysis returns the modification time of the file when the
@@ -765,7 +815,9 @@ export class LintAIClient {
 		try {
 			response = JSON.parse(payload.toString("utf8")) as JSONRPCResponse;
 		} catch (error) {
-			this.handleServeFailure(new Error(`lintai serve returned invalid JSON: ${asError(error).message}`));
+			this.handleServeFailure(
+				new Error(`lintai serve returned invalid JSON: ${asError(error).message}`),
+			);
 			return;
 		}
 
@@ -807,7 +859,11 @@ export class LintAIClient {
 		this.state = "fallback";
 	}
 
-	private setDiagnostics(diagnostics: Diagnostic[], analyzedAt: number, watchHints?: string[]): void {
+	private setDiagnostics(
+		diagnostics: Diagnostic[],
+		analyzedAt: number,
+		watchHints?: string[],
+	): void {
 		const indexed = indexDiagnostics(diagnostics);
 		this.problemsReported = false;
 		this.diagnosticsAnalyzedAt = analyzedAt;
@@ -818,10 +874,12 @@ export class LintAIClient {
 	}
 
 	private updateInputWatchers(inputPaths: string[]): void {
-		const paths = [...new Set([
-			...inputPaths.map((item) => path.resolve(item)),
-			...(this.options.sourceLinks === undefined ? [] : [path.resolve(this.options.sourceLinks)]),
-		])];
+		const paths = [
+			...new Set([
+				...inputPaths.map((item) => path.resolve(item)),
+				...(this.options.sourceLinks === undefined ? [] : [path.resolve(this.options.sourceLinks)]),
+			]),
+		];
 		this.inputPaths = paths;
 		this.inputPathSet = new Set(paths);
 		const generation = ++this.inputWatchGeneration;
@@ -864,10 +922,13 @@ export class LintAIClient {
 		this.inputDirectories = new Set(specs.keys());
 		for (const [target, spec] of specs) {
 			const directoryChanged = (changed?: string) =>
-				(this.inputDirectories.has(target) && !sameDirectory(spec.identity, directoryIdentity(target))) ||
-				[...spec.children].some(([child, identity]) =>
-					(!changed || changed === child) && this.inputDirectories.has(child) &&
-					!sameDirectory(identity, directoryIdentity(child)),
+				(this.inputDirectories.has(target) &&
+					!sameDirectory(spec.identity, directoryIdentity(target))) ||
+				[...spec.children].some(
+					([child, identity]) =>
+						(!changed || changed === child) &&
+						this.inputDirectories.has(child) &&
+						!sameDirectory(identity, directoryIdentity(child)),
 				);
 			const onError = (error: unknown) => {
 				if (this.state === "disposed" || generation !== this.inputWatchGeneration) return;
@@ -888,9 +949,12 @@ export class LintAIClient {
 						const changed = filename && path.resolve(target, filename);
 						if (
 							directoryChanged(changed) ||
-							spec.inputs.some((input) =>
-								this.inputPathSet.has(input.path) && (!changed || isSameOrAncestor(changed, input.path) ||
-									(input.directory && isSameOrAncestor(input.path, changed))),
+							spec.inputs.some(
+								(input) =>
+									this.inputPathSet.has(input.path) &&
+									(!changed ||
+										isSameOrAncestor(changed, input.path) ||
+										(input.directory && isSameOrAncestor(input.path, changed))),
 							)
 						) {
 							this.scheduleInputInvalidation();
@@ -1002,17 +1066,22 @@ export type HostDefaults = {
 	reportProblemsOnce: boolean;
 };
 
-export function resolveBridgeOptions(options: LintaiOptions, cwd: string, host: HostDefaults): ResolvedBridgeOptions {
-	if (options.ruleWorkers !== undefined && (!Number.isSafeInteger(options.ruleWorkers) || options.ruleWorkers < 0)) {
+export function resolveBridgeOptions(
+	options: LintaiOptions,
+	cwd: string,
+	host: HostDefaults,
+): ResolvedBridgeOptions {
+	if (
+		options.ruleWorkers !== undefined &&
+		(!Number.isSafeInteger(options.ruleWorkers) || options.ruleWorkers < 0)
+	) {
 		throw new Error("ruleWorkers must be zero or a positive integer");
 	}
 	const workspaceRoot = options.workspaceRoot
 		? path.resolve(cwd, options.workspaceRoot)
 		: findWorkspaceRoot(cwd);
 	const binary = options.binary ?? findBinary(workspaceRoot);
-	const repoRoot = options.repoRoot
-		? path.resolve(cwd, options.repoRoot)
-		: workspaceRoot;
+	const repoRoot = options.repoRoot ? path.resolve(cwd, options.repoRoot) : workspaceRoot;
 	const rawGlobs = options.rules ?? ["lintai-rules/**/*.ts"];
 	const ruleGlobs = rawGlobs.map((g) => (path.isAbsolute(g) ? g : path.join(workspaceRoot, g)));
 	return {
@@ -1025,11 +1094,15 @@ export function resolveBridgeOptions(options: LintaiOptions, cwd: string, host: 
 		ruleGlobs,
 		excludes: options.exclude ?? [],
 		...(options.files === undefined ? {} : { files: options.files }),
-		...(options.sourceLinks ? { sourceLinks: path.resolve(workspaceRoot, options.sourceLinks) } : {}),
+		...(options.sourceLinks
+			? { sourceLinks: path.resolve(workspaceRoot, options.sourceLinks) }
+			: {}),
 		env: options.env ?? {},
 		...(options.factLimit === undefined ? {} : { factLimit: options.factLimit }),
 		...(options.ruleWorkers === undefined ? {} : { ruleWorkers: options.ruleWorkers }),
-		...(options.rulesLock === undefined ? {} : { rulesLock: path.resolve(workspaceRoot, options.rulesLock) }),
+		...(options.rulesLock === undefined
+			? {}
+			: { rulesLock: path.resolve(workspaceRoot, options.rulesLock) }),
 		...(options.suppressionsLocation === undefined
 			? {}
 			: { suppressionsLocation: path.resolve(workspaceRoot, options.suppressionsLocation) }),
@@ -1316,7 +1389,10 @@ function directoryIdentity(directory: string): DirectoryIdentity | undefined {
 	}
 }
 
-function sameDirectory(left: DirectoryIdentity | undefined, right: DirectoryIdentity | undefined): boolean {
+function sameDirectory(
+	left: DirectoryIdentity | undefined,
+	right: DirectoryIdentity | undefined,
+): boolean {
 	return left?.dev === right?.dev && left?.ino === right?.ino;
 }
 
@@ -1348,14 +1424,14 @@ export function createTestProcess(): ClientProcess & {
 			}
 			return this;
 		},
-			kill() {
-				stdout.end();
-				listeners.forEach((listener) => listener(0, null));
-				return true;
-			},
-			unref() {},
-			emitExit(code = 0, signal = null) {
-				listeners.forEach((listener) => listener(code, signal));
-			},
+		kill() {
+			stdout.end();
+			listeners.forEach((listener) => listener(0, null));
+			return true;
+		},
+		unref() {},
+		emitExit(code = 0, signal = null) {
+			listeners.forEach((listener) => listener(code, signal));
+		},
 	};
 }

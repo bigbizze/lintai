@@ -117,7 +117,7 @@ A strict purity rule then reads: a violation when `glob(File, pure)` holds and t
 
 ## 5. Rules lockfile
 
-**Hash basis.** Run both esbuild builds in `bundle-rule.mjs` with `metafile: true`. For each rule, the hash input is the union of both metafiles' `inputs` as a sorted list of `(normalized path, sha256 of file bytes)` pairs. A path under the workspace root is workspace-relative. A path under any `node_modules` is cut to start at the package directory inside `node_modules`, so the hash does not depend on the machine or the install layout. The rule hash is the sha256 of the canonical JSON of that list. Bundler output bytes are not hashed, so an esbuild upgrade does not change the lock when no input changed. Return the per-rule hash and input list in the bundle response rows.
+**Hash basis.** The artifact hash covers the bundled rule inputs, including imported SDK code and the rule's suppression policy. The current contract is specified in [section 12.5 of the implementation specification](lintai-refactor-implementation-r6.md#125-rules-lock-approval).
 
 **Run-time code.** The lock covers only code the bundler sees. A `require()` with a computed argument inside `setup()` is left for run time, so it could load workspace code the lock never hashed. Section 6 closes this: during prepare, `require()` resolves only Node built-ins, and dynamic `import()` is unavailable. All workspace code a rule uses must therefore be imported statically, which puts it in the bundle and in the hash. Files that `setup()` reads as data through `fs` are not covered by the lock. `docs/trust.md` says so.
 
@@ -125,12 +125,15 @@ A strict purity rule then reads: a violation when `glob(File, pure)` holds and t
 
 ```json
 {
-  "version": 1,
-  "rules": {
-    "lintai-rules/no-service-imports.ts": { "hash": "sha256:..." }
-  }
+  "format": "lintai.rules-lock/4",
+  "rules": [
+    { "path": "lintai-rules/no-service-imports.ts", "id": "arch.no-service-imports", "version": 1, "artifact_hash": "sha256:..." }
+  ],
+  "approved_suppressions": []
 }
 ```
+
+The lock also approves suppression groups and counts. New groups or increased counts require explicit approval; lower counts and removed groups are allowed. An unapproved proposed suppression update fails before writing. See [bulk suppressions](bulk-suppressions.md) for the recording workflow.
 
 **Commands and flags.**
 
