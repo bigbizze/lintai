@@ -44,15 +44,16 @@ func TestSessionRetainsAndReplacesCurrentGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(first, warm) || session.currentFacts.base != index || evaluations.Load() != 1 ||
-		session.executionObservation().mangleCompiles != observation.mangleCompiles {
-		t.Fatalf("unchanged generation was rebuilt: first=%+v warm=%+v", first, warm)
+	warmObservation := session.executionObservation()
+	if !reflect.DeepEqual(first, warm) || session.currentFacts.base != index || evaluations.Load() != 2 ||
+		warmObservation.bundleArtifacts != observation.bundleArtifacts || warmObservation.mangleCompiles != observation.mangleCompiles {
+		t.Fatalf("unchanged check did not reuse facts/plans and dispatch rules: first=%+v warm=%+v", first, warm)
 	}
 	options.RuleSeverity = map[string]diagnostics.Severity{"fixture.modules": diagnostics.SeverityWarning}
 	warning, err := session.Check(context.Background(), options)
 	if err != nil || len(warning.Diagnostics) != 1 || warning.Diagnostics[0].Severity != diagnostics.SeverityWarning ||
-		evaluations.Load() != 1 || len(session.currentRaw.run.evaluated) != 0 {
-		t.Fatalf("warning policy did not reuse the completed outcome: %+v %v", warning, err)
+		evaluations.Load() != 3 {
+		t.Fatalf("warning check did not evaluate rules: %+v %v", warning, err)
 	}
 	freshOptions := options
 	freshOptions.beforeEvaluation = nil
@@ -66,10 +67,10 @@ func TestSessionRetainsAndReplacesCurrentGeneration(t *testing.T) {
 	}
 	options.RuleSeverity = nil
 	errorResult, err := session.Check(context.Background(), options)
-	if err != nil || !reflect.DeepEqual(errorResult, first) || evaluations.Load() != 1 || len(session.currentRaw.run.evaluated) != 1 {
-		t.Fatalf("error policy did not reuse the completed outcome: %+v %v", errorResult, err)
+	if err != nil || !reflect.DeepEqual(errorResult, first) || evaluations.Load() != 4 {
+		t.Fatalf("error check did not evaluate rules: %+v %v", errorResult, err)
 	}
-	// Returned data is independent of both the current result and the raw cache.
+	// Returned data is independent of the current result.
 	warm.Diagnostics[0].Message = "caller changed its copy"
 	current, err := session.Current()
 	if err != nil || current.Diagnostics[0].Message == warm.Diagnostics[0].Message {
@@ -106,7 +107,7 @@ func TestSessionRetainsAndReplacesCurrentGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	changed := assertFresh()
-	if changed.SnapshotVersion == first.SnapshotVersion || evaluations.Load() != 2 {
+	if changed.SnapshotVersion == first.SnapshotVersion || evaluations.Load() != 5 {
 		t.Fatal("content change did not replace the generation")
 	}
 	writeTestFile(t, workspace, "src/b.ts", "export const other = 3;\n")
@@ -160,9 +161,9 @@ func TestSessionRetainsAndReplacesCurrentGeneration(t *testing.T) {
 	}
 }
 
-// V20: arbitrary setup runs on every check; changed setup invalidates the raw
-// outcome without requiring a new producer generation.
-func TestSessionRefreshesSetupBeforeReusingOutcomes(t *testing.T) {
+// V20: arbitrary setup runs on every check and can change a generated program
+// without requiring a new producer generation.
+func TestSessionRefreshesSetupWithRetainedFacts(t *testing.T) {
 	repo, err := filepath.Abs("..")
 	if err != nil {
 		t.Fatal(err)
@@ -183,10 +184,8 @@ export default rule("fixture.setup-refresh").version(1)
   .report("violation").message((row) => row.Code);`
 	writeTestFile(t, workspace, "lintai-rules/setup.ts", source)
 	value := writeTestFile(t, workspace, "setup-value", "first")
-	var evaluations atomic.Int64
 	options := parallelFixtureOptions(repo, workspace)
 	options.SetupSandbox = bundle.SetupSandboxOff
-	options.beforeEvaluation = func() { evaluations.Add(1) }
 	session := Open(options, newParallelFixtureProducer())
 	defer session.Close()
 	for i := 0; i < 2; i++ {
@@ -196,15 +195,15 @@ export default rule("fixture.setup-refresh").version(1)
 		}
 	}
 	count, err := os.ReadFile(filepath.Join(workspace, "setup-count"))
-	if err != nil || string(count) != "2" || evaluations.Load() != 1 {
-		t.Fatalf("setup or reuse counts: setup=%q evaluations=%d err=%v", count, evaluations.Load(), err)
+	if err != nil || string(count) != "2" {
+		t.Fatalf("setup counts: setup=%q err=%v", count, err)
 	}
 	index := session.currentFacts.base
 	if err := os.WriteFile(value, []byte("all"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	result, err := session.Check(context.Background())
-	if err != nil || len(result.Diagnostics) != 3 || evaluations.Load() != 2 || session.currentFacts.base != index {
+	if err != nil || len(result.Diagnostics) != 3 || session.currentFacts.base != index {
 		t.Fatalf("changed setup did not re-execute on the retained facts: %+v %v", result, err)
 	}
 }
