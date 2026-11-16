@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -120,16 +119,7 @@ type Session struct {
 	stats          executionStats
 	currentFacts   *composedFacts
 	currentCatalog string
-	currentRaw     *retainedRaw
-	pendingRawKey  string
 	currentResult  *Result
-}
-
-type retainedRaw struct {
-	key      string
-	result   Result
-	run      runInfo
-	evidence executionEvidence
 }
 
 type compiledPlanCache struct {
@@ -208,7 +198,6 @@ func (e *Session) Close() error {
 		e.bundleCache = nil
 		e.bundleMu.Unlock()
 		e.currentFacts = nil
-		e.currentRaw = nil
 		e.currentResult = nil
 		for _, producer := range e.producers {
 			if err := producer.Close(); err != nil && e.closeErr == nil {
@@ -254,7 +243,7 @@ func (e *Session) executionObservation() executionObservation {
 	}
 }
 
-// Check validates current producer inputs, evaluates as needed and assembles policy.
+// Check validates current producer inputs, evaluates prepared rule jobs and assembles policy.
 func (e *Session) Check(ctx context.Context, requests ...Options) (Result, error) {
 	options := e.defaults
 	if len(requests) == 1 {
@@ -272,7 +261,6 @@ func (e *Session) Check(ctx context.Context, requests ...Options) (Result, error
 		if !success {
 			e.currentFacts = nil
 			e.currentCatalog = ""
-			e.currentRaw = nil
 		}
 	}()
 	e.mu.Lock()
@@ -288,7 +276,6 @@ func (e *Session) Check(ctx context.Context, requests ...Options) (Result, error
 	if err != nil {
 		return Result{}, err
 	}
-	e.pendingRawKey = ""
 	result, run, evidence, err := e.analyzeWithEvidence(checkCtx, options)
 	if err != nil {
 		return Result{}, err
@@ -296,7 +283,6 @@ func (e *Session) Check(ctx context.Context, requests ...Options) (Result, error
 	if err := checkCtx.Err(); err != nil {
 		return Result{}, err
 	}
-	raw := cloneResult(result)
 	write, err := applySuppressions(options, state, run, evidence, &result)
 	if err != nil {
 		return Result{}, err
@@ -316,11 +302,6 @@ func (e *Session) Check(ctx context.Context, requests ...Options) (Result, error
 			return Result{}, err
 		}
 		result.SuppressionsWritten = true
-	}
-	if e.pendingRawKey != "" {
-		e.currentRaw = &retainedRaw{key: e.pendingRawKey, result: raw, run: run, evidence: evidence}
-	} else {
-		e.currentRaw = nil
 	}
 	published := cloneResult(result)
 	e.currentResult = &published
@@ -420,7 +401,6 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options) (Res
 	if len(ruleCatalog.paths) == 0 {
 		e.currentFacts = nil
 		e.currentCatalog = ""
-		e.currentRaw = nil
 		if _, err := e.describeProducers(); err != nil {
 			return Result{}, run, evidence, err
 		}
@@ -736,31 +716,6 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options) (Res
 	run.known = knownRules
 	if run.complete {
 		allDiagnostics = append(allDiagnostics, unknownSeverityRules(options, knownRules, assembled.snapshotID, producerNames)...)
-	}
-
-	// The input revision is a producer-owned validity claim. Rule artifacts,
-	// setup values, generated programs and semantic execution settings are
-	// independent inputs and must agree before a raw outcome can be reused.
-	sortDiagnostics(allDiagnostics)
-	rawIdentity, identityErr := json.Marshal([]any{assembled.snapshotID, producerCatalog.identity, generationRecords,
-		options.RepoRoot, options.AssetRoot, options.WorkspaceRoot, options.Env, options.FactLimit,
-		options.Explain, allDiagnostics, result.RulesLoaded, run.complete})
-	if identityErr == nil {
-		digest := sha256.Sum256(rawIdentity)
-		e.pendingRawKey = hex.EncodeToString(digest[:])
-		if e.currentRaw != nil && e.currentRaw.key == e.pendingRawKey {
-			for _, job := range jobs {
-				job.release()
-			}
-			reused := e.currentRaw
-			retainedResult := cloneResult(reused.result)
-			retainedResult.Warnings = append([]string(nil), result.Warnings...)
-			retainedResult.WatchHints = append([]string(nil), assembled.watchHints...)
-			retainedRun := reused.run
-			retainedRun.lock = lock
-			assembleSeverity(options, &retainedResult, &retainedRun)
-			return retainedResult, retainedRun, reused.evidence, nil
-		}
 	}
 
 	outcomes, dispatchErr := dispatchRuleJobs(ctx, jobs, assembled, options, &e.stats)
