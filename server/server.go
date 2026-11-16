@@ -25,7 +25,8 @@ const (
 )
 
 type Analyzer interface {
-	Analyze(ctx context.Context, options engine.Options) (engine.Result, error)
+	Check(ctx context.Context, options ...engine.Options) (engine.Result, error)
+	Close() error
 }
 
 type AnalyzerFactory func(InitializeParams) Analyzer
@@ -57,6 +58,7 @@ type InitializeParams struct {
 	SourceLinks   string         `json:"sourceLinks,omitempty"`
 	Env           map[string]any `json:"env"`
 	FactLimit     int            `json:"factLimit,omitempty"`
+	RuleWorkers   int            `json:"ruleWorkers,omitempty"`
 	// Severity maps a rule id to "error", "warning" or "off".
 	Severity map[string]string `json:"severity,omitempty"`
 	// RulesLock is the path of a rules lock file to enforce.
@@ -76,7 +78,8 @@ type FileDiagnosticsParams struct {
 }
 
 type ReanalyzeParams struct {
-	Reason string `json:"reason,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+	RuleWorkers *int   `json:"ruleWorkers,omitempty"`
 }
 
 type AnalysisResult struct {
@@ -84,7 +87,7 @@ type AnalysisResult struct {
 	DiagnosticCount int                      `json:"diagnosticCount"`
 	SnapshotVersion string                   `json:"snapshotVersion"`
 	Diagnostics     []diagnostics.Diagnostic `json:"diagnostics"`
-	InputPaths      []string                 `json:"inputPaths,omitempty"`
+	WatchHints      []string                 `json:"watchHints,omitempty"`
 }
 
 type FileDiagnosticsResult struct {
@@ -105,7 +108,14 @@ func NewWithFactory(factory AnalyzerFactory) *Server {
 	}
 }
 
-func (s *Server) Serve(ctx context.Context, input io.Reader, output io.Writer) error {
+func (s *Server) Serve(ctx context.Context, input io.Reader, output io.Writer) (serveErr error) {
+	defer func() {
+		if s.engine != nil {
+			if err := s.engine.Close(); serveErr == nil {
+				serveErr = err
+			}
+		}
+	}()
 	reader := bufio.NewReader(input)
 	writer := bufio.NewWriter(output)
 
@@ -206,6 +216,7 @@ func (s *Server) handleInitialize(ctx context.Context, rawParams json.RawMessage
 		Severity:      diagnostics.SeverityError,
 		RuleSeverity:  ruleSeverity,
 		FactLimit:     params.FactLimit,
+		RuleWorkers:   params.RuleWorkers,
 		RulesLock:     params.RulesLock,
 		SetupSandbox:  sandbox,
 
@@ -215,6 +226,9 @@ func (s *Server) handleInitialize(ctx context.Context, rawParams json.RawMessage
 	s.mu.Lock()
 	s.options = options
 	if s.factory != nil {
+		if s.engine != nil {
+			_ = s.engine.Close()
+		}
 		s.engine = s.factory(params)
 	}
 	s.initialized = true
@@ -224,7 +238,7 @@ func (s *Server) handleInitialize(ctx context.Context, rawParams json.RawMessage
 	s.snapshotVersion = ""
 	s.rulesLoaded = 0
 	s.mu.Unlock()
-	result, err := s.engine.Analyze(ctx, options)
+	result, err := s.engine.Check(ctx, options)
 	if err != nil {
 		return AnalysisResult{}, err
 	}
@@ -267,9 +281,12 @@ func (s *Server) handleReanalyze(ctx context.Context, rawParams json.RawMessage)
 		if err := json.Unmarshal(rawParams, &params); err != nil {
 			return AnalysisResult{}, fmt.Errorf("invalid params: %w", err)
 		}
+		if params.RuleWorkers != nil {
+			options.RuleWorkers = *params.RuleWorkers
+		}
 	}
 
-	result, err := s.engine.Analyze(ctx, options)
+	result, err := s.engine.Check(ctx, options)
 	if err != nil {
 		s.invalidateAnalysis()
 		return AnalysisResult{}, err
@@ -299,7 +316,6 @@ func (s *Server) applyAnalysis(options engine.Options, result engine.Result) {
 		s.warned[warning] = struct{}{}
 		fmt.Fprintln(s.Log, warning)
 	}
-	s.options = options
 	s.diagnostics = append([]diagnostics.Diagnostic(nil), result.Diagnostics...)
 	s.diagnosticsByFile = byFile
 	s.snapshotVersion = result.SnapshotVersion
@@ -327,7 +343,7 @@ func analysisResult(result engine.Result) AnalysisResult {
 		DiagnosticCount: len(result.Diagnostics),
 		SnapshotVersion: result.SnapshotVersion,
 		Diagnostics:     items,
-		InputPaths:      append([]string(nil), result.InputPaths...),
+		WatchHints:      append([]string(nil), result.WatchHints...),
 	}
 }
 

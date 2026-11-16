@@ -93,7 +93,7 @@ func TestRuleErrorPhases(t *testing.T) {
 	}
 	rulePaths = append(rulePaths, filepath.Join(repoRoot, "testdata/fixtures/rules/pure-no-effects.ts"))
 
-	items, err := New(typescript.New()).Run(context.Background(), Options{
+	result, err := Open(Options{}, typescript.New()).Check(context.Background(), Options{
 		RepoRoot:      repoRoot,
 		AssetRoot:     filepath.Join(repoRoot, "packages", "client"),
 		WorkspaceRoot: filepath.Join(repoRoot, "testdata/fixtures/workspace"),
@@ -105,6 +105,7 @@ func TestRuleErrorPhases(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	items := result.Diagnostics
 
 	byRule := make(map[string][]diagnostics.Diagnostic)
 	for _, item := range items {
@@ -148,7 +149,7 @@ export default rule("arch.no-async").version(1)
 	.program(dl`+"`"+`Decl v(Fn). v(Fn) :- ts.fn_async(Fn).`+"`"+`)
 	.report("v").message(() => "no async");
 `)
-	items, err := New(typescript.New()).Run(context.Background(), Options{
+	result, err := Open(Options{}, typescript.New()).Check(context.Background(), Options{
 		RepoRoot:      repoRoot,
 		AssetRoot:     filepath.Join(repoRoot, "packages", "client"),
 		WorkspaceRoot: workspaceRoot,
@@ -159,6 +160,7 @@ export default rule("arch.no-async").version(1)
 	if err != nil {
 		t.Fatal(err)
 	}
+	items := result.Diagnostics
 	if len(items) != 1 || items[0].RuleID != "arch.no-async" || items[0].SourceLocation.File != "src/bad.ts" {
 		t.Fatalf("expected one arch.no-async violation in src/bad.ts, got %+v", items)
 	}
@@ -218,7 +220,7 @@ func TestDeclaredWriterCapabilityPolicy(t *testing.T) {
 				}
 				writeTestFile(t, root, file, source)
 			}
-			items, err := New(typescript.New(typescript.Options{Files: typescript.FileScopeWalk})).Run(context.Background(), Options{
+			result, err := Open(Options{}, typescript.New(typescript.Options{Files: typescript.FileScopeWalk})).Check(context.Background(), Options{
 				RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages", "client"),
 				WorkspaceRoot: root, RuleGlobs: []string{filepath.Join(fixture, "writer-policy.ts")},
 				Severity: diagnostics.SeverityError,
@@ -226,6 +228,7 @@ func TestDeclaredWriterCapabilityPolicy(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
+			items := result.Diagnostics
 			var got []string
 			for _, item := range items {
 				if item.RuleID != "arch.no-writer-write" || item.DiagnosticKind != diagnostics.KindArchitectureViolation ||
@@ -275,7 +278,7 @@ export default rule("t.round-trip").version(1)
 	.report("v")
 		.message((row) => JSON.stringify([row.S === tricky, row.N, row.K]));
 `)
-	items, err := New(typescript.New(typescript.Options{Files: typescript.FileScopeWalk})).Run(context.Background(), Options{
+	result, err := Open(Options{}, typescript.New(typescript.Options{Files: typescript.FileScopeWalk})).Check(context.Background(), Options{
 		RepoRoot:      repoRoot,
 		AssetRoot:     filepath.Join(repoRoot, "packages", "client"),
 		WorkspaceRoot: filepath.Join(repoRoot, "testdata/fixtures/workspace"),
@@ -286,6 +289,7 @@ export default rule("t.round-trip").version(1)
 	if err != nil {
 		t.Fatal(err)
 	}
+	items := result.Diagnostics
 	if len(items) != 1 || items[0].Message != `[true,-12,"/a/b_c"]` {
 		t.Fatalf("expected the values to round-trip, got %+v", items)
 	}
@@ -317,7 +321,7 @@ Decl v(M). v(M) :- ts.module(M), ts.location(M, F, _, _, _, _), !lintai.glob(F, 
 Decl w(M). w(M) :- ts.module(M), ts.location(M, F, _, _, _, _), F = "src/a/b.c", layer(M, /ui.x).`+"`"+`)
 	.report("v").message(() => "outside");
 `)
-	items, err := New(typescript.New()).Run(context.Background(), Options{
+	result, err := Open(Options{}, typescript.New()).Check(context.Background(), Options{
 		RepoRoot:      repoRoot,
 		AssetRoot:     filepath.Join(repoRoot, "packages", "client"),
 		WorkspaceRoot: workspaceRoot,
@@ -328,6 +332,7 @@ Decl w(M). w(M) :- ts.module(M), ts.location(M, F, _, _, _, _), F = "src/a/b.c",
 	if err != nil {
 		t.Fatal(err)
 	}
+	items := result.Diagnostics
 	byRule := map[string][]string{}
 	for _, item := range items {
 		if item.SourceLocation == nil {
@@ -370,7 +375,7 @@ export default rule("t.broken-warning").version(1)
 `)
 	writeTestFile(t, workspaceRoot, "lintai-rules/soft.ts", `export { soft as default } from "./rules";
 `)
-	items, err := New(typescript.New()).Run(context.Background(), Options{
+	result, err := Open(Options{}, typescript.New()).Check(context.Background(), Options{
 		RepoRoot:      repoRoot,
 		AssetRoot:     filepath.Join(repoRoot, "packages", "client"),
 		WorkspaceRoot: workspaceRoot,
@@ -386,6 +391,7 @@ export default rule("t.broken-warning").version(1)
 	if err != nil {
 		t.Fatal(err)
 	}
+	items := result.Diagnostics
 	got := make([]string, 0, len(items))
 	for _, item := range items {
 		got = append(got, item.RuleID+" "+string(item.DiagnosticKind)+" "+string(item.Severity)+" "+item.Phase)
@@ -476,7 +482,7 @@ export default rule("t.awaited").version(1)
 	.report("v")
 	.message((row) => `+"`${row.Name}:${row.Text}`"+`);
 `)
-	items, err := New(typescript.New()).Run(context.Background(), Options{
+	result, err := Open(Options{}, typescript.New()).Check(context.Background(), Options{
 		RepoRoot:      repoRoot,
 		AssetRoot:     filepath.Join(repoRoot, "packages", "client"),
 		WorkspaceRoot: workspaceRoot,
@@ -487,6 +493,7 @@ export default rule("t.awaited").version(1)
 	if err != nil {
 		t.Fatal(err)
 	}
+	items := result.Diagnostics
 	byRule := map[string][]string{}
 	for _, item := range items {
 		byRule[item.RuleID] = append(byRule[item.RuleID], item.Message)
@@ -581,7 +588,7 @@ export async function ambiguous(value: string | undefined): Promise<ActionResult
 				writeTestFile(t, root, group+"/use.ts", `export { mixed } from "../src/actions/save";`)
 			}
 			rulePath := filepath.Join(repoRoot, "testdata/npm-smoke/lintai-rules/actions-return-action-result.ts")
-			items, err := New(typescript.New()).Run(context.Background(), Options{
+			result, err := Open(Options{}, typescript.New()).Check(context.Background(), Options{
 				RepoRoot:      repoRoot,
 				AssetRoot:     filepath.Join(repoRoot, "packages", "client"),
 				WorkspaceRoot: root,
@@ -592,6 +599,7 @@ export async function ambiguous(value: string | undefined): Promise<ActionResult
 			if err != nil {
 				t.Fatal(err)
 			}
+			items := result.Diagnostics
 			got := make([]string, 0, len(items))
 			for _, item := range items {
 				if item.RuleID != "arch.actions-return-action-result" || item.SourceLocation == nil || item.SourceLocation.File != "src/actions/save.ts" {
@@ -637,13 +645,14 @@ export default rule("test.strict").version(1)
   `+"`"+`)
   .report("ambient", "indeterminate").message((row, ctx) => `+"`${row.Name}:${ctx.assertion_id}`"+`);
 `)
-	items, err := New(typescript.New()).Run(context.Background(), Options{
+	result, err := Open(Options{}, typescript.New()).Check(context.Background(), Options{
 		RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: root,
 		RuleGlobs: []string{"lintai-rules/*.ts"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	items := result.Diagnostics
 	var got []string
 	for _, item := range items {
 		if item.RuleID != "test.strict" {
@@ -698,7 +707,7 @@ export default rule("arch.public-api-infrastructure-types").version(1)
 	.message((row) => row.Name);
 `
 	writeTestFile(t, workspaceRoot, "lintai-rules/public-api.ts", rule)
-	items, err := New(typescript.New()).Run(context.Background(), Options{
+	result, err := Open(Options{}, typescript.New()).Check(context.Background(), Options{
 		RepoRoot:      repoRoot,
 		AssetRoot:     filepath.Join(repoRoot, "packages", "client"),
 		WorkspaceRoot: workspaceRoot,
@@ -709,6 +718,7 @@ export default rule("arch.public-api-infrastructure-types").version(1)
 	if err != nil {
 		t.Fatal(err)
 	}
+	items := result.Diagnostics
 	var got []string
 	for _, item := range items {
 		if item.RuleID != "arch.public-api-infrastructure-types" {

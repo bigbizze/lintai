@@ -30,6 +30,7 @@ type composedFacts struct {
 	analyzedFiles map[string]struct{}
 	namespaces    []string
 	snapshotID    string
+	watchHints    []string
 }
 
 type producerEntry struct {
@@ -48,7 +49,7 @@ type producerCatalog struct {
 // describeProducers constructs the validated catalog without collecting any
 // source facts. Rule programs use this view to determine the exact producer
 // relations they need before extraction begins.
-func (e *Engine) describeProducers() (producerCatalog, error) {
+func (e *Session) describeProducers() (producerCatalog, error) {
 	entries := make([]producerEntry, 0, len(e.producers))
 	owned := make(map[string]struct{}, len(e.producers))
 	for _, producer := range e.producers {
@@ -135,7 +136,7 @@ func (e *Engine) describeProducers() (producerCatalog, error) {
 
 // collect requests only the base relations selected by successfully prepared
 // rules. Producers with no requested relations are not called.
-func (catalog producerCatalog) collect(ctx context.Context, options Options, requestedByNamespace map[string]map[facts.Predicate]struct{}) (composedFacts, error) {
+func (catalog producerCatalog) collect(ctx context.Context, options Options, requestedByNamespace map[string]map[facts.Predicate]struct{}, current *composedFacts) (composedFacts, error) {
 	allFacts := make([]facts.Fact, 0)
 	anchors := make(map[string]facts.AnchorSupport)
 	reportable := make(map[facts.Predicate]map[string]struct{})
@@ -143,6 +144,13 @@ func (catalog producerCatalog) collect(ctx context.Context, options Options, req
 	analyzedFiles := make(map[string]struct{})
 	producerRecords := make([]any, 0, len(catalog.entries))
 	usedNamespaces := make([]string, 0, len(requestedByNamespace))
+	type collected struct {
+		description facts.ProducerDescription
+		requested   []facts.Predicate
+		validated   facts.ValidatedFacts
+	}
+	collectedBatches := make([]collected, 0, len(catalog.entries))
+	watchHints := make(map[string]struct{})
 	for _, entry := range catalog.entries {
 		producer := entry.producer
 		description := entry.description
@@ -174,6 +182,38 @@ func (catalog producerCatalog) collect(ctx context.Context, options Options, req
 		if err != nil {
 			return composedFacts{}, fmt.Errorf("producer %q returned an invalid batch: %w", description.Namespace, err)
 		}
+		for _, hint := range batch.WatchHints {
+			watchHints[hint] = struct{}{}
+		}
+		requestedNames := make([]string, len(requested))
+		for i, predicate := range requested {
+			requestedNames[i] = predicate.Name
+		}
+		producerRecords = append(producerRecords, []any{
+			"producer-result-v2", description.Namespace, description.ImplementationID,
+			description.ImplementationStamp, description.ContractVersion, description.EffectiveConfiguration,
+			validated.InputRevision(), validated.Scope(), requestedNames,
+		})
+		collectedBatches = append(collectedBatches, collected{description, requested, validated})
+	}
+	encoded, err := canonical.Marshal([]any{"lintai-facts-v1", producerRecords})
+	if err != nil {
+		return composedFacts{}, fmt.Errorf("snapshot identity: %w", err)
+	}
+	digest := sha256.Sum256(encoded)
+	snapshotID := "sha256:" + hex.EncodeToString(digest[:])
+	hints := make([]string, 0, len(watchHints))
+	for hint := range watchHints {
+		hints = append(hints, hint)
+	}
+	sort.Strings(hints)
+	if current != nil && current.snapshotID == snapshotID {
+		reused := *current
+		reused.watchHints = hints
+		return reused, nil
+	}
+	for _, item := range collectedBatches {
+		description, requested, validated := item.description, item.requested, item.validated
 		allFacts = append(allFacts, validated.Facts()...)
 		for _, predicate := range requested {
 			factCounts[ast.PredicateSym{Symbol: predicate.Name, Arity: predicate.Arity}] = len(validated.Rows(predicate))
@@ -205,26 +245,11 @@ func (catalog producerCatalog) collect(ctx context.Context, options Options, req
 		for _, file := range validated.AnalyzedFiles() {
 			analyzedFiles[suppressions.NormalizePath(file)] = struct{}{}
 		}
-		requestedNames := make([]string, len(requested))
-		for i, predicate := range requested {
-			requestedNames[i] = predicate.Name
-		}
-		producerRecords = append(producerRecords, []any{
-			"producer-result-v2", description.Namespace, description.ImplementationID,
-			description.ImplementationStamp, description.ContractVersion, description.EffectiveConfiguration,
-			validated.InputRevision(), validated.Scope(), requestedNames,
-		})
 	}
 	base, err := facts.Store(allFacts)
 	if err != nil {
 		return composedFacts{}, fmt.Errorf("assembled facts: %w", err)
 	}
-	record := []any{"lintai-facts-v1", producerRecords}
-	encoded, err := canonical.Marshal(record)
-	if err != nil {
-		return composedFacts{}, fmt.Errorf("snapshot identity: %w", err)
-	}
-	digest := sha256.Sum256(encoded)
 	files := make([]string, 0, len(analyzedFiles))
 	for file := range analyzedFiles {
 		files = append(files, file)
@@ -236,7 +261,7 @@ func (catalog producerCatalog) collect(ctx context.Context, options Options, req
 	}
 	return composedFacts{
 		base: base, sources: catalog.sources, schemaDecls: catalog.schemaDecls, anchors: anchors, reportable: reportable,
-		factCounts: factCounts, analyzedFiles: fileSet, namespaces: usedNamespaces, snapshotID: "sha256:" + hex.EncodeToString(digest[:]),
+		factCounts: factCounts, analyzedFiles: fileSet, namespaces: usedNamespaces, snapshotID: snapshotID, watchHints: hints,
 	}, nil
 }
 

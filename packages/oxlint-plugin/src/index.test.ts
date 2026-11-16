@@ -63,10 +63,13 @@ const bridge = { binary: "/tmp/lintai", workspaceRoot: workspace, repoRoot: work
 
 it("unused suppressions report through analysis rather than the generated rule", () => {
 	resetClientsForTest();
-	const options = { ...bridge, mode: "oneshot" as const };
+	const options = { ...bridge, mode: "oneshot" as const, ruleWorkers: 2 };
 	const resolved = resolveBridgeOptions(options, process.cwd(), oxlintHostDefaults());
 	const unused = { ...violation, diagnostic_kind: "unused_suppression", message: "unused suppression" };
-	const dependencies = createTestDependencies({ spawnSync: (_binary, args) => ({ status: args[0] === "rules" ? 0 : 2, stderr: "", stdout: JSON.stringify(args[0] === "rules" ? { rules: [{ id: "arch.no-async", path: "rule.ts" }], errors: [] } : [unused]) }) });
+	const dependencies = createTestDependencies({ spawnSync: (_binary, args) => {
+		if (args[0] !== "rules") deepEqual(args[args.indexOf("--rule-workers") + 1], "2");
+		return { status: args[0] === "rules" ? 0 : 2, stderr: "", stdout: JSON.stringify(args[0] === "rules" ? { rules: [{ id: "arch.no-async", path: "rule.ts" }], errors: [] } : [unused]) };
+	} });
 	loadRuleIds(resolved, dependencies);
 	getClient(resolved, dependencies);
 	const plugin = createLintaiPlugin(options);

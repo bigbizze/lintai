@@ -159,6 +159,7 @@ Options of `createLintaiPlugin`:
 - `files?: "tsconfig" | "walk"`
 - `env?: Record<string, unknown>`
 - `factLimit?: number`
+- `ruleWorkers?: number`
 - `rulesLock?: string`
 - `setupSandbox?: "auto" | "on" | "off"`
 

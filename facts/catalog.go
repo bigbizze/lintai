@@ -85,6 +85,8 @@ type Batch struct {
 	AnalyzedFiles []string
 	InputRevision string
 	Scope         any
+	// WatchHints request future checks; they do not establish validity.
+	WatchHints []string
 }
 
 // ValidatedFacts owns a defensive copy of a producer batch. Callers can only

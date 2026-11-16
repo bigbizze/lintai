@@ -50,7 +50,7 @@ async function withTimeout<T>(promise: Promise<T>, description: string): Promise
 
 function createInitializeResult(
 	ruleID: string,
-	inputPaths?: string[],
+	watchHints?: string[],
 	file = "src/example.ts",
 	id = 1,
 ): ReturnType<typeof createFramedResponse> {
@@ -61,7 +61,7 @@ function createInitializeResult(
 			rulesLoaded: 1,
 			diagnosticCount: 1,
 			snapshotVersion: `snap-${ruleID}`,
-			...(inputPaths === undefined ? {} : { inputPaths }),
+			...(watchHints === undefined ? {} : { watchHints }),
 			diagnostics: [
 				{
 					rule_id: ruleID,
@@ -80,7 +80,7 @@ function createInitializeResult(
 	});
 }
 
-function createInputResult(id: number, inputPaths: string[], message: string): Buffer {
+function createInputResult(id: number, watchHints: string[], message: string): Buffer {
 	return createFramedResponse({
 		jsonrpc: "2.0",
 		id,
@@ -88,7 +88,7 @@ function createInputResult(id: number, inputPaths: string[], message: string): B
 			rulesLoaded: 1,
 			diagnosticCount: 1,
 			snapshotVersion: `snap-${id}`,
-			inputPaths,
+			watchHints,
 			diagnostics: [
 				{
 					rule_id: "arch.input",
@@ -572,134 +572,31 @@ test("rule file changes invalidate cached diagnostics and the next pass refreshe
 	}
 });
 
-for (const scenario of ["known", "discovered", "saved"]) {
-	test(`analysis verifies ${scenario} inputs before returning diagnostics`, () => {
-		const workspaceRoot = mkdtempSync(path.join(os.tmpdir(), "lintai-input-race-"));
-		const input = path.join(workspaceRoot, "input.json");
-		writeFileSync(input, "before");
-		const child = createTestProcess();
-		let analyses = 0;
-		let modifiedAt: number | undefined;
-		const client = new LintAIClient(
-			resolveBridgeOptions(
-				{
-					mode: "serve",
-					binary: "/tmp/lintai",
-					repoRoot: workspaceRoot,
-					workspaceRoot,
-					...(scenario === "known" ? { sourceLinks: input } : {}),
-				},
-				workspaceRoot,
-				editorHost,
-			),
-			createTestDependencies({
-				spawnServe: () => child,
-				watchInputPath: () => ({ close() {} }),
-				modifiedAt: () => modifiedAt,
-				now: () => 100,
-				readServeSync: () => {
-					analyses++;
-					if (scenario === "saved" && analyses === 1) return createInputResult(analyses, [], "initial");
-					const value = readFileSync(input, "utf8");
-					if (analyses === 1) writeFileSync(input, "after the read");
-					return createInputResult(analyses, [input], value);
-				},
-				log: () => undefined,
-			}),
-		);
-		try {
-			if (scenario === "saved") {
-				assert.equal(client.getDiagnostics("src/app.ts")[0]?.message, "initial");
-				modifiedAt = 101;
-			}
-			assert.equal(client.getDiagnostics("src/app.ts")[0]?.message, scenario === "saved" ? "before" : "after the read");
-			for (let index = 0; index < 3; index++) client.getDiagnostics("src/app.ts");
-			assert.equal(analyses, scenario === "saved" ? 3 : 2);
-			assert.deepEqual(client.problems(), []);
-		} finally {
-			client.dispose();
-			rmSync(workspaceRoot, { recursive: true, force: true });
-		}
-	});
-}
-
-test("repeated input changes defer retries until the next synchronous lint pass", async () => {
-	const workspaceRoot = mkdtempSync(path.join(os.tmpdir(), "lintai-input-retry-"));
-	const input = path.join(workspaceRoot, "input.json");
-	writeFileSync(input, "initial");
+// V19: producer-validated discovery is accepted once. Later watch events request a check.
+test("new watch hints do not reject a completed analysis", async () => {
+	const workspaceRoot = mkdtempSync(path.join(os.tmpdir(), "lintai-discovery-"));
+	const input = path.join(workspaceRoot, "dependency.json");
+	writeFileSync(input, "stable");
 	const child = createTestProcess();
 	let analyses = 0;
-	let modifiedAt: number | undefined;
 	const client = new LintAIClient(
-		resolveBridgeOptions(
-			{ mode: "serve", binary: "/tmp/lintai", workspaceRoot, sourceLinks: input },
-			workspaceRoot,
-			editorHost,
-		),
+		resolveBridgeOptions({ mode: "serve", binary: "/tmp/lintai", workspaceRoot }, workspaceRoot, editorHost),
 		createTestDependencies({
 			spawnServe: () => child,
 			watchInputPath: () => ({ close() {} }),
-			modifiedAt: () => modifiedAt,
-			now: () => 100,
-			readServeSync: () => {
-				const value = readFileSync(input, "utf8");
-				analyses++;
-				if (analyses === 2) writeFileSync(input, "second value");
-				if (analyses === 3) writeFileSync(input, "third, stable value");
-				return createInputResult(analyses, [input], value);
-			},
+			readServeSync: () => createInputResult(++analyses, [input], "validated"),
 			log: () => undefined,
 		}),
 	);
 	try {
-		assert.equal(client.getDiagnostics("src/app.ts")[0]?.message, "initial");
-		modifiedAt = 101;
-		for (let index = 0; index < 3; index++) assert.deepEqual(client.getDiagnostics("src/app.ts"), []);
-		assert.equal(analyses, 3);
-		assert.ok(client.problems().some((message) => message.includes("inputs changed during analysis")));
-		await new Promise((resolve) => setImmediate(resolve));
-		assert.equal(client.getDiagnostics("src/app.ts")[0]?.message, "third, stable value");
-		assert.equal(analyses, 4);
-		assert.deepEqual(client.problems(), []);
-	} finally {
-		client.dispose();
-		rmSync(workspaceRoot, { recursive: true, force: true });
-	}
-});
-
-test("a background refresh verifies newly discovered inputs before using its result", async () => {
-	const workspaceRoot = mkdtempSync(path.join(os.tmpdir(), "lintai-background-input-"));
-	const known = path.join(workspaceRoot, "known.json");
-	const discovered = path.join(workspaceRoot, "discovered.json");
-	writeFileSync(known, "known");
-	writeFileSync(discovered, "before");
-	const child = createTestProcess();
-	let syncReads = 0;
-	const client = new LintAIClient(
-		resolveBridgeOptions(
-			{ mode: "serve", binary: "/tmp/lintai", workspaceRoot, sourceLinks: known },
-			workspaceRoot,
-			editorHost,
-		),
-		createTestDependencies({
-			spawnServe: () => child,
-			watchInputPath: () => ({ close() {} }),
-			readServeSync: () =>
-				++syncReads === 1
-					? createInputResult(1, [known], "initial")
-					: createInputResult(3, [known, discovered], readFileSync(discovered, "utf8")),
-			log: () => undefined,
-		}),
-	);
-	try {
-		assert.equal(client.getDiagnostics("src/app.ts")[0]?.message, "initial");
+		assert.equal(client.getDiagnostics("src/app.ts")[0]?.message, "validated");
+		assert.equal(client.getDiagnostics("src/app.ts")[0]?.message, "validated");
+		assert.equal(analyses, 1);
 		const refresh = client.refresh();
-		const oldValue = readFileSync(discovered, "utf8");
-		writeFileSync(discovered, "after the read");
-		child.stdout.write(createInputResult(2, [known, discovered], oldValue));
+		child.stdout.write(createInputResult(2, [input, path.join(workspaceRoot, "new.json")], "new hint"));
 		await refresh;
-		assert.equal(client.getDiagnostics("src/app.ts")[0]?.message, "after the read");
-		assert.equal(syncReads, 2);
+		assert.equal(client.getDiagnostics("src/app.ts")[0]?.message, "new hint");
+		assert.equal(analyses, 1);
 	} finally {
 		client.dispose();
 		rmSync(workspaceRoot, { recursive: true, force: true });
@@ -737,7 +634,7 @@ test("an event queued on a replaced input watcher still invalidates diagnostics"
 						rulesLoaded: 1,
 						diagnosticCount: 0,
 						snapshotVersion: `snap-${analyses}`,
-						inputPaths: [input],
+						watchHints: [input],
 						diagnostics: [],
 					},
 				}),
@@ -764,7 +661,7 @@ test("missing semantic inputs invalidate diagnostics as their parent directories
 	mkdirSync(mapDirectory, { recursive: true });
 	const sourceDirectory = path.join(workspaceRoot, "missing");
 	const source = path.join(sourceDirectory, "next/source.ts");
-	const inputPaths = [path.join(mapDirectory, "index.d.ts.map"), source];
+	const watchHints = [path.join(mapDirectory, "index.d.ts.map"), source];
 	const listeners = new Map<string, (event: "rename" | "change", filename: string | null) => void>();
 	const watchMock = mock.method(fs, "watch", (
 		target: fs.PathLike,
@@ -791,7 +688,7 @@ test("missing semantic inputs invalidate diagnostics as their parent directories
 				rulesLoaded: 1,
 				diagnosticCount: ruleID ? 1 : 0,
 				snapshotVersion: `snap-${id}`,
-				inputPaths,
+				watchHints,
 				diagnostics: ruleID
 					? [
 							{
@@ -830,7 +727,7 @@ test("missing semantic inputs invalidate diagnostics as their parent directories
 			spawnServe: () => child,
 			readServeSync: () => {
 				analyses++;
-				const ruleID = !existsSync(inputPaths[0])
+				const ruleID = !existsSync(watchHints[0])
 					? "arch.missing-map"
 					: !existsSync(source)
 						? "arch.missing-source"
@@ -857,23 +754,23 @@ test("missing semantic inputs invalidate diagnostics as their parent directories
 		changed(path.join(workspaceRoot, "unrelated.txt"));
 		await new Promise((resolve) => setTimeout(resolve, 250));
 		assert.equal(client.getDiagnostics("src/app.ts")[0]?.rule_id, "arch.missing-map");
-		assert.equal(analyses, 2);
+		assert.equal(analyses, 1);
 
-		writeFileSync(inputPaths[0], "map");
-		changed(inputPaths[0]);
-		await waitForAnalysis(3);
+		writeFileSync(watchHints[0], "map");
+		changed(watchHints[0]);
+		await waitForAnalysis(2);
 		assert.equal(client.getDiagnostics("src/app.ts")[0]?.rule_id, "arch.missing-source");
 
 		mkdirSync(sourceDirectory);
 		changed(sourceDirectory);
-		await waitForAnalysis(4);
+		await waitForAnalysis(3);
 		assert.equal(client.getDiagnostics("src/app.ts")[0]?.rule_id, "arch.missing-source");
 
 		mkdirSync(path.dirname(source));
 		writeFileSync(source, "export const value = 1;");
 		changed(path.dirname(source));
 		changed(source);
-		await waitForAnalysis(5);
+		await waitForAnalysis(4);
 		assert.deepEqual(client.getDiagnostics("src/app.ts"), []);
 	} finally {
 		client.dispose();
@@ -883,7 +780,7 @@ test("missing semantic inputs invalidate diagnostics as their parent directories
 	}
 });
 
-test("native input watches follow replaced directories and later edits", async () => {
+test("input watches follow replaced directories and later edits", async () => {
 	const workspaceRoot = mkdtempSync(path.join(os.tmpdir(), "lintai-native-input-watch-"));
 	const contracts = path.join(workspaceRoot, "contracts");
 	const dist = path.join(contracts, "dist");
@@ -892,6 +789,7 @@ test("native input watches follow replaced directories and later edits", async (
 	mkdirSync(dist, { recursive: true });
 	writeFileSync(input, declaration("initial"));
 	const child = createTestProcess();
+	const listeners = new Map<string, (filename?: string) => void>();
 	let analyses = 0;
 	const client = new LintAIClient(
 		resolveBridgeOptions(
@@ -910,7 +808,7 @@ test("native input watches follow replaced directories and later edits", async (
 						rulesLoaded: 1,
 						diagnosticCount: 1,
 						snapshotVersion: `snap-${analyses}`,
-						inputPaths: [input],
+						watchHints: [input],
 						diagnostics: [
 							{
 								rule_id: "arch.input",
@@ -929,11 +827,9 @@ test("native input watches follow replaced directories and later edits", async (
 				});
 			},
 			watchInputPath: (target, onChange, onError) => {
-				const watcher = fs.watch(target, { persistent: false, recursive: false }, (_event, filename) =>
-					onChange(filename ?? undefined),
-				);
-				watcher.on("error", onError);
-				return watcher;
+				void onError;
+				listeners.set(target, onChange);
+				return { close() { if (listeners.get(target) === onChange) listeners.delete(target); } };
 			},
 			now: () => 0,
 			log: () => undefined,
@@ -959,17 +855,19 @@ test("native input watches follow replaced directories and later edits", async (
 	};
 	try {
 		assert.equal(client.getDiagnostics("src/app.ts")[0]?.message, declaration("initial"));
-		assert.equal(analyses, 2);
+		assert.equal(analyses, 1);
 		assert.deepEqual(client.problems(), []);
 
 		renameSync(dist, path.join(contracts, "old-dist"));
 		mkdirSync(dist);
 		writeFileSync(input, declaration("replacement"));
+		listeners.get(contracts)?.("dist");
 		await waitForMessage(declaration("replacement"));
 		let previousAnalyses = analyses;
 		assert.ok(previousAnalyses > 1);
 
 		writeFileSync(input, declaration("edited replacement"));
+		listeners.get(dist)?.("index.d.ts");
 		await waitForMessage(declaration("edited replacement"));
 		assert.ok(analyses > previousAnalyses);
 
@@ -977,11 +875,13 @@ test("native input watches follow replaced directories and later edits", async (
 		renameSync(contracts, path.join(workspaceRoot, "old-contracts"));
 		mkdirSync(dist, { recursive: true });
 		writeFileSync(input, declaration("replacement ancestor"));
+		listeners.get(workspaceRoot)?.("contracts");
 		await waitForMessage(declaration("replacement ancestor"));
 		assert.ok(analyses > previousAnalyses);
 
 		previousAnalyses = analyses;
 		writeFileSync(input, declaration("edited ancestor replacement"));
+		listeners.get(dist)?.("index.d.ts");
 		await waitForMessage(declaration("edited ancestor replacement"));
 		assert.ok(analyses > previousAnalyses);
 		assert.deepEqual(client.problems(), []);
@@ -1017,7 +917,7 @@ test("oneshot source-links changes follow a replaced directory", (t) => {
 			},
 			spawnSync: () => {
 				const value = readFileSync(input, "utf8");
-				if (++analyses === 1) writeFileSync(input, "changed during analysis");
+				analyses++;
 				return {
 					stdout: JSON.stringify([
 						{
@@ -1042,8 +942,8 @@ test("oneshot source-links changes follow a replaced directory", (t) => {
 		}),
 	);
 	try {
-		assert.equal(client.getDiagnostics("src/app.ts")[0]?.message, "changed during analysis");
-		assert.equal(analyses, 2);
+		assert.equal(client.getDiagnostics("src/app.ts")[0]?.message, "initial");
+		assert.equal(analyses, 1);
 		renameSync(directory, path.join(workspaceRoot, "old-config"));
 		mkdirSync(directory);
 		writeFileSync(input, "replacement");
@@ -1097,8 +997,6 @@ test("an asynchronous parent input watcher failure falls back and reports the pr
 		assert.equal(client.getDiagnostics("src/example.ts")[0]?.rule_id, "arch.old");
 		assert.deepEqual(client.problems(), []);
 		assert.deepEqual(watched, [
-			[workspaceRoot, false],
-			[path.dirname(workspaceRoot), false],
 			[workspaceRoot, false],
 			[path.dirname(workspaceRoot), false],
 		]);
@@ -1283,7 +1181,7 @@ test("a CLI host reports workspace problems on the first file only", () => {
 	client.dispose();
 });
 
-test("a clean oneshot pass does not hide a later source-links analysis failure", async () => {
+test("a reported oneshot problem does not hide a later source-links analysis failure", async () => {
 	const workspaceRoot = mkdtempSync(path.join(os.tmpdir(), "lintai-oneshot-source-links-"));
 	let onInputChange: ((filename?: string) => void) | undefined;
 	let runs = 0;
@@ -1302,7 +1200,7 @@ test("a clean oneshot pass does not hide a later source-links analysis failure",
 				const index = args.indexOf("--source-links");
 				assert.deepEqual(args.slice(index, index + 2), ["--source-links", path.join(workspaceRoot, "source-links.json")]);
 				return ++runs === 1
-					? { stdout: "[]", stderr: "", error: undefined, status: 0 }
+					? { stdout: JSON.stringify([{ rule_id: "arch.broken", diagnostic_kind: "rule_execution_error", phase: "program_parse", message: "parse error" }]), stderr: "", error: undefined, status: 3 }
 					: { stdout: "", stderr: "invalid source links", error: undefined, status: 2 };
 			},
 			log: () => undefined,
@@ -1310,6 +1208,7 @@ test("a clean oneshot pass does not hide a later source-links analysis failure",
 	);
 	try {
 		assert.deepEqual(client.getDiagnostics("src/a.ts"), []);
+		assert.match(client.problems().join("\n"), /rule arch\.broken could not run.*parse error/);
 		assert.deepEqual(client.problems(), []);
 		assert.ok(onInputChange);
 		onInputChange("source-links.json");

@@ -73,7 +73,7 @@ func openRuleCatalog(ctx context.Context, options Options) (*ruleCatalog, error)
 	return openRuleCatalogWithCache(ctx, options, nil)
 }
 
-func openRuleCatalogWithCache(ctx context.Context, options Options, engine *Engine) (*ruleCatalog, error) {
+func openRuleCatalogWithCache(ctx context.Context, options Options, engine *Session) (*ruleCatalog, error) {
 	paths, err := discoverRulePaths(options.WorkspaceRoot, options.RuleGlobs)
 	if err != nil {
 		return nil, err
@@ -106,7 +106,7 @@ func openRuleCatalogWithCache(ctx context.Context, options Options, engine *Engi
 	return catalog, catalog.bundleError
 }
 
-func (catalog *ruleCatalog) buildWithEngineCache(ctx context.Context, options Options, engine *Engine) {
+func (catalog *ruleCatalog) buildWithEngineCache(ctx context.Context, options Options, engine *Session) {
 	toolContext, cacheable := bundleCacheContext(options)
 	engine.bundleMu.Lock()
 	defer engine.bundleMu.Unlock()
@@ -129,6 +129,7 @@ func (catalog *ruleCatalog) buildWithEngineCache(ctx context.Context, options Op
 		key := toolContext + "\x00" + rulePath
 		cached, exists := engine.bundleCache[key]
 		if !cacheable || !exists || cached.context != toolContext || !bundleInputsUnchanged(cached, options) {
+			delete(engine.bundleCache, key)
 			misses = append(misses, rulePath)
 			continue
 		}
