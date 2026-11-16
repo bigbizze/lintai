@@ -864,16 +864,6 @@ func keepRetainedSemantics(snap *Snapshot) {
 		item.TypeIncomplete = slices.DeleteFunc(item.TypeIncomplete, func(value DeclarationTypeUncertainty) bool {
 			return !slices.Contains(item.TypeSubjects, value.Space)
 		})
-		if len(item.TypeSubjects) == 0 {
-			item.TypeObservations = nil
-			item.TypesComplete = false
-		} else {
-			for i := range item.TypeObservations {
-				item.TypeObservations[i] = slices.DeleteFunc(item.TypeObservations[i], func(value DeclarationType) bool {
-					return !slices.Contains(item.TypeSubjects, value.Space)
-				})
-			}
-		}
 	}
 	snap.ExportSites = slices.DeleteFunc(snap.ExportSites, func(item ExportSiteFact) bool { return !sites[item.ID] })
 }

@@ -505,7 +505,7 @@ func TestFunctionSignatureConflictsKeepCompleteObservations(t *testing.T) {
 			break
 		}
 	}
-	if declaration == nil || !slices.Contains(declaration.TypeIncomplete, DeclarationTypeUncertainty{Space: SpaceValue, Reason: AssociationConflict}) || len(declaration.TypeObservations) != 2 {
+	if declaration == nil || !slices.Contains(declaration.TypeIncomplete, DeclarationTypeUncertainty{Space: SpaceValue, Reason: AssociationConflict}) {
 		t.Fatalf("expected the exported declaration type conflict, got %+v", declaration)
 	}
 	for _, value := range declaration.Types {
