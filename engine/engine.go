@@ -72,6 +72,8 @@ type Options struct {
 	PassOnUnprunedSuppressions bool
 	// beforeEvaluation is an in-package synchronization point for tests.
 	beforeEvaluation func()
+	// onDerivedFact is an in-package synchronization point inside evaluation.
+	onDerivedFact func()
 	// afterDispatch is an in-package lifecycle synchronization point for tests.
 	afterDispatch func()
 }
@@ -406,7 +408,7 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options) (Res
 		lock = &loaded
 		run.lock = lock
 	}
-	ruleCatalog, catalogErr := openRuleCatalogWithCache(ctx, options, e)
+	ruleCatalog, catalogErr := openRuleCatalogWithCache(ctx, options, e, lock)
 	if catalogErr != nil && ruleCatalog == nil {
 		return Result{}, run, evidence, catalogErr
 	}
@@ -430,6 +432,13 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options) (Res
 		run.files = make(map[string]struct{})
 		run.snapshotVersion = assembled.snapshotID
 		result := Result{Diagnostics: []diagnostics.Diagnostic{}, SnapshotVersion: assembled.snapshotID}
+		if lock != nil {
+			for _, failure := range checkRulesLock(*lock, options.WorkspaceRoot, ruleCatalog.paths, ruleCatalog.artifacts) {
+				result.Diagnostics = append(result.Diagnostics, errorDiagnostic(failure.key, "integrity", 0, assembled.snapshotID, nil, failure.message))
+			}
+			run.complete = len(result.Diagnostics) == 0
+			sortDiagnostics(result.Diagnostics)
+		}
 		if sandboxWarning != "" {
 			result.Warnings = append(result.Warnings, sandboxWarning)
 		}
@@ -890,7 +899,7 @@ func runPreparedRule(job *preparedRuleJob, assembled composedFacts, options Opti
 	var createdFacts int64
 	violations, perr := job.plan.evaluate(assembled.base, assembled.factCounts, assembled.anchors, assembled.reportable, evalOptions{
 		factLimit: options.FactLimit, explain: options.Explain, createdFacts: &createdFacts,
-		beforeEvaluation: options.beforeEvaluation,
+		beforeEvaluation: options.beforeEvaluation, onDerivedFact: options.onDerivedFact,
 	})
 	outcome.createdFacts = createdFacts
 	if perr != nil {
@@ -1091,8 +1100,11 @@ func errorDiagnostic(ruleID, phase string, ruleVersion int, snapshotVersion stri
 	}
 }
 
-func discoverRulePaths(root string, patterns []string) ([]string, error) {
+func discoverRulePaths(root string, patterns []string, allowEmptyForLock bool) ([]string, error) {
 	discovered := make(map[string]struct{})
+	// Defer an unmatched-glob error only to compare a wholly empty inventory
+	// with the existing lock; mixed matching and unmatched globs still fail.
+	var unmatched error
 	for _, pattern := range patterns {
 		pattern = strings.TrimSpace(pattern)
 		if pattern == "" {
@@ -1106,14 +1118,26 @@ func discoverRulePaths(root string, patterns []string) ([]string, error) {
 		}
 		matches, err := doublestar.Glob(os.DirFS(prefix), glob)
 		if err != nil {
+			if unmatched != nil {
+				return nil, unmatched
+			}
 			return nil, err
 		}
 		if len(matches) == 0 {
-			return nil, fmt.Errorf("rule glob %q matched no files (relative globs resolve from the workspace root %s)", pattern, root)
+			if unmatched == nil {
+				unmatched = fmt.Errorf("rule glob %q matched no files (relative globs resolve from the workspace root %s)", pattern, root)
+			}
+			if !allowEmptyForLock {
+				return nil, unmatched
+			}
+			continue
 		}
 		for _, match := range matches {
 			discovered[filepath.Join(prefix, filepath.FromSlash(match))] = struct{}{}
 		}
+	}
+	if unmatched != nil && len(discovered) > 0 {
+		return nil, unmatched
 	}
 	results := make([]string, 0, len(discovered))
 	for path := range discovered {

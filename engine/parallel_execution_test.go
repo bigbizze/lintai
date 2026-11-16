@@ -40,7 +40,7 @@ func TestParallelRuleExecutionContract(t *testing.T) {
 	parallelOptions.RuleWorkers = 2
 	parallelOptions.FactLimit = 8
 	parallelOptions.Explain = true
-	parallelOptions.beforeEvaluation = func() {
+	parallelOptions.onDerivedFact = func() {
 		current := active.Add(1)
 		for previous := peak.Load(); current > previous; previous = peak.Load() {
 			if peak.CompareAndSwap(previous, current) {
@@ -50,7 +50,12 @@ func TestParallelRuleExecutionContract(t *testing.T) {
 		if entered.Add(1) >= 2 {
 			releaseOnce.Do(func() { close(releaseOverlap) })
 		}
-		<-releaseOverlap
+		select {
+		case <-releaseOverlap:
+		case <-time.After(10 * time.Second):
+			t.Error("timed out waiting for overlapping derived facts")
+			releaseOnce.Do(func() { close(releaseOverlap) })
+		}
 		active.Add(-1)
 	}
 	parallelResult, parallelRun, parallelEvidence, err := engine.analyzeWithEvidence(context.Background(), parallelOptions)
@@ -75,7 +80,7 @@ func TestParallelRuleExecutionContract(t *testing.T) {
 	sequentialOptions.RuleWorkers = 1
 	sequentialOptions.FactLimit = 8
 	sequentialOptions.Explain = true
-	sequentialOptions.beforeEvaluation = func() {
+	sequentialOptions.onDerivedFact = func() {
 		current := sequentialActive.Add(1)
 		for previous := sequentialPeak.Load(); current > previous; previous = sequentialPeak.Load() {
 			if sequentialPeak.CompareAndSwap(previous, current) {
@@ -137,7 +142,7 @@ func TestParallelRuleExecutionCancellationJoinsBeforeClose(t *testing.T) {
 	options.RuleWorkers = 2
 	options.SuppressionsLocation = filepath.Join(t.TempDir(), "suppression-state.json")
 	options.SuppressAll = true
-	options.beforeEvaluation = func() {
+	options.onDerivedFact = func() {
 		current := active.Add(1)
 		for previous := peak.Load(); current > previous; previous = peak.Load() {
 			if peak.CompareAndSwap(previous, current) {

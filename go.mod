@@ -4,6 +4,7 @@ go 1.27.3
 
 require (
 	codeberg.org/TauCeti/mangle-go v0.7.0
+	github.com/BurntSushi/toml v1.6.0
 	github.com/Microsoft/go-winio v0.6.2
 	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/dop251/goja v0.0.0-20260311135729-065cd970411c

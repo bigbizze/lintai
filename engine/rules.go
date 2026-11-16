@@ -70,11 +70,11 @@ type cachedRuleBundle struct {
 }
 
 func openRuleCatalog(ctx context.Context, options Options) (*ruleCatalog, error) {
-	return openRuleCatalogWithCache(ctx, options, nil)
+	return openRuleCatalogWithCache(ctx, options, nil, nil)
 }
 
-func openRuleCatalogWithCache(ctx context.Context, options Options, engine *Session) (*ruleCatalog, error) {
-	paths, err := discoverRulePaths(options.WorkspaceRoot, options.RuleGlobs)
+func openRuleCatalogWithCache(ctx context.Context, options Options, engine *Session, lock *RulesLock) (*ruleCatalog, error) {
+	paths, err := discoverRulePaths(options.WorkspaceRoot, options.RuleGlobs, lock != nil && len(lock.Rules) > 0)
 	if err != nil {
 		return nil, err
 	}

@@ -1,14 +1,13 @@
 package workspace
 
 import (
-	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
-	"strings"
+
+	"github.com/BurntSushi/toml"
 )
 
 // WorkspaceConfig is the supported lintai.toml input. Producer-specific
@@ -24,9 +23,9 @@ type WorkspaceConfig struct {
 }
 
 type ProducerConfig struct {
-	Implementation string
-	Files          string
-	SourceLinks    string
+	Implementation string `toml:"implementation"`
+	Files          string `toml:"files"`
+	SourceLinks    string `toml:"source_links"`
 }
 
 // LoadWorkspaceConfig reads path. A missing default file is represented by an
@@ -68,159 +67,63 @@ func ResolveConfigPath(workspaceRoot, invocationDir, explicit string) (string, b
 }
 
 func decodeWorkspaceTOML(input string, result *WorkspaceConfig) error {
-	section := ""
-	seenTables := make(map[string]bool)
-	seenKeys := make(map[string]bool)
-	producersTable := false
-	scanner := bufio.NewScanner(strings.NewReader(input))
-	lineNumber := 0
-	for scanner.Scan() {
-		lineNumber++
-		line := stripTOMLComment(scanner.Text())
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		if strings.HasPrefix(line, "[") {
-			if !strings.HasSuffix(line, "]") || strings.HasPrefix(line, "[[") {
-				return fmt.Errorf("line %d: unsupported or malformed table header", lineNumber)
-			}
-			name := strings.TrimSpace(line[1 : len(line)-1])
-			parts := strings.Split(name, ".")
-			switch {
-			case len(parts) == 1 && parts[0] == "workspace":
-				section = "workspace"
-			case len(parts) == 1 && parts[0] == "producers":
-				section = "producers"
-				producersTable = true
-			case len(parts) == 2 && parts[0] == "producers":
-				namespace := parts[1]
-				if !validNamespace(namespace) {
-					return fmt.Errorf("line %d: invalid producer namespace %q", lineNumber, namespace)
-				}
-				section = "producers." + namespace
-				producersTable = true
-				if _, ok := result.Producers[namespace]; !ok {
-					result.Producers[namespace] = ProducerConfig{}
-				}
-			default:
-				return fmt.Errorf("line %d: unsupported table %q", lineNumber, name)
-			}
-			if seenTables[section] {
-				return fmt.Errorf("line %d: duplicate table %q", lineNumber, name)
-			}
-			seenTables[section] = true
-			continue
-		}
-		key, value, ok := strings.Cut(line, "=")
-		if !ok || section == "" {
-			return fmt.Errorf("line %d: expected a key/value inside a supported table", lineNumber)
-		}
-		key = strings.TrimSpace(key)
-		if !validKey(key) {
-			return fmt.Errorf("line %d: invalid key %q", lineNumber, key)
-		}
-		fullKey := section + "." + key
-		if seenKeys[fullKey] {
-			return fmt.Errorf("line %d: duplicate key %q", lineNumber, fullKey)
-		}
-		seenKeys[fullKey] = true
-		value = strings.TrimSpace(value)
-		if strings.HasPrefix(value, "[") && !stringArrayComplete(value) {
-			for scanner.Scan() {
-				lineNumber++
-				value += "\n" + strings.TrimSpace(stripTOMLComment(scanner.Text()))
-				if stringArrayComplete(value) {
-					break
-				}
-			}
-			if !stringArrayComplete(value) {
-				return fmt.Errorf("line %d: unterminated string array", lineNumber)
-			}
-		}
-		switch section {
-		case "workspace":
-			var destination *[]string
-			switch key {
-			case "exclude":
-				destination = &result.Exclude
-			case "include":
-				destination = &result.Include
-			case "sources":
-				destination = &result.Sources
-			default:
-				return fmt.Errorf("line %d: unknown workspace key %q", lineNumber, key)
-			}
-			items, err := parseStringArray(value)
-			if err != nil {
-				return fmt.Errorf("line %d: workspace.%s: %w", lineNumber, key, err)
-			}
-			*destination = items
-		case "producers":
-			return fmt.Errorf("line %d: producer settings must be inside [producers.<namespace>]", lineNumber)
-		default:
-			if !strings.HasPrefix(section, "producers.") {
-				return fmt.Errorf("line %d: unsupported table %q", lineNumber, section)
-			}
-			namespace := strings.TrimPrefix(section, "producers.")
-			producer := result.Producers[namespace]
-			text, err := parseString(value)
-			if err != nil {
-				return fmt.Errorf("line %d: producers.%s.%s: %w", lineNumber, namespace, key, err)
-			}
-			switch key {
-			case "implementation":
-				producer.Implementation = text
-			case "files":
-				producer.Files = text
-			case "source_links":
-				producer.SourceLinks = text
-			default:
-				return fmt.Errorf("line %d: unknown producer key %q", lineNumber, key)
-			}
-			result.Producers[namespace] = producer
-		}
+	var document struct {
+		Workspace struct {
+			Exclude []string `toml:"exclude"`
+			Include []string `toml:"include"`
+			Sources []string `toml:"sources"`
+		} `toml:"workspace"`
+		Producers map[string]ProducerConfig `toml:"producers"`
 	}
-	if err := scanner.Err(); err != nil {
+	metadata, err := toml.Decode(input, &document)
+	if err != nil {
 		return err
 	}
-	if producersTable && len(result.Producers) == 0 {
+	// Check exact keys as well as decoded types: the TOML decoder otherwise
+	// accepts case-insensitive struct field matches and ignores unknown keys.
+	for _, key := range metadata.Keys() {
+		switch {
+		case len(key) == 1 && (key[0] == "workspace" || key[0] == "producers"):
+		case len(key) == 2 && key[0] == "workspace" && metadata.Type(key...) != "Hash":
+			switch key[1] {
+			case "exclude", "include", "sources":
+			default:
+				return fmt.Errorf("unknown workspace key %q", key[1])
+			}
+		case len(key) == 2 && key[0] == "producers" && metadata.Type(key...) == "Hash":
+			if !validNamespace(key[1]) {
+				return fmt.Errorf("invalid producer namespace %q", key[1])
+			}
+		case len(key) == 2 && key[0] == "producers":
+			return fmt.Errorf("producer settings must be inside [producers.<namespace>]")
+		case len(key) == 3 && key[0] == "producers" && metadata.Type(key...) != "Hash":
+			switch key[2] {
+			case "implementation", "files", "source_links":
+			default:
+				return fmt.Errorf("unknown producer key %q", key[2])
+			}
+		default:
+			return fmt.Errorf("unsupported table %q", key.String())
+		}
+	}
+	if metadata.IsDefined("producers") && len(document.Producers) == 0 {
 		return fmt.Errorf("[producers] must contain at least one producer")
 	}
-	for namespace, producer := range result.Producers {
+	for namespace, producer := range document.Producers {
+		if !validNamespace(namespace) {
+			return fmt.Errorf("invalid producer namespace %q", namespace)
+		}
 		if namespace != "ts" && producer.Implementation == "" {
 			return fmt.Errorf("producer %q must state implementation", namespace)
 		}
 	}
-	return nil
-}
-
-func stripTOMLComment(line string) string {
-	quote, escaped := rune(0), false
-	for index, r := range line {
-		if escaped {
-			escaped = false
-			continue
-		}
-		if quote == '"' && r == '\\' {
-			escaped = true
-			continue
-		}
-		if quote != 0 {
-			if r == quote {
-				quote = 0
-			}
-			continue
-		}
-		if r == '"' || r == '\'' {
-			quote = r
-			continue
-		}
-		if r == '#' {
-			return line[:index]
-		}
+	result.Exclude = document.Workspace.Exclude
+	result.Include = document.Workspace.Include
+	result.Sources = document.Workspace.Sources
+	if document.Producers != nil {
+		result.Producers = document.Producers
 	}
-	return line
+	return nil
 }
 
 func validNamespace(value string) bool {
@@ -233,118 +136,4 @@ func validNamespace(value string) bool {
 		}
 	}
 	return true
-}
-
-func validKey(value string) bool {
-	if value == "" {
-		return false
-	}
-	for _, r := range value {
-		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_') {
-			return false
-		}
-	}
-	return true
-}
-
-func parseString(value string) (string, error) {
-	if len(value) < 2 || value[len(value)-1] != value[0] || value[0] != '"' && value[0] != '\'' {
-		return "", fmt.Errorf("expected a quoted string")
-	}
-	if value[0] == '\'' {
-		return value[1 : len(value)-1], nil
-	}
-	decoded, err := strconv.Unquote(value)
-	if err != nil {
-		return "", fmt.Errorf("invalid string: %w", err)
-	}
-	return decoded, nil
-}
-
-func parseStringArray(value string) ([]string, error) {
-	if len(value) < 2 || value[0] != '[' || value[len(value)-1] != ']' {
-		return nil, fmt.Errorf("expected an array of strings")
-	}
-	body := strings.TrimSpace(value[1 : len(value)-1])
-	if body == "" {
-		return []string{}, nil
-	}
-	parts := make([]string, 0)
-	start, quote, escaped := 0, rune(0), false
-	for index, r := range body {
-		if escaped {
-			escaped = false
-			continue
-		}
-		if quote == '"' && r == '\\' {
-			escaped = true
-			continue
-		}
-		if quote != 0 {
-			if r == quote {
-				quote = 0
-			}
-			continue
-		}
-		if r == '"' || r == '\'' {
-			quote = r
-			continue
-		}
-		if r == ',' {
-			parts = append(parts, strings.TrimSpace(body[start:index]))
-			start = index + 1
-		}
-	}
-	parts = append(parts, strings.TrimSpace(body[start:]))
-	items := make([]string, 0, len(parts))
-	for index, part := range parts {
-		if part == "" {
-			if index == len(parts)-1 && strings.HasSuffix(body, ",") {
-				continue
-			}
-			return nil, fmt.Errorf("array contains an empty element")
-		}
-		item, err := parseString(part)
-		if err != nil {
-			return nil, err
-		}
-		items = append(items, item)
-	}
-	return items, nil
-}
-
-func stringArrayComplete(value string) bool {
-	depth := 0
-	quote := rune(0)
-	escaped := false
-	for _, r := range value {
-		if escaped {
-			escaped = false
-			continue
-		}
-		if quote == '"' && r == '\\' {
-			escaped = true
-			continue
-		}
-		if quote != 0 {
-			if r == quote {
-				quote = 0
-			}
-			continue
-		}
-		if r == '"' || r == '\'' {
-			quote = r
-			continue
-		}
-		switch r {
-		case '[':
-			depth++
-		case ']':
-			depth--
-			if depth < 0 {
-				return true
-			}
-		}
-	}
-	return depth == 0 && quote == 0 && strings.HasSuffix(strings.TrimSpace(value), "]")
 }
