@@ -142,6 +142,8 @@ type DeclarationType struct {
 	Type  string
 }
 
+type declarationTypeSubject struct{ Declaration, Space string }
+
 type ExportFact struct {
 	ID                 string
 	File               string
@@ -153,6 +155,10 @@ type ExportFact struct {
 	Incomplete         []string
 	TargetObservations [][]string
 	Location           SourceLocation
+	// A type-only export of a value uses type-space export identity but
+	// requests the target's value-space type. Preserve that pairing until the
+	// retained exports are known.
+	typeSubjects []declarationTypeSubject
 }
 
 type ExportReexportFact struct {
@@ -709,6 +715,9 @@ func buildSnapshotAttempt(ctx context.Context, req BuildSnapshotRequest) (*Snaps
 		keepRetainedSemantics(merged)
 		keepReachableTypes(merged)
 	}
+	for i := range merged.Exports {
+		merged.Exports[i].typeSubjects = nil
+	}
 	merged.callDeclarationObservations = nil
 	merged.ConfigFiles = configs.files()
 	merged.Inputs = append(merged.Inputs, configs.inputs()...)
@@ -798,24 +807,22 @@ func keepRetainedSemantics(snap *Snapshot) {
 		modules[module.Path] = true
 	}
 	snap.Exports = slices.DeleteFunc(snap.Exports, func(item ExportFact) bool { return !modules[item.File] })
-	exportTargets := make(map[string]bool)
+	exportSubjects := make(map[string][]string)
 	keep := make(map[string]bool)
-	provenanceEndpoints := make(map[string]bool)
 	for _, call := range snap.CallDeclarations {
 		keep[call.Declaration] = true
-		provenanceEndpoints[call.Declaration] = true
 	}
 	for _, member := range snap.DeclarationMembers {
 		keep[member.Declaration] = true
 		keep[member.OwnerDeclaration] = true
-		provenanceEndpoints[member.Declaration] = true
-		provenanceEndpoints[member.OwnerDeclaration] = true
 	}
 	sites := make(map[string]bool)
 	for _, item := range snap.Exports {
 		for _, id := range item.Targets {
-			exportTargets[id] = true
 			keep[id] = true
+		}
+		for _, subject := range item.typeSubjects {
+			exportSubjects[subject.Declaration] = append(exportSubjects[subject.Declaration], subject.Space)
 		}
 		for _, id := range item.Via {
 			sites[id] = true
@@ -850,12 +857,13 @@ func keepRetainedSemantics(snap *Snapshot) {
 	snap.Declarations = slices.DeleteFunc(snap.Declarations, func(item DeclarationFact) bool { return !keep[item.ID] })
 	for index := range snap.Declarations {
 		item := &snap.Declarations[index]
-		// Metadata-only provenance never extracts types. Any types already on
-		// these endpoints were collected independently and must survive.
-		if !exportTargets[item.ID] && !provenanceEndpoints[item.ID] {
-			item.Types = nil
-			item.TypeObservations = nil
-		}
+		item.TypeSubjects = sortedUnique(exportSubjects[item.ID])
+		item.Types = slices.DeleteFunc(item.Types, func(value DeclarationType) bool {
+			return !slices.Contains(item.TypeSubjects, value.Space)
+		})
+		item.TypeIncomplete = slices.DeleteFunc(item.TypeIncomplete, func(value DeclarationTypeUncertainty) bool {
+			return !slices.Contains(item.TypeSubjects, value.Space)
+		})
 	}
 	snap.ExportSites = slices.DeleteFunc(snap.ExportSites, func(item ExportSiteFact) bool { return !sites[item.ID] })
 }

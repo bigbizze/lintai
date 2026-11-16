@@ -915,8 +915,8 @@ func (e *extractor) sortedTypeFacts() []TypeFact {
 	return result
 }
 
-// keepReachableTypes removes the type facts that no function parameter or
-// return type reaches, after functions were removed from the snapshot.
+// keepReachableTypes removes type facts unreachable from retained function
+// signatures and declaration types.
 func keepReachableTypes(snap *Snapshot) {
 	index := make(map[string]*TypeFact, len(snap.Types))
 	for i := range snap.Types {
