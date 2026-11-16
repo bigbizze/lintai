@@ -26,4 +26,7 @@ export default rule("arch.layers")
 	`)
 	.report("violation")
 	.suppression("violation", { by: ["ToLayer"] })
-	.message((row) => `Layer ${row.FromLayer} must not import layer ${row.ToLayer} (${row.From} -> ${row.To})`);
+	.message(
+		(row) =>
+			`Layer ${row.FromLayer} must not import layer ${row.ToLayer} (${row.From} -> ${row.To})`,
+	);

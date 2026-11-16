@@ -71,8 +71,22 @@ test("oneshot forwards suppression options and handles policy exit codes", () =>
 });
 
 test("serve forwards suppression initialization parameters", () => {
-	assert.throws(() => resolveBridgeOptions({ ruleWorkers: -1 }, "/workspace", { defaultMode: "serve", reportProblemsOnce: false }), /ruleWorkers/);
-	assert.throws(() => resolveBridgeOptions({ ruleWorkers: 1.5 }, "/workspace", { defaultMode: "serve", reportProblemsOnce: false }), /ruleWorkers/);
+	assert.throws(
+		() =>
+			resolveBridgeOptions({ ruleWorkers: -1 }, "/workspace", {
+				defaultMode: "serve",
+				reportProblemsOnce: false,
+			}),
+		/ruleWorkers/,
+	);
+	assert.throws(
+		() =>
+			resolveBridgeOptions({ ruleWorkers: 1.5 }, "/workspace", {
+				defaultMode: "serve",
+				reportProblemsOnce: false,
+			}),
+		/ruleWorkers/,
+	);
 	const child = createTestProcess();
 	const options = resolveBridgeOptions(
 		{
