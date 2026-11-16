@@ -26,7 +26,7 @@ type ListedRule struct {
 
 // RuleLoadError is a rule file that did not bundle or load, or that has an
 // id that another rule file has. ID is set when the id of the rule is
-// known, so a linter plugin can still define a rule with that name.
+// known and valid, so a linter plugin can still define a rule with that name.
 type RuleLoadError struct {
 	Path    string `json:"path"`
 	ID      string `json:"id,omitempty"`
@@ -432,7 +432,7 @@ func ListRules(ctx context.Context, options Options) (RuleList, error) {
 		key := lockKey(options.WorkspaceRoot, rulePath)
 		if entry.loadError != nil {
 			message := entry.loadError.Error()
-			if entry.metadata.ID != "" {
+			if entry.metadata.ID != "" && runtime.ValidateRuleID(entry.metadata.ID) == nil {
 				found = append(found, foundRule{ListedRule: ListedRule{ID: entry.metadata.ID, Path: key}, shapeErr: entry.loadError})
 			} else {
 				list.Errors = append(list.Errors, RuleLoadError{Path: key, Message: message})

@@ -20,7 +20,7 @@ export type SuspensionKind = "await" | "for_await" | "await_using";
 /** Reasons in `site_attribution_unsupported`. Pass these strings to `dl.name`. */
 export type SiteAttributionUnsupportedReason = "instance_construction" | "unsupported_context";
 
-export type RowValue = FactValue;
+export type RowValue = string | number;
 
 export type Row = Record<string, RowValue>;
 

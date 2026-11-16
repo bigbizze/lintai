@@ -308,7 +308,7 @@ func (r *LoadedRule) Message(row map[string]any, assertionID string) (string, er
 	messageRow := make(map[string]any, len(row))
 	for key, value := range row {
 		if name, ok := value.(Name); ok {
-			messageRow[key] = map[string]any{"__lintaiKind": "name", "value": name.Value}
+			messageRow[key] = "/" + name.Value
 		} else {
 			messageRow[key] = value
 		}

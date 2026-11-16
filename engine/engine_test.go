@@ -273,7 +273,7 @@ const tricky = `+string(tricky)+`;
 export default rule("t.round-trip").version(1)
 	.program(dl`+"`"+`Decl v(M, S, N, K). v(M, ${tricky}, ${-12}, ${dl.name("a/b_c")}) :- ts.module(M), ts.location(M, F, _, _, _, _), F = "src/pure/math.ts".`+"`"+`)
 	.report("v")
-		.message((row) => JSON.stringify([row.S === tricky, row.N, row.K.__lintaiKind, row.K.value]));
+		.message((row) => JSON.stringify([row.S === tricky, row.N, row.K]));
 `)
 	items, err := New(typescript.New(typescript.Options{Files: typescript.FileScopeWalk})).Run(context.Background(), Options{
 		RepoRoot:      repoRoot,
@@ -286,7 +286,7 @@ export default rule("t.round-trip").version(1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 1 || items[0].Message != `[true,-12,"name","a/b_c"]` {
+	if len(items) != 1 || items[0].Message != `[true,-12,"/a/b_c"]` {
 		t.Fatalf("expected the values to round-trip, got %+v", items)
 	}
 }
