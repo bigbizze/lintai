@@ -134,9 +134,11 @@ func TestOpaqueProducerScopeContributesToResultIdentity(t *testing.T) {
 	// V16: identical opaque revision and file coverage with a different scope
 	// token produce different producer-result-v2 identities.
 	repoRoot, _ := filepath.Abs("..")
+	workspace := t.TempDir()
+	writeCatalogRule(t, workspace, `Decl violation(Entity). violation(Entity) :- catalog.item(Entity).`, "violation")
 	options := engine.Options{
-		RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: t.TempDir(),
-		RuleGlobs: []string{}, Env: map[string]any{},
+		RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: workspace,
+		RuleGlobs: []string{"lintai-rules/**/*.ts"}, Env: map[string]any{},
 	}
 	left := fakeProducer("catalog", "item")
 	left.scope = "partition-a"
