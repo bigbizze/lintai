@@ -55,13 +55,20 @@ assert.equal(
 	cliDiagnostics[0].message,
 	"legacySave must return Promise<ActionResult<T>>, but returns Promise<number>",
 );
+// Spec §4.4: function anchors cover the declared source range, including modifiers.
+function sourceRange(location) {
+	return [location.startLine, location.startColumn, location.endLine, location.endColumn];
+}
+assert.deepEqual(sourceRange(cliDiagnostics[0].source_location), [7, 1, 9, 2]);
+assert.deepEqual(sourceRange(cliDiagnostics[2].source_location), [1, 1, 3, 2]);
 
 const facts = spawnSync("pnpm", ["exec", "lintai", "facts", "--workspace-root", ".", "--relation", "ts.module"], {
 	cwd: repoDir,
 	encoding: "utf8",
 });
 assert.equal(facts.status, 0, `expected lintai facts to succeed through the launcher, got ${facts.status}\n${facts.stderr}`);
-assert.ok(facts.stdout.includes(`ts.module("ts:src/example.ts").`), facts.stdout);
+// Spec §3.4: TypeScript module IDs contain the module kind and canonical file identity.
+assert.ok(facts.stdout.includes(`ts.module("ts:module:src/example.ts").`), facts.stdout);
 
 const schema = spawnSync("pnpm", ["exec", "lintai", "schema"], { cwd: repoDir, encoding: "utf8" });
 assert.equal(schema.status, 0, `expected lintai schema to succeed, got ${schema.status}\n${schema.stderr}`);
@@ -76,11 +83,11 @@ assert.equal(walked.status, 0, `expected lintai facts --files walk to succeed, g
 assert.equal(
 	walked.stdout.trim(),
 	[
-		`ts.module("ts:src/actions/save.ts").`,
-		`ts.module("ts:src/core/result.ts").`,
-		`ts.module("ts:src/disabled.ts").`,
-		`ts.module("ts:src/example.ts").`,
-		`ts.module("ts:src/legacy.ts").`,
+		`ts.module("ts:module:src/actions/save.ts").`,
+		`ts.module("ts:module:src/core/result.ts").`,
+		`ts.module("ts:module:src/disabled.ts").`,
+		`ts.module("ts:module:src/example.ts").`,
+		`ts.module("ts:module:src/legacy.ts").`,
 	].join("\n"),
 );
 
@@ -163,6 +170,7 @@ function eslintMessages(args) {
 			ruleId: message.ruleId,
 			severity: message.severity,
 			message: String(message.message ?? ""),
+				range: [message.line, message.column, message.endLine, message.endColumn],
 		})),
 	);
 	return { status: result.status, stderr: result.stderr, messages };
@@ -177,6 +185,8 @@ const expectedESLint = [
 const eslint = eslintMessages([]);
 assert.equal(eslint.status, 1, `expected eslint to report the lintai error, got ${eslint.status}\n${eslint.stderr}`);
 assert.deepEqual(summary(eslint.messages), expectedESLint, JSON.stringify(eslint.messages, null, 2));
+assert.deepEqual(eslint.messages.find((message) => message.ruleId === "lintai/arch.no-async").range, [1, 1, 3, 2]);
+assert.deepEqual(eslint.messages.find((message) => message.ruleId === "lintai/arch.actions-return-action-result").range, [7, 1, 9, 2]);
 assert.ok(
 	eslint.messages.some((message) => message.message.includes("[arch.actions-return-action-result/violation] legacySave")),
 	JSON.stringify(eslint.messages),

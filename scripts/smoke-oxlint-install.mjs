@@ -71,15 +71,16 @@ assert.deepEqual(await lintaiRuns(), ["rules", "--json"]);
 const planted = cliDiagnostics.find((diagnostic) => diagnostic.code === "lintai(arch.no-async)");
 assert.match(planted.message, /\[arch\.no-async\/violation\] example in src\/example\.ts must not be async/);
 assert.equal(planted.filename, "src/example.ts");
-// lintai reports line 1, column 23 (1-based); oxlint prints the same values.
-assert.deepEqual([planted.labels[0].span.line, planted.labels[0].span.column], [1, 23]);
+// Spec §4.4: the anchor spans the declared function, from its modifiers through
+// the closing brace. Oxlint reports a 1-based start and a byte length.
+assert.deepEqual(planted.labels[0].span, { offset: 0, length: 46, line: 1, column: 1 });
 // The structural type rule reports the action that does not return
 // Promise<ActionResult<T>> and accepts the one that does.
 const typeRule = cliDiagnostics.filter((diagnostic) => diagnostic.message.includes("[arch.actions-return-action-result/violation]"));
 assert.equal(typeRule.length, 1, `expected one type rule diagnostic\n${cli.stdout}`);
 assert.match(typeRule[0].message, /legacySave must return Promise<ActionResult<T>>, but returns Promise<number>/);
 assert.equal(typeRule[0].filename, "src/actions/save.ts");
-assert.deepEqual([typeRule[0].labels[0].span.line, typeRule[0].labels[0].span.column], [7, 23]);
+assert.deepEqual(typeRule[0].labels[0].span, { offset: 150, length: 66, line: 7, column: 1 });
 
 // A misspelled lintai rule name fails the lint run.
 await fs.writeFile(
