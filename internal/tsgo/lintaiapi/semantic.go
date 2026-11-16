@@ -668,11 +668,22 @@ func (e *extractor) addDeclaration(node *ast.Node, symbol *ast.Symbol, publicNam
 	if fact == nil {
 		return id, false
 	}
-	if file := ast.GetSourceFileOfNode(node); file != nil && file.IsDeclarationFile {
+	if file := ast.GetSourceFileOfNode(node); e.operations.sourceRecovery && file != nil && file.IsDeclarationFile {
 		e.recoverDeclarationMap(node, false, fact.Name)
 	}
 	if !supported {
 		return id, false
+	}
+	function := e.functionNodes[node]
+	if function == nil {
+		function = e.functionKeys[nodeKey(node)]
+	}
+	if function != nil {
+		fact.FunctionObservations = append(fact.FunctionObservations, function.SemanticKey)
+		fact.Function = function.SemanticKey
+	}
+	if !e.operations.declarationTypes {
+		return id, true
 	}
 	fact.TypesComplete = true
 	if symbol == nil {
@@ -681,12 +692,12 @@ func (e *extractor) addDeclaration(node *ast.Node, symbol *ast.Symbol, publicNam
 				typeValue := e.checker.GetTypeAtLocation(expression)
 				if typeValue != nil {
 					e.addDeclarationType(fact, SpaceValue, e.emitFunctionType(typeValue, expression))
-					return id, fact.TypesComplete
+					return id, true
 				}
 			}
 			fact.TypesComplete = false
 			fact.Incomplete = append(fact.Incomplete, AssociationUnresolved)
-			return id, false
+			return id, true
 		}
 		return id, true
 	}
@@ -700,16 +711,10 @@ func (e *extractor) addDeclaration(node *ast.Node, symbol *ast.Symbol, publicNam
 	if typeValue == nil {
 		fact.TypesComplete = false
 		fact.Incomplete = append(fact.Incomplete, AssociationUnresolved)
-		return id, false
+		return id, true
 	}
 	e.addDeclarationType(fact, space, e.emitFunctionType(typeValue, node))
-	function := e.functionNodes[node]
-	if function == nil {
-		function = e.functionKeys[nodeKey(node)]
-	}
 	if function != nil {
-		fact.FunctionObservations = append(fact.FunctionObservations, function.SemanticKey)
-		fact.Function = function.SemanticKey
 		if slices.ContainsFunc(function.SignatureObservations, func(item FunctionSignatureObservation) bool { return !item.Complete }) {
 			fact.Incomplete = append(fact.Incomplete, AssociationUnresolved)
 		}

@@ -62,7 +62,7 @@ func (b *Backend) Describe() (facts.ProducerDescription, error) {
 		"files":            string(b.settings.Files),
 		"sourceLinks":      b.settings.SourceLinks,
 	}
-	return facts.DescribeSchema(b.namespace, "lintai.typescript", "typescript-producer-r2", "ts-vocabulary/1", configuration, Schema())
+	return facts.DescribeSchema(b.namespace, "lintai.typescript", "typescript-producer-type-observations-1", "ts-vocabulary/1", configuration, Schema())
 }
 
 func (b *Backend) Collect(ctx context.Context, request backend.CollectionRequest) (facts.Batch, error) {
@@ -91,7 +91,11 @@ func (b *Backend) Collect(ctx context.Context, request backend.CollectionRequest
 		}
 		requested[predicate] = struct{}{}
 	}
-	snapshot, err := b.BuildSnapshot(ctx, request.RepoRoot, request.WorkspaceRoot)
+	relations := make([]string, 0, len(requested))
+	for predicate := range requested {
+		relations = append(relations, strings.TrimPrefix(predicate.Name, b.namespace+"."))
+	}
+	snapshot, err := b.buildSnapshot(ctx, request.RepoRoot, request.WorkspaceRoot, relations)
 	if err != nil {
 		return facts.Batch{}, err
 	}
@@ -155,7 +159,11 @@ func (b *Backend) Close() error { return nil }
 
 // BuildSnapshot extracts the facts of the source files under workspaceRoot.
 func (b *Backend) BuildSnapshot(ctx context.Context, repoRoot, workspaceRoot string) (facts.Snapshot, error) {
-	snapshot, sources, version, err := b.buildLintaiSnapshot(ctx, repoRoot, workspaceRoot)
+	return b.buildSnapshot(ctx, repoRoot, workspaceRoot, nil)
+}
+
+func (b *Backend) buildSnapshot(ctx context.Context, repoRoot, workspaceRoot string, relations []string) (facts.Snapshot, error) {
+	snapshot, sources, version, err := b.buildLintaiSnapshotForRelations(ctx, repoRoot, workspaceRoot, relations)
 	if err != nil {
 		return facts.Snapshot{}, err
 	}
@@ -173,6 +181,10 @@ func (b *Backend) BuildSnapshot(ctx context.Context, repoRoot, workspaceRoot str
 }
 
 func (b *Backend) buildLintaiSnapshot(ctx context.Context, repoRoot, workspaceRoot string) (*lintaiapi.Snapshot, []ambient.Source, string, error) {
+	return b.buildLintaiSnapshotForRelations(ctx, repoRoot, workspaceRoot, nil)
+}
+
+func (b *Backend) buildLintaiSnapshotForRelations(ctx context.Context, repoRoot, workspaceRoot string, relations []string) (*lintaiapi.Snapshot, []ambient.Source, string, error) {
 	options := b.settings
 	scope, err := ParseFileScope(string(options.Files))
 	if err != nil {
@@ -184,14 +196,15 @@ func (b *Backend) buildLintaiSnapshot(ctx context.Context, repoRoot, workspaceRo
 		Sources: options.Sources, InvocationExclude: options.Excludes,
 	}
 	extracted, err := lintaiapi.BuildSnapshot(ctx, lintaiapi.BuildSnapshotRequest{
-		WorkspaceRoot:   workspaceRoot,
-		ScopeOptions:    &scopeOptions,
-		ConfigPath:      options.ConfigPath,
-		ConfigDigest:    options.ConfigDigest,
-		ConfigPresent:   options.ConfigPresent,
-		SourceLinks:     options.SourceLinks,
-		AmbientMatchers: convertAmbientMatchers(sources),
-		TsconfigFiles:   scope == FileScopeTsconfig,
+		WorkspaceRoot:      workspaceRoot,
+		ScopeOptions:       &scopeOptions,
+		ConfigPath:         options.ConfigPath,
+		ConfigDigest:       options.ConfigDigest,
+		ConfigPresent:      options.ConfigPresent,
+		SourceLinks:        options.SourceLinks,
+		AmbientMatchers:    convertAmbientMatchers(sources),
+		RequestedRelations: relations,
+		TsconfigFiles:      scope == FileScopeTsconfig,
 	})
 	if err != nil {
 		return nil, nil, "", err

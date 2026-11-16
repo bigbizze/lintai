@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -20,6 +21,89 @@ import (
 
 func hasSnapshotInput(snapshot *lintaiapi.Snapshot, path string) bool {
 	return slices.ContainsFunc(snapshot.Inputs, func(input lintaiapi.SnapshotInput) bool { return input.Path == path })
+}
+
+// V04, V09, V10: relation demand must preserve rows and eligible reporting
+// support from a full collection, including metadata-only collection.
+func TestRequestedRelationsMatchFullCollection(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "src/main.ts", `
+import { helper } from "./other";
+export { external } from "../dist/generated";
+export type Result = { value: string };
+export function calculate(value: Result): Result { return value; }
+calculate({ value: helper("ok") });
+`)
+	writeWorkspaceFile(t, root, "src/other.ts", `export function helper(value: string): string { return value; }`)
+	writeWorkspaceFile(t, root, "dist/generated.d.ts", "export declare function external(): void;\n//# sourceMappingURL=generated.d.ts.map\n")
+	writeWorkspaceFile(t, root, "dist/generated.d.ts.map", `{"version":3,"file":"generated.d.ts","sources":["../source.ts"],"names":[],"mappings":"AAAA"}`)
+	writeWorkspaceFile(t, root, "source.ts", `export function external(): void {}`)
+	producer := New(Options{Files: FileScopeWalk})
+	description, err := producer.Describe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := make(map[string]facts.RelationDescription)
+	all := make([]facts.Predicate, 0, len(description.BaseRelations))
+	for _, relation := range description.BaseRelations {
+		byName[relation.Predicate.Name] = relation
+		all = append(all, relation.Predicate)
+	}
+	collect := func(predicates []facts.Predicate) facts.Batch {
+		t.Helper()
+		batch, err := producer.Collect(context.Background(), backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: root, Predicates: predicates})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := facts.ValidateBatch(description, predicates, batch); err != nil {
+			t.Fatal(err)
+		}
+		return batch
+	}
+	full := collect(all)
+	rowSet := func(rows []facts.Row) map[string]bool {
+		result := make(map[string]bool, len(rows))
+		for _, row := range rows {
+			result[fmt.Sprintf("%#v", row)] = true
+		}
+		return result
+	}
+	selections := [][]string{
+		{"ts.module"},
+		{"ts.declaration", "ts.declaration_origin"},
+		{"ts.module_export", "ts.export_incomplete"},
+		{"ts.call_declaration", "ts.call_declaration_incomplete"},
+		{"ts.fn_param", "ts.fn_returns", "ts.declaration_type"},
+		{"ts.type_kind", "ts.type_display"},
+	}
+	for _, relation := range description.BaseRelations {
+		selections = append(selections, []string{relation.Predicate.Name})
+	}
+	for _, names := range selections {
+		predicates := make([]facts.Predicate, len(names))
+		for i, name := range names {
+			predicates[i] = byName[name].Predicate
+		}
+		selected := collect(predicates)
+		for _, predicate := range predicates {
+			if !reflect.DeepEqual(rowSet(selected.Relations[predicate]), rowSet(full.Relations[predicate])) {
+				t.Errorf("%s rows differ: selected=%v full=%v", predicate, selected.Relations[predicate], full.Relations[predicate])
+			}
+			for _, row := range selected.Relations[predicate] {
+				for index, argument := range byName[predicate.Name].Arguments {
+					if argument.ReportSupport == facts.ReportNone {
+						continue
+					}
+					id := row[index].String
+					got, gotOK := selected.Anchors[id]
+					want, wantOK := full.Anchors[id]
+					if gotOK != wantOK || !reflect.DeepEqual(got, want) {
+						t.Errorf("%s support for %q differs: selected=%+v/%t full=%+v/%t", predicate, id, got, gotOK, want, wantOK)
+					}
+				}
+			}
+		}
+	}
 }
 
 func TestBuildSnapshotExposesStableFunctionKeysAndCalls(t *testing.T) {

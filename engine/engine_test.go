@@ -498,7 +498,7 @@ export default rule("t.awaited").version(1)
 	checkedName := fmt.Sprintf("<anonymous@%d>", strings.Index(actionSource, "async () => 3"))
 	defaultName := fmt.Sprintf("<anonymous@%d>", strings.Index(actionSource, "async () => 4"))
 	wantActions := []string{
-		"legacy must return Promise<ActionResult<T>>, but returns Promise<Legacy<number>>", "wrongDirect must return Promise<ActionResult<T>>, but returns Promise<number>",
+		"legacy must return Promise<ActionResult<T>>, but returns Promise<ActionResult<number>>", "wrongDirect must return Promise<ActionResult<T>>, but returns Promise<number>",
 		wrappedName + " must return Promise<ActionResult<T>>, but returns Promise<number>", checkedName + " must return Promise<ActionResult<T>>, but returns Promise<number>", defaultName + " must return Promise<ActionResult<T>>, but returns Promise<number>",
 	}
 	sort.Strings(wantActions)
@@ -517,7 +517,7 @@ export default rule("t.awaited").version(1)
 		t.Fatalf("strict domain rule: %v", got)
 	}
 	// fn_returns_awaited unwraps one lib Promise, not a union that has one.
-	want := []string{"Db.query:number", "constrained:void", "hidden:void", "legacy:Legacy<number>", "load:number", "maybe:Promise<number> | undefined", "picked:Db[K]", "plain:number", "save:ActionResult<number>", "sync:number", "wrongDirect:number", wrappedName + ":number", checkedName + ":number", defaultName + ":number"}
+	want := []string{"Db.query:number", "constrained:void", "hidden:void", "legacy:ActionResult<number>", "load:number", "maybe:Promise<number> | undefined", "picked:Db[K]", "plain:number", "save:ActionResult<number>", "sync:number", "wrongDirect:number", wrappedName + ":number", checkedName + ":number", defaultName + ":number"}
 	sort.Strings(want)
 	if got := byRule["t.awaited"]; strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("fn_returns_awaited: got %v, want %v", got, want)

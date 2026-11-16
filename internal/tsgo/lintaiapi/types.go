@@ -159,32 +159,30 @@ type shapeProp struct {
 
 // emitFunctionType records the facts of a parameter or return type and of
 // every type that those facts refer to, and returns the type ID.
-func (e *extractor) emitFunctionType(root *checker.Type, enclosing *ast.Node) string {
+func (e *extractor) emitFunctionType(root *checker.Type, _ *ast.Node) string {
 	if root == nil {
 		return ""
 	}
-	visited := make(map[*checker.Type]struct{})
+	if !e.operations.typeStructure {
+		return e.typeID(root)
+	}
 	var visit func(t *checker.Type)
 	visit = func(t *checker.Type) {
-		if _, ok := visited[t]; ok {
+		// A checker type is one observation, even when several roots reach it.
+		// Mark it before descending so recursive types terminate as well.
+		if _, ok := e.typeFactSeen[t]; ok {
 			return
 		}
-		visited[t] = struct{}{}
+		e.typeFactSeen[t] = struct{}{}
+		e.typeStructureVisits++
 		id := e.typeID(t)
-		display := e.typeDisplay(t, enclosing)
+		display := e.typeDisplay(t, nil)
 		existing := e.typeFacts[id]
-		switch {
-		case existing == nil:
+		if existing == nil {
 			e.typeFacts[id] = e.newTypeFact(t, id, display)
-			e.typeFactSeen[t] = struct{}{}
-		case !hasKey(e.typeFactSeen, t):
+		} else {
 			// Another checker type has this ID. Its facts must agree.
 			*existing = mergeTypeFact(*existing, *e.newTypeFact(t, id, display))
-			e.typeFactSeen[t] = struct{}{}
-		default:
-			if display < existing.Display {
-				existing.Display = display
-			}
 		}
 		if e.isTruncated(t) {
 			return
@@ -1054,5 +1052,11 @@ func locationLess(left SourceLocation, right SourceLocation) bool {
 	if left.StartLine != right.StartLine {
 		return left.StartLine < right.StartLine
 	}
-	return left.StartColumn < right.StartColumn
+	if left.StartColumn != right.StartColumn {
+		return left.StartColumn < right.StartColumn
+	}
+	if left.EndLine != right.EndLine {
+		return left.EndLine < right.EndLine
+	}
+	return left.EndColumn < right.EndColumn
 }

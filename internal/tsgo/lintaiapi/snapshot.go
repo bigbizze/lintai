@@ -43,6 +43,9 @@ type BuildSnapshotRequest struct {
 	ConfigPresent   bool
 	SourceLinks     string
 	AmbientMatchers []AmbientMatcher
+	// RequestedRelations is the producer's local predicate demand. Nil requests
+	// the full snapshot used by the direct extraction API.
+	RequestedRelations []string
 	// TsconfigFiles limits the modules to the files that tsc compiles. A
 	// file under a tsconfig.json is a module only when the program of that
 	// tsconfig contains it, as a root file or as an imported file. When it
@@ -391,10 +394,11 @@ type Snapshot struct {
 	// InputRevision is the digest of captured compiler inputs after validation.
 	InputRevision string
 	// Scope is a producer-owned canonical scope description for result identity.
-	Scope        any
-	ContextPaths []string
-	Validation   validationStats
-	capture      *resolutionInputFS
+	Scope               any
+	ContextPaths        []string
+	Validation          validationStats
+	capture             *resolutionInputFS
+	typeStructureVisits int
 }
 
 type configGroup struct {
@@ -461,6 +465,7 @@ type extractor struct {
 	typeIDs                     map[*checker.Type]string
 	typeKeys                    map[typeKeyAt]typeKeyResult
 	typeFactSeen                map[*checker.Type]struct{}
+	typeStructureVisits         int
 	typeShapes                  map[*checker.Type]*typeShape
 	typeTruncated               map[*checker.Type]struct{}
 	timing                      *extractTiming
@@ -471,6 +476,41 @@ type extractor struct {
 	declarationMaps             *declarationMapCache
 	moduleExportIndex           map[*ast.SourceFile]map[string]*ast.Symbol
 	semanticBindingCache        *semanticBindingCache
+	operations                  semanticOperations
+}
+
+// semanticOperations are private collection families, derived from relation
+// demand; they are not user-facing configuration.
+type semanticOperations struct {
+	signatures       bool
+	declarationTypes bool
+	typeStructure    bool
+	sourceRecovery   bool
+}
+
+func operationsForRelations(relations []string) semanticOperations {
+	if relations == nil {
+		return semanticOperations{true, true, true, true}
+	}
+	var operations semanticOperations
+	for _, relation := range relations {
+		switch {
+		case relation == "location":
+			return semanticOperations{true, true, true, true}
+		case strings.HasPrefix(relation, "type_") && relation != "type_ref" && relation != "type_ref_target":
+			operations.signatures, operations.declarationTypes, operations.typeStructure = true, true, true
+		case relation == "fn_param" || relation == "fn_returns" || strings.HasPrefix(relation, "fn_signature") || strings.HasPrefix(relation, "signature_"):
+			// Type entities in signature rows can have reportable locations.
+			// Collect the full type domain so their locations are independent
+			// of which signature or declaration first exposed the entity.
+			operations.signatures, operations.declarationTypes, operations.typeStructure = true, true, true
+		case relation == "declaration_type" || relation == "declaration_type_subject" || relation == "declaration_type_incomplete" || relation == "declaration_incomplete":
+			operations.signatures, operations.declarationTypes, operations.typeStructure, operations.sourceRecovery = true, true, true, true
+		case relation == "config_adjusted" || relation == "declaration" || strings.HasPrefix(relation, "declaration_") || strings.HasPrefix(relation, "source_"):
+			operations.sourceRecovery = true
+		}
+	}
+	return operations
 }
 
 type functionMeta struct {
@@ -689,8 +729,9 @@ func buildSnapshotAttempt(ctx context.Context, req BuildSnapshotRequest) (*Snaps
 		)
 	}
 	missing := make(map[string]struct{})
+	operations := operationsForRelations(req.RequestedRelations)
 	for _, group := range groups {
-		partial, groupMissing, err := buildSnapshotForGroup(ctx, host, workspaceRoot, files, group, req.AmbientMatchers, sourceEntries, configs, auxiliary, entryResolutions, timing)
+		partial, groupMissing, err := buildSnapshotForGroup(ctx, host, workspaceRoot, files, group, req.AmbientMatchers, sourceEntries, configs, auxiliary, entryResolutions, timing, operations)
 		if err != nil {
 			return nil, err
 		}
@@ -708,7 +749,7 @@ func buildSnapshotAttempt(ctx context.Context, req BuildSnapshotRequest) (*Snaps
 			fallbackFiles = append(fallbackFiles, file)
 		}
 		slices.Sort(fallbackFiles)
-		partial, _, err := buildSnapshotForGroup(ctx, host, workspaceRoot, files, configGroup{PrimaryFiles: fallbackFiles}, req.AmbientMatchers, sourceEntries, configs, auxiliary, entryResolutions, timing)
+		partial, _, err := buildSnapshotForGroup(ctx, host, workspaceRoot, files, configGroup{PrimaryFiles: fallbackFiles}, req.AmbientMatchers, sourceEntries, configs, auxiliary, entryResolutions, timing, operations)
 		if err != nil {
 			return nil, err
 		}
@@ -909,7 +950,7 @@ func keepRetainedSemantics(snap *Snapshot) {
 	snap.ExportSites = slices.DeleteFunc(snap.ExportSites, func(item ExportSiteFact) bool { return !sites[item.ID] })
 }
 
-func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, workspaceRoot string, requestedFiles []string, group configGroup, ambientMatchers []AmbientMatcher, sourceEntries []configuredSourceEntry, configs *configCache, auxiliary *auxiliarySourcePrograms, resolutions *sourceEntryResolutions, timing *extractTiming) (*Snapshot, []string, error) {
+func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, workspaceRoot string, requestedFiles []string, group configGroup, ambientMatchers []AmbientMatcher, sourceEntries []configuredSourceEntry, configs *configCache, auxiliary *auxiliarySourcePrograms, resolutions *sourceEntryResolutions, timing *extractTiming, demand ...semanticOperations) (*Snapshot, []string, error) {
 	programStarted := time.Now()
 	timing.programs++
 	config := group.Config
@@ -978,6 +1019,10 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 		sourceEntries:   sourceEntries,
 		accessCount:     make(map[string]int),
 		instanceOwners:  make(map[*ast.Node]*functionState),
+		operations:      operationsForRelations(nil),
+	}
+	if len(demand) != 0 {
+		ex.operations = demand[0]
 	}
 	for _, file := range requestedFiles {
 		ex.requestedFiles[file] = struct{}{}
@@ -1034,7 +1079,7 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 			ex.collectSemanticExports(sourceFile)
 		}
 	}
-	if len(sourceEntries) > 0 {
+	if len(sourceEntries) > 0 && ex.operations.sourceRecovery {
 		if err := ex.applyConfiguredSourceEntries(sourceEntries, auxiliary, resolutions); err != nil {
 			return nil, nil, err
 		}
@@ -1042,6 +1087,7 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 	ex.recordProgramInputs()
 
 	partial := &Snapshot{
+		typeStructureVisits:         ex.typeStructureVisits,
 		callDeclarationObservations: ex.callDeclarationObservations,
 		Modules:                     modules,
 		Functions:                   ex.functions,
@@ -1401,6 +1447,7 @@ func (c *configCache) findNearestConfigPath(workspaceRoot string, file string) (
 }
 
 func mergeSnapshot(into *Snapshot, partial *Snapshot) {
+	into.typeStructureVisits += partial.typeStructureVisits
 	into.callDeclarationObservations = append(into.callDeclarationObservations, partial.callDeclarationObservations...)
 	into.Modules = mergeByEntityID(into.Modules, partial.Modules, func(item Module) string { return item.EntityID })
 	into.Functions = mergeFunctionSlices(into.Functions, partial.Functions)
@@ -1724,7 +1771,7 @@ func (e *extractor) collectFunction(node *ast.Node) *Function {
 	var returnType string
 	var parameterTypes []string
 	var observations []FunctionSignatureObservation
-	if !omitted {
+	if !omitted && e.operations.signatures {
 		returnType, parameterTypes = e.functionTypes(node)
 		observations = []FunctionSignatureObservation{e.functionSignatureObservation(node, parameterTypes, returnType)}
 	}
@@ -1747,7 +1794,7 @@ func (e *extractor) collectFunction(node *ast.Node) *Function {
 		ParameterTypes:        parameterTypes,
 		SignatureObservations: observations,
 		SignatureOmitted:      omitted,
-		SignatureUnresolved:   !omitted && !observations[0].Complete,
+		SignatureUnresolved:   len(observations) != 0 && !observations[0].Complete,
 		Range:                 nameRange,
 	}
 	e.functions = append(e.functions, record)
