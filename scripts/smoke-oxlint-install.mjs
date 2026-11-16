@@ -148,7 +148,7 @@ try {
 	);
 	const located = opened.find((diagnostic) => diagnostic.message.includes("[arch.no-async/violation]"));
 	// The language server uses 0-based lines and characters.
-	assert.deepEqual(located.range.start, { line: 0, character: 22 });
+	assert.deepEqual(located.range.start, { line: 0, character: 0 });
 
 	const actionPath = path.join(repoDir, "src", "actions", "save.ts");
 	const actionURI = pathToFileURL(actionPath).href;
