@@ -412,9 +412,6 @@ func (e *extractor) matchGlobalRef(node *ast.Node, currentFunction *functionStat
 		functionKey = currentFunction.record.SemanticKey
 	}
 	semanticKey := e.registerSite(node, e.callSourceFor(node, currentFunction))
-	if currentFunction != nil {
-		e.markUnsupported(semanticKey, currentFunction.reason)
-	}
 	start := scanner.GetTokenPosOfNode(node, state.file, false)
 	e.globalRefs = append(e.globalRefs, GlobalRef{
 		EntityID:            semanticKey,
@@ -489,9 +486,6 @@ func (e *extractor) recordAmbient(state *ambientFileState, matcher *AmbientMatch
 	}
 	for _, site := range sites {
 		semanticKey := e.registerSite(site.node, e.callSourceFor(site.node, currentFunction))
-		if currentFunction != nil {
-			e.markUnsupported(semanticKey, currentFunction.reason)
-		}
 		start := scanner.GetTokenPosOfNode(site.node, state.file, false)
 		e.ambientUses = append(e.ambientUses, AmbientUse{
 			EntityID:            semanticKey,

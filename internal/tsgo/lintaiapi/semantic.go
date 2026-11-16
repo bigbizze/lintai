@@ -670,6 +670,9 @@ func (e *extractor) addDeclarationMetadata(node *ast.Node, symbol *ast.Symbol, p
 		fact.Incomplete = append(fact.Incomplete, AssociationUnsupported)
 		fact.TypesComplete = false
 	}
+	if e.operations.sourceRecovery && file != nil && file.IsDeclarationFile {
+		e.recoverDeclarationMap(node, false, fact.Name)
+	}
 	return id, fact, supported
 }
 
@@ -677,9 +680,6 @@ func (e *extractor) addDeclaration(node *ast.Node, symbol *ast.Symbol, publicNam
 	id, fact, supported := e.addDeclarationMetadata(node, symbol, publicName)
 	if fact == nil {
 		return id, false
-	}
-	if file := ast.GetSourceFileOfNode(node); e.operations.sourceRecovery && file != nil && file.IsDeclarationFile {
-		e.recoverDeclarationMap(node, false, fact.Name)
 	}
 	if e.operations.declarationTypes {
 		fact.TypeSubjects = sortedUnique(append(fact.TypeSubjects, space))
