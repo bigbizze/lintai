@@ -1,5 +1,15 @@
 # API and Caveats
 
+## Architecture replacement (0.9.0)
+
+This release replaces the analysis architecture defined in [the refactor specification](../specs/lintai-refactor-implementation-r6.md). It contains breaking changes and no migration path:
+
+- Rule programs use namespaced facts, such as `ts.fn` and `ts.import_edge`, and engine helpers, such as `lintai.glob`. `lintai schema` prints the configured producer catalog. See [base relations](#base-relations-and-caveats).
+- An optional `lintai.toml` at the workspace root sets the scope. `--config PATH` selects another file.
+- Rules are evaluated in parallel. `--rule-workers N` and the `ruleWorkers` client and plugin option set the maximum number of concurrent rule jobs.
+- Suppressions use `.suppression(...)` declarations and the `lintai.suppressions/4` file format. Rules locks use `lintai.rules-lock/4`. lintai does not read earlier suppression files or locks. Record the suppressions again with `--suppress-all` and run `lintai lock` again.
+- `--pass-on-unpruned-suppressions` is removed. Unused suppression entries are always reported.
+
 ## Declared call provenance (0.8.0)
 
 Rules can identify the checked signature and lexical contract member at a call site through `call_declaration` and `declaration_member`. `call_declaration_incomplete` exposes unresolved, synthetic, unsupported, or conflicting evidence. These facts preserve existing runtime call classifications: a known declared member can still have an unresolved runtime implementation. The included Writer policy distinguishes forbidden writes from cases it cannot decide, including properties that borrow another member's signature.
