@@ -2,13 +2,9 @@ package typescript
 
 import (
 	"context"
-	"crypto/sha1"
-	"encoding/hex"
 	"fmt"
 	"io"
-	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 
@@ -16,127 +12,300 @@ import (
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/facts"
 	"github.com/bigbizze/lintai/internal/ambient"
-	"github.com/bigbizze/lintai/internal/analysis"
 	"github.com/bigbizze/lintai/internal/tsgo/lintaiapi"
 	"github.com/bigbizze/lintai/internal/workspace"
 )
 
 // Backend extracts facts from TypeScript and JavaScript files.
 type Backend struct {
+	settings  Options
+	namespace string
+
 	// Log receives one line for each tsconfig that lintai adjusted for
 	// TypeScript 7, once per config and adjustment set. Nil discards them.
 	Log io.Writer
 
 	reportedMu sync.Mutex
 	reported   map[string]string
+	collectMu  sync.Mutex
+	current    *producerGeneration
+	// beforeValidation supports deterministic mutation tests at the publication boundary.
+	beforeValidation func()
 }
 
-var _ backend.Backend = (*Backend)(nil)
-
-func New() *Backend {
-	return &Backend{}
+type producerGeneration struct {
+	repoRoot, workspaceRoot string
+	relations               []string
+	snapshot                *lintaiapi.Snapshot
+	plan                    *workspace.ScopePlan
+	inputRevision           string
+	scope                   map[string]any
+	watchHints              []string
+	items                   []facts.Fact
 }
 
-func (b *Backend) ID() string {
-	return "typescript"
-}
+var _ backend.Producer = (*Backend)(nil)
 
-// BuildSnapshot extracts the facts of the source files under workspaceRoot.
-func (b *Backend) BuildSnapshot(ctx context.Context, repoRoot, workspaceRoot string, options backend.SnapshotOptions) (facts.Snapshot, error) {
-	snapshot, err := b.buildAnalysisSnapshot(ctx, repoRoot, workspaceRoot, options)
-	if err != nil {
-		return facts.Snapshot{}, err
-	}
-	items, err := factsFromAnalysis(snapshot)
-	if err != nil {
-		return facts.Snapshot{}, err
-	}
-	return facts.Snapshot{Version: snapshot.Version, Schema: Schema(), Facts: items, InputPaths: snapshot.InputPaths}, nil
-}
+func producerEntityID(localID string) string { return producerEntityIDIn("ts", localID) }
 
-func (b *Backend) buildAnalysisSnapshot(ctx context.Context, repoRoot, workspaceRoot string, options backend.SnapshotOptions) (*analysis.Snapshot, error) {
-	scope, err := backend.ParseFileScope(string(options.Files))
-	if err != nil {
-		return nil, err
-	}
-	walked, err := workspace.ListSourceFiles(workspaceRoot, options.Excludes)
-	if err != nil {
-		return nil, err
-	}
-	sources := ambient.Builtin()
-	extracted, err := lintaiapi.BuildSnapshot(ctx, lintaiapi.BuildSnapshotRequest{
-		WorkspaceRoot:   workspaceRoot,
-		Files:           walked,
-		SourceLinks:     options.SourceLinks,
-		AmbientMatchers: convertAmbientMatchers(sources),
-		TsconfigFiles:   scope == backend.FileScopeTsconfig,
-	})
-	if err != nil {
-		return nil, err
-	}
-	files := moduleFiles(workspaceRoot, walked, extracted.Modules)
-	adjustments := convertAdjustments(workspaceRoot, extracted.ConfigAdjustments)
-	b.reportAdjustments(adjustments)
+func producerEntityIDIn(namespace, localID string) string { return namespace + ":" + localID }
 
-	modules := convertModules(extracted.Modules)
-	functions := convertFunctions(extracted.Functions)
-	importEdges := convertImportEdges(extracted.ImportEdges)
-	callEdges := convertCallEdges(extracted.CallEdges)
-	typeRefs := convertTypeRefs(extracted.TypeRefs)
-	inputPaths := make([]string, 0, len(extracted.Inputs))
-	for _, input := range extracted.Inputs {
-		inputPaths = append(inputPaths, input.Path)
-	}
-	versionFiles := slices.Concat(files, extracted.ConfigFiles)
-	if options.SourceLinks != "" {
-		links := options.SourceLinks
-		if !filepath.IsAbs(links) {
-			links = filepath.Join(workspaceRoot, links)
+func New(settings ...Options) *Backend {
+	selected := Options{Files: FileScopeTsconfig}
+	if len(settings) > 0 {
+		selected = settings[0]
+		if scope, err := ParseFileScope(string(selected.Files)); err == nil {
+			selected.Files = scope
 		}
-		versionFiles = append(versionFiles, links)
+		selected.WorkspaceExcludes = slices.Clone(selected.WorkspaceExcludes)
+		selected.Includes = slices.Clone(selected.Includes)
+		selected.Sources = slices.Clone(selected.Sources)
+		selected.Excludes = slices.Clone(selected.Excludes)
 	}
-	version, err := snapshotVersionWithInputs(workspaceRoot, versionFiles, extracted.Inputs)
+	if selected.Namespace == "" {
+		selected.Namespace = "ts"
+	}
+	return &Backend{settings: selected, namespace: selected.Namespace}
+}
+
+func (b *Backend) Describe() (facts.ProducerDescription, error) {
+	configuration := map[string]any{
+		"workspaceExclude": sortedUnique(b.settings.WorkspaceExcludes),
+		"include":          sortedUnique(b.settings.Includes),
+		"sources":          sortedUnique(b.settings.Sources),
+		"exclude":          sortedUnique(b.settings.Excludes),
+		"files":            string(b.settings.Files),
+		"sourceLinks":      b.settings.SourceLinks,
+	}
+	description, err := facts.DescribeSchema(b.namespace, "lintai.typescript", "typescript-producer-semantic-ownership-1", "ts-vocabulary/2", configuration, Schema())
+	if err != nil {
+		return facts.ProducerDescription{}, err
+	}
+	// Ambient names come from the same registry used to extract ambient facts.
+	var ambientSources, ambientCapabilities []string
+	for _, source := range ambient.Builtin() {
+		ambientSources = append(ambientSources, source.ID)
+		for _, matcher := range source.Matchers {
+			ambientCapabilities = append(ambientCapabilities, matcher.Capability)
+		}
+	}
+	ambientSources = sortedUnique(ambientSources)
+	ambientCapabilities = sortedUnique(ambientCapabilities)
+	// Package is a reserved Mangle token, so the declaration uses Pkg as its
+	// variable while the public catalog retains Appendix A's argument name.
+	for index := range description.BaseRelations {
+		relation := &description.BaseRelations[index]
+		switch relation.Predicate.Name {
+		case b.namespace + ".import_package":
+			relation.Arguments[1].Name = "Package"
+		case b.namespace + ".ambient_source", b.namespace + ".ambient_use":
+			for index := range relation.Arguments {
+				argument := &relation.Arguments[index]
+				switch argument.Name {
+				case "Source":
+					argument.AllowedNames = slices.Clone(ambientSources)
+				case "Capability":
+					argument.AllowedNames = slices.Clone(ambientCapabilities)
+				}
+			}
+		}
+	}
+	return description, nil
+}
+
+func (b *Backend) Collect(ctx context.Context, request backend.CollectionRequest) (facts.Batch, error) {
+	b.collectMu.Lock()
+	defer b.collectMu.Unlock()
+	batch := facts.Batch{Relations: make(map[facts.Predicate][]facts.Row), Anchors: make(map[string]facts.AnchorSupport)}
+	if len(request.Predicates) == 0 {
+		return batch, nil
+	}
+	description, err := b.Describe()
+	if err != nil {
+		return facts.Batch{}, err
+	}
+	requested := make(map[facts.Predicate]struct{}, len(request.Predicates))
+	for _, predicate := range request.Predicates {
+		found := false
+		for _, relation := range description.BaseRelations {
+			if relation.Predicate == predicate {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return facts.Batch{}, fmt.Errorf("unknown TypeScript base predicate %s", predicate)
+		}
+		if _, exists := requested[predicate]; exists {
+			return facts.Batch{}, fmt.Errorf("duplicate requested TypeScript predicate %s", predicate)
+		}
+		requested[predicate] = struct{}{}
+	}
+	relations := make([]string, 0, len(requested))
+	for predicate := range requested {
+		relations = append(relations, strings.TrimPrefix(predicate.Name, b.namespace+"."))
+	}
+	slices.Sort(relations)
+	generation, err := b.generation(ctx, request.RepoRoot, request.WorkspaceRoot, relations)
+	if err != nil {
+		return facts.Batch{}, err
+	}
+	snapshot, items := generation.snapshot, generation.items
+	metadata := make(map[facts.Predicate]facts.RelationDescription, len(description.BaseRelations))
+	for _, relation := range description.BaseRelations {
+		metadata[relation.Predicate] = relation
+	}
+	for predicate := range requested {
+		batch.Relations[predicate] = []facts.Row{}
+	}
+	for _, item := range items {
+		predicate := facts.Predicate{Name: b.namespace + "." + item.Relation, Arity: len(item.Values)}
+		if _, wanted := requested[predicate]; !wanted {
+			continue
+		}
+		values := slices.Clone(item.Values)
+		for index, argument := range metadata[predicate].Arguments {
+			if argument.Role != facts.EntityRole {
+				continue
+			}
+			if values[index].Kind != facts.StringKind {
+				return facts.Batch{}, fmt.Errorf("TypeScript entity %s argument %s is not a string", predicate, argument.Name)
+			}
+			id := values[index].String
+			values[index].String = producerEntityIDIn(b.namespace, id)
+		}
+		batch.Relations[predicate] = append(batch.Relations[predicate], facts.Row(values))
+	}
+	locationPredicate := facts.Predicate{Name: b.namespace + ".location", Arity: 6}
+	if _, ok := metadata[locationPredicate]; ok {
+		descriptions := make(map[string]string)
+		for _, fn := range snapshot.Functions {
+			description := snapshot.Tracking[fn.SemanticKey].Description
+			if strings.HasPrefix(description, "function") {
+				description = "signature" + strings.TrimPrefix(description, "function")
+			} else if description != "" {
+				description = "signature " + description
+			} else {
+				description = "signature"
+			}
+			for _, observation := range fn.SignatureObservations {
+				descriptions[lintaiapi.SignatureID(fn.SemanticKey, observation, b.namespace)] = description
+			}
+		}
+		for _, item := range snapshot.Types {
+			if item.Description != "" {
+				descriptions[item.ID] = item.Description
+			}
+		}
+		for _, item := range items {
+			if item.Relation != "location" || len(item.Values) != 6 {
+				continue
+			}
+			id := producerEntityIDIn(b.namespace, item.Values[0].String)
+			file := item.Values[1].String
+			if strings.HasPrefix(file, "bundled://") {
+				continue
+			}
+			toInt := func(value facts.Value) int { return int(value.Number) }
+			support := snapshot.Tracking[item.Values[0].String]
+			description := support.Description
+			if description == "" {
+				description = descriptions[item.Values[0].String]
+			}
+			if description == "" {
+				description = "TypeScript " + strings.SplitN(item.Values[0].String, ":", 2)[0]
+			}
+			anchor := facts.AnchorSupport{
+				Location:    diagnostics.SourceLocation{File: file, StartLine: toInt(item.Values[2]), StartColumn: toInt(item.Values[3]), EndLine: toInt(item.Values[4]), EndColumn: toInt(item.Values[5])},
+				Description: description,
+			}
+			if support.Data != nil {
+				anchor.Tracking = &facts.TrackingKey{Scheme: "lintai.typescript.subject/1", Data: cloneProducerValue(support.Data)}
+			}
+			batch.Anchors[id] = anchor
+		}
+	}
+	for _, module := range snapshot.Modules {
+		batch.AnalyzedFiles = append(batch.AnalyzedFiles, module.Path)
+	}
+	batch.InputRevision = generation.inputRevision
+	batch.Scope = cloneProducerValue(generation.scope)
+	batch.WatchHints = slices.Clone(generation.watchHints)
+	return batch, nil
+}
+
+func (b *Backend) Close() error {
+	b.collectMu.Lock()
+	defer b.collectMu.Unlock()
+	b.current = nil
+	return nil
+}
+
+// generation is called with collectMu held. A changed relation demand needs a
+// new extraction, whose own validation covers the new inputs. The prior
+// snapshot only supplies tracking keys whose captured source bytes still match.
+func (b *Backend) generation(ctx context.Context, repoRoot, workspaceRoot string, relations []string) (*producerGeneration, error) {
+	var total validationStats
+	defer func() { printValidationTrace(total) }()
+	var previousSnapshot *lintaiapi.Snapshot
+	if b.current != nil && b.current.repoRoot == repoRoot && b.current.workspaceRoot == workspaceRoot {
+		previousSnapshot = b.current.snapshot
+		if slices.Equal(relations, b.current.relations) {
+			valid, err := b.validateGeneration(ctx, b.current, &total)
+			if err != nil {
+				b.current = nil
+				return nil, err
+			}
+			if valid {
+				return b.current, nil
+			}
+		}
+	}
+	b.current = nil
+	generation, sources, err := b.extractSnapshot(ctx, workspaceRoot, relations, previousSnapshot, &total)
 	if err != nil {
 		return nil, err
 	}
+	snapshot := generation.snapshot
+	adjustments := convertAdjustments(workspaceRoot, snapshot.ConfigAdjustments)
+	b.reportAdjustments(adjustments)
+	items, err := factsFromSnapshot(snapshot, sources, adjustments, b.namespace)
+	if err != nil {
+		return nil, err
+	}
+	generation.repoRoot, generation.workspaceRoot = repoRoot, workspaceRoot
+	generation.relations, generation.items = slices.Clone(relations), items
+	b.current = generation
+	return b.current, nil
+}
 
-	return &analysis.Snapshot{
-		Version:                     version,
-		BackendID:                   b.ID(),
-		WorkspaceRoot:               workspaceRoot,
-		Modules:                     modules,
-		Functions:                   functions,
-		ImportEdges:                 importEdges,
-		CallEdges:                   callEdges,
-		ExternalCalls:               convertExternalCalls(extracted.ExternalCalls),
-		CallsUnresolved:             convertCallsUnresolved(extracted.CallsUnresolved),
-		CallDeclarations:            convertCallDeclarations(extracted.CallDeclarations),
-		DeclarationMembers:          convertDeclarationMembers(extracted.DeclarationMembers),
-		CallDeclarationIncomplete:   convertCallDeclarationIncomplete(extracted.CallDeclarationIncomplete),
-		ImportsOpaque:               convertImportsOpaque(extracted.ImportsOpaque),
-		FnRefs:                      convertFnRefs(extracted.FnRefs),
-		SuspensionSites:             convertSuspensionSites(extracted.SuspensionSites),
-		UnsupportedAttributions:     convertUnsupportedAttributions(extracted.UnsupportedAttributions),
-		TypeRefs:                    typeRefs,
-		Accesses:                    convertAccesses(extracted.Accesses),
-		AmbientSources:              convertAmbientSources(sources),
-		AmbientUses:                 convertAmbientUses(extracted.AmbientUses),
-		GlobalRefs:                  convertGlobalRefs(extracted.GlobalRefs),
-		Directives:                  convertDirectives(extracted.Directives),
-		ParseErrors:                 convertParseErrors(extracted.ParseErrors),
-		Types:                       convertTypes(extracted.Types),
-		Declarations:                convertDeclarations(extracted.Declarations),
-		Exports:                     convertExports(extracted.Exports),
-		ModuleExportsIncomplete:     convertModuleExportsIncomplete(extracted.ModuleExportsIncomplete),
-		ExportSites:                 convertExportSites(extracted.ExportSites),
-		DeclarationSourceCandidates: convertDeclarationSources(extracted.DeclarationSourceCandidates),
-		DeclarationSources:          convertDeclarationSources(extracted.DeclarationSources),
-		DeclarationSourceOutcomes:   convertDeclarationSourceOutcomes(extracted.DeclarationSourceOutcomes),
-		SourceEntries:               convertSourceEntries(extracted.SourceEntries),
-		SourceBindings:              convertSourceBindings(extracted.SourceBindings),
-		InputPaths:                  inputPaths,
-		Adjustments:                 adjustments,
-	}, nil
+// cloneProducerValue detaches the JSON-shaped scope and tracking data that
+// callers receive from the producer's retained generation.
+func cloneProducerValue(value any) any {
+	switch value := value.(type) {
+	case map[string]any:
+		clone := make(map[string]any, len(value))
+		for key, item := range value {
+			clone[key] = cloneProducerValue(item)
+		}
+		return clone
+	case []any:
+		clone := make([]any, len(value))
+		for index, item := range value {
+			clone[index] = cloneProducerValue(item)
+		}
+		return clone
+	case []string:
+		return slices.Clone(value)
+	default:
+		return value
+	}
+}
+
+func sortedUnique(values []string) []string {
+	result := slices.Clone(values)
+	slices.Sort(result)
+	return slices.Compact(result)
 }
 
 // moduleFiles returns the walked files that are modules of the snapshot.
@@ -154,349 +323,10 @@ func moduleFiles(workspaceRoot string, walked []string, modules []lintaiapi.Modu
 	return result
 }
 
-func convertModules(items []lintaiapi.Module) []analysis.Module {
-	result := make([]analysis.Module, 0, len(items))
-	for _, item := range items {
-		result = append(result, analysis.Module{
-			EntityID:    item.EntityID,
-			SemanticKey: item.SemanticKey,
-			Path:        item.Path,
-			Range:       convertLocation(item.Range),
-		})
-	}
-	return result
-}
-
-func convertFunctions(items []lintaiapi.Function) []analysis.Function {
-	result := make([]analysis.Function, 0, len(items))
-	for _, item := range items {
-		result = append(result, analysis.Function{
-			EntityID:              item.EntityID,
-			SemanticKey:           item.SemanticKey,
-			Name:                  item.Name,
-			Kind:                  item.Kind,
-			FilePath:              item.FilePath,
-			ContainerName:         item.ContainerName,
-			IsExported:            item.IsExported,
-			IsAsync:               item.IsAsync,
-			ParameterCount:        item.ParameterCount,
-			SignatureObservations: convertSignatureObservations(item.SignatureObservations),
-			SignatureConflict:     item.SignatureConflict,
-			SignatureOmitted:      item.SignatureOmitted,
-			SignatureUnresolved:   item.SignatureUnresolved,
-			Range:                 convertLocation(item.Range),
-		})
-	}
-	return result
-}
-
-func convertSuspensionSites(items []lintaiapi.SuspensionSite) []analysis.SuspensionSite {
-	result := make([]analysis.SuspensionSite, 0, len(items))
-	for _, item := range items {
-		result = append(result, analysis.SuspensionSite{EntityID: item.EntityID, SemanticKey: item.SemanticKey, FilePath: item.FilePath, Kind: item.Kind, FunctionSemanticKey: item.FunctionSemanticKey, UnsupportedReason: item.UnsupportedReason, AtModule: item.AtModule, Range: convertLocation(item.Range)})
-	}
-	return result
-}
-
-func convertAccesses(items []lintaiapi.Access) []analysis.Access {
-	result := make([]analysis.Access, 0, len(items))
-	for _, item := range items {
-		result = append(result, analysis.Access{
-			EntityID: item.EntityID, SemanticKey: item.SemanticKey,
-			Root: "import.meta", AccessPath: item.AccessPath, Origin: "special_form", FilePath: item.FilePath,
-			FunctionSemanticKey: item.FunctionSemanticKey, UnsupportedReason: item.UnsupportedReason, Range: convertLocation(item.Range),
-		})
-	}
-	return result
-}
-
-func convertUnsupportedAttributions(items []lintaiapi.UnsupportedAttribution) []analysis.UnsupportedAttribution {
-	result := make([]analysis.UnsupportedAttribution, 0, len(items))
-	for _, item := range items {
-		result = append(result, analysis.UnsupportedAttribution{Site: item.Site, Reason: item.Reason})
-	}
-	return result
-}
-
-func convertSignatureObservations(items []lintaiapi.FunctionSignatureObservation) []analysis.FunctionSignatureObservation {
-	result := make([]analysis.FunctionSignatureObservation, 0, len(items))
-	for _, item := range items {
-		result = append(result, analysis.FunctionSignatureObservation{
-			ParameterTypes: append([]string(nil), item.ParameterTypes...),
-			ReturnType:     item.ReturnType,
-		})
-	}
-	return result
-}
-
-func convertDeclarations(items []lintaiapi.DeclarationFact) []analysis.Declaration {
-	result := make([]analysis.Declaration, 0, len(items))
-	for _, item := range items {
-		types := make([]analysis.DeclarationType, 0, len(item.Types))
-		for _, value := range item.Types {
-			types = append(types, analysis.DeclarationType{Space: value.Space, Type: value.Type})
-		}
-		result = append(result, analysis.Declaration{
-			ID: item.ID, Name: item.Name, Kind: item.Kind, OriginKind: item.OriginKind, Origin: item.Origin,
-			Types:    types,
-			Function: item.Function, Incomplete: append([]string(nil), item.Incomplete...), Range: convertLocation(item.Location),
-		})
-	}
-	return result
-}
-
-func convertExports(items []lintaiapi.ExportFact) []analysis.Export {
-	result := make([]analysis.Export, 0, len(items))
-	for _, item := range items {
-		reexports := make([]analysis.ExportReexport, 0, len(item.Reexports))
-		for _, value := range item.Reexports {
-			reexports = append(reexports, analysis.ExportReexport{Site: value.Site, Module: value.Module, SourceName: value.SourceName, Space: value.Space})
-		}
-		var location *diagnostics.SourceLocation
-		if item.Location != (lintaiapi.SourceLocation{}) {
-			converted := convertLocation(item.Location)
-			location = &converted
-		}
-		result = append(result, analysis.Export{
-			ID: item.ID, File: item.File, Name: item.Name, Space: item.Space,
-			Targets: append([]string(nil), item.Targets...), Via: append([]string(nil), item.Via...),
-			Reexports: reexports, Incomplete: append([]string(nil), item.Incomplete...), Range: location,
-		})
-	}
-	return result
-}
-
-func convertModuleExportsIncomplete(items []lintaiapi.ModuleExportsIncompleteFact) []analysis.ModuleExportsIncomplete {
-	result := make([]analysis.ModuleExportsIncomplete, 0, len(items))
-	for _, item := range items {
-		result = append(result, analysis.ModuleExportsIncomplete{File: item.File, Reason: item.Reason})
-	}
-	return result
-}
-
-func convertExportSites(items []lintaiapi.ExportSiteFact) []analysis.ExportSite {
-	result := make([]analysis.ExportSite, 0, len(items))
-	for _, item := range items {
-		result = append(result, analysis.ExportSite{ID: item.ID, Range: convertLocation(item.Location)})
-	}
-	return result
-}
-
-func convertDeclarationSources(items []lintaiapi.DeclarationSourceFact) []analysis.DeclarationSource {
-	result := make([]analysis.DeclarationSource, 0, len(items))
-	for _, item := range items {
-		result = append(result, analysis.DeclarationSource{CheckedDecl: item.CheckedDecl, SourceDecl: item.SourceDecl, Method: item.Method})
-	}
-	return result
-}
-
-func convertDeclarationSourceOutcomes(items []lintaiapi.DeclarationSourceOutcomeFact) []analysis.DeclarationSourceOutcome {
-	result := make([]analysis.DeclarationSourceOutcome, 0, len(items))
-	for _, item := range items {
-		result = append(result, analysis.DeclarationSourceOutcome{CheckedDecl: item.CheckedDecl, Outcome: item.Outcome})
-	}
-	return result
-}
-
-func convertSourceEntries(items []lintaiapi.SourceEntryFact) []analysis.SourceEntry {
-	result := make([]analysis.SourceEntry, 0, len(items))
-	for _, item := range items {
-		result = append(result, analysis.SourceEntry{
-			ID: item.ID, CheckedEntry: item.CheckedEntry, SourceEntry: item.SourceEntry, Tsconfig: item.Tsconfig,
-			Applied: item.Applied, Incomplete: append([]string(nil), item.Incomplete...),
-		})
-	}
-	return result
-}
-
-func convertSourceBindings(items []lintaiapi.SourceBindingFact) []analysis.SourceBinding {
-	result := make([]analysis.SourceBinding, 0, len(items))
-	for _, item := range items {
-		result = append(result, analysis.SourceBinding{
-			ID: item.ID, Entry: item.Entry, CheckedFile: item.CheckedFile, Name: item.Name, Space: item.Space,
-			SourceFile:          item.SourceFile,
-			CheckedDeclarations: append([]string(nil), item.CheckedDeclarations...),
-			SourceDeclarations:  append([]string(nil), item.SourceDeclarations...),
-			Incomplete:          append([]string(nil), item.Incomplete...),
-		})
-	}
-	return result
-}
-
-func convertImportEdges(items []lintaiapi.ImportEdge) []analysis.ImportEdge {
-	result := make([]analysis.ImportEdge, 0, len(items))
-	for _, item := range items {
-		importedSymbols := make([]analysis.ImportedSymbol, 0, len(item.ImportedSymbols))
-		for _, symbol := range item.ImportedSymbols {
-			importedSymbols = append(importedSymbols, analysis.ImportedSymbol{
-				Name:       symbol.Name,
-				Kind:       symbol.Kind,
-				IsTypeOnly: symbol.IsTypeOnly,
-			})
-		}
-		result = append(result, analysis.ImportEdge{
-			EntityID:           item.EntityID,
-			SemanticKey:        item.SemanticKey,
-			Specifier:          item.Specifier,
-			FromPath:           item.FromPath,
-			ToPath:             item.ToPath,
-			Form:               item.Form,
-			Internal:           item.Internal,
-			Unresolved:         item.Unresolved,
-			Package:            item.Package,
-			ImportedSymbols:    importedSymbols,
-			HasDefaultImport:   item.HasDefaultImport,
-			HasNamespaceImport: item.HasNamespaceImport,
-			HasNamedImports:    item.HasNamedImports,
-			IsTypeOnly:         item.IsTypeOnly,
-			Retained:           item.Retained,
-			Range:              convertLocation(item.Range),
-		})
-	}
-	return result
-}
-
-func convertCallEdges(items []lintaiapi.CallEdge) []analysis.CallEdge {
-	result := make([]analysis.CallEdge, 0, len(items))
-	for _, item := range items {
-		result = append(result, analysis.CallEdge{
-			EntityID:        item.EntityID,
-			SemanticKey:     item.SemanticKey,
-			FromSemanticKey: item.FromSemanticKey,
-			FromModule:      item.FromModule,
-			ToSemanticKey:   item.ToSemanticKey,
-			FromName:        item.FromName,
-			ToName:          item.ToName,
-			FromPath:        item.FromPath,
-			ToPath:          item.ToPath,
-			Range:           convertLocation(item.Range),
-		})
-	}
-	return result
-}
-
-func convertCallDeclarations(items []lintaiapi.CallDeclarationFact) []analysis.CallDeclaration {
-	result := make([]analysis.CallDeclaration, 0, len(items))
-	for _, item := range items {
-		result = append(result, analysis.CallDeclaration{Site: item.Site, Declaration: item.Declaration})
-	}
-	return result
-}
-
-func convertDeclarationMembers(items []lintaiapi.DeclarationMemberFact) []analysis.DeclarationMember {
-	result := make([]analysis.DeclarationMember, 0, len(items))
-	for _, item := range items {
-		result = append(result, analysis.DeclarationMember{Declaration: item.Declaration, OwnerDeclaration: item.OwnerDeclaration, Name: item.Name})
-	}
-	return result
-}
-
-func convertCallDeclarationIncomplete(items []lintaiapi.CallDeclarationIncompleteFact) []analysis.CallDeclarationIncomplete {
-	result := make([]analysis.CallDeclarationIncomplete, 0, len(items))
-	for _, item := range items {
-		result = append(result, analysis.CallDeclarationIncomplete{Site: item.Site, Reason: item.Reason})
-	}
-	return result
-}
-
-func convertExternalCalls(items []lintaiapi.ExternalCall) []analysis.ExternalCall {
-	result := make([]analysis.ExternalCall, 0, len(items))
-	for _, item := range items {
-		result = append(result, analysis.ExternalCall{
-			EntityID:        item.EntityID,
-			SemanticKey:     item.SemanticKey,
-			FromSemanticKey: item.FromSemanticKey,
-			FromModule:      item.FromModule,
-			FromPath:        item.FromPath,
-			Module:          item.Module,
-			Name:            item.Name,
-			Range:           convertLocation(item.Range),
-		})
-	}
-	return result
-}
-
-func convertDirectives(items []lintaiapi.ModuleDirective) []analysis.ModuleDirective {
-	result := make([]analysis.ModuleDirective, 0, len(items))
-	for _, item := range items {
-		result = append(result, analysis.ModuleDirective{
-			EntityID:    item.EntityID,
-			SemanticKey: item.SemanticKey,
-			FilePath:    item.FilePath,
-			Text:        item.Text,
-			Range:       convertLocation(item.Range),
-		})
-	}
-	return result
-}
-
-func convertCallsUnresolved(items []lintaiapi.CallUnresolved) []analysis.CallUnresolved {
-	result := make([]analysis.CallUnresolved, 0, len(items))
-	for _, item := range items {
-		result = append(result, analysis.CallUnresolved{
-			EntityID:        item.EntityID,
-			SemanticKey:     item.SemanticKey,
-			FromSemanticKey: item.FromSemanticKey,
-			FromModule:      item.FromModule,
-			FromPath:        item.FromPath,
-			Range:           convertLocation(item.Range),
-		})
-	}
-	return result
-}
-
-func convertImportsOpaque(items []lintaiapi.ImportOpaque) []analysis.ImportOpaque {
-	result := make([]analysis.ImportOpaque, 0, len(items))
-	for _, item := range items {
-		result = append(result, analysis.ImportOpaque{
-			EntityID:    item.EntityID,
-			SemanticKey: item.SemanticKey,
-			FromPath:    item.FromPath,
-			Range:       convertLocation(item.Range),
-		})
-	}
-	return result
-}
-
-func convertFnRefs(items []lintaiapi.FnRef) []analysis.FnRef {
-	result := make([]analysis.FnRef, 0, len(items))
-	for _, item := range items {
-		result = append(result, analysis.FnRef{
-			EntityID:        item.EntityID,
-			SemanticKey:     item.SemanticKey,
-			FromSemanticKey: item.FromSemanticKey,
-			FromModule:      item.FromModule,
-			FromPath:        item.FromPath,
-			ToSemanticKey:   item.ToSemanticKey,
-			ToPath:          item.ToPath,
-			Range:           convertLocation(item.Range),
-		})
-	}
-	return result
-}
-
-func convertParseErrors(items []lintaiapi.ParseError) []analysis.ParseError {
-	result := make([]analysis.ParseError, 0, len(items))
-	for _, item := range items {
-		result = append(result, analysis.ParseError{
-			EntityID:    item.EntityID,
-			SemanticKey: item.SemanticKey,
-			FilePath:    item.FilePath,
-			Message:     item.Message,
-			Range:       convertLocation(item.Range),
-		})
-	}
-	return result
-}
-
-func convertAdjustments(workspaceRoot string, items []lintaiapi.ConfigAdjustment) []analysis.ConfigAdjustment {
-	result := make([]analysis.ConfigAdjustment, 0, len(items))
-	for _, item := range items {
-		result = append(result, analysis.ConfigAdjustment{
-			Config: workspace.RelativePath(workspaceRoot, item.Config),
-			Option: item.Option,
-			Action: item.Action,
-		})
+func convertAdjustments(workspaceRoot string, items []lintaiapi.ConfigAdjustment) []lintaiapi.ConfigAdjustment {
+	result := slices.Clone(items)
+	for index := range result {
+		result[index].Config = workspace.RelativePath(workspaceRoot, result[index].Config)
 	}
 	return result
 }
@@ -506,7 +336,7 @@ func convertAdjustments(workspaceRoot string, items []lintaiapi.ConfigAdjustment
 // rewritten, target removed)". A line that b.Log already received for the
 // config is not written again, so lintai serve does not repeat it on every
 // refresh. The adjustments are sorted by config.
-func (b *Backend) reportAdjustments(adjustments []analysis.ConfigAdjustment) {
+func (b *Backend) reportAdjustments(adjustments []lintaiapi.ConfigAdjustment) {
 	if b.Log == nil {
 		return
 	}
@@ -532,133 +362,6 @@ func (b *Backend) reportAdjustments(adjustments []analysis.ConfigAdjustment) {
 	}
 }
 
-func convertTypeRefs(items []lintaiapi.TypeRef) []analysis.TypeRef {
-	result := make([]analysis.TypeRef, 0, len(items))
-	for _, item := range items {
-		result = append(result, analysis.TypeRef{
-			EntityID:    item.EntityID,
-			SemanticKey: item.SemanticKey,
-			Name:        item.Name,
-			FilePath:    item.FilePath,
-			TargetPath:  item.TargetPath,
-			Range:       convertLocation(item.Range),
-		})
-	}
-	return result
-}
-
-func convertTypes(items []lintaiapi.TypeFact) []analysis.TypeFact {
-	result := make([]analysis.TypeFact, 0, len(items))
-	for _, item := range items {
-		converted := analysis.TypeFact{
-			ID:         item.ID,
-			Kind:       item.Kind,
-			Named:      item.Named,
-			OriginKind: item.OriginKind,
-			Origin:     item.Origin,
-			Name:       item.Name,
-			Args:       item.Args,
-			ArgMarks:   item.ArgMarks,
-			Readonly:   item.Readonly,
-			Members:    item.Members,
-			ParamName:  item.ParamName,
-			SigParams:  item.SigParams,
-			SigMarks:   item.SigMarks,
-			SigReturns: item.SigReturns,
-			Incomplete: item.Incomplete,
-			Display:    item.Display,
-		}
-		if item.Literal != nil {
-			converted.Literal = &analysis.TypeLiteral{Kind: item.Literal.Kind, Text: item.Literal.Text, Number: item.Literal.Number, Bool: item.Literal.Bool}
-		}
-		for _, prop := range item.Props {
-			converted.Props = append(converted.Props, analysis.TypeProp{Name: prop.Name, Type: prop.Type, Optional: prop.Optional, Readonly: prop.Readonly})
-		}
-		if item.Location != nil {
-			location := convertLocation(*item.Location)
-			converted.Location = &location
-		}
-		result = append(result, converted)
-	}
-	return result
-}
-
-func convertLocation(location lintaiapi.SourceLocation) diagnostics.SourceLocation {
-	return diagnostics.SourceLocation{
-		File:        location.File,
-		StartLine:   location.StartLine,
-		StartColumn: location.StartColumn,
-		EndLine:     location.EndLine,
-		EndColumn:   location.EndColumn,
-	}
-}
-
-func snapshotVersion(root string, files []string) (string, error) {
-	return snapshotVersionWithInputs(root, files, nil)
-}
-
-func snapshotVersionWithInputs(root string, files []string, inputs []lintaiapi.SnapshotInput) (string, error) {
-	byPath := make(map[string]lintaiapi.SnapshotInput, len(files)+len(inputs))
-	required := make(map[string]bool, len(files))
-	for _, file := range files {
-		path := filepath.Clean(file)
-		byPath[path] = lintaiapi.SnapshotInput{Path: path, Exists: true}
-		required[path] = true
-	}
-	for _, input := range inputs {
-		path := filepath.Clean(input.Path)
-		current := byPath[path]
-		current.Exists = current.Exists || input.Exists
-		current.OptionalMap = current.OptionalMap || input.OptionalMap
-		byPath[path] = current
-	}
-	paths := make([]string, 0, len(byPath))
-	for file := range byPath {
-		paths = append(paths, file)
-	}
-	sort.Strings(paths)
-	hash := sha1.New()
-	for _, file := range paths {
-		relative := workspace.RelativePath(root, file)
-		if strings.HasPrefix(relative, "../") || filepath.IsAbs(relative) {
-			relative = filepath.ToSlash(file)
-		}
-		hash.Write([]byte(relative))
-		hash.Write([]byte{0})
-		if !byPath[file].Exists {
-			hash.Write([]byte{0})
-			hash.Write([]byte{0})
-			continue
-		}
-		source, err := workspace.ReadFile(file)
-		if err != nil {
-			if required[file] || !byPath[file].OptionalMap {
-				return "", err
-			}
-			hash.Write([]byte{2, 0})
-			continue
-		}
-		hash.Write([]byte{1})
-		hash.Write([]byte(source))
-		hash.Write([]byte{0})
-	}
-	return hex.EncodeToString(hash.Sum(nil)), nil
-}
-
-func convertAmbientSources(sources []ambient.Source) []analysis.AmbientSource {
-	result := make([]analysis.AmbientSource, 0, len(sources))
-	for _, source := range sources {
-		capabilities := make([]string, 0, len(source.Matchers))
-		for _, matcher := range source.Matchers {
-			if !slices.Contains(capabilities, matcher.Capability) {
-				capabilities = append(capabilities, matcher.Capability)
-			}
-		}
-		result = append(result, analysis.AmbientSource{ID: source.ID, Capabilities: capabilities})
-	}
-	return result
-}
-
 func convertAmbientMatchers(sources []ambient.Source) []lintaiapi.AmbientMatcher {
 	result := make([]lintaiapi.AmbientMatcher, 0)
 	for _, source := range sources {
@@ -682,41 +385,6 @@ func convertAmbientMatchers(sources []ambient.Source) []lintaiapi.AmbientMatcher
 				KeyMember:  matcher.Key == ambient.KeyMember,
 			})
 		}
-	}
-	return result
-}
-
-func convertAmbientUses(items []lintaiapi.AmbientUse) []analysis.AmbientUse {
-	result := make([]analysis.AmbientUse, 0, len(items))
-	for _, item := range items {
-		result = append(result, analysis.AmbientUse{
-			EntityID:            item.EntityID,
-			SemanticKey:         item.SemanticKey,
-			Source:              item.Source,
-			Capability:          item.Capability,
-			FilePath:            item.FilePath,
-			Key:                 item.Key,
-			HasKey:              item.HasKey,
-			Dynamic:             item.Dynamic,
-			Write:               item.Write,
-			FunctionSemanticKey: item.FunctionSemanticKey,
-			Range:               convertLocation(item.Range),
-		})
-	}
-	return result
-}
-
-func convertGlobalRefs(items []lintaiapi.GlobalRef) []analysis.GlobalRef {
-	result := make([]analysis.GlobalRef, 0, len(items))
-	for _, item := range items {
-		result = append(result, analysis.GlobalRef{
-			EntityID:            item.EntityID,
-			SemanticKey:         item.SemanticKey,
-			Name:                item.Name,
-			FilePath:            item.FilePath,
-			FunctionSemanticKey: item.FunctionSemanticKey,
-			Range:               convertLocation(item.Range),
-		})
 	}
 	return result
 }

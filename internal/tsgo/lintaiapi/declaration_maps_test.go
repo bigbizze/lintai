@@ -55,6 +55,26 @@ export default function entry(): number;
 	}
 	want := map[string]string{"load": "function", "Widget": "class", "count": "variable", "arrow": "variable", "Options": "interface", "Label": "type_alias", "default": "function"}
 	assertDeclarationMapLinks(t, snapshot, want, "dist/source.d.ts", "source.ts")
+
+	t.Run("call without re-export", func(t *testing.T) {
+		app := filepath.Join(root, "src/app.ts")
+		if err := os.WriteFile(app, []byte(`import { load } from "../dist/source"; load("value");`), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		snapshot, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{
+			WorkspaceRoot: root, Files: []string{app}, RequestedRelations: []string{"declaration_source"},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertDeclarationMapLinks(t, snapshot, map[string]string{"load": "function"}, "dist/source.d.ts", "source.ts")
+		if len(snapshot.Exports) != 0 || len(snapshot.CallDeclarations) != 1 || snapshot.CallDeclarations[0].Declaration != snapshot.DeclarationSources[0].CheckedDecl {
+			t.Fatalf("call-only provenance: exports=%+v calls=%+v links=%+v", snapshot.Exports, snapshot.CallDeclarations, snapshot.DeclarationSources)
+		}
+		if snapshot.typeStructureVisits != 0 || len(snapshot.Types) != 0 || slices.ContainsFunc(snapshot.Declarations, func(decl DeclarationFact) bool { return len(decl.TypeSubjects) != 0 }) {
+			t.Fatalf("source recovery expanded types: visits=%d types=%+v declarations=%+v", snapshot.typeStructureVisits, snapshot.Types, snapshot.Declarations)
+		}
+	})
 }
 
 func TestDeclarationMapScaling(t *testing.T) {
@@ -203,7 +223,11 @@ func TestDeclarationMapReusesFilesAndSharedMap(t *testing.T) {
 	fs.mu.Lock()
 	fs.reads = make(map[string]int) // Count recovery, after program construction.
 	fs.mu.Unlock()
-	e := &extractor{workspaceRoot: root, host: host, program: program, declarations: make(map[string]*DeclarationFact)}
+	e := &extractor{workspaceRoot: root, host: host, program: program, declarations: make(map[string]*DeclarationFact), operations: semanticOperations{sourceRecovery: true}}
+	firstDeclaration := first.Statements.Nodes[0]
+	if _, _, ok := e.addDeclarationMetadata(firstDeclaration, nil, firstDeclaration.Name().Text()); !ok || e.declarationMaps != nil {
+		t.Fatal("declaration metadata registration performed map recovery")
+	}
 	firstIDs := make(map[string]bool, count)
 	for _, node := range first.Statements.Nodes {
 		firstIDs[e.declarationID(node)] = true

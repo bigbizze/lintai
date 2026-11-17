@@ -21,6 +21,25 @@ type LoadedRule struct {
 	strictRowFn    goja.Callable
 	report         []string
 	expectNonEmpty []string
+	suppressions   []SuppressionDeclaration
+}
+
+// SuppressionDeclaration is raw rule metadata. Its option shape is validated
+// against the generated report declaration during program preparation.
+type SuppressionDeclaration struct {
+	Assertion string
+	Options   any
+}
+
+// RuleMetadata is the pure, setup-free part of a rule catalog entry.
+type RuleMetadata struct {
+	ID             string
+	Version        int
+	HasSetup       bool
+	HasConfig      bool
+	Report         []string
+	ExpectNonEmpty []string
+	Suppressions   []SuppressionDeclaration
 }
 
 // ProgramOutput is what the pure phase of a rule produces before evaluation.
@@ -76,6 +95,94 @@ func ReadRuleID(code string) (id string, ok bool, err error) {
 		return "", true, err
 	}
 	return value, true, nil
+}
+
+// ReadRuleMetadata executes a pure bundle once to read its identity and
+// declarations. It never runs setup(), facts(), program() or message().
+// ok is false for a helper module without a default rule export.
+func ReadRuleMetadata(code string) (metadata RuleMetadata, ok bool, err error) {
+	vm := goja.New()
+	disableAmbientCapabilities(vm)
+	if _, err := vm.RunString(code); err != nil {
+		return RuleMetadata{}, false, err
+	}
+	// Property access and export can invoke JavaScript getters outside RunString.
+	if exception := vm.Try(func() {
+		metadata, ok, err = readRuleMetadata(vm)
+	}); exception != nil {
+		return metadata, true, fmt.Errorf("read rule metadata: %w", exception)
+	}
+	return metadata, ok, err
+}
+
+func readRuleMetadata(vm *goja.Runtime) (metadata RuleMetadata, ok bool, err error) {
+	moduleValue := vm.Get("LintAIPureModule")
+	if moduleValue == nil || goja.IsUndefined(moduleValue) || goja.IsNull(moduleValue) {
+		return RuleMetadata{}, false, fmt.Errorf("pure bundle did not initialize LintAIPureModule")
+	}
+	ruleValue := moduleValue.ToObject(vm).Get("rule")
+	if ruleValue == nil || goja.IsUndefined(ruleValue) || goja.IsNull(ruleValue) {
+		return RuleMetadata{}, false, nil
+	}
+	ruleObject := ruleValue.ToObject(vm)
+	idValue := ruleObject.Get("id")
+	if idValue == nil {
+		return RuleMetadata{}, true, fmt.Errorf("the default export is not a lintai rule; create it with rule(id) from @lintai/sdk")
+	}
+	id, validID := idValue.Export().(string)
+	if !validID || id == "" {
+		return RuleMetadata{}, true, fmt.Errorf("the default export is not a lintai rule; create it with rule(id) from @lintai/sdk")
+	}
+	metadata.ID = id
+	if err := ValidateRuleID(id); err != nil {
+		return metadata, true, err
+	}
+	versionValue := ruleObject.Get("versionValue")
+	if !goja.IsNumber(versionValue) {
+		return metadata, true, fmt.Errorf("rule %s must call .version(n) with a positive integer", id)
+	}
+	version := versionValue.ToFloat()
+	if math.IsNaN(version) || version < 1 || version > 9007199254740991 || math.Trunc(version) != version {
+		return metadata, true, fmt.Errorf("rule %s must call .version(n) with a positive integer", id)
+	}
+	metadata.Version = int(version)
+	setupValue, configValue := ruleObject.Get("hasSetup"), ruleObject.Get("hasConfig")
+	if setupValue == nil || configValue == nil {
+		return metadata, true, fmt.Errorf("rule %s has invalid setup or config metadata", id)
+	}
+	var validSetup, validConfig bool
+	metadata.HasSetup, validSetup = setupValue.Export().(bool)
+	metadata.HasConfig, validConfig = configValue.Export().(bool)
+	if !validSetup || !validConfig {
+		return metadata, true, fmt.Errorf("rule %s has invalid setup or config metadata", id)
+	}
+	if programValue := ruleObject.Get("programValue"); programValue == nil || goja.IsUndefined(programValue) || goja.IsNull(programValue) {
+		return metadata, true, fmt.Errorf("rule is missing program()")
+	}
+	if _, ok := goja.AssertFunction(ruleObject.Get("messageFn")); !ok {
+		return metadata, true, fmt.Errorf("rule is missing message()")
+	}
+	if value := ruleObject.Get("factsFn"); value != nil && !goja.IsUndefined(value) && !goja.IsNull(value) {
+		if _, ok := goja.AssertFunction(value); !ok {
+			return metadata, true, fmt.Errorf("facts() must be given a function")
+		}
+	}
+	metadata.Report, err = stringList(vm, ruleObject.Get("reportPredicates"))
+	if err != nil {
+		return metadata, true, fmt.Errorf("report(): %w", err)
+	}
+	if len(metadata.Report) == 0 {
+		return metadata, true, fmt.Errorf("rule is missing report()")
+	}
+	metadata.ExpectNonEmpty, err = stringList(vm, ruleObject.Get("expectNonEmptyPredicates"))
+	if err != nil {
+		return metadata, true, fmt.Errorf("expectNonEmpty(): %w", err)
+	}
+	metadata.Suppressions, err = suppressionDeclarations(vm, ruleObject.Get("suppressionDeclarations"))
+	if err != nil {
+		return metadata, true, fmt.Errorf("suppression(): %w", err)
+	}
+	return metadata, true, nil
 }
 
 func LoadPureBundle(code string) (*LoadedRule, error) {
@@ -158,6 +265,10 @@ func LoadPureBundle(code string) (*LoadedRule, error) {
 		strictRowFn:    strictRowFn,
 		report:         report,
 		expectNonEmpty: expectNonEmpty,
+		suppressions: func() []SuppressionDeclaration {
+			declarations, _ := suppressionDeclarations(vm, ruleObject.Get("suppressionDeclarations"))
+			return declarations
+		}(),
 	}, nil
 }
 
@@ -175,6 +286,10 @@ func (r *LoadedRule) Report() []string {
 
 func (r *LoadedRule) ExpectNonEmpty() []string {
 	return append([]string(nil), r.expectNonEmpty...)
+}
+
+func (r *LoadedRule) SuppressionDeclarations() []SuppressionDeclaration {
+	return cloneSuppressionDeclarations(r.suppressions)
 }
 
 // Program runs facts() and program() and returns the program text and the
@@ -211,7 +326,15 @@ func (r *LoadedRule) Program(env, setup any) (ProgramOutput, error) {
 }
 
 func (r *LoadedRule) Message(row map[string]any, assertionID string) (string, error) {
-	strictRow, err := r.strictRowFn(goja.Undefined(), r.runtime.ToValue(row))
+	messageRow := make(map[string]any, len(row))
+	for key, value := range row {
+		if name, ok := value.(Name); ok {
+			messageRow[key] = "/" + name.Value
+		} else {
+			messageRow[key] = value
+		}
+	}
+	strictRow, err := r.strictRowFn(goja.Undefined(), r.runtime.ToValue(messageRow))
 	if err != nil {
 		return "", err
 	}
@@ -224,6 +347,38 @@ func (r *LoadedRule) Message(row map[string]any, assertionID string) (string, er
 		return "", err
 	}
 	return result.String(), nil
+}
+
+func suppressionDeclarations(vm *goja.Runtime, value goja.Value) ([]SuppressionDeclaration, error) {
+	if value == nil || goja.IsUndefined(value) || goja.IsNull(value) {
+		return nil, nil
+	}
+	raw, err := json.Marshal(value.Export())
+	if err != nil {
+		return nil, err
+	}
+	var items []struct {
+		Assertion string `json:"assertion"`
+		Options   any    `json:"options"`
+	}
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, fmt.Errorf("must be an array of assertion policies")
+	}
+	result := make([]SuppressionDeclaration, len(items))
+	for index, item := range items {
+		result[index] = SuppressionDeclaration{Assertion: item.Assertion, Options: item.Options}
+	}
+	return result, nil
+}
+
+func cloneSuppressionDeclarations(items []SuppressionDeclaration) []SuppressionDeclaration {
+	if len(items) == 0 {
+		return nil
+	}
+	raw, _ := json.Marshal(items)
+	var clone []SuppressionDeclaration
+	_ = json.Unmarshal(raw, &clone)
+	return clone
 }
 
 func (r *LoadedRule) ruleContext(env, setup any) (*goja.Object, error) {
@@ -348,12 +503,20 @@ func disableAmbientCapabilities(vm *goja.Runtime) {
 			panic(vm.NewTypeError("Math.random is disabled in the pure runtime"))
 		})
 	}
-	if dateValue := vm.Get("Date"); !goja.IsUndefined(dateValue) && !goja.IsNull(dateValue) {
-		dateObject := dateValue.ToObject(vm)
-		_ = dateObject.Set("now", func(goja.FunctionCall) goja.Value {
-			panic(vm.NewTypeError("Date.now is disabled in the pure runtime"))
-		})
-	}
+	_, _ = vm.RunString(`
+		(() => {
+			const message = "Date is disabled in the pure runtime; supply time as explicit data";
+			const denied = () => { throw new TypeError(message); };
+			globalThis.Date = new Proxy(function lintaiDisabledDate() {}, {
+				apply: denied,
+				construct: denied,
+				get(target, key, receiver) {
+					if (key === "now" || key === "parse" || key === "UTC") return denied;
+					return Reflect.get(target, key, receiver);
+				},
+			});
+		})();
+	`)
 }
 
 func toFrozenValue(vm *goja.Runtime, value any) (goja.Value, error) {

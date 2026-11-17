@@ -61,6 +61,81 @@ func hasStructure(item TypeFact) bool {
 	return len(item.Args) > 0 || len(item.Members) > 0 || len(item.Props) > 0 || len(item.SigParams) > 0 || item.SigReturns != "" || item.Literal != nil
 }
 
+// V11: repeated roots share structural observations within one checker, and
+// their display and structure do not depend on the order in which roots occur.
+func TestSharedTypeRootsVisitEachCheckerObservationOnce(t *testing.T) {
+	const declaration = `type Shared = { value: string; child: { count: number } };` + "\n"
+	const first = `function first(x: Shared): Shared { return x; }` + "\n"
+	const second = `function other(x: Shared): Shared { return x; }` + "\n"
+	one := buildTestSnapshot(t, map[string]string{"src/main.ts": declaration + first})
+	two := buildTestSnapshot(t, map[string]string{"src/main.ts": declaration + first + second})
+	reversed := buildTestSnapshot(t, map[string]string{"src/main.ts": declaration + second + first})
+	if one.typeStructureVisits == 0 || two.typeStructureVisits != one.typeStructureVisits || reversed.typeStructureVisits != one.typeStructureVisits {
+		t.Fatalf("structural observations: one=%d two=%d reversed=%d", one.typeStructureVisits, two.typeStructureVisits, reversed.typeStructureVisits)
+	}
+	if !reflect.DeepEqual(one.Types, two.Types) || !reflect.DeepEqual(two.Types, reversed.Types) {
+		t.Fatalf("shared type facts differ by root order: one=%+v two=%+v reversed=%+v", one.Types, two.Types, reversed.Types)
+	}
+	firstRange := SourceLocation{File: "src/main.ts", StartLine: 1, StartColumn: 1, EndLine: 1, EndColumn: 3}
+	secondRange := SourceLocation{File: "src/main.ts", StartLine: 1, StartColumn: 1, EndLine: 1, EndColumn: 5}
+	a := TypeFact{ID: "type", Kind: TypeKindString, Display: "string", Location: &firstRange}
+	b := TypeFact{ID: "type", Kind: TypeKindString, Display: "string", Location: &secondRange}
+	if left, right := mergeTypeFact(a, b), mergeTypeFact(b, a); !reflect.DeepEqual(left, right) || *left.Location != firstRange {
+		t.Fatalf("type location depends on observation order: %+v / %+v", left.Location, right.Location)
+	}
+	t.Logf("structural observations: %d for one or two roots", one.typeStructureVisits)
+}
+
+// V04, V09, V10, V11: metadata and source-only demand must not expand the
+// structural type graph, while declaration metadata agrees with full demand.
+func TestMetadataDemandDoesNotExpandTypes(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspace(t, root, map[string]string{"src/main.ts": `
+export { external } from "../dist/generated";
+export type Result = { value: string; nested: { count: number } };
+export function calculate(value: Result): Result { return value; }
+calculate({ value: "ok", nested: { count: 1 } });
+`,
+		"dist/generated.d.ts":     "export declare function external(): void;\n//# sourceMappingURL=generated.d.ts.map\n",
+		"dist/generated.d.ts.map": `{"version":3,"file":"generated.d.ts","sources":["../source.ts"],"names":[],"mappings":"AAAA"}`,
+		"source.ts":               "export function external(): void {}\n",
+	})
+	files := []string{filepath.Join(root, "src/main.ts")}
+	build := func(relations []string) *Snapshot {
+		t.Helper()
+		snapshot, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{WorkspaceRoot: root, Files: files, RequestedRelations: relations})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return snapshot
+	}
+	full := build(nil)
+	metadata := build([]string{"declaration"})
+	source := build([]string{"module"})
+	if full.typeStructureVisits == 0 || metadata.typeStructureVisits != 0 || source.typeStructureVisits != 0 || len(metadata.Types) != 0 || len(source.Types) != 0 {
+		t.Fatalf("structural observations: full=%d metadata=%d source=%d", full.typeStructureVisits, metadata.typeStructureVisits, source.typeStructureVisits)
+	}
+	metadataFields := func(snapshot *Snapshot) map[string][4]string {
+		result := make(map[string][4]string)
+		for _, item := range snapshot.Declarations {
+			result[item.ID] = [4]string{item.Name, item.Kind, item.OriginKind, item.Origin}
+		}
+		return result
+	}
+	if !reflect.DeepEqual(metadataFields(full), metadataFields(metadata)) {
+		t.Fatalf("metadata differs: full=%v metadata=%v", metadataFields(full), metadataFields(metadata))
+	}
+	hasMapInput := func(snapshot *Snapshot) bool {
+		return slices.ContainsFunc(snapshot.Inputs, func(input SnapshotInput) bool {
+			return strings.HasSuffix(input.Path, "/dist/generated.d.ts.map")
+		})
+	}
+	if !hasMapInput(full) || !hasMapInput(metadata) || hasMapInput(source) {
+		t.Fatalf("map recovery inputs: full=%t metadata=%t source=%t", hasMapInput(full), hasMapInput(metadata), hasMapInput(source))
+	}
+	t.Logf("structural observations: full=%d metadata=%d source=%d", full.typeStructureVisits, metadata.typeStructureVisits, source.typeStructureVisits)
+}
+
 // Types are entities keyed by where each named type is declared, not by
 // the checker's text. Before this, fn_param and fn_returns held
 // TypeToString output, so rules matched on text that changes between
@@ -347,19 +422,20 @@ func TestTypeFactsAcrossConfigGroups(t *testing.T) {
 	}
 }
 
-// One declaration compiled under strict and non-strict options has
-// different structure in each group. 0.6.0 kept the structure of the group
-// that sorted first. The merged fact now has no structure, is marked as a
-// conflict, and does not depend on the group order.
+// V11, V12: different checker observations can conflict. Reversing their
+// order must not change the result, and removing one restores the survivor.
 func TestTypeFactsConflictAcrossConfigGroups(t *testing.T) {
-	build := func(loose, strict string) *Snapshot {
+	build := func(loose, strict string, includeStrict bool) *Snapshot {
 		files := map[string]string{
-			"shared/r.ts":             "export type R = { a: string | undefined };\n",
-			loose + "/tsconfig.json":  `{"compilerOptions": {"strict": false}, "include": ["**/*.ts", "../shared/**/*.ts"]}`,
-			loose + "/use.ts":         "import type { R } from \"../shared/r\";\nexport function fa(x: R): void {}\n",
-			strict + "/tsconfig.json": `{"compilerOptions": {"strict": true}, "include": ["**/*.ts", "../shared/**/*.ts"]}`,
-			strict + "/use.ts":        "import type { R } from \"../shared/r\";\nexport function fb(x: R): void {}\n",
-			"tsconfig.json":           `{"files": [], "references": [{"path": "./` + loose + `"}, {"path": "./` + strict + `"}]}`,
+			"shared/r.ts":            "export type R = { a: string | undefined };\n",
+			loose + "/tsconfig.json": `{"compilerOptions": {"strict": false}, "include": ["**/*.ts", "../shared/**/*.ts"]}`,
+			loose + "/use.ts":        "import type { R } from \"../shared/r\";\nexport function fa(x: R): void {}\n",
+			"tsconfig.json":          `{"files": [], "references": [{"path": "./` + loose + `"}]}`,
+		}
+		if includeStrict {
+			files[strict+"/tsconfig.json"] = `{"compilerOptions": {"strict": true}, "include": ["**/*.ts", "../shared/**/*.ts"]}`
+			files[strict+"/use.ts"] = "import type { R } from \"../shared/r\";\nexport function fb(x: R): void {}\n"
+			files["tsconfig.json"] = `{"files": [], "references": [{"path": "./` + loose + `"}, {"path": "./` + strict + `"}]}`
 		}
 		root := t.TempDir()
 		snap, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{WorkspaceRoot: root, Files: writeWorkspace(t, root, files)})
@@ -368,8 +444,8 @@ func TestTypeFactsConflictAcrossConfigGroups(t *testing.T) {
 		}
 		return snap
 	}
-	looseFirst := build("a", "b")
-	strictFirst := build("c", "b")
+	looseFirst := build("a", "b", true)
+	strictFirst := build("c", "b", true)
 	x := newTypeIndex(t, looseFirst)
 	r := x.param("fa", 0)
 	if r.ID != x.fn("fb").ParameterTypes[0] || r.Name != "R" || len(r.Props) != 0 || !slices.Equal(r.Incomplete, []string{IncompleteConflict}) {
@@ -378,6 +454,10 @@ func TestTypeFactsConflictAcrossConfigGroups(t *testing.T) {
 	y := newTypeIndex(t, strictFirst)
 	if !reflect.DeepEqual(r, y.param("fa", 0)) {
 		t.Fatalf("the group order changed R:\n%+v\n%+v", r, y.param("fa", 0))
+	}
+	survivor := newTypeIndex(t, build("a", "b", false)).param("fa", 0)
+	if survivor.ID != r.ID || len(survivor.Props) != 1 || slices.Contains(survivor.Incomplete, IncompleteConflict) {
+		t.Fatalf("removing the conflicting context did not restore the surviving observation: %+v", survivor)
 	}
 }
 
@@ -425,7 +505,7 @@ func TestFunctionSignatureConflictsKeepCompleteObservations(t *testing.T) {
 			break
 		}
 	}
-	if declaration == nil || !slices.Contains(declaration.Incomplete, AssociationConflict) || len(declaration.TypeObservations) != 2 {
+	if declaration == nil || !slices.Contains(declaration.TypeIncomplete, DeclarationTypeUncertainty{Space: SpaceValue, Reason: AssociationConflict}) {
 		t.Fatalf("expected the exported declaration type conflict, got %+v", declaration)
 	}
 	for _, value := range declaration.Types {

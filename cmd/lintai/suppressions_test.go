@@ -1,286 +1,189 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
-	"context"
 	"encoding/json"
-	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/bigbizze/lintai/diagnostics"
-	"github.com/bigbizze/lintai/engine"
-	"github.com/bigbizze/lintai/jsonrpc"
-	"github.com/bigbizze/lintai/server"
 	"github.com/bigbizze/lintai/suppressions"
 )
 
-func TestSuppressionLifecycle(t *testing.T) {
-	repoRoot, err := filepath.Abs("../..")
+func suppressionFixture(t *testing.T, files map[string]string) (string, string, func(...string) (int, []diagnostics.Diagnostic)) {
+	t.Helper()
+	repo, err := filepath.Abs("../..")
 	if err != nil {
 		t.Fatal(err)
 	}
 	workspace := t.TempDir()
-	writeFiles(t, workspace, map[string]string{
-		"src/a.ts":                 "export async function first() { return 1; }\n",
-		"lintai-rules/no-async.ts": "import { dl, rule } from '@lintai/sdk';\nexport default rule('no-async').version(1).program(dl`Decl v(Fn). v(Fn) :- fn_async(Fn).`).report('v').message(() => 'no async');\n",
-	})
-	args := []string{"--json", "--workspace-root", workspace, "--repo-root", repoRoot}
-	check := func(want int, flags ...string) []diagnostics.Diagnostic {
+	writeFiles(t, workspace, files)
+	check := func(flags ...string) (int, []diagnostics.Diagnostic) {
 		t.Helper()
-		code, items := runCode(t, append(append([]string{}, args...), flags...))
-		if code != want {
-			t.Fatalf("flags %v: exit %d, want %d; %+v", flags, code, want, items)
-		}
-		return items
+		args := []string{"--json", "--repo-root", repo, "--workspace-root", workspace}
+		return runCode(t, append(args, flags...))
 	}
-	check(exitViolations)
-	check(exitClean, "--suppress-all")
-	check(exitClean)
-	file := filepath.Join(workspace, suppressions.DefaultFile)
-	t.Run("serve suppresses per-file diagnostics", func(t *testing.T) {
-		var input, output bytes.Buffer
-		for index, request := range []struct {
-			method string
-			params any
-		}{
-			{"initialize", server.InitializeParams{RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: workspace, RuleGlobs: []string{"lintai-rules/**/*.ts"}}},
-			{"diagnostics/file", server.FileDiagnosticsParams{File: "src/a.ts"}},
-		} {
-			payload, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": index + 1, "method": request.method, "params": request.params})
-			if err != nil {
-				t.Fatal(err)
-			}
-			fmt.Fprintf(&input, "Content-Length: %d\r\n\r\n%s", len(payload), payload)
-		}
-		if err := server.New(engine.New(newBackend())).Serve(context.Background(), &input, &output); err != nil {
-			t.Fatal(err)
-		}
-		reader := bufio.NewReader(&output)
-		for range 2 {
-			response, err := jsonrpc.ReadResponse(reader)
-			if err != nil || response.Error != nil {
-				t.Fatalf("response %+v: %v", response, err)
-			}
-			payload, err := json.Marshal(response.Result)
-			if err != nil {
-				t.Fatal(err)
-			}
-			var result struct {
-				Diagnostics []diagnostics.Diagnostic `json:"diagnostics"`
-			}
-			if err := json.Unmarshal(payload, &result); err != nil {
-				t.Fatal(err)
-			}
-			if len(result.Diagnostics) != 0 {
-				t.Fatalf("suppressed findings leaked: %+v", result.Diagnostics)
-			}
-		}
-	})
-	entries, err := suppressions.Load(file)
-	if err != nil || entries["src/a.ts"]["no-async"].Count != 1 {
-		t.Fatalf("recorded %+v: %v", entries, err)
+	return repo, workspace, check
+}
+func requireCode(t *testing.T, check func(...string) (int, []diagnostics.Diagnostic), want int, flags ...string) []diagnostics.Diagnostic {
+	t.Helper()
+	code, items := check(flags...)
+	if code != want {
+		t.Fatalf("%v: exit %d want %d: %+v", flags, code, want, items)
 	}
-	writeFiles(t, workspace, map[string]string{"src/a.ts": "export async function first() { return 1; }\nexport async function second() { return 2; }\n"})
-	check(exitViolations)
-	check(exitClean, "--suppress-all")
-	writeFiles(t, workspace, map[string]string{"src/a.ts": "export async function first() { return 1; }\n"})
-	items := check(exitUsage)
-	if len(items) != 1 || items[0].DiagnosticKind != diagnostics.KindUnusedSuppression {
-		t.Fatalf("unused output: %+v", items)
-	}
-	check(exitClean, "--pass-on-unpruned-suppressions")
-	check(exitClean, "--exclude", "src/**")
-	check(exitClean, "--severity", "no-async=warning")
-	check(exitClean, "--prune-suppressions")
-	check(exitClean)
-	writeFiles(t, workspace, map[string]string{"src/a.ts": "export function first() { return 1; }\n"})
-	check(exitUsage)
-	check(exitClean, "--prune-suppressions")
-	entries, err = suppressions.Load(file)
-	if err != nil || len(entries) != 0 {
-		t.Fatalf("empty entries not removed: %+v %v", entries, err)
-	}
+	return items
 }
 
-func TestSuppressionLockLimits(t *testing.T) {
-	repoRoot, err := filepath.Abs("../..")
-	if err != nil {
-		t.Fatal(err)
+// V25, V32, V34, V35, V38: configured rule selection, real TypeScript keys,
+// null-key counted duplicates, independent assertions, excluded-file prune
+// coverage and whole-group fail-closed matching.
+func TestSuppressionTrackingAndCounts(t *testing.T) {
+	rule := `import { dl, rule } from '@lintai/sdk';
+export default rule('sample').version(1).program(dl`
+	rule += "`" + `Decl named(Fn). Decl calls(Site). Decl other(Site).
+named(Fn) :- ts.fn_async(Fn). calls(Site) :- ts.call_site(Site), ts.site(Site, File), lintai.glob(File, "src/**"). other(Site) :- ts.call_site(Site), ts.site(Site, File), lintai.glob(File, "src/**").` + "`" + `).report('named','calls','other').message(() => 'violation');`
+	_, workspace, runCheck := suppressionFixture(t, map[string]string{"src/a.ts": "declare function work(): void;\nexport async function first() { work(); work(); }\n", "policy/sample.ts": rule})
+	check := func(flags ...string) (int, []diagnostics.Diagnostic) {
+		return runCheck(append([]string{"--rules", "policy/**/*.ts"}, flags...)...)
 	}
-	workspace := t.TempDir()
-	writeFiles(t, workspace, map[string]string{
-		"src/a.ts":                 "export async function first() { return 1; }\n",
-		"lintai-rules/no-async.ts": "import { dl, rule } from '@lintai/sdk';\nexport default rule('no-async').version(1).program(dl`Decl v(Fn). v(Fn) :- fn_async(Fn).`).report('v').message(() => 'no async');\n",
-	})
-	args := []string{"--json", "--workspace-root", workspace, "--repo-root", repoRoot}
-	if code, items := runCode(t, append(append([]string{}, args...), "--suppress-all")); code != exitClean {
-		t.Fatalf("record: %d %+v", code, items)
-	}
-	if code, _ := runCode(t, []string{"lock", "--workspace-root", workspace, "--repo-root", repoRoot}); code != exitClean {
-		t.Fatal(code)
-	}
-	lock, err := engine.ReadRulesLock(filepath.Join(workspace, engine.DefaultRulesLockFile))
-	if err != nil || lock.Version != 2 || lock.Suppressions.Entries() != 1 {
-		t.Fatalf("lock %+v %v", lock, err)
-	}
-	args = append(args, "--rules-lock", engine.DefaultRulesLockFile)
-	file := filepath.Join(workspace, suppressions.DefaultFile)
-	entries, err := suppressions.Load(file)
-	if err != nil {
-		t.Fatal(err)
-	}
-	entry := entries["src/a.ts"]["no-async"]
-	entry.Count++
-	for key := range entry.Entities {
-		entry.Entities[key]++
-	}
-	entries["src/a.ts"]["no-async"] = entry
-	if err := suppressions.Write(file, entries); err != nil {
-		t.Fatal(err)
-	}
-	code, items := runCode(t, args)
-	if code != exitRuleError {
-		t.Fatalf("increased allowance: %d %+v", code, items)
-	}
-	found := false
-	for _, item := range items {
-		if item.Phase == "integrity" {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("missing integrity failure: %+v", items)
-	}
-	if err := suppressions.Write(file, suppressions.File{}); err != nil {
-		t.Fatal(err)
-	}
-	if code, items := runCode(t, args); code != exitViolations {
-		t.Fatalf("removed allowance should be allowed: %d %+v", code, items)
-	}
-	lock.Version = 1
-	lock.Suppressions = nil
-	if err := engine.WriteRulesLock(filepath.Join(workspace, engine.DefaultRulesLockFile), lock); err != nil {
-		t.Fatal(err)
-	}
-	if code, items := runCode(t, args); code != exitViolations {
-		t.Fatalf("v1 compatibility: %d %+v", code, items)
-	}
-	if err := suppressions.Write(file, entries); err != nil {
-		t.Fatal(err)
-	}
-	if code, items := runCode(t, args); code != exitRuleError {
-		t.Fatalf("v1 must reject unapproved suppressions: %d %+v", code, items)
-	}
-}
-
-func TestSuppressionWritesRefusedForBrokenRules(t *testing.T) {
-	repoRoot, err := filepath.Abs("../..")
-	if err != nil {
-		t.Fatal(err)
-	}
-	workspace := t.TempDir()
-	const content = "{\"src/a.ts\":{\"broken\":{\"count\":2}}}\n"
-	writeFiles(t, workspace, map[string]string{
-		"src/a.ts":               "export const value = 1;\n",
-		"lintai-rules/broken.ts": "import { dl, rule } from '@lintai/sdk';\nexport default rule('broken').version(1).program(dl`Decl v(Fn). v(Fn) :- missing(Fn).`).report('v').message(() => 'broken');\n",
-		suppressions.DefaultFile: content,
-	})
-	for _, flags := range [][]string{{"--suppress-all"}, {"--suppress-rule", "broken"}, {"--prune-suppressions"}} {
-		args := append([]string{"--json", "--workspace-root", workspace, "--repo-root", repoRoot}, flags...)
-		code, items := runCode(t, args)
-		if code != exitRuleError {
-			t.Fatalf("%v: exit %d %+v", flags, code, items)
-		}
-		data, err := os.ReadFile(filepath.Join(workspace, suppressions.DefaultFile))
-		if err != nil || string(data) != content {
-			t.Fatalf("%v changed suppressions: %s %v", flags, data, err)
-		}
-	}
-}
-
-func TestSuppressionsRespectFileAndRuleSelection(t *testing.T) {
-	repoRoot, err := filepath.Abs("../..")
-	if err != nil {
-		t.Fatal(err)
-	}
-	workspace := t.TempDir()
-	writeFiles(t, workspace, map[string]string{
-		"src/a.ts":                 "export const a = 1;\n",
-		"src/b.ts":                 "export const b = 1;\n",
-		"tsconfig.json":            `{"files":["src/a.ts"]}`,
-		"lintai-rules/no-async.ts": "import { dl, rule } from '@lintai/sdk';\nexport default rule('no-async').version(1).program(dl`Decl v(Fn). v(Fn) :- fn_async(Fn).`).report('v').message(() => 'no async');\n",
-		suppressions.DefaultFile:   `{"src/b.ts":{"no-async":{"count":1}},"src/a.ts":{"unselected":{"count":1}}}`,
-	})
-	args := []string{"--json", "--workspace-root", workspace, "--repo-root", repoRoot, "--rules", "lintai-rules/no-async.ts"}
-	if code, items := runCode(t, args); code != exitClean {
-		t.Fatalf("scoped run: %d %+v", code, items)
-	}
-	if code, items := runCode(t, append(append([]string{}, args...), "--files", "walk")); code != exitUsage {
-		t.Fatalf("walk run: %d %+v", code, items)
-	}
-	if code, items := runCode(t, append(append([]string{}, args...), "--prune-suppressions")); code != exitClean {
-		t.Fatalf("scoped prune: %d %+v", code, items)
-	}
+	requireCode(t, check, exitClean, "--suppress-all")
 	file, err := suppressions.Load(filepath.Join(workspace, suppressions.DefaultFile))
-	if err != nil || file.Entries() != 2 {
-		t.Fatalf("scoped entries lost: %+v %v", file, err)
-	}
-}
-
-func TestSuppressionUsageErrors(t *testing.T) {
-	repoRoot, err := filepath.Abs("../..")
 	if err != nil {
 		t.Fatal(err)
 	}
-	workspace := t.TempDir()
-	for _, flags := range [][]string{
-		{"--suppress-all", "--suppress-rule", "example"},
-		{"--suppress-all", "--prune-suppressions"},
-		{"--suppress-rule", "example", "--prune-suppressions"},
-		{"--suppressions-location", "missing.json"},
-		{"--suppressions-location", "missing.json", "--prune-suppressions"},
-	} {
-		code, items := runCode(t, append([]string{"--json", "--repo-root", repoRoot, "--workspace-root", workspace}, flags...))
-		if code != exitUsage {
-			t.Fatalf("%v: %d %+v", flags, code, items)
-		}
+	if len(file) != 3 {
+		t.Fatalf("assertions did not get separate entries: %+v", file)
 	}
-	if code, _ := runCode(t, []string{"lock", "--repo-root", repoRoot, "--workspace-root", workspace, "--suppressions-location", "missing.json"}); code != exitUsage {
-		t.Fatalf("lock with missing suppressions file: %d", code)
-	}
-	if _, err := os.Stat(filepath.Join(workspace, engine.DefaultRulesLockFile)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("lock written for missing suppressions file: %v", err)
-	}
-}
-
-func TestUnknownSuppressRuleWritesNothing(t *testing.T) {
-	repoRoot, err := filepath.Abs("../..")
+	writeFiles(t, workspace, map[string]string{"src/a.ts": "declare function work(): void;\nexport function first() { work(); work(); }\n"})
+	requireCode(t, check, exitViolations, "--suppress-rule", "sample")
+	retained, err := suppressions.Load(filepath.Join(workspace, suppressions.DefaultFile))
 	if err != nil {
 		t.Fatal(err)
 	}
-	workspace := t.TempDir()
-	writeFiles(t, workspace, map[string]string{
-		"src/a.ts":                 "export async function first() { return 1; }\n",
-		"lintai-rules/no-async.ts": "import { dl, rule } from '@lintai/sdk';\nexport default rule('no-async').version(1).program(dl`Decl v(Fn). v(Fn) :- fn_async(Fn).`).report('v').message(() => 'no async');\n",
-	})
-	code, items := runCode(t, []string{"--json", "--workspace-root", workspace, "--repo-root", repoRoot, "--suppress-rule", "no-async", "--suppress-rule", "no-asnyc"})
-	if code != exitRuleError {
-		t.Fatalf("exit %d %+v", code, items)
+	foundNamed := false
+	for _, entry := range retained {
+		foundNamed = foundNamed || entry.Assertion.Name == "named"
 	}
-	found := false
-	for _, item := range items {
-		if item.RuleID == "no-asnyc" && item.Phase == "config" {
-			found = true
+	if !foundNamed {
+		t.Fatal("re-recording removed an entry with no findings")
+	}
+	writeFiles(t, workspace, map[string]string{"src/a.ts": "declare function work(): void;\nexport async function first() { const x = 3; work(); work(); }\n"})
+	requireCode(t, check, exitClean)
+	writeFiles(t, workspace, map[string]string{"src/a.ts": "declare function work(): void; declare function alternate(): void;\nexport async function first() { work(); alternate(); }\n"})
+	requireCode(t, check, exitClean)
+	writeFiles(t, workspace, map[string]string{"src/a.ts": "declare function work(): void;\nexport async function first() { work(); }\n"})
+	items := requireCode(t, check, exitViolations)
+	if len(items) != 2 {
+		t.Fatalf("want two unused counts: %+v", items)
+	}
+	path := filepath.Join(workspace, suppressions.DefaultFile)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireCode(t, check, exitClean, "--exclude", "src/a.ts", "--prune-suppressions")
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("excluded file granted prune authority: %v", err)
+	}
+	requireCode(t, check, exitClean, "--prune-suppressions")
+	writeFiles(t, workspace, map[string]string{"src/a.ts": "declare function work(): void;\nexport async function first() { work(); work(); work(); }\n"})
+	items = requireCode(t, check, exitViolations)
+	if len(items) != 6 {
+		t.Fatalf("both over-limit groups must report all findings: %+v", items)
+	}
+	writeFiles(t, workspace, map[string]string{"src/a.ts": "declare function work(): void;\nexport async function renamed() { work(); }\n"})
+	items = requireCode(t, check, exitViolations)
+	if len(items) != 2 {
+		t.Fatalf("renamed function should reopen and leave unused approval: %+v", items)
+	}
+}
+
+// V35, V37, V38, V39: saved reason policy mismatch, replacement, preserved
+// entry failure, and approval before an atomic suppression write.
+func TestSuppressionReasonsReplacementAndLock(t *testing.T) {
+	makeRule := func(id, column, reason string) string {
+		return "import { dl, rule } from '@lintai/sdk';\nexport default rule('" + id + "').version(1).program(dl`Decl v(Fn, " + column + "). v(Fn, /" + reason + ") :- ts.fn_async(Fn).`).report('v').suppression('v', { by: ['" + column + "'] }).message(() => 'violation');\n"
+	}
+	repo, workspace, check := suppressionFixture(t, map[string]string{"src/a.ts": "export async function first() {}\n", "lintai-rules/a.ts": makeRule("a", "Reason", "clock"), "lintai-rules/b.ts": makeRule("b", "Reason", "clock")})
+	requireCode(t, check, exitClean, "--suppress-all")
+	path := filepath.Join(workspace, suppressions.DefaultFile)
+	original, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFiles(t, workspace, map[string]string{"lintai-rules/a.ts": makeRule("a", "Why", "clock")})
+	requireCode(t, check, exitUsage)
+	requireCode(t, check, exitUsage, "--suppress-rule", "b")
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(after, original) {
+		t.Fatalf("preserved mismatch changed file: %v", err)
+	}
+	requireCode(t, check, exitClean, "--suppress-rule", "a")
+	requireCode(t, check, exitClean)
+	encoded, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved map[string]any
+	if err := json.Unmarshal(encoded, &saved); err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range saved["entries"].([]any) {
+		entry := raw.(map[string]any)
+		if entry["rule"] != "a" {
+			continue
 		}
+		group := entry["groups"].([]any)[0].(map[string]any)
+		reason := group["reasons"].([]any)[0].([]any)
+		reason[1].([]any)[0] = "unsupported"
 	}
-	if !found {
-		t.Fatalf("unknown rule not reported: %+v", items)
+	encoded, err = json.Marshal(saved)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(workspace, suppressions.DefaultFile)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("suppressions written with an unknown rule: %v", err)
+	if err := os.WriteFile(path, encoded, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	requireCode(t, check, exitUsage)
+	requireCode(t, check, exitClean, "--suppress-rule", "a")
+	writeFiles(t, workspace, map[string]string{"lintai-rules/a.ts": makeRule("a", "Why", "network")})
+	requireCode(t, check, exitViolations)
+	requireCode(t, check, exitClean, "--suppress-rule", "a")
+	code, _ := runCode(t, []string{"lock", "--repo-root", repo, "--workspace-root", workspace})
+	if code != exitClean {
+		t.Fatalf("lock exit %d", code)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFiles(t, workspace, map[string]string{"src/a.ts": "export async function first() {}\nexport async function second() {}\n"})
+	requireCode(t, check, exitRuleError, "--rules-lock", "lintai-rules.lock.json", "--suppress-all")
+	after, err = os.ReadFile(path)
+	if err != nil || !bytes.Equal(after, before) {
+		t.Fatalf("unapproved proposal changed file: %v", err)
+	}
+	requireCode(t, check, exitClean, "--suppress-all")
+	code, _ = runCode(t, []string{"lock", "--repo-root", repo, "--workspace-root", workspace})
+	if code != exitClean {
+		t.Fatalf("lock exit %d", code)
+	}
+	requireCode(t, check, exitClean, "--rules-lock", "lintai-rules.lock.json")
+}
+
+// V32, V33: literal import subject keys survive binding edits but reopen
+// when the specifier changes, through the complete reporting path.
+func TestSuppressionImportSubject(t *testing.T) {
+	rule := "import { dl, rule } from '@lintai/sdk';\nexport default rule('imports').version(1).program(dl`Decl v(Site). v(Site) :- ts.import_form(Site, /static), ts.site(Site, File), lintai.glob(File, \"src/**\").`).report('v').message(() => 'import');\n"
+	_, workspace, check := suppressionFixture(t, map[string]string{"src/a.ts": `import { one, two } from "example-package";` + "\n", "lintai-rules/imports.ts": rule})
+	requireCode(t, check, exitClean, "--suppress-all")
+	writeFiles(t, workspace, map[string]string{"src/a.ts": `import { two, one } from "example-package";` + "\n"})
+	requireCode(t, check, exitClean)
+	writeFiles(t, workspace, map[string]string{"src/a.ts": `import { two, one } from "other-package";` + "\n"})
+	items := requireCode(t, check, exitViolations)
+	if len(items) != 2 {
+		t.Fatalf("changed import did not reopen: %+v", items)
 	}
 }

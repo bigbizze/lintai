@@ -45,9 +45,9 @@ type EntityIdentity struct {
 }
 
 type Provenance struct {
-	SnapshotVersion string `json:"snapshot_version"`
-	RuleVersion     int    `json:"rule_version"`
-	BackendID       string `json:"backend_id"`
+	SnapshotVersion    string   `json:"snapshot_version"`
+	RuleVersion        int      `json:"rule_version"`
+	ProducerNamespaces []string `json:"producer_namespaces,omitempty"`
 }
 
 type Diagnostic struct {

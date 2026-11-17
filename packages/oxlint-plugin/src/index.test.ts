@@ -1,11 +1,12 @@
 import { deepEqual } from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { after, describe, it } from "node:test";
 
 import { rules as authoringRules } from "@lintai/authoring-rules";
 import {
+	type Diagnostic,
 	createFramedResponse,
 	createTestDependencies,
 	createTestProcess,
@@ -13,7 +14,6 @@ import {
 	loadRuleIds,
 	resetClientsForTest,
 	resolveBridgeOptions,
-	type Diagnostic,
 } from "@lintai/client";
 import { RuleTester as ESLintRuleTester } from "eslint";
 import { RuleTester } from "oxlint/plugins-dev";
@@ -54,24 +54,53 @@ const violation: Diagnostic = {
 };
 const diagnostics = [ruleError, violation];
 const problem = "[lintai] rule arch.broken could not run (phase program_parse): parse error";
-const loadError = "[lintai] rule file lintai-rules/typo.ts could not be loaded: Unexpected end of file";
-const violationError = { message: "[arch.no-async/violation] functions must not be async", line: 3, column: 8, endLine: 3, endColumn: 29 };
+const loadError =
+	"[lintai] rule file lintai-rules/typo.ts could not be loaded: Unexpected end of file";
+const violationError = {
+	message: "[arch.no-async/violation] functions must not be async",
+	line: 3,
+	column: 8,
+	endLine: 3,
+	endColumn: 29,
+};
 const problemError = { message: problem, line: 1, column: 1 };
 const loadErrorReport = { message: loadError, line: 1, column: 1 };
 
 const bridge = { binary: "/tmp/lintai", workspaceRoot: workspace, repoRoot: workspace };
 
+// V25, V31: policy findings and worker options agree with the CLI contract.
 it("unused suppressions report through analysis rather than the generated rule", () => {
 	resetClientsForTest();
-	const options = { ...bridge, mode: "oneshot" as const };
+	const options = { ...bridge, mode: "oneshot" as const, ruleWorkers: 2 };
 	const resolved = resolveBridgeOptions(options, process.cwd(), oxlintHostDefaults());
-	const unused = { ...violation, diagnostic_kind: "unused_suppression", message: "unused suppression" };
-	const dependencies = createTestDependencies({ spawnSync: (_binary, args) => ({ status: args[0] === "rules" ? 0 : 2, stderr: "", stdout: JSON.stringify(args[0] === "rules" ? { rules: [{ id: "arch.no-async", path: "rule.ts" }], errors: [] } : [unused]) }) });
+	const unused = {
+		...violation,
+		diagnostic_kind: "unused_suppression",
+		message: "unused suppression",
+	};
+	const dependencies = createTestDependencies({
+		spawnSync: (_binary, args) => {
+			if (args[0] !== "rules") deepEqual(args[args.indexOf("--rule-workers") + 1], "2");
+			return {
+				status: args[0] === "rules" ? 0 : 1,
+				stderr: "",
+				stdout: JSON.stringify(
+					args[0] === "rules"
+						? { rules: [{ id: "arch.no-async", path: "rule.ts" }], errors: [] }
+						: [unused],
+				),
+			};
+		},
+	});
 	loadRuleIds(resolved, dependencies);
 	getClient(resolved, dependencies);
 	const plugin = createLintaiPlugin(options);
 	const messages: string[] = [];
-	const context = { physicalFilename: path.join(workspace, "src/a.ts"), sourceCode: { text: savedText }, report: (report: { message: string }) => messages.push(report.message) };
+	const context = {
+		physicalFilename: path.join(workspace, "src/a.ts"),
+		sourceCode: { text: savedText },
+		report: (report: { message: string }) => messages.push(report.message),
+	};
 	plugin.rules["arch.no-async"]?.create(context).Program();
 	deepEqual(messages, []);
 	plugin.rules.analysis?.create(context).Program();
@@ -108,7 +137,7 @@ function withHost(argv: string[], fresh: boolean) {
 								error: undefined,
 								status: 0,
 							}
-						: { stdout: JSON.stringify(diagnostics), stderr: "", error: undefined, status: 1 },
+						: { stdout: JSON.stringify(diagnostics), stderr: "", error: undefined, status: 3 },
 				spawnServe: () => createTestProcess(),
 				readServeSync: () =>
 					createFramedResponse({
@@ -137,7 +166,10 @@ function rulesFor(argv: string[]) {
 	try {
 		withHost(argv, true).before();
 		const plugin = createLintaiPlugin(bridge);
-		return { analysis: plugin.rules.analysis as never, noAsync: plugin.rules["arch.no-async"] as never };
+		return {
+			analysis: plugin.rules.analysis as never,
+			noAsync: plugin.rules["arch.no-async"] as never,
+		};
 	} finally {
 		process.argv = previous;
 	}
@@ -261,7 +293,14 @@ tester.run("analysis (oxlint --lsp, serve)", lsp.analysis, {
 			code: "export const changed = true;\n",
 			filename: path.join(workspace, "src", "a.ts"),
 			...withHost(lspArgv, false),
-			errors: [{ message: "[lintai] lintai checks saved files. Save this file to update its lintai diagnostics.", line: 1, column: 1 }],
+			errors: [
+				{
+					message:
+						"[lintai] lintai checks saved files. Save this file to update its lintai diagnostics.",
+					line: 1,
+					column: 1,
+				},
+			],
 		},
 	],
 });
@@ -293,8 +332,8 @@ type AuthoringCases = {
 	invalid: Array<{ code: string; errors: Array<{ message: string }> }>;
 };
 
-const ruleShape = `import { rule } from "@lintai/sdk";
-export default rule("arch.x").version(1).program(() => "").report(() => []).message(() => "x");
+const ruleShape = `import { dl, rule } from "@lintai/sdk";
+export default rule("arch.x").version(1).program(dl\`Decl violation(Fn). violation(Fn) :- ts.fn_async(Fn).\`).report("violation").message(() => "x");
 `;
 
 const authoringCases: Record<keyof typeof authoringRules, AuthoringCases> = {
@@ -339,25 +378,21 @@ const authoringCases: Record<keyof typeof authoringRules, AuthoringCases> = {
 		valid: [ruleShape],
 		invalid: [
 			{
-				code: `export default rule("arch.x").version(1).program(() => "").report(() => []);`,
+				code: ruleShape.replace('.message(() => "x")', ""),
 				errors: [{ message: "Rule default export must include .message(" }],
-			},
-			{
-				code: ruleShape.replace(".message(", ".assert(() => true).message("),
-				errors: [
-					{
-						message:
-							"Rule default export must not use .assert(); write the rule as a Datalog program with .program() and .report()",
-					},
-				],
 			},
 		],
 	},
 };
 
 const authoringPlugin = createLintaiPlugin({ rules: [] });
-const oxlintAuthoring = new RuleTester({ eslintCompat: true, languageOptions: { sourceType: "module" } });
-const eslintAuthoring = new ESLintRuleTester({ languageOptions: { sourceType: "module", ecmaVersion: "latest" } });
+const oxlintAuthoring = new RuleTester({
+	eslintCompat: true,
+	languageOptions: { sourceType: "module" },
+});
+const eslintAuthoring = new ESLintRuleTester({
+	languageOptions: { sourceType: "module", ecmaVersion: "latest" },
+});
 for (const [name, cases] of Object.entries(authoringCases)) {
 	const rule = authoringRules[name as keyof typeof authoringRules];
 	oxlintAuthoring.run(`oxlint ${name}`, authoringPlugin.rules[name] as never, cases);

@@ -2,8 +2,12 @@ package typescript
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -11,8 +15,200 @@ import (
 	"github.com/bigbizze/lintai/backend"
 	"github.com/bigbizze/lintai/engine"
 	"github.com/bigbizze/lintai/facts"
-	"github.com/bigbizze/lintai/internal/analysis"
+	"github.com/bigbizze/lintai/internal/ambient"
+	"github.com/bigbizze/lintai/internal/tsgo/lintaiapi"
+	"github.com/bigbizze/lintai/internal/workspace"
 )
+
+func hasSnapshotInput(snapshot *lintaiapi.Snapshot, path string) bool {
+	return slices.ContainsFunc(snapshot.Inputs, func(input lintaiapi.SnapshotInput) bool { return input.Path == path })
+}
+
+func hasGenerationWatchHint(generation *producerGeneration, path string) bool {
+	return slices.Contains(generation.watchHints, filepath.ToSlash(path))
+}
+
+// Inspect the retained producer generation after collecting and validating the
+// complete public relation set. Observation tests use its local projection.
+func (b *Backend) buildTestGeneration(ctx context.Context, repoRoot, workspaceRoot string) (*producerGeneration, error) {
+	description, err := b.Describe()
+	if err != nil {
+		return nil, err
+	}
+	predicates := make([]facts.Predicate, 0, len(description.BaseRelations))
+	for _, relation := range description.BaseRelations {
+		predicates = append(predicates, relation.Predicate)
+	}
+	batch, err := b.Collect(ctx, backend.CollectionRequest{RepoRoot: repoRoot, WorkspaceRoot: workspaceRoot, Predicates: predicates})
+	if err != nil {
+		return nil, err
+	}
+	if _, err := facts.ValidateBatch(description, predicates, batch); err != nil {
+		return nil, err
+	}
+	return b.current, nil
+}
+
+func (b *Backend) buildLintaiSnapshot(ctx context.Context, repoRoot, workspaceRoot string) (*lintaiapi.Snapshot, []ambient.Source, string, error) {
+	var stats validationStats
+	generation, sources, err := b.extractSnapshot(ctx, workspaceRoot, nil, nil, &stats)
+	if err != nil {
+		return nil, nil, "", err
+	}
+	return generation.snapshot, sources, generation.inputRevision, nil
+}
+
+// V04, V09, V10: relation demand must preserve rows and eligible reporting
+// support from a full collection, including metadata-only collection.
+func TestRequestedRelationsMatchFullCollection(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "src/main.ts", `
+import { helper } from "./other";
+export { external } from "../dist/generated";
+export type Result = { value: string };
+export function calculate(value: Result): Result { return value; }
+export function choose(value: true | "ready"): true | "ready" { return value; }
+calculate({ value: helper("ok") });
+`)
+	writeWorkspaceFile(t, root, "src/other.ts", `export function helper(value: string): string { return value; }`)
+	writeWorkspaceFile(t, root, "dist/generated.d.ts", "export declare function external(): void;\n//# sourceMappingURL=generated.d.ts.map\n")
+	writeWorkspaceFile(t, root, "dist/generated.d.ts.map", `{"version":3,"file":"generated.d.ts","sources":["../source.ts"],"names":[],"mappings":"AAAA"}`)
+	writeWorkspaceFile(t, root, "source.ts", `export function external(): void {}`)
+	producer := New(Options{Files: FileScopeWalk})
+	description, err := producer.Describe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := make(map[string]facts.RelationDescription)
+	all := make([]facts.Predicate, 0, len(description.BaseRelations))
+	for _, relation := range description.BaseRelations {
+		byName[relation.Predicate.Name] = relation
+		all = append(all, relation.Predicate)
+	}
+	if byName["ts.import_package"].Arguments[1].Name != "Package" {
+		t.Fatal("import_package catalog argument does not match Appendix A")
+	}
+	collect := func(predicates []facts.Predicate) facts.Batch {
+		t.Helper()
+		batch, err := producer.Collect(context.Background(), backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: root, Predicates: predicates})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := facts.ValidateBatch(description, predicates, batch); err != nil {
+			t.Fatal(err)
+		}
+		return batch
+	}
+	full := collect(all)
+	fnKind := byName["ts.fn_kind"].Predicate
+	if len(full.Relations[fnKind]) == 0 {
+		t.Fatal("fixture did not produce a function kind")
+	}
+	invalidKind := slices.Clone(full.Relations[fnKind][0])
+	invalidKind[1] = facts.Name("not_a_function_kind")
+	invalidBatch := facts.Batch{
+		Relations: map[facts.Predicate][]facts.Row{fnKind: {invalidKind}},
+		Anchors:   map[string]facts.AnchorSupport{invalidKind[0].String: full.Anchors[invalidKind[0].String]},
+	}
+	if _, err := facts.ValidateBatch(description, []facts.Predicate{fnKind}, invalidBatch); err == nil || !strings.Contains(err.Error(), "/not_a_function_kind") {
+		t.Fatalf("expected unaccepted function kind to be rejected, got %v", err)
+	}
+	var stringLiteral, booleanLiteral bool
+	for _, row := range full.Relations[byName["ts.type_literal"].Predicate] {
+		stringLiteral = stringLiteral || row[1] == facts.Name("string") && row[2] == facts.String("ready")
+		booleanLiteral = booleanLiteral || row[1] == facts.Name("boolean") && row[2] == facts.Name("true")
+	}
+	if !stringLiteral || !booleanLiteral {
+		t.Fatalf("fixture did not validate string and boolean literal values: %v", full.Relations[byName["ts.type_literal"].Predicate])
+	}
+	var calculate, signature, namedType string
+	for _, row := range full.Relations[byName["ts.fn"].Predicate] {
+		if row[2].String == "calculate" {
+			calculate = row[0].String
+		}
+	}
+	for _, row := range full.Relations[byName["ts.fn_signature"].Predicate] {
+		if row[0].String == calculate {
+			signature = row[1].String
+		}
+	}
+	for _, row := range full.Relations[byName["ts.type_named"].Predicate] {
+		if row[2].String == "Result" {
+			namedType = row[0].String
+		}
+	}
+	for _, item := range []struct{ id, category, name, preview string }{
+		{signature, "signature", "calculate", "export function calculate"},
+		{namedType, "type", "Result", "export type Result"},
+	} {
+		support, ok := full.Anchors[item.id]
+		if item.id == "" || !ok || support.Tracking != nil || !strings.Contains(support.Description, item.category) || !strings.Contains(support.Description, item.name) || !strings.Contains(support.Description, item.preview) {
+			t.Errorf("%s source description or null key missing: %+v", item.category, support)
+		}
+	}
+	rowSet := func(rows []facts.Row) map[string]bool {
+		result := make(map[string]bool, len(rows))
+		for _, row := range rows {
+			result[fmt.Sprintf("%#v", row)] = true
+		}
+		return result
+	}
+	selections := [][]string{
+		{"ts.module"},
+		{"ts.declaration", "ts.declaration_origin"},
+		{"ts.module_export", "ts.export_incomplete"},
+		{"ts.call_declaration", "ts.call_declaration_incomplete"},
+		{"ts.fn_signature", "ts.signature_param", "ts.signature_returns", "ts.declaration_type"},
+		{"ts.type_kind", "ts.type_display"},
+	}
+	for _, relation := range description.BaseRelations {
+		selections = append(selections, []string{relation.Predicate.Name})
+	}
+	for _, names := range selections {
+		predicates := make([]facts.Predicate, len(names))
+		for i, name := range names {
+			predicates[i] = byName[name].Predicate
+		}
+		selected := collect(predicates)
+		for _, predicate := range predicates {
+			if !reflect.DeepEqual(rowSet(selected.Relations[predicate]), rowSet(full.Relations[predicate])) {
+				t.Errorf("%s rows differ: selected=%v full=%v", predicate, selected.Relations[predicate], full.Relations[predicate])
+			}
+			for _, row := range selected.Relations[predicate] {
+				for index, argument := range byName[predicate.Name].Arguments {
+					if argument.ReportSupport == facts.ReportNone {
+						continue
+					}
+					id := row[index].String
+					got, gotOK := selected.Anchors[id]
+					want, wantOK := full.Anchors[id]
+					if gotOK != wantOK || !reflect.DeepEqual(got, want) {
+						t.Errorf("%s support for %q differs: selected=%+v/%t full=%+v/%t", predicate, id, got, gotOK, want, wantOK)
+					}
+				}
+			}
+		}
+	}
+	// V04, V20, V36, V40: demand is order-independent, the retained
+	// generation is reused, and returned support cannot mutate its cache.
+	requested := []facts.Predicate{byName["ts.fn"].Predicate, byName["ts.site_owner"].Predicate}
+	first := collect(requested)
+	generation := producer.current
+	baseline := collect([]facts.Predicate{requested[1], requested[0]})
+	if producer.current != generation {
+		t.Fatal("reordered unchanged demand rebuilt the producer generation")
+	}
+	if len(first.Relations[requested[0]]) == 0 || first.Anchors[calculate].Tracking == nil {
+		t.Fatal("fixture did not produce a tracked function")
+	}
+	first.Relations[requested[0]][0][0].String = "changed by caller"
+	first.Anchors[calculate].Tracking.Data.(map[string]any)["subject"].([]any)[0] = "changed by caller"
+	first.Scope.(map[string]any)["primary"].([]string)[0] = "changed by caller"
+	after := collect(requested)
+	if producer.current != generation || !reflect.DeepEqual(after, baseline) {
+		t.Fatal("caller mutation changed the retained producer generation")
+	}
+}
 
 func TestBuildSnapshotExposesStableFunctionKeysAndCalls(t *testing.T) {
 	repoRoot, err := filepath.Abs("../..")
@@ -21,7 +217,7 @@ func TestBuildSnapshotExposesStableFunctionKeysAndCalls(t *testing.T) {
 	}
 	workspaceRoot := filepath.Join(repoRoot, "testdata/fixtures/workspace")
 
-	snapshot, err := New().buildAnalysisSnapshot(context.Background(), repoRoot, workspaceRoot, backend.SnapshotOptions{})
+	snapshot, _, _, err := New(Options{}).buildLintaiSnapshot(context.Background(), repoRoot, workspaceRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,12 +237,255 @@ func TestBuildSnapshotExposesStableFunctionKeysAndCalls(t *testing.T) {
 	}
 }
 
+func TestTwoTypeScriptProducersKeepConstructionSettingsIndependent(t *testing.T) {
+	// R1 API fixture: two TypeScript producer instances use separate file
+	// scopes through the public producer contract, without shared settings.
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "tsconfig.json", `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler"},"files":["src/one.ts"]}`)
+	writeWorkspaceFile(t, root, "src/one.ts", "export const one = 1;\n")
+	writeWorkspaceFile(t, root, "src/two.ts", "export const two = 2;\n")
+
+	collectModules := func(producer *Backend) []string {
+		t.Helper()
+		description, err := producer.Describe()
+		if err != nil {
+			t.Fatal(err)
+		}
+		requested := make([]facts.Predicate, len(description.BaseRelations))
+		for index, relation := range description.BaseRelations {
+			requested[index] = relation.Predicate
+		}
+		batch, err := producer.Collect(context.Background(), backend.CollectionRequest{
+			RepoRoot: root, WorkspaceRoot: root, Predicates: requested,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		validated, err := facts.ValidateBatch(description, requested, batch)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var result []string
+		for _, row := range validated.Rows(facts.Predicate{Name: "ts.module", Arity: 1}) {
+			result = append(result, row[0].String)
+		}
+		slices.Sort(result)
+		return result
+	}
+
+	tsconfigProducer := New(Options{Files: FileScopeTsconfig})
+	walkProducer := New(Options{Files: FileScopeWalk})
+	if got := collectModules(tsconfigProducer); !slices.Equal(got, []string{"ts:module:src/one.ts"}) {
+		t.Fatalf("tsconfig producer modules = %v", got)
+	}
+	generation := tsconfigProducer.current
+	if got := collectModules(walkProducer); !slices.Equal(got, []string{"ts:module:src/one.ts", "ts:module:src/two.ts"}) {
+		t.Fatalf("walk producer modules = %v", got)
+	}
+	if got := collectModules(tsconfigProducer); !slices.Equal(got, []string{"ts:module:src/one.ts"}) {
+		t.Fatalf("second producer changed the first producer's settings: %v", got)
+	}
+	if tsconfigProducer.current != generation {
+		t.Fatal("V20: unchanged producer generation was extracted again")
+	}
+	writeWorkspaceFile(t, root, "src/one.ts", "export const one = 2;\n")
+	collectModules(tsconfigProducer)
+	if tsconfigProducer.current == generation {
+		t.Fatal("V18: changed content did not replace the producer generation")
+	}
+	if foo, prefixedFoo := producerEntityID("foo.ts"), producerEntityID("ts:foo.ts"); foo == prefixedFoo || foo != "ts:foo.ts" || prefixedFoo != "ts:ts:foo.ts" {
+		t.Fatalf("producer-local entity IDs are not uniquely namespaced: %q and %q", foo, prefixedFoo)
+	}
+}
+
+func TestExactSourceAndExcludedGlobalUseOneProductionScope(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "tsconfig.json", `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler"},"files":["src/main.ts","src/globals.ts"]}`)
+	writeWorkspaceFile(t, root, "src/main.ts", `export function read() { return hiddenGlobal.secret; }`)
+	writeWorkspaceFile(t, root, "src/globals.ts", `declare global { var hiddenGlobal: { secret: string }; } export {};`)
+	writeWorkspaceFile(t, root, "src/extra.ts", `export const selected = 1;`)
+	options := Options{
+		Files: FileScopeTsconfig, WorkspaceExcludes: []string{"src/globals.ts", "src/extra.ts"},
+		Sources: []string{"src/extra.ts"},
+	}
+	snapshot, err := New(options).buildTestGeneration(context.Background(), root, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	modules := make([]string, 0)
+	for _, fact := range snapshot.items {
+		if fact.Relation == "module_path" {
+			modules = append(modules, fact.Values[1].String)
+		}
+	}
+	slices.Sort(modules)
+	if !slices.Equal(modules, []string{"src/extra.ts", "src/main.ts"}) {
+		t.Fatalf("exact and ordinary primary modules = %v", modules)
+	}
+	var readID, returnType string
+	for _, fact := range snapshot.items {
+		if fact.Relation == "fn" && fact.Values[2].String == "read" {
+			readID = fact.Values[0].String
+		}
+	}
+	var signature string
+	for _, fact := range snapshot.items {
+		if fact.Relation == "fn_signature" && fact.Values[0].String == readID {
+			signature = fact.Values[1].String
+		}
+	}
+	for _, fact := range snapshot.items {
+		if fact.Relation == "signature_returns" && fact.Values[0].String == signature {
+			returnType = fact.Values[1].String
+		}
+	}
+	if readID == "" || !slices.ContainsFunc(snapshot.items, func(fact facts.Fact) bool {
+		return fact.Relation == "type_kind" && fact.Values[0].String == returnType && fact.Values[1].String == "string"
+	}) {
+		t.Fatalf("excluded global declaration did not affect selected code's inferred return type")
+	}
+	if !hasSnapshotInput(snapshot.snapshot, filepath.Join(root, "src/globals.ts")) {
+		t.Fatal("compiler-read excluded global was absent from captured dependency inputs")
+	}
+	explanation, err := ExplainScope(context.Background(), root, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(explanation.CompilerEligible, modules) || !slices.Equal(explanation.ExactSources, []string{"src/extra.ts"}) {
+		t.Fatalf("scope explanation differs from production modules: %+v modules=%v", explanation, modules)
+	}
+}
+
+// V04, V09, V10: a declaration retained for a call is not a type subject
+// unless a retained export calls for its type in that space.
+func TestFilteredExportsDefineDeclarationTypeSubjects(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "tsconfig.json", `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler"},"files":["src/main.ts"]}`)
+	writeWorkspaceFile(t, root, "src/excluded/tsconfig.json", `{"files":["other.ts"]}`)
+	writeWorkspaceFile(t, root, "src/excluded/other.ts", `export {};`)
+	writeWorkspaceFile(t, root, "src/excluded/effect.ts", `
+export function effect(value: string): boolean { return value.length > 0; }
+export class Widget {}
+export const valueOnly = 123;
+`)
+	writeWorkspaceFile(t, root, "src/main.ts", `
+import { effect } from "./excluded/effect";
+export type { Widget, valueOnly } from "./excluded/effect";
+export function run(): boolean { return effect("ok"); }
+`)
+	producer := New(Options{Files: FileScopeTsconfig})
+	description, err := producer.Describe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := make(map[string]facts.Predicate)
+	var all []facts.Predicate
+	for _, relation := range description.BaseRelations {
+		byName[relation.Predicate.Name] = relation.Predicate
+		all = append(all, relation.Predicate)
+	}
+	collect := func(producer *Backend, predicates []facts.Predicate) facts.Batch {
+		t.Helper()
+		batch, err := producer.Collect(context.Background(), backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: root, Predicates: predicates})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := facts.ValidateBatch(description, predicates, batch); err != nil {
+			t.Fatal(err)
+		}
+		return batch
+	}
+	full := collect(producer, all)
+	rows := func(batch facts.Batch, name string) []facts.Row { return batch.Relations[byName["ts."+name]] }
+	if slices.Contains(full.AnalyzedFiles, "src/excluded/effect.ts") || !slices.Contains(full.AnalyzedFiles, "src/main.ts") {
+		t.Fatalf("fixture has wrong primary modules: %v", full.AnalyzedFiles)
+	}
+	ids := make(map[string]string)
+	for _, row := range rows(full, "declaration") {
+		ids[row[1].String] = row[0].String
+	}
+	for _, name := range []string{"effect", "Widget", "valueOnly", "run"} {
+		if ids[name] == "" {
+			t.Fatalf("missing %s declaration: %v", name, rows(full, "declaration"))
+		}
+	}
+	if !slices.ContainsFunc(rows(full, "call_declaration"), func(row facts.Row) bool { return row[1].String == ids["effect"] }) {
+		t.Fatalf("excluded declaration was not retained for call provenance: %v", rows(full, "call_declaration"))
+	}
+	wantExports := map[string]struct{ space, declaration string }{
+		"Widget": {"type", ids["Widget"]}, "valueOnly": {"type", ids["valueOnly"]}, "run": {"value", ids["run"]},
+	}
+	for _, row := range rows(full, "module_export") {
+		binding, ok := wantExports[row[2].String]
+		if !ok || row[1].String != "ts:module:src/main.ts" || row[3].String != binding.space ||
+			!slices.ContainsFunc(rows(full, "export_target"), func(target facts.Row) bool {
+				return target[0].String == row[0].String && target[1].String == binding.declaration
+			}) {
+			t.Fatalf("unexpected retained export or target: %v", row)
+		}
+		delete(wantExports, row[2].String)
+	}
+	if len(wantExports) != 0 {
+		t.Fatalf("missing retained exports: %v", wantExports)
+	}
+	want := map[string]string{ids["Widget"]: "type", ids["valueOnly"]: "value", ids["run"]: "value"}
+	subjects := make(map[string]string)
+	for _, row := range rows(full, "declaration_type_subject") {
+		id, space := row[0].String, row[1].String
+		if want[id] != space {
+			t.Errorf("unexpected declaration type subject: %v", row)
+		}
+		subjects[id] = space
+	}
+	if !reflect.DeepEqual(subjects, want) {
+		t.Errorf("declaration type subjects = %v, want %v", subjects, want)
+	}
+	for _, name := range []string{"declaration_type", "declaration_type_incomplete"} {
+		for _, row := range rows(full, name) {
+			if want[row[0].String] != row[1].String {
+				t.Errorf("%s outside retained subject domain: %v", name, row)
+			}
+		}
+	}
+	for id, space := range want {
+		if !slices.ContainsFunc(rows(full, "declaration_type"), func(row facts.Row) bool { return row[0].String == id && row[1].String == space }) &&
+			!slices.ContainsFunc(rows(full, "declaration_type_incomplete"), func(row facts.Row) bool { return row[0].String == id && row[1].String == space }) {
+			t.Errorf("subject %s /%s has no type or incomplete reason", id, space)
+		}
+	}
+	// The walk scope exposes the excluded function's export type. It must not
+	// remain in the filtered type population solely through that discarded root.
+	walk := collect(New(Options{Files: FileScopeWalk}), []facts.Predicate{byName["ts.declaration_type"], byName["ts.type_kind"]})
+	effectTypes := make(map[string]bool)
+	for _, row := range rows(walk, "declaration_type") {
+		if row[0].String == ids["effect"] && row[1] == facts.Name("value") {
+			effectTypes[row[2].String] = true
+		}
+	}
+	if len(effectTypes) == 0 {
+		t.Fatal("walk scope did not expose the excluded export's value type")
+	}
+	for _, row := range rows(full, "type_kind") {
+		if effectTypes[row[0].String] {
+			t.Errorf("discarded export kept an otherwise unreachable type: %v", row)
+		}
+	}
+	for _, name := range []string{"declaration_type_subject", "declaration_type", "declaration_type_incomplete"} {
+		selected := collect(producer, []facts.Predicate{byName["ts."+name]})
+		if !reflect.DeepEqual(rows(selected, name), rows(full, name)) {
+			t.Errorf("%s-only collection differs from full collection: %v vs %v", name, rows(selected, name), rows(full, name))
+		}
+	}
+}
+
+// V06, V08: target filtering preserves invocation identity and exposes only
+// the callback transfers of the now-unresolved invocation.
 func TestFilteredCallTargetsRemainUnresolved(t *testing.T) {
 	root := t.TempDir()
 	writeWorkspaceFile(t, root, "tsconfig.json", `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler"},"files":["src/main.ts"]}`)
 	writeWorkspaceFile(t, root, "src/excluded/tsconfig.json", `{"files":["other.ts"]}`)
 	writeWorkspaceFile(t, root, "src/excluded/other.ts", `export const other = 1;`)
-	writeWorkspaceFile(t, root, "src/excluded/effect.ts", `export function effect() { return helper(); } function helper() { return 1; }`)
+	writeWorkspaceFile(t, root, "src/excluded/effect.ts", `export function effect(callback?: () => number) { return helper(); } function helper() { return 1; }`)
 	const mainSource = `import { effect } from "./excluded/effect";
 effect();
 export function run() {
@@ -62,23 +501,21 @@ function kept() { return 1; }
 export function use() { return kept(); }
 export function escape() { return [1].map(effect); }
 class Escaping { value = [1].map(effect); }
+export function passing() { effect(kept); }
 `
 	writeWorkspaceFile(t, root, "src/main.ts", mainSource)
-	build := func(scope backend.FileScope) facts.Snapshot {
+	build := func(scope FileScope) *producerGeneration {
 		t.Helper()
-		snapshot, err := New().BuildSnapshot(context.Background(), root, root, backend.SnapshotOptions{Files: scope})
+		snapshot, err := New(Options{Files: scope}).buildTestGeneration(context.Background(), root, root)
 		if err != nil {
-			t.Fatal(err)
-		}
-		if err := facts.Validate(snapshot); err != nil {
 			t.Fatal(err)
 		}
 		return snapshot
 	}
-	walk, filtered := build(backend.FileScopeWalk), build(backend.FileScopeTsconfig)
-	index := func(snapshot facts.Snapshot) map[string]map[string]facts.Fact {
+	walk, filtered := build(FileScopeWalk), build(FileScopeTsconfig)
+	index := func(snapshot *producerGeneration) map[string]map[string]facts.Fact {
 		result := make(map[string]map[string]facts.Fact)
-		for _, fact := range snapshot.Facts {
+		for _, fact := range snapshot.items {
 			if result[fact.Relation] == nil {
 				result[fact.Relation] = make(map[string]facts.Fact)
 			}
@@ -87,97 +524,88 @@ class Escaping { value = [1].map(effect); }
 		return result
 	}
 	before, after := index(walk), index(filtered)
-	const target = "src/excluded/effect.ts::function::effect"
-	want := map[int]string{2: "src/main.ts", 4: "src/main.ts::function::run", 5: "src/main.ts::function::run", 9: ""}
+	findFunction := func(snapshot *producerGeneration, file, name string) string {
+		for _, fact := range snapshot.items {
+			if fact.Relation == "fn" && fact.Values[1].String == file && fact.Values[2].String == name {
+				return fact.Values[0].String
+			}
+		}
+		return ""
+	}
+	target := findFunction(walk, "src/excluded/effect.ts", "effect")
+	run := findFunction(filtered, "src/main.ts", "run")
+	want := map[int]string{2: "module:src/main.ts", 4: run, 5: run, 9: "", 16: findFunction(filtered, "src/main.ts", "passing")}
 	for site, edge := range before["call_edge"] {
-		if edge.Values[2].String != target {
+		if edge.Values[1].String != target {
 			continue
 		}
 		location := before["location"][site]
 		line := int(location.Values[2].Number)
 		owner, ok := want[line]
-		if !ok || edge.Values[1].String != owner {
-			t.Fatalf("unexpected original call: %v at %v", edge, location)
+		if !ok {
+			t.Fatalf("unexpected call at %v", location)
 		}
 		delete(want, line)
-		unresolved, ok := after["call_unresolved"][site]
-		if !ok || unresolved.Values[1].String != owner || !slices.Equal(location.Values, after["location"][site].Values) {
-			t.Errorf("call site changed or disappeared: %v at %v; unresolved %v at %v", edge, location, unresolved, after["location"][site])
+		if _, ok := after["call_unresolved"][site]; !ok || !slices.Equal(location.Values, after["location"][site].Values) {
+			t.Errorf("classification changed identity: %v", edge)
 		}
-		if owner == "src/main.ts::function::run" {
-			if fact, ok := after["site_in_fn"][site]; !ok || fact.Values[1].String != owner {
-				t.Errorf("call lost its lexical owner: %v", unresolved)
-			}
+		if owner != "" && after["site_owner"][site].Values[1].String != owner {
+			t.Errorf("owner changed: %v", after["site_owner"][site])
 		}
-		if line == 9 {
-			if fact, ok := after["site_attribution_unsupported"][site]; !ok || fact.Values[1].String != "instance_construction" {
-				t.Errorf("call lost its unsupported attribution: %v", unresolved)
-			}
+		if owner == "" && after["site_attribution_unsupported"][site].Values[1].String != "instance_construction" {
+			t.Errorf("lost unsupported owner: %v", after["site_attribution_unsupported"][site])
 		}
 	}
 	if len(want) != 0 {
-		t.Errorf("missing original calls at lines %v", want)
+		t.Errorf("missing original calls: %v", want)
 	}
-	if len(after["call_unresolved"]) != 6 || len(after["call_edge"]) != 1 || len(after["external_call"]) != 2 {
-		t.Errorf("unexpected call outcomes: unresolved %v, edges %v, external %v", after["call_unresolved"], after["call_edge"], after["external_call"])
+	// A call that ceases to be a collected local call must expose its direct
+	// callback argument, while the context where the call remains local must not.
+	for _, pair := range []struct {
+		facts map[string]map[string]facts.Fact
+		want  bool
+	}{{before, false}, {after, true}} {
+		found := false
+		for site := range pair.facts["fn_value_escape"] {
+			if int(pair.facts["location"][site].Values[2].Number) == 16 {
+				found = true
+				target, ok := pair.facts["fn_value_escape_target"][site]
+				if !ok || target.Values[1].String != findFunction(filtered, "src/main.ts", "kept") {
+					t.Errorf("filtered call lost the collected callback target: %s", site)
+				}
+				if _, ok := pair.facts["call_site"][site]; ok {
+					t.Errorf("callback argument became an invocation: %s", site)
+				}
+			}
+		}
+		if found != pair.want {
+			t.Errorf("filtered local call callback event: got %t, want %t", found, pair.want)
+		}
 	}
-	for _, check := range []struct {
-		line  int
-		owner string
-	}{
-		{14, "src/main.ts::function::escape"},
-		{15, ""},
-	} {
-		var matched bool
-		for site, call := range after["call_unresolved"] {
+	for _, line := range []int{14, 15} {
+		found := false
+		for site := range after["fn_value_escape"] {
 			location := after["location"][site]
-			if int(location.Values[2].Number) != check.line {
+			if int(location.Values[2].Number) != line {
 				continue
 			}
-			matched = true
-			column := strings.Index(strings.Split(mainSource, "\n")[check.line-1], "effect") + 1
-			if call.Values[1].String != check.owner || int(location.Values[3].Number) != column || int(location.Values[4].Number) != check.line || int(location.Values[5].Number) != column+len("effect") {
-				t.Errorf("escaping argument did not keep its owner and location: %v at %v", call, location)
+			found = true
+			if _, ok := after["fn_value_escape_unknown"][site]; !ok {
+				t.Errorf("filtered callback target was not unknown: %v", location)
 			}
-			if check.owner == "" {
-				if marker, ok := after["site_attribution_unsupported"][site]; !ok || marker.Values[1].String != "instance_construction" {
-					t.Errorf("escaping argument lost unsupported attribution: %v", call)
-				}
-			} else if owner, ok := after["site_in_fn"][site]; !ok || owner.Values[1].String != check.owner {
-				t.Errorf("escaping argument lost its function owner: %v", call)
+			if _, ok := after["call_unresolved"][site]; ok {
+				t.Errorf("callback argument became an invocation: %v", location)
+			}
+			if _, ok := after["call_declaration_incomplete"][site]; ok {
+				t.Errorf("callback argument got call provenance: %v", location)
 			}
 		}
-		if !matched {
-			t.Errorf("missing uncertainty at escaping argument on line %d", check.line)
+		if !found {
+			t.Errorf("missing callback event on line %d", line)
 		}
 	}
-	for _, edge := range after["call_edge"] {
-		if edge.Values[1].String != "src/main.ts::function::use" || edge.Values[2].String != "src/main.ts::function::kept" {
-			t.Errorf("unexpected retained call: %v", edge)
-		}
-	}
-	removedRefs := 0
-	unsupportedRef := false
-	for site, ref := range before["fn_ref"] {
-		if ref.Values[2].String == target {
-			removedRefs++
-			if marker, ok := before["site_attribution_unsupported"][site]; ok && marker.Values[1].String == "instance_construction" {
-				unsupportedRef = true
-			}
-			if _, ok := after["site_attribution_unsupported"][site]; ok {
-				t.Errorf("removed reference left an attribution marker: %v", ref)
-			}
-		}
-	}
-	if removedRefs != 4 || !unsupportedRef {
-		t.Errorf("expected ordinary and escaping references before filtering, got %d, unsupported = %t", removedRefs, unsupportedRef)
-	}
-	if len(after["fn_ref"]) != 0 {
-		t.Errorf("references to filtered functions survived: %v", after["fn_ref"])
-	}
-	if _, ok := after["module"]["src/excluded/effect.ts"]; ok {
-		t.Error("filtered target was added as a module")
-	}
+	// Strict policy handles callback transfer explicitly; an unknown callback
+	// does not by itself make the containing invocation unresolved.
 	repoRoot, err := filepath.Abs("../..")
 	if err != nil {
 		t.Fatal(err)
@@ -185,42 +613,227 @@ class Escaping { value = [1].map(effect); }
 	writeWorkspaceFile(t, root, "lintai-rules/strict.ts", `import { dl, rule } from "@lintai/sdk";
 export default rule("test.filtered-callback").version(1)
   .program(dl`+"`"+`Decl indeterminate(Fn, Name).
-    indeterminate(Fn, Name) :- fn(Fn, _, Name), Name = "escape", fn_reaches_unresolved(Fn).`+"`"+`)
+    indeterminate(Fn, Name) :- ts.fn(Fn, _, Name), Name = "escape", ts.site_owner(Site, Fn), ts.fn_value_escape_unknown(Site).`+"`"+`)
   .report("indeterminate").message((row) => row.Name);
 `)
-	items, err := engine.New(New()).Run(context.Background(), engine.Options{
+	session := engine.Open(engine.Options{}, New())
+	defer session.Close()
+	result, err := session.Check(context.Background(), engine.Options{
 		RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: root,
-		RuleGlobs: []string{"lintai-rules/*.ts"}, Files: backend.FileScopeTsconfig,
+		RuleGlobs: []string{"lintai-rules/*.ts"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	items := result.Diagnostics
 	if len(items) != 1 || items[0].RuleID != "test.filtered-callback" || items[0].Message != "escape" {
 		t.Fatalf("filtered callback strict rule = %+v, want escape indeterminate", items)
 	}
 }
 
-func TestSnapshotVersionIgnoresFileOrderAndAbsoluteRoot(t *testing.T) {
+// V06, V08: direct callback arguments have their own source identity and are
+// distinct from the invocation. Unsupported transfers produce no evidence.
+func TestDirectCallbackEvidence(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "node_modules/external/package.json", `{"name":"external","types":"index.d.ts"}`)
+	writeWorkspaceFile(t, root, "node_modules/external/index.d.ts", `export declare function accept(...values: unknown[]): void;`)
+	writeWorkspaceFile(t, root, "src/main.ts", `import { accept } from "external";
+function local(n: number) { return n; }
+export function run(callback: (n: number) => number, loose: any, callbacks: Array<(n: number) => number>, flag: boolean, mixed: string | ((n: number) => number)) {
+  missing();
+  [1].map(callback);
+  [1].map(local);
+  [1].map(n => missing(n));
+  accept(Math.abs);
+  missing(callback);
+  accept(loose);
+  accept(...callbacks);
+  accept`+"`"+`hello ${callback}`+"`"+`;
+  [1].map(flag ? local : callback);
+  [1].map(mixed);
+  accept(notDeclared.property);
+}
+`)
+	snapshot, err := New(Options{Files: FileScopeWalk}).buildTestGeneration(context.Background(), root, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	locations := make(map[string]int)
+	functions := make(map[string]string)
+	for _, item := range snapshot.items {
+		switch item.Relation {
+		case "location":
+			if item.Values[1].String == "src/main.ts" {
+				locations[item.Values[0].String] = int(item.Values[2].Number)
+			}
+		case "fn":
+			functions[item.Values[2].String] = item.Values[0].String
+		}
+	}
+	byLine := make(map[int][]string)
+	targets := make(map[string]string)
+	unknown := make(map[string]bool)
+	call := make(map[string]bool)
+	provenance := make(map[string]bool)
+	references := make(map[string]string)
+	for _, item := range snapshot.items {
+		site := item.Values[0].String
+		switch item.Relation {
+		case "fn_value_escape":
+			byLine[locations[site]] = append(byLine[locations[site]], site)
+		case "fn_value_escape_target":
+			targets[site] = item.Values[1].String
+		case "fn_value_escape_unknown":
+			unknown[site] = true
+		case "call_site":
+			call[site] = true
+		case "call_declaration", "call_declaration_incomplete":
+			provenance[site] = true
+		case "fn_ref":
+			references[site] = item.Values[1].String
+		}
+	}
+	for _, line := range []int{5, 6, 7, 8, 9, 13} {
+		if len(byLine[line]) != 1 {
+			t.Fatalf("line %d: expected one argument event, got %v", line, byLine[line])
+		}
+		site := byLine[line][0]
+		if call[site] || provenance[site] {
+			t.Errorf("line %d: callback argument became an invocation: %s", line, site)
+		}
+	}
+	for _, line := range []int{4, 10, 11, 12, 14, 15} {
+		if len(byLine[line]) != 0 {
+			t.Errorf("line %d: unsupported or absent transfer produced %v", line, byLine[line])
+		}
+	}
+	for _, line := range []int{5, 8, 9, 13} {
+		if !unknown[byLine[line][0]] || targets[byLine[line][0]] != "" {
+			t.Errorf("line %d: expected unknown collected target", line)
+		}
+	}
+	localSite := byLine[6][0]
+	if targets[localSite] != functions["local"] || references[localSite] != functions["local"] || unknown[localSite] {
+		t.Errorf("local callback evidence: target=%q reference=%q unknown=%t", targets[localSite], references[localSite], unknown[localSite])
+	}
+	if targets[byLine[7][0]] == "" || unknown[byLine[7][0]] {
+		t.Error("inline callback did not retain its collected target")
+	}
+}
+
+func TestCapturedInputRevisionIgnoresAbsoluteRoot(t *testing.T) {
 	t.Parallel()
 
 	rootOne := t.TempDir()
 	rootTwo := t.TempDir()
 
-	firstOne := writeWorkspaceFile(t, rootOne, "src/a.ts", "export const alpha = 1;\n")
-	secondOne := writeWorkspaceFile(t, rootOne, "src/b.ts", "export const beta = 2;\n")
-	firstTwo := writeWorkspaceFile(t, rootTwo, "src/a.ts", "export const alpha = 1;\n")
-	secondTwo := writeWorkspaceFile(t, rootTwo, "src/b.ts", "export const beta = 2;\n")
+	writeWorkspaceFile(t, rootOne, "src/a.ts", "export const alpha = 1;\n")
+	writeWorkspaceFile(t, rootOne, "src/b.ts", "export const beta = 2;\n")
+	configContents := []byte("[workspace]\nexclude = []\n")
+	configDigest := sha256.Sum256(configContents)
+	configOne := writeWorkspaceFile(t, rootOne, "lintai.toml", string(configContents))
+	writeWorkspaceFile(t, rootTwo, "src/a.ts", "export const alpha = 1;\n")
+	writeWorkspaceFile(t, rootTwo, "src/b.ts", "export const beta = 2;\n")
+	configTwo := writeWorkspaceFile(t, rootTwo, "lintai.toml", string(configContents))
 
-	left, err := snapshotVersion(rootOne, []string{secondOne, firstOne})
+	options := func(path string) Options {
+		return Options{Files: FileScopeWalk, ConfigPath: path, ConfigPresent: true, ConfigDigest: hex.EncodeToString(configDigest[:])}
+	}
+	left, err := New(options(configOne)).buildTestGeneration(context.Background(), rootOne, rootOne)
 	if err != nil {
 		t.Fatal(err)
 	}
-	right, err := snapshotVersion(rootTwo, []string{firstTwo, secondTwo})
+	right, err := New(options(configTwo)).buildTestGeneration(context.Background(), rootTwo, rootTwo)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if left != right {
-		t.Fatalf("expected stable hash across order and roots, got %q != %q", left, right)
+	if left.inputRevision != right.inputRevision {
+		t.Fatalf("expected stable input revision across roots, got %q != %q", left.inputRevision, right.inputRevision)
+	}
+	if !hasGenerationWatchHint(left, configOne) || !hasGenerationWatchHint(right, configTwo) {
+		t.Fatalf("lintai.toml was missing from producer watch hints: left=%v right=%v", left.watchHints, right.watchHints)
+	}
+	for _, snapshot := range []*producerGeneration{left, right} {
+		seen := make(map[string]struct{}, len(snapshot.watchHints))
+		for _, path := range snapshot.watchHints {
+			if _, exists := seen[path]; exists {
+				t.Fatalf("watch hint %q was published more than once: %v", path, snapshot.watchHints)
+			}
+			seen[path] = struct{}{}
+		}
+	}
+}
+
+func TestSymlinkedWorkspaceRootKeepsScopeAndIdentity(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeWorkspaceFile(t, root, "tsconfig.json", `{"files":["src/a.ts"]}`)
+	writeWorkspaceFile(t, root, "src/a.ts", "export const alpha = 1;\n")
+	writeWorkspaceFile(t, root, "source-links.json", `{"version":1,"entries":[]}`)
+	alias := filepath.Join(t.TempDir(), "workspace")
+	if err := os.Symlink(root, alias); err != nil {
+		t.Skipf("symlinks are unavailable: %v", err)
+	}
+	options := Options{Files: FileScopeTsconfig, Sources: []string{"src/a.ts"}, SourceLinks: filepath.Join(root, "source-links.json")}
+	realSnapshot, err := New(options).buildTestGeneration(context.Background(), root, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	options.SourceLinks = filepath.Join(alias, "source-links.json")
+	aliasSnapshot, err := New(options).buildTestGeneration(context.Background(), alias, alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if realSnapshot.inputRevision != aliasSnapshot.inputRevision || !reflect.DeepEqual(realSnapshot.scope, aliasSnapshot.scope) {
+		t.Fatalf("symlinked root changed scope or input revision: %q != %q", realSnapshot.inputRevision, aliasSnapshot.inputRevision)
+	}
+	if len(realSnapshot.items) != len(aliasSnapshot.items) {
+		t.Fatalf("symlinked root changed fact count: %d != %d", len(realSnapshot.items), len(aliasSnapshot.items))
+	}
+	for _, fact := range realSnapshot.items {
+		if !slices.ContainsFunc(aliasSnapshot.items, func(other facts.Fact) bool { return reflect.DeepEqual(fact, other) }) {
+			t.Fatalf("symlinked root lost fact: %+v", fact)
+		}
+	}
+	if !slices.ContainsFunc(aliasSnapshot.items, func(fact facts.Fact) bool {
+		return fact.Relation == "module_path" && len(fact.Values) > 1 && fact.Values[1].String == "src/a.ts"
+	}) {
+		t.Fatal("symlinked root did not produce the workspace-relative module path")
+	}
+	explanation, err := ExplainScope(context.Background(), alias, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(explanation.CompilerEligible, []string{"src/a.ts"}) || !slices.Equal(explanation.ExactSources, []string{"src/a.ts"}) {
+		t.Fatalf("symlinked root scope explanation = %+v", explanation)
+	}
+	if got := workspace.RelativePath(alias, filepath.Join(root, "src/a.ts")); got != "src/a.ts" {
+		t.Fatalf("relative path from symlinked root = %q", got)
+	}
+	if !hasGenerationWatchHint(aliasSnapshot, filepath.Join(alias, "src/a.ts")) {
+		t.Fatalf("symlinked root watch hints = %v", aliasSnapshot.watchHints)
+	}
+	plan, err := workspace.PlanSources(alias, workspace.ScopeOptions{Sources: []string{filepath.Join(alias, "src/a.ts")}})
+	if err != nil {
+		t.Fatalf("absolute exact source through symlinked root: %v", err)
+	}
+	if valid, err := workspace.ValidateScope(plan); err != nil || !valid {
+		t.Fatalf("validate scope with absolute exact source: valid=%t err=%v", valid, err)
+	}
+	other := t.TempDir()
+	writeWorkspaceFile(t, other, "tsconfig.json", `{"files":["src/a.ts"]}`)
+	writeWorkspaceFile(t, other, "src/a.ts", "export const alpha = 1;\n")
+	writeWorkspaceFile(t, other, "source-links.json", `{"version":1,"entries":[]}`)
+	if err := os.Remove(alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(other, alias); err != nil {
+		t.Fatal(err)
+	}
+	if valid, err := workspace.ValidateScope(plan); err != nil || valid {
+		t.Fatalf("retargeted workspace validation: valid=%t err=%v", valid, err)
 	}
 }
 
@@ -234,12 +847,12 @@ func TestLegacyTsconfigIsAdjusted(t *testing.T) {
 	}
 	workspaceRoot := filepath.Join(repoRoot, "testdata/fixtures/legacy-tsconfig")
 	before := listTree(t, workspaceRoot)
-	for _, files := range []backend.FileScope{backend.FileScopeTsconfig, backend.FileScopeWalk} {
-		snapshot, err := New().buildAnalysisSnapshot(context.Background(), repoRoot, workspaceRoot, backend.SnapshotOptions{Files: files})
+	for _, files := range []FileScope{FileScopeTsconfig, FileScopeWalk} {
+		snapshot, _, _, err := New(Options{Files: files}).buildLintaiSnapshot(context.Background(), repoRoot, workspaceRoot)
 		if err != nil {
 			t.Fatalf("%s: %v", files, err)
 		}
-		var alias *analysis.ImportEdge
+		var alias *lintaiapi.ImportEdge
 		for index := range snapshot.ImportEdges {
 			if snapshot.ImportEdges[index].Specifier == "@/lib/helper" {
 				alias = &snapshot.ImportEdges[index]
@@ -248,8 +861,9 @@ func TestLegacyTsconfigIsAdjusted(t *testing.T) {
 		if alias == nil || !alias.Internal || alias.ToPath != "src/lib/helper.ts" {
 			t.Fatalf("%s: expected @/lib/helper to resolve to src/lib/helper.ts, got %+v", files, alias)
 		}
-		got := make([]string, 0, len(snapshot.Adjustments))
-		for _, item := range snapshot.Adjustments {
+		adjustments := convertAdjustments(workspaceRoot, snapshot.ConfigAdjustments)
+		got := make([]string, 0, len(adjustments))
+		for _, item := range adjustments {
 			got = append(got, item.Config+" "+item.Option+" "+item.Action)
 		}
 		want := []string{
@@ -272,7 +886,7 @@ func TestLegacyTsconfigIsAdjusted(t *testing.T) {
 func TestWalkModeWritesNothingIntoTheWorkspace(t *testing.T) {
 	root := t.TempDir()
 	writeWorkspaceFile(t, root, "src/a.ts", "export const a = 1;\n")
-	snapshot, err := New().buildAnalysisSnapshot(context.Background(), root, root, backend.SnapshotOptions{Files: backend.FileScopeWalk})
+	snapshot, _, _, err := New(Options{Files: FileScopeWalk}).buildLintaiSnapshot(context.Background(), root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,25 +915,42 @@ func listTree(t *testing.T, root string) []string {
 	return result
 }
 
-func TestSnapshotVersionUsesDelimitersBetweenPathsAndContents(t *testing.T) {
+func TestMetadataPreservingInputEditChangesCapturedRevision(t *testing.T) {
 	t.Parallel()
-
-	rootOne := t.TempDir()
-	rootTwo := t.TempDir()
-
-	ab := writeWorkspaceFile(t, rootOne, "ab", "cd")
-	abc := writeWorkspaceFile(t, rootTwo, "abc", "d")
-
-	left, err := snapshotVersion(rootOne, []string{ab})
+	root := t.TempDir()
+	file := writeWorkspaceFile(t, root, "src/main.ts", "export const value = 1;\n")
+	build := func() *producerGeneration {
+		t.Helper()
+		result, err := New(Options{Files: FileScopeWalk}).buildTestGeneration(context.Background(), root, root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	before := build()
+	info, err := os.Stat(file)
 	if err != nil {
 		t.Fatal(err)
 	}
-	right, err := snapshotVersion(rootTwo, []string{abc})
+	if err := os.WriteFile(file, []byte("export const value = 2;\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(file, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	updatedInfo, err := os.Stat(file)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if left == right {
-		t.Fatalf("expected different hashes for path/content boundary cases, got %q", left)
+	after := build()
+	if before.inputRevision == after.inputRevision {
+		t.Fatalf("metadata-preserving content edit kept revision %q", before.inputRevision)
+	}
+	if !info.ModTime().Equal(updatedInfo.ModTime()) {
+		t.Fatal("test edit did not preserve the file modification time")
+	}
+	if after.inputRevision == "" {
+		t.Fatal("captured input revision was empty")
 	}
 }
 
@@ -330,38 +961,38 @@ func TestSnapshotVersionTracksAssociationConfigAndMissingInputs(t *testing.T) {
 	writeWorkspaceFile(t, root, "src/index.ts", `export const load = 1;`)
 	writeWorkspaceFile(t, root, "src/app.ts", `import { load } from "../dist"; export const result = load;`)
 	linksPath := writeWorkspaceFile(t, root, "source-links.json", `{"version":1,"entries":[{"checkedEntry":"dist/index.d.ts","sourceEntry":"src/index.ts"}]}`)
-	options := backend.SnapshotOptions{Files: backend.FileScopeTsconfig, SourceLinks: "source-links.json"}
-	build := func() *analysis.Snapshot {
+	options := Options{Files: FileScopeTsconfig, SourceLinks: "source-links.json"}
+	build := func() (*lintaiapi.Snapshot, string) {
 		t.Helper()
-		snapshot, err := New().buildAnalysisSnapshot(context.Background(), root, root, options)
+		snapshot, _, version, err := New(options).buildLintaiSnapshot(context.Background(), root, root)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return snapshot
+		return snapshot, version
 	}
-	initial := build()
+	initial, initialVersion := build()
 	mapPath := filepath.Join(root, "dist/index.d.ts.map")
-	if !slices.Contains(initial.InputPaths, mapPath) {
-		t.Fatalf("missing declaration map path was not included in snapshot inputs: %v", initial.InputPaths)
+	if !hasSnapshotInput(initial, mapPath) {
+		t.Fatalf("missing declaration map path was not included in snapshot inputs: %v", initial.Inputs)
 	}
 	if err := os.WriteFile(mapPath, []byte(`{"version":3,"file":"index.d.ts","sources":[],"mappings":""}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	mapCreated := build()
-	if initial.Version == mapCreated.Version {
+	_, mapCreatedVersion := build()
+	if initialVersion == mapCreatedVersion {
 		t.Fatal("creating a previously missing declaration map did not invalidate the snapshot")
 	}
 	missingSource := filepath.Join(root, "src/missing.ts")
 	if err := os.WriteFile(linksPath, []byte(`{"version":1,"entries":[{"checkedEntry":"dist/index.d.ts","sourceEntry":"src/missing.ts"}]}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	missing := build()
-	if mapCreated.Version == missing.Version || !slices.Contains(missing.InputPaths, missingSource) {
-		t.Fatalf("source-links changes or missing source were not retained: version=%s inputs=%v", missing.Version, missing.InputPaths)
+	missing, missingVersion := build()
+	if mapCreatedVersion == missingVersion || !hasSnapshotInput(missing, missingSource) {
+		t.Fatalf("source-links changes or missing source were not retained: version=%s inputs=%v", missingVersion, missing.Inputs)
 	}
 	writeWorkspaceFile(t, root, "src/missing.ts", `export const load = 2;`)
-	createdSource := build()
-	if missing.Version == createdSource.Version {
+	_, createdSourceVersion := build()
+	if missingVersion == createdSourceVersion {
 		t.Fatal("creating a previously missing source entry did not invalidate the snapshot")
 	}
 }
@@ -376,14 +1007,14 @@ func TestSourceLinksFactsKeepUnappliedEntriesVisible(t *testing.T) {
 		{"checkedEntry":"dist/index.d.ts","sourceEntry":"src/source.ts"},
 		{"checkedEntry":"unused/dist/index.d.ts","sourceEntry":"unused/src/index.ts"}
 	]}`)
-	snapshot, err := New().BuildSnapshot(context.Background(), root, root, backend.SnapshotOptions{Files: backend.FileScopeTsconfig, SourceLinks: "source-links.json"})
+	snapshot, err := New(Options{Files: FileScopeTsconfig, SourceLinks: "source-links.json"}).buildTestGeneration(context.Background(), root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	entries := make(map[string]string)
 	statuses := make(map[string][]string)
 	attempts := make(map[string]int)
-	for _, fact := range snapshot.Facts {
+	for _, fact := range snapshot.items {
 		switch fact.Relation {
 		case "source_entry":
 			entries[fact.Values[1].String] = fact.Values[0].String
@@ -409,27 +1040,27 @@ func TestSnapshotTracksMissingPackageDirectoryAndDeclaration(t *testing.T) {
 	root := t.TempDir()
 	writeWorkspaceFile(t, root, "tsconfig.json", `{"compilerOptions":{"strict":true,"module":"preserve","moduleResolution":"bundler"},"include":["src/**/*.ts"]}`)
 	writeWorkspaceFile(t, root, "src/app.ts", `import { value } from "latepkg"; export const result = value;`)
-	options := backend.SnapshotOptions{Files: backend.FileScopeTsconfig}
-	build := func() *analysis.Snapshot {
+	options := Options{Files: FileScopeTsconfig}
+	build := func() (*lintaiapi.Snapshot, string) {
 		t.Helper()
-		snapshot, err := New().buildAnalysisSnapshot(context.Background(), root, root, options)
+		snapshot, _, version, err := New(options).buildLintaiSnapshot(context.Background(), root, root)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return snapshot
+		return snapshot, version
 	}
 	// Without node_modules, resolution probes no file under it.
-	if before := build(); !slices.Contains(before.InputPaths, filepath.Join(root, "node_modules")) {
-		t.Fatalf("missing node_modules directory was not retained as an input: %v", before.InputPaths)
+	if before, _ := build(); !hasSnapshotInput(before, filepath.Join(root, "node_modules")) {
+		t.Fatalf("missing node_modules directory was not retained as an input: %v", before.Inputs)
 	}
 	writeWorkspaceFile(t, root, "node_modules/latepkg/package.json", `{"types":"index.d.ts"}`)
 	declarationPath := filepath.Join(root, "node_modules/latepkg/index.d.ts")
-	withoutDeclaration := build()
-	if !slices.Contains(withoutDeclaration.InputPaths, declarationPath) {
-		t.Fatalf("missing package declaration candidate was not retained as an input: %v", withoutDeclaration.InputPaths)
+	withoutDeclaration, withoutDeclarationVersion := build()
+	if !hasSnapshotInput(withoutDeclaration, declarationPath) {
+		t.Fatalf("missing package declaration candidate was not retained as an input: %v", withoutDeclaration.Inputs)
 	}
 	writeWorkspaceFile(t, root, "node_modules/latepkg/index.d.ts", `export declare const value: string;`)
-	if after := build(); withoutDeclaration.Version == after.Version {
+	if _, afterVersion := build(); withoutDeclarationVersion == afterVersion {
 		t.Fatal("creating the resolved package declaration did not change the snapshot version")
 	}
 }
@@ -477,7 +1108,7 @@ export function mirror(config: LocalConfig): DbConfig {
 }
 `)
 
-	snapshot, err := New().buildAnalysisSnapshot(context.Background(), root, root, backend.SnapshotOptions{})
+	snapshot, _, _, err := New(Options{}).buildLintaiSnapshot(context.Background(), root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -568,7 +1199,7 @@ func TestBuildSnapshotExposesImportMetaAccessesAndIgnoresStrings(t *testing.T) {
 }
 `)
 
-	snapshot, err := New().buildAnalysisSnapshot(context.Background(), root, root, backend.SnapshotOptions{})
+	snapshot, _, _, err := New(Options{}).buildLintaiSnapshot(context.Background(), root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -576,7 +1207,7 @@ func TestBuildSnapshotExposesImportMetaAccessesAndIgnoresStrings(t *testing.T) {
 	var importMetaFound bool
 	for _, access := range snapshot.Accesses {
 		switch {
-		case access.FilePath == "src/env.ts" && access.Root == "import.meta" && access.AccessPath == "import.meta.env" && access.Origin == "special_form":
+		case access.FilePath == "src/env.ts" && access.AccessPath == "import.meta.env":
 			importMetaFound = true
 			if access.Range.File != "src/env.ts" || access.Range.StartLine != 2 {
 				t.Fatalf("unexpected import.meta access range %+v", access.Range)
@@ -618,12 +1249,12 @@ export function a() {
 }
 `)
 
-	snapshot, err := New().buildAnalysisSnapshot(context.Background(), root, root, backend.SnapshotOptions{})
+	generation, err := New(Options{}).buildTestGeneration(context.Background(), root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var got []string
-	for _, use := range snapshot.AmbientUses {
+	for _, use := range generation.snapshot.AmbientUses {
 		got = append(got, use.Source+"."+use.Capability)
 	}
 	slices.Sort(got)
@@ -664,23 +1295,23 @@ func TestUnreadableOptionalMapKeepsCheckedFactsAndChangesVersionWhenReadable(t *
 	if _, err := os.ReadFile(mapPath); err == nil {
 		t.Skip("current user can read mode-000 files")
 	}
-	options := backend.SnapshotOptions{Files: backend.FileScopeTsconfig}
-	unreadable, err := New().buildAnalysisSnapshot(context.Background(), root, root, options)
+	options := Options{Files: FileScopeTsconfig}
+	unreadable, _, unreadableVersion, err := New(options).buildLintaiSnapshot(context.Background(), root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.ContainsFunc(unreadable.DeclarationSourceOutcomes, func(item analysis.DeclarationSourceOutcome) bool { return item.Outcome == "unavailable_map" }) ||
-		!slices.ContainsFunc(unreadable.Exports, func(item analysis.Export) bool { return item.Name == "value" && len(item.Targets) == 1 }) || !slices.Contains(unreadable.InputPaths, mapPath) {
+	if !slices.ContainsFunc(unreadable.DeclarationSourceOutcomes, func(item lintaiapi.DeclarationSourceOutcomeFact) bool { return item.Outcome == "unavailable_map" }) ||
+		!slices.ContainsFunc(unreadable.Exports, func(item lintaiapi.ExportFact) bool { return item.Name == "value" && len(item.Targets) == 1 }) || !hasSnapshotInput(unreadable, mapPath) {
 		t.Fatalf("unreadable optional map lost checked facts, outcome or input: %+v", unreadable)
 	}
 	if err := os.Chmod(mapPath, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	readable, err := New().buildAnalysisSnapshot(context.Background(), root, root, options)
+	_, _, readableVersion, err := New(options).buildLintaiSnapshot(context.Background(), root, root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if unreadable.Version == readable.Version {
+	if unreadableVersion == readableVersion {
 		t.Fatal("making the map readable did not change the snapshot version")
 	}
 	linksPath := writeWorkspaceFile(t, root, "source-links.json", `{}`)
@@ -689,7 +1320,167 @@ func TestUnreadableOptionalMapKeepsCheckedFactsAndChangesVersionWhenReadable(t *
 	}
 	t.Cleanup(func() { _ = os.Chmod(linksPath, 0o600) })
 	options.SourceLinks = "source-links.json"
-	if _, err := New().buildAnalysisSnapshot(context.Background(), root, root, options); err == nil || !strings.Contains(err.Error(), "invalid --source-links") {
+	if _, _, _, err := New(options).buildLintaiSnapshot(context.Background(), root, root); err == nil || !strings.Contains(err.Error(), "invalid --source-links") {
 		t.Fatalf("unreadable requested configuration was not an error: %v", err)
+	}
+}
+
+// V07: conflicting signatures remain whole; a parameter from one context
+// cannot join to the return of the other through the same signature.
+func TestWholeSignatureProjection(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{
+		"shared/api.ts": `export const parse = (value: string | undefined) => value;
+export function zero() {}
+export function marked(first?: string, ...rest: number[]) {}
+export const mapped = [1].map((n) => n);`,
+		"loose/tsconfig.json":  `{"compilerOptions":{"strict":false},"include":["**/*.ts","../shared/**/*.ts"]}`,
+		"loose/index.ts":       `export { parse } from "../shared/api";`,
+		"strict/tsconfig.json": `{"compilerOptions":{"strict":true},"include":["**/*.ts","../shared/**/*.ts"]}`,
+		"strict/index.ts":      `export { parse } from "../shared/api";`,
+		"tsconfig.json":        `{"files":["shared/api.ts"],"references":[{"path":"./loose"},{"path":"./strict"}]}`,
+	}
+	for path, text := range files {
+		writeWorkspaceFile(t, root, path, text)
+	}
+	snapshot, err := New(Options{Files: FileScopeTsconfig}).buildTestGeneration(context.Background(), root, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var function string
+	for _, fact := range snapshot.items {
+		if fact.Relation == "fn" && fact.Values[1].String == "shared/api.ts" && fact.Values[2].String == "parse" {
+			function = fact.Values[0].String
+		}
+	}
+	signatures := make(map[string]bool)
+	params, returns := make(map[string]string), make(map[string]string)
+	for _, fact := range snapshot.items {
+		switch fact.Relation {
+		case "fn_signature":
+			if fact.Values[0].String == function {
+				signatures[fact.Values[1].String] = true
+			}
+		case "signature_param":
+			if fact.Values[1].Number == 0 {
+				params[fact.Values[0].String] = fact.Values[2].String
+			}
+		case "signature_returns":
+			returns[fact.Values[0].String] = fact.Values[1].String
+		}
+	}
+	if function == "" || len(signatures) != 2 {
+		t.Fatalf("signature observations: %v", signatures)
+	}
+	seen := make(map[string]bool)
+	for signature := range signatures {
+		if params[signature] == "" || params[signature] != returns[signature] {
+			t.Fatalf("signature mixed observations: %s param=%s return=%s", signature, params[signature], returns[signature])
+		}
+		seen[params[signature]] = true
+	}
+	if len(seen) != 2 {
+		t.Fatalf("fixture did not produce differing signatures: %v", seen)
+	}
+	byName := make(map[string]string)
+	for _, fact := range snapshot.items {
+		if fact.Relation == "fn" && fact.Values[1].String == "shared/api.ts" {
+			byName[fact.Values[2].String] = fact.Values[0].String
+		}
+	}
+	var zeroSignature, markedSignature string
+	var omitted bool
+	for _, fact := range snapshot.items {
+		switch fact.Relation {
+		case "fn_signature":
+			switch fact.Values[0].String {
+			case byName["zero"]:
+				zeroSignature = fact.Values[1].String
+			case byName["marked"]:
+				markedSignature = fact.Values[1].String
+			}
+		case "fn_signature_omitted":
+			for name, id := range byName {
+				if strings.HasPrefix(name, "<anonymous@") && fact.Values[0].String == id {
+					omitted = true
+				}
+			}
+		}
+	}
+	has := func(relation, signature string, position int64) bool {
+		return slices.ContainsFunc(snapshot.items, func(fact facts.Fact) bool {
+			return fact.Relation == relation && fact.Values[0].String == signature && fact.Values[1].Number == position
+		})
+	}
+	if zeroSignature == "" || markedSignature == "" || !omitted || !has("signature_arity", zeroSignature, 0) || !has("signature_param_optional", markedSignature, 0) || !has("signature_param_rest", markedSignature, 1) {
+		t.Fatal("zero-arity, optional/rest, or omitted signature evidence was lost")
+	}
+	// A partial whole observation retains its known slot and incompleteness
+	// without acquiring slots or a return from another observation.
+	partial := lintaiapi.FunctionSignatureObservation{ParameterTypes: []string{"", "type:known"}, ReturnType: "", Complete: false}
+	complete := lintaiapi.FunctionSignatureObservation{ParameterTypes: []string{"type:first", "type:second"}, ReturnType: "type:result", Complete: true}
+	projected, err := factsFromSnapshot(&lintaiapi.Snapshot{Functions: []lintaiapi.Function{{
+		SemanticKey: "fn:partial", Kind: "function", SignatureUnresolved: true,
+		SignatureObservations: []lintaiapi.FunctionSignatureObservation{partial, complete},
+	}}}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	partialID := lintaiapi.SignatureID("fn:partial", partial)
+	var partialArity, partialKnown, incomplete, unresolved bool
+	for _, fact := range projected {
+		switch fact.Relation {
+		case "signature_arity":
+			partialArity = partialArity || fact.Values[0].String == partialID && fact.Values[1].Number == 2
+		case "signature_param":
+			if fact.Values[0].String == partialID {
+				if fact.Values[1].Number != 1 || fact.Values[2].String != "type:known" {
+					t.Fatalf("partial observation gained a foreign slot: %+v", fact)
+				}
+				partialKnown = true
+			}
+		case "signature_returns", "signature_complete":
+			if fact.Values[0].String == partialID {
+				t.Fatalf("partial observation gained complete evidence: %+v", fact)
+			}
+		case "signature_incomplete":
+			incomplete = incomplete || fact.Values[0].String == partialID && fact.Values[1].String == "unresolved"
+		case "fn_signature_unresolved":
+			unresolved = unresolved || fact.Values[0].String == "fn:partial"
+		}
+	}
+	if !partialArity || !partialKnown || !incomplete || !unresolved {
+		t.Fatalf("partial signature evidence: arity=%t known=%t incomplete=%t unresolved=%t", partialArity, partialKnown, incomplete, unresolved)
+	}
+}
+
+func TestGenerationValidatesUnchangedSymlinkMembership(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "tsconfig.json", `{"include":["src/**/*.ts"]}`)
+	writeWorkspaceFile(t, root, "src/a.ts", `export const value = 1;`)
+	if err := os.Mkdir(filepath.Join(root, "empty"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, link := range []struct{ target, name string }{
+		{"a.ts", "link.ts"},
+		{"../empty", "linked-dir"},
+		{"missing.ts", "dangling.ts"},
+	} {
+		if err := os.Symlink(link.target, filepath.Join(root, "src", link.name)); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+	}
+	producer := New(Options{Files: FileScopeTsconfig})
+	generation, err := producer.buildTestGeneration(context.Background(), root, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := producer.buildTestGeneration(context.Background(), root, root)
+	if err != nil || again != generation {
+		t.Fatalf("unchanged symlink membership was not reused: err=%v", err)
+	}
+	snapshot := generation.snapshot
+	if len(snapshot.Modules) != 1 || snapshot.Modules[0].Path != "src/a.ts" {
+		t.Fatalf("unexpected selected modules: %+v", snapshot.Modules)
 	}
 }

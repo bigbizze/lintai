@@ -38,8 +38,10 @@ const options: LintaiOptions = {
 	binary: "/tmp/lintai",
 	repoRoot: "/workspace",
 	workspaceRoot: "/workspace",
+	ruleWorkers: 2,
 };
 
+// V25: unused allowances remain policy findings through the host adapter.
 test("unused suppressions report only through lintai/analysis", () => {
 	const unused = located("arch.example", "unused suppression", 1);
 	unused.diagnostic_kind = "unused_suppression";
@@ -103,7 +105,12 @@ function stubLintai(
 					status: 0,
 				};
 			}
-			return { stdout: JSON.stringify(diagnostics), stderr: "", error: undefined, status: 1 };
+			return {
+				stdout: JSON.stringify(diagnostics),
+				stderr: "",
+				error: undefined,
+				status: diagnostics.some((item) => item.diagnostic_kind === "rule_execution_error") ? 3 : 1,
+			};
 		},
 		log: () => undefined,
 	});
@@ -182,6 +189,7 @@ test("each lintai rule is its own ESLint rule with the configured level; analysi
 		["rules", "--json"],
 	);
 	assert.ok(!runs.some((args) => args.includes("--severity")));
+	assert.equal(runs[1]?.[runs[1].indexOf("--rule-workers") + 1], "2");
 });
 
 test("configs.all enables every lintai rule, and a later config overrides one rule or one file", () => {

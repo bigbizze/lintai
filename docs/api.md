@@ -8,21 +8,21 @@ Rules can identify the checked signature and lexical contract member at a call s
 
 This release adds public export and declaration inventories, checked-to-source declaration associations, explicit type-opacity facts, and suspension sites for `await`, `for await`, and module-scope suspension. Shared lexical ownership keeps call, reference, and suspension facts attached to the correct function or module. Rule listings expose validated versions, reported predicates, and `expectNonEmpty` declarations.
 
-Source associations report incomplete or ambiguous evidence instead of guessing. The client tracks semantic inputs and verifies changes during analysis before caching results. Library-type opacity remains explicit; accepting it also trusts any merged augmentations. See the predicate reference below and [examples.md](examples.md) for rule-author guidance.
+Source associations report incomplete or ambiguous evidence instead of guessing. The session validates producer inputs before reusing analysis; clients request checks when watched inputs change. Library-type opacity remains explicit; accepting it also trusts any merged augmentations. See the predicate reference below and [examples.md](examples.md) for rule-author guidance.
 
 ## Linear reachability predicates (0.6.4)
 
-`fn_reaches_ambient`, `fn_reaches_ambient_strict`, `fn_reaches_unresolved`, `module_reaches_ambient` and `type_reaches_incomplete` now propagate backward from their targets one edge at a time. They no longer build `calls_reach`, `calls_or_refs_reach`, `imports_reach` or `type_contains`, so their cost grows with nodes × targets instead of nodes². Their results are unchanged. The closure predicates remain for rules that need both ends of a pair. See example 16 in [examples.md](examples.md) for the same pattern with your own target relation.
+`owner_reaches_ambient`, `owner_reaches_ambient_strict`, `owner_reaches_unresolved`, `module_reaches_ambient` and `type_reaches_incomplete` now propagate backward from their targets one edge at a time. They no longer build `calls_reach`, `calls_or_refs_reach`, `imports_reach` or `type_contains`, so their cost grows with nodes × targets instead of nodes². Their results are unchanged. The closure predicates remain for rules that need both ends of a pair. See example 16 in [examples.md](examples.md) for the same pattern with your own target relation.
 
-## Bulk suppressions (0.6.3)
+## Bulk suppressions
 
-The CLI automatically reads workspace-root `lintai-suppressions.json`. Use `--suppress-all` or repeatable `--suppress-rule <id>` to record current errors, `--prune-suppressions` to lower stale counts, `--suppressions-location <path>` to override the file, and `--pass-on-unpruned-suppressions` to ignore unused entries. Recording and pruning flags are mutually exclusive. Relative locations resolve from the workspace root. `lintai lock --suppressions-location <path>` includes that file in a version 2 rules lock.
+The CLI automatically reads workspace-root `lintai-suppressions.json` in the `lintai.suppressions/4` format. Use `--suppress-all` or repeatable `--suppress-rule <id>` to record current errors, `--prune-suppressions` to lower stale counts, and `--suppressions-location <path>` to override the file. Unused entries are always reported. Recording and pruning flags are mutually exclusive. Relative locations resolve from the workspace root. `lintai lock --suppressions-location <path>` approves that file in a `lintai.rules-lock/4` lock.
 
-Both plugin factories and `@lintai/client` accept `suppressionsLocation?: string` and `passOnUnprunedSuppressions?: boolean`. Serve initialization uses the same parameter names. Unused entries appear under `lintai/analysis`; JSON stdout remains a diagnostic array with kind `unused_suppression` for stale entries. Rule errors take exit priority (3), then violations (1), then unused suppressions (2).
+Both plugin factories and `@lintai/client` accept `suppressionsLocation?: string`. Serve initialization uses the same parameter name. Unused entries appear under `lintai/analysis`; JSON stdout remains a diagnostic array with kind `unused_suppression` for stale entries. Rule errors take exit priority (3); violations and unused suppressions exit 1. Invalid saved policy exits 2.
 
-Go `engine.Options` adds `SuppressionsLocation`, `SuppressAll`, `SuppressRules`, `PruneSuppressions`, and `PassOnUnprunedSuppressions`. `engine.Result` exposes `Suppressed`, `UnusedSuppressions`, `SuppressionsPath`, and `SuppressionsWritten`. See the [complete specification](../specs/bulk-suppressions.md) for scope, entity keys, overlap checking and lock compatibility.
+Go `engine.Options` has `SuppressionsLocation`, `SuppressAll`, `SuppressRules`, and `PruneSuppressions`. `engine.Result` exposes `Suppressed`, `UnusedSuppressions`, `SuppressionsPath`, and `SuppressionsWritten`. See the bulk suppressions section above for grouping, recording and lock approval.
 
-This page documents the rule-authoring and integration surface of LintAI 0.2.
+This page documents lintai's current rule-authoring and integration surface.
 
 ## Rule module shape and caveats
 
@@ -47,13 +47,13 @@ export default rule("arch.pure-no-effects")
 	.version(1)
 	.program(({ env }) => dl`
 		Decl reaches_suspension(Fn).
-		reaches_suspension(Fn) :- fn_suspends(Fn).
-		reaches_suspension(Fn) :- call_edge(Site, Fn, Callee), !site_attribution_unknown(Site), reaches_suspension(Callee).
+		reaches_suspension(Fn) :- ts.fn_suspends(Fn).
+		reaches_suspension(Fn) :- ts.site_owner(Site, Fn), ts.call_edge(Site, Callee), !ts.site_attribution_unknown(Site), reaches_suspension(Callee).
 
 		Decl violation(Fn, Name).
 		violation(Fn, Name) :-
-			fn(Fn, File, Name), glob(File, ${`${env.pureDir}/**`}),
-			call_edge(Site, Fn, Callee), !site_attribution_unknown(Site), reaches_suspension(Callee).
+			ts.fn(Fn, File, Name), lintai.glob(File, ${`${env.pureDir}/**`}),
+			ts.site_owner(Site, Fn), ts.call_edge(Site, Callee), !ts.site_attribution_unknown(Site), reaches_suspension(Callee).
 	`)
 	.report("violation")
 	.message((row) => `Pure function ${row.Name} calls code with suspension syntax`);
@@ -68,12 +68,15 @@ export default rule("arch.pure-no-effects")
 | `.facts(fn)` | pure | no | Receives `{ env, setup }`. Returns `Record<string, Array<Array<string \| number \| Name>>>`: extra extensional relations for this rule. Declare each relation in the program with `descr [extensional()]`. Each tuple must match the declared arity. Booleans are not allowed; use the presence of a fact. |
 | `.program(p)` | pure | yes | A `dl` fragment, or a function `({ env, setup }) => Fragment`. |
 | `.report(...predicates)` | — | yes | One or more predicates defined in the program. Each one needs a `Decl` that names its arguments. Each row is one violation. The first argument is the anchor. |
+| `.suppression(assertion, { by: [...] })` | — | no | Select stable non-anchor column names whose typed values distinguish suppression groups for this reported predicate. No declaration or `{}` selects none. |
 | `.expectNonEmpty(...predicates)` | — | no | After evaluation, each listed predicate (base, prelude or rule-defined) must have at least one fact. If one is empty, the rule reports a `rule_execution_error` with phase `premise` and no violations. Use this to catch a glob or layer table that stopped matching. |
 | `.message(fn)` | pure | yes | Receives `(row, ctx)`. `row` is keyed by the argument names in the reported predicate's `Decl`. Reading a key that is not an argument name throws, and the error lists the argument names. `ctx.assertion_id` is the reported predicate's name. |
 
 ### The anchor
 
-The first argument of a reported predicate is the anchor. It must be an entity id that has a `location` fact: a module path, a function, an import, a call, an external call, a type reference, a meta access, an ambient site, a directive, a parse error, a declaration, an export site or an export that has a contributing syntax site. The anchor's `location` gives the diagnostic's `source_location`, and the anchor becomes `entity_identity.semantic_key`. An anchor without a `location` fact is a `rule_execution_error` with phase `report`.
+The first argument of a reported predicate is the anchor. It must be an entity ID with eligible producer-supplied location support from a base relation required by the rule. The producer location supplies the diagnostic range. A nonlocatable or ineligible anchor causes a `rule_execution_error` with phase `report`.
+
+An anchor also has one producer-supplied tracking key or a null key. The key groups recorded allowances across ordinary edits; it is separate from the analysis entity ID. `.suppression("violation", { by: ["ForbiddenSource"] })` selects typed values from named columns of the reported predicate. Each assertion may have one declaration. Unknown fields, predicates, duplicate or missing column names, and selecting the anchor column fail program analysis. Names, strings, integers and finite floats are distinct typed values. Use stable classifications, not presentation text.
 
 ### `dl` and values
 
@@ -125,356 +128,202 @@ A failing rule contributes only its error diagnostic. Other rules still run. Dia
 
 ## Base relations and caveats
 
-`lintai schema` prints the TypeScript backend schema (`backend/typescript/schema.mg`) with a `doc` and an `arg` description for every relation, followed by its prelude. `lintai facts` prints the facts of a workspace.
-
-Conventions:
-
-- paths are workspace-relative strings with forward slashes
-- entity ids are semantic keys, as strings; a module's entity id is its path
-- booleans are presence facts, for example `fn_async(Fn)`
-- closed vocabularies are name constants, for example `/named`
-
-| Relation | Meaning |
-|---|---|
-| `module(File)` | A source file in the workspace. |
-| `fn(Fn, File, Name)` | A collected function. `Name` is the display name (`Container.local`). |
-| `fn_kind(Fn, Kind)` | `"function"`, `"function_expression"`, `"arrow_function"`, `"method"`, `"constructor"`, `"get_accessor"` or `"set_accessor"`. |
-| `fn_container(Fn, Container)` | The container name, when it is not empty. |
-| `fn_exported(Fn)`, `fn_async(Fn)`, `fn_awaits(Fn)` | Exported, has the `async` modifier, or owns an ordinary `await` expression. `fn_awaits` does not include `for await` or `await using`. |
-| `fn_param(Fn, Index, Type)` | One row per parameter. `Index` starts at 0. `Type` is a type entity id. When tsconfig files see different signatures, the rows are the union of all of them. See [Observations across tsconfig files](#observations-across-tsconfig-files). |
-| `fn_returns(Fn, Type)` | The return type, as a type entity id. The rows are a union in the same way as `fn_param`. |
-| `fn_signature_conflict(Fn)` | Complete signatures of `Fn` from different tsconfig files disagree. Do not combine its `fn_param` and `fn_returns` rows as one signature. |
-| `fn_signature_omitted(Fn)` | This anonymous function has an identity for ownership, but its signature was deliberately skipped. |
-| `fn_signature_unresolved(Fn)` | Signature collection was attempted, but a signature or required type was missing. Some parameter or return rows may still be present. This can coexist with `fn_signature_conflict`. |
-| `suspension_site(Site, File, Kind)` | One site for `/await`, `/for_await` or `/await_using`. |
-| `suspension_in_fn(Site, Fn)` | The site belongs to `Fn`. |
-| `suspension_at_module(Site)` | The site belongs to module evaluation. |
-| `site_attribution_unsupported(Site, Reason)` | The owner could not be represented: `/instance_construction` or `/unsupported_context`. |
-| `import_edge(Imp, From, To, Specifier)` | One row per module reference with a string specifier: `import`, `export ... from`, `import()`, `require()`, `import x = require()` and `typeof import()`. `To` is the workspace-relative path when `import_internal` is set, otherwise the specifier. |
-| `import_form(Imp, Form)` | `/static`, `/reexport`, `/dynamic`, `/require`, `/import_equals` or `/import_type`. Every import has one row. |
-| `import_internal(Imp)` | The import resolves to a workspace file that is not in `node_modules`. |
-| `import_unresolved(Imp)` | The import resolves to no file and no declared module: a typo in a path or alias, or a package that is not installed. |
-| `import_package(Imp, Pkg)` | The package name, for example `"next"` for `"next/server"`. |
-| `import_type_only(Imp)` | The reference loads only types: `import type`, `export type ... from` or `typeof import()`. |
-| `import_retained(Imp)` | An import declaration whose bindings are all `type` bindings (`import { type X } from "m"`), when `verbatimModuleSyntax` is on. tsc emits it as `import {} from "m"`, so `m` loads at runtime. Without the option, tsc removes the import and the fact is absent. |
-| `import_symbol(Imp, Name, Kind)` | `Kind` is `/default`, `/namespace` or `/named`. A side-effect import, `export *`, `import()` and `require()` have no rows. |
-| `import_symbol_type_only(Imp, Name)` | `import { type X }`. |
-| `call_edge(Call, Caller, Callee)` | A call to a collected function. The callee is the declaration that the type checker resolves for the call. `Caller` is the module path for a call at module scope. A call through a function-typed value (a callback parameter, or a property of a record of functions) has no row; it is a `call_unresolved` row. |
-| `external_call(Call, Caller, Module, Name)` | A call to a declaration outside the workspace sources. `Module` is `"lib"`, a package name, a `declare module` name or a `.d.ts` path. `Name` is the qualified name, for example `"JSON.parse"` or `"Set.add"`. |
-| `call_declaration(Site, Decl)` | The concrete signature declaration TypeScript selects for this invocation. Uses the existing runtime call site's id. |
-| `declaration_member(Decl, OwnerDecl, Name)` | The signature belongs to this named member of this interface or class declaration. |
-| `call_declaration_incomplete(Site, Reason)` | Declaration or member evidence is incomplete: `/unresolved`, `/synthetic`, `/unsupported` or `/conflict`. Concrete declaration evidence may also be present. |
-| `call_unresolved(Site, Caller)` | A call that lintai cannot follow. These are rows: a call, `new` or tagged template whose target is not a retained workspace function or an external declaration, including a function in a file excluded by the file scope (other examples include callbacks, function-typed values, element-access callees such as `table["k"]()`, and `any`-typed callees); `f.call(...)` and `f.apply(...)` when `f` is not a collected function; a function value that is not a collected function, passed as an argument to an external call, for example `[1].map(read)` with a parameter `read` (the row is at the argument); and `new` of a workspace class without a constructor whose instance fields have initializers that can run code. Every call site has exactly one of `call_edge`, `external_call` and `call_unresolved`. `new` of a workspace class without a represented constructor is also unresolved when no target can be established. |
-| `import_opaque(Site, From)` | An `import()` or `require()` whose specifier is not a string literal, for example `import(name)` or ``import(`./${name}`)``. It has no `import_edge` row. A template literal without substitutions is a string literal and gives a normal `import_edge`. |
-| `fn_ref(Ref, From, To)` | A collected function used as a value, for example passed, stored, returned or used as a property value. In `[1].map(() => Date.now())`, the surrounding owner has a reference to the arrow. A nested named declaration alone creates no reference. `From` is the surrounding function, the module path at module scope, or an empty string when attribution is unsupported. Import and export specifiers are not references. |
-| `type_ref(Ref, File, Name)` | A type reference. |
-| `type_ref_target(Ref, TargetFile)` | The declaring file, when it is inside the workspace. |
-| `type_kind(Type, Kind)` | The structure of a type. Every type entity has one row. `Kind` is `/any`, `/unknown`, `/never`, `/void`, `/undefined`, `/null`, `/string`, `/number`, `/bigint`, `/boolean`, `/symbol`, `/object_keyword`, `/literal`, `/type_param`, `/union`, `/intersection`, `/tuple`, `/function`, `/object` or `/other`. |
-| `type_named(Type, Origin, Name)` | The type is a class, interface, enum or type alias, or an instantiation of one. `Origin` is `"lib"`, a package name (without `@types/`), a `declare module` name, or the workspace-relative path of the actual declaring file, also when that file is a generated `.d.ts` file. `Origin` describes the type; it is not its identity. It matches the `Module` of `external_call`. `Name` includes containing namespaces, for example `"Models.User"`. Use `type_origin_kind` to tell the kinds of origin apart. |
-| `type_origin_kind(Type, Kind)` | The kind of the origin of a named type: `/lib`, `/package`, `/ambient_module`, `/declaration_file` or `/source_file`. A `declare module "lib"` block has the origin `"lib"` and the kind `/ambient_module`. |
-| `type_arg(Type, Index, Arg)` | A type argument of a named type, or an element of a tuple. The `this` argument of class and interface references is not included. |
-| `type_arg_optional(Type, Index)` | The tuple element is optional. |
-| `type_arg_rest(Type, Index)` | The tuple element is a rest element. |
-| `type_readonly(Type)` | The tuple is readonly. |
-| `type_member(Type, Member)` | A member of a union or intersection. Members are unordered. |
-| `type_literal(Type, Value)` | The value of a literal type: a string, a number, `/true` or `/false`, or the digits of a bigint as a string. An integer is a number and any other value is a float, so `2` matches `2` but not `2.0`. |
-| `type_param_name(Type, Name)` | The name of a type parameter, for example `"T"`. |
-| `type_prop(Type, Name, PropType)` | A property of an anonymous object type. |
-| `type_prop_optional(Type, Name)` | The property is optional. |
-| `type_prop_readonly(Type, Name)` | The property is readonly. |
-| `type_sig_param(Type, Index, ParamType)` | A parameter of a `/function` type. |
-| `type_sig_param_optional(Type, Index)` | The parameter of a `/function` type is optional. |
-| `type_sig_param_rest(Type, Index)` | The parameter of a `/function` type is a rest parameter. |
-| `type_sig_returns(Type, ReturnType)` | The return type of a `/function` type. |
-| `type_display(Type, Text)` | The type as the TypeScript 7 checker prints it. Use it in messages only. |
-| `type_incomplete(Type, Reason)` | The facts of the type leave out structure that a rule can depend on. `Reason` is `/truncated`, `/unsupported`, `/signatures`, `/constraint`, `/conflict` or `/members_omitted`. See [Types](#types). |
-| `meta_access(Acc, File, AccessPath)` | An `import.meta.*` access. |
-| `ambient_source(Source, Capability)` | One row per capability of each ambient source. |
-| `ambient_use(Site, Source, Capability, File)` | One row per ambient use site. |
-| `ambient_key(Site, Key)` | The static key read or written at the site. |
-| `ambient_dynamic(Site)` | The key is not static, or the whole object escapes. |
-| `ambient_write(Site)` | The site assigns to or deletes the keyed member. |
-| `global_ref(Site, Name, File)` | A reference to a global value. The identifier resolves to the global binding with that name, from the default library, an `@types` package or a declaration file. `globalThis.X`, `window.X`, `self.X` and `global.X` are references to `X` too. A local binding with the same name is not a global reference, and type positions are not references. Use it to ban a global completely, for example `crypto` or `process`, including aliases such as `const c = crypto`. |
-| `module_directive(Dir, File, Text)` | A prologue directive, for example `"use client"`. |
-| `module_parse_error(Err, File, Message)` | The first syntax error of a file. The other facts of that file can be incomplete. |
-| `config_adjusted(Config, Option, Action)` | lintai changed a compiler option that TypeScript 7 rejects before it loaded the tsconfig `Config`. `Action` is `/removed`, `/rewritten` (`baseUrl` and `paths` become absolute `paths`) or `/replaced` (a removed `moduleResolution` becomes the TypeScript 7 default). The analysis uses the adjusted configuration, which can differ from the project's own build. |
-| `site_in_fn(Site, Fn)` | The lexical function owner of a call, external-call, unresolved-call, function-reference, ambient-use, global-ref or meta-access site. A callback owns its own sites. Module and unsupported sites have no row. |
-| `location(Entity, File, StartLine, StartCol, EndLine, EndCol)` | The source range of every entity id. |
-
-Caveats:
-
-- `call_edge` follows only calls that the type checker resolves to one declaration. Calls through records of functions or callback parameters can be `call_unresolved` rows. A passed function can have a `fn_ref` row where it is passed. `calls_or_refs_reach` and `fn_reaches_unresolved` help a rule review these paths, but they do not resolve every function value or prove that it runs. See example 12 in [examples.md](examples.md).
-- an unresolved import is not internal, so `To` is the specifier. Check `import_unresolved` when a rule depends on `import_internal`.
-- `export default function () {}` and `export default () => ...` are functions named `default`.
-- `app.get("/", () => load())` gives the arrow function its own identity. The arrow owns the call to `load`; a static block instead uses the surrounding class-evaluation owner. For an unsupported owner, `Caller` or `From` is an empty string and the site has `site_attribution_unsupported`.
-
-### Declared members at call sites
-
-Available starting with 0.8.0. The [capability policy](../testdata/call-provenance/writer-policy.ts) uses these facts to distinguish forbidden members from incomplete evidence.
-
-TypeScript can know which declared member a call uses even when lintai cannot know which implementation runs. For example:
-
-```ts
-interface Reader { read(): void; }
-interface Writer { write(): void; }
-function use(store: Reader & Writer) {
-  store.read();
-  store.write();
-}
-```
-
-The first call selects `Reader.read`; the second selects `Writer.write`. Both can remain `call_unresolved`. That runtime fact does not mean declaration evidence is missing. `const saved = store; saved.write()` can select the same `Writer.write` declaration without finding the implementation behind `store`.
-
-To ban a public member, select its owner with `module_export` and `export_target`, then join `call_declaration` to `declaration_member`. Export aliases still lead to the same owner. A forbidden finding requires a positive member row; an unrelated `Other.write` does not match just because its name is `write`. Owner selection does not require an observed forbidden member. Anonymous call signatures can be complete without a member row.
-
-Ordinary and optional calls, receiver aliases, static element access and selected overloads retain the concrete signature chosen by the checker. Method owners are their declaring interfaces or classes, including the base declaration for an inherited method. Inline function-type properties and inline callable-object properties retain their signature identity and lexical owner. Shared callable aliases do not acquire owners from their uses. Constructors and tagged templates retain concrete selected signatures without an invented member name. A getter returning a callable is not the declaration of that callable. Dynamic access is never matched by spelling.
-
-`/unresolved` means no usable signature declaration was selected, including an `any` call or checker recovery. `/synthetic` means the checker combined signatures without one concrete declaration. `/unsupported` means the signature or member association cannot be represented safely. For example, a shared callable type alias does not belong to each interface property that uses it. `/conflict` means checked programs disagree. Retain and check these markers even when a declaration row exists. The selected declaration may be an overload, an inline callable property's signature, or a declaration outside the analyzed files; it does not identify a runtime implementation.
-
-For property calls, the selected signature's lexical member must be a declaration of the checker-resolved property. An anonymous signature without a lexical member must be declared within that property. A signature borrowed from another member remains incomplete even if it is nested inside the property's implementation. One matching declaration suffices when intersected properties supply multiple overloads. This check applies uniformly to properties, accessors, constructor parameter properties, and object-literal assignments.
-
-Referenced declarations and owners retain identity, origin and location without becoming new export or type-extraction roots. Across checked programs, differing selections or completeness produce `/conflict`; known rows and incomplete reasons remain visible. Escaped callback values represented by `call_unresolved` are not invocations and receive `/unsupported`. Runtime relations (`call_edge`, `external_call`, `call_unresolved` and `fn_ref`) remain independent of this evidence.
-
-Rules must also check missing declaration rows and incomplete or missing owner/export selection. No forbidden match is not enough to establish the policy while required evidence is missing. See [the executable capability example](examples.md#18-forbid-a-declared-capability-member) for separate forbidden and indeterminate results. These facts do not prove that an unknown runtime value is safe.
-
-### Suspension sites and owners
-
-For `await using resource = await acquire()`, lintai records two sites: one `/await_using` for the declaration list and one `/await` for the expression. A list with several resources still has one `/await_using` site. A `for await` statement has one `/for_await` site, in addition to any other sites inside it. Locations cover the await expression, the loop, or the declaration list respectively. IDs use the workspace-relative file, kind and first-token offset, so moving a site changes its ID.
-
-A callback owns the sites in its body. Its enclosing function gets a `fn_ref` when the callback is passed, returned, assigned or used as a property value; that reference does not prove a call. A nested named declaration alone creates no reference. Parameter defaults belong to the function. Computed names, decorators, class heritage, static initializers and static blocks belong to the surrounding class or object evaluation. An instance field initializer belongs to its class's source constructor when it has a body. Without one, the site is marked `/instance_construction` instead of being assigned to the module or an outer function.
-
-Each suspension site has exactly one owner classification: function, module, or unsupported. `module_has_suspension` includes all three, so a check for module initialization also needs `suspension_at_module`. An `async` modifier or a returned promise alone creates no site. These facts describe syntax, not execution or runtime scheduling. Parser diagnostics do not establish that the rest of a file was semantically validated.
-
-Anonymous ownership-only functions use positional IDs such as `src/file.ts::arrow_function::<anonymous@42>`. Their signatures are omitted and do not add type roots. A collected `function done(): void {}` has no parameters, a `/void` return type, and neither signature marker. Rules that need a complete signature should guard against `fn_signature_omitted`, `fn_signature_unresolved` and `fn_signature_conflict`; an `/other` type with `type_incomplete` is still a collected type.
-
-### Types
-
-A type is an entity. Its id is `"type:"` and a hash of the type's structure, so the same type has the same id in every file, every tsconfig, every file order and every run. `fn_param` and `fn_returns` give the type ids of a function's parameters and return type. The `type_*` relations describe those types and every type that they contain.
-
-- `type_kind` says what a type is. A named type also has a `type_named` row, and its kind describes what the name refers to. `ActionResult<number>`, where `ActionResult<T>` is an alias of a union, has kind `/union`, a `type_named` row for `ActionResult`, one `type_arg` row and one `type_member` row for each member of the union.
-- A named type is identified by its declarations, not by its text. Two types called `ActionResult` in different files are different entities, with different `Origin` values. `ActionResult<number>` and `ActionResult<string>` are different entities too. A type parameter and a `unique symbol` are identified by their declarations, so the `T` of two generic functions are two entities. See [Declaration identity](#declaration-identity).
-- Union members and object properties are sorted before the id is computed, so `A | B` and `B | A` are the same entity.
-- Classes, interfaces and enums are emitted by name and type arguments only. Their members are not expanded, and each receives `type_incomplete(Type, /members_omitted)`, including aliases and generic instantiations that take an early return. A function that returns `Promise<User>` gives `Promise<User>`, `User`, nothing inside `User`, and an omission marker on the library `Promise` and on `User` if it is a class, interface or enum. Arrays are the lib interface `Array` and receive the same marker.
-- Conditional, mapped, indexed access, `keyof`, template literal, string mapping and `unique symbol` types are `/other` with `type_incomplete(T, /unsupported)`. They have no structure facts, only `type_display`. An alias of such a type still has its `type_named` and `type_arg` rows. The id of an `/other` type comes from its full text and its declarations, if it has any, so two `unique symbol` types in two files are two entities.
-- A function type with one call signature and no properties is `/function`, with `type_sig_param` and `type_sig_returns` rows. Other anonymous object types, including overloaded function types, are `/object` with `type_prop` rows only. If such a type has a call, construct or index signature, it has `type_incomplete(T, /signatures)`. `{ [k: string]: Db }` has no `type_child` row for `Db`.
-- A type parameter with a constraint has `type_incomplete(T, /constraint)`. The constraint is not emitted.
-- A type that refers to itself, such as `type Tree = { kids: Tree[] }`, refers to its own id. A type whose structure is more than 16 levels deep, such as a type that makes a new type at each level of nesting, is `/other` with `type_incomplete(T, /truncated)` and no structure facts. A named type keeps its `type_named` row. Its id includes its display text, so two truncated types with different text are two entities.
-- TypeScript flattens a union that contains another union. `ActionResult<number> | null` is one union with the members of `ActionResult<number>` and `null`, and it has no row for `ActionResult`. A rule that must find the alias inside such a union cannot do so. Write the union as a named alias, or match the members.
-- A named type has one id for its declarations and type arguments. If two tsconfig files compile the same declaration with different compiler options, such as `strictNullChecks`, and the structure differs, the type keeps only `type_named`, `type_origin_kind` and `type_arg`, has kind `/other` if the kinds differ, and has `type_incomplete(T, /conflict)`. The result does not depend on the order of the tsconfig files.
-- Two different types can have one id only if the id is incomplete: two `/other` types with the same text and no declaration, or two truncated types that agree to depth 16 and have the same text. Every fact of such an id is true of each type. An id with structure facts is never shared by two types with different structure.
-- `type_display` is the text that TypeScript 7 prints. TypeScript stops the text at about 2000 characters and ends it with `...`. When one id has different text at different sites, lintai keeps the smallest text. The text can differ from the text in an editor that runs TypeScript 5, and it can change when lintai updates its compiler. Do not match a rule against it. Use the structural relations, and use `type_display` in messages.
-- Only a named type declared in a workspace source file has a `location` row, at its name. A rule that reports a type id as its anchor fails with a "no location fact" error for other types, so rules should report the function.
-
-What the facts show:
-
-| Distinction | Shown by |
-|---|---|
-| optional property | the id, `type_prop_optional` |
-| readonly property | the id, `type_prop_readonly` |
-| optional or rest tuple element | the id, `type_arg_optional`, `type_arg_rest` |
-| readonly tuple | the id, `type_readonly`. A readonly array is the lib interface `ReadonlyArray`. |
-| optional or rest parameter of a function type | the id, `type_sig_param_optional`, `type_sig_param_rest` |
-| origin kind | the id, `type_origin_kind` |
-| type alias name and arguments | the id, `type_named`, `type_arg`, when the checker keeps the alias |
-
-Not shown: members of classes, interfaces and enums (marked `/members_omitted`); call, construct and index signatures of an `/object` (marked `/signatures`); type parameter constraints (marked `/constraint`) and defaults; the structure of `/other` types (marked `/unsupported`); parameter names.
-
-Because default library `Promise`, `Array`, and other interfaces are opaque named interfaces, `type_reaches_incomplete` can now report ordinary library wrappers even when their represented type arguments are complete. A rule may accept a specific library origin and identity while still propagating through its `type_arg` edges; see [the rule-specific example](examples.md#15-domain-signatures-do-not-mention-infrastructure-types). An absent incompleteness marker does not establish that `any`, `unknown`, an unconstrained parameter, or a runtime value is safe.
-
-Removed by the checker before lintai sees the type, so no rule can see them: an alias of a primitive or of another named type (`type UserId = string` is `/string`, `type Handle = Db` is `Db`), a union inside a union (the members are flattened), and `undefined` in optional properties, elements and parameters.
-
-### Declaration identity
-
-Earlier versions of lintai sometimes guessed where a type came from. When a workspace package was imported through its build output, for example `packages/contracts/dist/index.d.ts`, lintai changed `dist/` to `src/` in the path and reported the type as if it came from the source file. The guess was often right, but nothing checked it. Type ids were also built from the package name, so two installed copies of one package gave their types the same id, although they are really different declarations.
-
-lintai now names each declaration by where the checker actually found it. Take this file:
-
-```ts
-// packages/contracts/src/index.ts
-export type Contract = { id: string };
-```
-
-The declaration of `Contract` gets an id that starts with `decl:`, followed by a hash of three values: the file that the checker read, the kind of syntax (here a type alias), and the offset of the first token of the declaration. The offset points to the first token rather than a leading comment or whitespace. Adding text before that token shifts its offset and can change the id. A file inside the workspace is hashed with its workspace-relative path, and a file outside it with the compiler's normalized path. lintai uses the compiler's own rules for case sensitivity and for symbolic links (`preserveSymlinks`), and does not resolve links itself. The name, the package version and the origin label are not part of the id.
-
-The workspace root is the path you gave lintai. If it contains a symbolic link and the compiler resolves a package to a path outside that spelling of the root, lintai uses the compiler's absolute path for the declaration id. Its location can then contain `..` segments, even when both paths reach the same workspace on disk.
-
-Because the id comes from the position of the declaration, each overload and each part of a merged declaration gets its own id. If you move a declaration within its file, its id can change.
-
-Type ids are built from these declaration ids. A named type such as `Contract` uses the ids of all its declarations, plus its type arguments, and type parameters and `unique symbol` types use their declaration ids too. So two imports of the same named type with the same type arguments give the same type id, and types from declarations in different files have different type ids. This includes two installed copies of one package, even of the same version. Each copy is a separate package instance with its own type ids, although the `type_named` rows of both copies can show the same `Origin`, such as `"knex"`. A generated `.d.ts` declaration and the source declaration it was built from are also always two entities. A declaration map or a source-links entry can link them, as described below, but it never makes them the same.
-
-Use `type_named` and `type_origin_kind` to match a type by its name and origin. Equal type ids identify the same extracted type. Two types from the same declaration can still have different ids, for example two uses of a generic type, `Box<string>` and `Box<number>`.
-
-If you upgrade from an earlier version, check three things. First, type ids change for package types, type parameters, `unique symbol` types and types declared in generated `.d.ts` files, so do not save type ids between lintai versions. Second, lintai no longer changes `dist/` into `src/`. A type declared in `packages/contracts/dist/index.d.ts` now has that path as its `type_named` `Origin`, with kind `/declaration_file`, and a call to a function declared there is an `external_call` with that path as `Module`. Before, lintai made it a `call_edge` to the function that it guessed in `src/`. Third, a rule that matched `glob(Origin, "packages/*/src/**")` for types imported through `dist/` stops matching them. To fix it, set up TypeScript project references so that the checker reads the source (see [Source resolution order](#source-resolution-order)), match the real `.d.ts` path, or follow the source associations.
-
-### Exports and declarations
-
-Many architecture rules are about what a package makes public, for example "nothing exported from `packages/common` may expose a database client type". Earlier versions of lintai could see functions and types, but not the list of names that a module exports, so such a rule had no good place to start.
-
-lintai now records each public name of each analyzed module, the declarations behind the name, and how the name got there. Take three files:
-
-```ts
-// packages/common/src/context.ts
-export type ValidationContext = { db: Knex; eventVersionId: number };
-
-// packages/common/src/validation.ts
-export type { ValidationContext as CheckContext } from "./context";
-
-// packages/common/src/index.ts
-export * from "./validation";
-```
-
-For `index.ts`, lintai records a `module_export` row for the name `CheckContext` in type space. An `export_target` row connects that export to the `ValidationContext` declaration in `context.ts`, and a `declaration_type` row gives the type of that declaration. An `export_reexport` row records the single step from `index.ts` back to `validation.ts`, with the source name `"*"` because it is a star export. `validation.ts` has its own `CheckContext` export, and its re-export row points to `context.ts` with the source name `ValidationContext`. The checker decides what each name points to, and the source text gives the public names and the re-export steps.
-
-A space is TypeScript's split between the type world and the value world. `/type` is the name used as a type, and `/value` is the name used as a runtime value. A class is both, so it has two exports: in type space its declared type is the instance type, and in value space it is the constructor.
-
-A type-only export can also name a value or function for use in a `typeof` query. That binding has a `/type` export, while its target declaration has a `/value` declaration type. The binding is still resolved when the checker finds its declaration.
-
-| Relation | Meaning |
-|---|---|
-| `declaration(Decl, Name, Kind)` | One actual declaration. `Name` is qualified when possible; an anonymous default declaration has the name `default`. `Kind` is `/function`, `/variable`, `/type_alias`, `/interface`, `/class`, `/enum`, `/namespace`, `/method`, `/property`, `/signature` or `/export_expression`. |
-| `declaration_origin(Decl, OriginKind, Origin)` | Description of where the declaration is: `/source_file`, `/declaration_file`, `/package`, `/ambient_module` or `/lib`, with a workspace path, package name, module name or `"lib"`. It is not part of the identity. |
-| `declaration_type(Decl, Space, Type)` | The type that the checker gives the declaration in `/type` or `/value` space. A class can have both: its instance type and its constructor type. |
-| `declaration_fn(Decl, Fn)` | The declaration is directly a collected function. |
-| `declaration_incomplete(Decl, Reason)` | The type or function of the declaration is `/unresolved`, `/unsupported` or a `/conflict`. A failed source association is not a reason. |
-| `module_export(Export, File, Name, Space)` | A public binding of an analyzed module, as the checker sees it. One row for each module, public name and space. |
-| `export_target(Export, Decl)` | A declaration behind the binding. Overloads and merged declarations give more than one row. The rows are a set; they are not paired. |
-| `export_via(Export, Site)` | A syntax site that contributes the binding, including a local `export` statement. |
-| `export_reexport(Export, Site, Module, SourceName, Space)` | One immediate re-export step of the binding. `Module` is the resolved path in the compiler's canonical form, not the raw specifier. `SourceName` is the name in that module, or `"*"` for `export *` and `export * as ns`. |
-| `export_incomplete(Export, Reason)` | The target of a known binding is `/unresolved`, `/unsupported` or a `/conflict`. Known targets are still in `export_target`. |
-| `module_exports_incomplete(File, Reason)` | The list of public names of the module is `/unresolved`, `/unsupported` or a `/conflict`. |
-
-`export default` and `export =` use the public names `default` and `export=`. `export =` is in value space, and lintai does not invent named exports from the properties of the assigned value. `export const handler = () => ...` points at the `/variable` declaration, not at the arrow function; when a declaration is directly a function that lintai collected, `declaration_fn` connects the two. Overloads and merged declarations give several `export_target` rows. They form a set, so do not pair them up by order.
-
-Destructuring exports give each bound name its own binding, with the containing statement as its site. Exported string names, including `""` and `"*"`, are kept as written. For a literal `"*"` source name, use the site's import-symbol facts to tell a named re-export from `export *`.
-
-When an export has a contributing syntax site, its `location` is the earliest such site, and the export can be the anchor of a diagnostic. Each site has its own location too. A re-export site ID uses its position in the file, so it can change when the file changes. An export without a location cannot be used as an anchor. In `export { left as first, right as second } from "./pair"`, each name gets its own `export_reexport` row, `first` from `left` and `second` from `right`, so the two names never get mixed up. Each row is one step only.
-
-To follow a chain into an internal module, join `Site` to `import_edge`, check `import_internal(Site)`, and match `To` to `module_export.File`. The compiler can spell `Module` differently from `File`, for example in capitalization. For named re-exports, match `SourceName` and `Space`; for `export *`, match the exporting binding's public `Name` and `Space`.
-
-For `export * as ns`, the site has an `import_symbol` row of kind `/namespace`, and the binding points to the whole namespace declaration, not a member. Only modules in the snapshot have `module_export` rows; package entries in `node_modules`, `.d.ts` files in `dist/`, and files read only to link declarations to source have none. The prelude predicate `export_from` gives the same step without the export id.
-
-`export *` follows TypeScript's rules: it skips `default`, a local export with the same name wins, and competing declarations from different star sources leave the name without a target. Two paths to the same declaration do not conflict. The declared type of each export is a starting point for type extraction, within the usual depth limit, so the normal `type_*` facts describe it.
-
-Sometimes lintai cannot get the full list of names. If the module in `export * from "./missing"` does not resolve, lintai cannot know which names it would add. It then adds `module_exports_incomplete(File, /unresolved)` to that module, and to each module that star-exports it, and still lists the names that it does know. This matters for rules that rely on a name being absent, or on having seen every export. Such a rule must check `module_exports_incomplete` for every module whose names it uses, and report that it cannot decide instead of passing. When there is no marker, the list is complete only as far as lintai's model goes. That is not proof that the module is safe.
-
-For CommonJS, lintai keeps static exports that the checker exposes and it can model, but marks the inventory `/unsupported`: dynamic writes can add names that the checker does not list. Known bindings remain available.
-
-### Observations across tsconfig files
-
-In a monorepo, more than one tsconfig file can compile the same file, each with different options, and the checker can then give different answers about the same function. Suppose that one program sees `parse` as `(input: string) => number` and another sees it as `(input: number) => string`. `fn_param` and `fn_returns` keep the rows from both programs, so `parse` has two parameter rows and two return rows. A rule that joins them freely could conclude that `parse` is `(string) => string`, which neither program saw.
-
-To make this visible, lintai keeps the complete answer from each checked program and compares the answers before it writes the facts. When complete answers differ, it adds a marker: `fn_signature_conflict(Fn)` when the full signatures differ, `export_incomplete(Export, /conflict)` when export targets differ, `declaration_incomplete(Decl, /conflict)` when declared types differ, and `source_binding_incomplete(Assoc, /conflict)` when source declaration sets differ. `type_incomplete(Type, /conflict)` still marks one type id with different structure. Overloads are separate declarations, so they are not a conflict. A program that did not see the entity, or saw only part of it, does not count as a complete empty answer, and its incomplete reason stays in the facts.
-
-So a rule that needs one consistent answer must exclude these markers. Use `!fn_signature_conflict(Fn)`, `!fn_signature_omitted(Fn)` and `!fn_signature_unresolved(Fn)` before you combine parameters and a return type, and `!export_incomplete(Export, /conflict)` before you rely on one export target. A strict rule should report unresolved, unsupported and conflicting subjects as undecided, because leaving them out quietly is not the same as proving that a problem is absent. Known rows can still produce findings. The guard works on one entity at a time, so it does not prove that a join across different entities used answers from the same program. And the absence of a conflict does not mean that lintai saw every member of a type.
-
-### Source resolution order
-
-In a workspace, one package often imports another through its build output. For example, `apps/web` imports `@acme/contracts`, and the `types` field of that package points at `packages/contracts/dist/index.d.ts`. If the checker reads that file, rules see generated declarations instead of the source that people edit. lintai looks for source in two stages.
-
-In the first stage, TypeScript decides which files the checker reads, and lintai turns on TypeScript's project-reference source redirect when it builds each program. If `apps/web/tsconfig.json` has an explicit `references` entry for `packages/contracts`, an import that would resolve to that project's output `.d.ts` resolves to the referenced source file instead, also when the output was never built. A tsconfig can turn this off with `disableSourceOfProjectReferenceRedirect: true`. lintai does not add references just because two packages are in one workspace, and it does not compute output paths by renaming directories. When the checker reads source this way, the source declaration is the checked declaration, and no link fact is needed.
-
-In the second stage, if the checker still uses a generated `.d.ts` file, lintai can try to link its declarations back to source. It tries a [declaration map](#declaration-maps) first and then a [source-links entry](#source-links-entries). These links only add evidence. They never replace the declarations, types or call targets that the checker used.
-
-Neither stage proves that the build output is current. A redirect shows where TypeScript points, and a map shows where the compiler said a declaration came from when it last ran. Source on disk can differ from stale output on disk, and lintai does not check build freshness.
-
-### Source associations
-
-When the checker reads generated declarations, a rule may still want to know which source declaration each one came from, for example to report a problem in `src/` instead of in `dist/`. lintai has two kinds of link for this, and they are not equally strong. A declaration map link is precise: it connects one checked declaration to one source declaration. A source-links entry is weaker: it says that the checked entry file and the source entry file export the same name in the same space, and it lists the declarations behind that name on each side as two separate sets, without pairing them.
-
-A source declaration that lintai reads only to make one of these links is an endpoint. It has `declaration`, `declaration_origin` and `location` rows, so you can report it and see where it is. lintai does not add modules, functions, `declaration_type` rows or type facts for it, and does not start type extraction from it. If such a declaration has no `declaration_type` row, that does not mean it has no type.
-
-#### Declaration maps
-
-When TypeScript writes `index.d.ts` with the `declarationMap` option on, it also writes `index.d.ts.map`, which records where each part of the `.d.ts` file came from in the source. lintai reads that map, but it does not accept the nearest match. A source map can return a nearby position even when nothing maps to the exact spot, and that nearby position can belong to a different declaration.
-
-lintai therefore accepts a link only when three things hold. It must be able to read, from disk, the source file that the map names; it does not use source text embedded in the map's `sourcesContent`. A mapping segment must start exactly at the first token of the checked declaration, and the source position must map back to the same place. And exactly one source declaration, of a compatible kind and in a compatible binding context, must contain that source position. A matching name alone is not enough. When all of this holds, lintai adds `declaration_source(CheckedDecl, SourceDecl, /declaration_map)`. The two declarations keep their own ids and locations.
-
-| Relation | Meaning |
-|---|---|
-| `declaration_source_candidate(CheckedDecl, SourceDecl, /declaration_map)` | A source declaration that passed validation. All candidates are kept. |
-| `declaration_source(CheckedDecl, SourceDecl, /declaration_map)` | The single accepted link. It has a row only when there is exactly one candidate. Many checked declarations can link to one source declaration. |
-| `declaration_source_outcome(CheckedDecl, Outcome)` | A requested map attempt failed. No row means that there was no attempt, or that it succeeded. |
-
-When an attempt fails, `declaration_source_outcome` gives the reason:
-
-| Outcome | Meaning |
-|---|---|
-| `/missing_map` | A map was requested, but there is no map URL or adjacent map file. |
-| `/unavailable_map` | lintai cannot read the map. |
-| `/malformed_map` | The map is not valid, or its mappings do not decode. |
-| `/unavailable_source` | lintai cannot read or parse the source that the map names. |
-| `/unsupported` | An unsupported map form, for example non-null `sourcesContent`, or unsupported source syntax. |
-| `/unresolved` | No exact anchor, or no compatible declaration at the mapped point. |
-| `/ambiguous` | More than one compatible source declaration, or more than one distinct source segment at the generated position. The candidates are kept and there is no `declaration_source` row. |
-| `/conflict` | Complete observations of the declaration disagree. |
-
-A failed map does not make the checked declaration incomplete. lintai still knows the declaration and its type, and only the optional link is missing, so these outcomes never become `declaration_incomplete`. lintai reports a missing map only when a source-links entry applies to the declaration. In that case the outcome is `/missing_map`, and lintai falls back to the configured binding. Without such an entry, a missing map gives no row.
-
-#### Source-links entries
-
-Some packages ship no declaration maps. For these, you can tell lintai which source entry belongs to a checked entry with a source-links file (see "Source links" in the [CLI reference](#cli-reference-and-caveats)). Given an entry that links `packages/contracts/dist/index.d.ts` to `packages/contracts/src/index.ts`, lintai takes each public binding of the checked file, such as `parse` in value space, and looks for the same name in the same space in the source entry.
-
-Suppose `parse` has two overloads. The checked side then has two declarations, and the source side has three: two overload signatures and the implementation. lintai records one `source_binding_attempt` for `parse`, a `source_binding` row because the source also exports `parse` as a value, two `source_binding_checked_decl` rows and three `source_binding_source_decl` rows. It does not record which checked overload belongs to which source declaration, because a matching name cannot show that.
-
-| Relation | Meaning |
-|---|---|
-| `source_entry(Entry, CheckedEntry, SourceEntry)` | One valid entry, with workspace-relative paths. |
-| `source_entry_tsconfig(Entry, Tsconfig)` | The entry names a `sourceTsconfig`. |
-| `source_entry_applied(Entry)` | The checked entry is a file that an analyzed program used, and lintai tried its bindings. It does not mean that they succeeded. |
-| `source_entry_unapplied(Entry)` | No analyzed program used the checked entry. This is not an error. |
-| `source_entry_incomplete(Entry, Reason)` | The source program cannot be built, or its list of exports is `/unresolved`, `/unsupported` or a `/conflict`. |
-| `source_binding_attempt(Assoc, Entry, CheckedFile, Name, Space)` | One attempt for one public binding of the checked entry. `CheckedFile` is the actual checked file, also when it is not an analyzed module. |
-| `source_binding(Assoc, SourceFile, SourceName, Space, /source_entry)` | The source entry exports the same name in the same space. |
-| `source_binding_checked_decl(Assoc, Decl)` | A member of the checked declaration set of the binding. |
-| `source_binding_source_decl(Assoc, Decl)` | A member of the source declaration set of the binding. It can include overload signatures and the implementation. |
-| `source_binding_incomplete(Assoc, Reason)` | The source binding is `/unresolved`, `/unsupported` or a `/conflict`. |
-
-Treat the two declaration sets as independent. Do not join them into pairs, pair overloads by position, or treat declarations with the same name as equal. A `source_binding` row shows only that TypeScript exposes the same public name and space from both entries, not that the output was built from that source.
-
-The checked set is present even when the source side fails. A failed attempt has no `source_binding` row and has a `source_binding_incomplete` reason; when the source entry does not export the name at all, the reason is `/unresolved` and there is no source set. If a precise map link for a checked declaration points outside the source set of its binding, lintai marks the binding `/conflict` and keeps both kinds of evidence. Before a rule treats a set as complete, it must exclude bindings that have `source_binding_incomplete`. Mangle needs every variable in a negated atom to be bound, so define `binding_uncertain(Assoc) :- source_binding_incomplete(Assoc, _).` and negate `binding_uncertain(Assoc)`. lintai tries the map for each declaration and the configured entry for each binding separately, so one failure does not stop the others.
-
-When the source entry is not part of the consumer's checked program, lintai checks it in a separate auxiliary program. It uses the entry's `sourceTsconfig`, or else the nearest tsconfig of the source file, or else a referenced tsconfig that owns it. Multiple owners with equivalent program inputs can share the association. If their inputs differ and the entry has no `sourceTsconfig`, lintai does not pick one by order; the entry gets `source_entry_incomplete(Entry, /unsupported)`. The auxiliary program never becomes part of the consumer's program. Within one run, lintai reuses an auxiliary program for entries with the same configuration and inputs, and it keeps none between runs.
+`lintai schema` reads the configured producer descriptions without collecting source facts. Rule programs use qualified names such as `ts.fn` or `app.fn`, according to the producer's configured namespace; `lintai.glob` belongs to the engine. Entity IDs are producer-owned strings and are distinct from file paths. A module ID is `ts:module:<file>`, not the file path. Location and tracking support are supplied by the producer for eligible anchors.
+
+Source syntax has one `ts.site` identity and either one `ts.site_owner` or unsupported-attribution evidence. A call's classification is evidence about that site. A direct callback argument uses its own site and is not an invocation. Function signatures are grouped observations: join through `ts.fn_signature` before reading parameters and returns. Incompleteness and conflict rows describe uncertainty, rather than proving absence.
+
+The tables below are the Appendix A base contract. `E!` and `E?` are owned entities with required or optional location support; `E` is query-only, `P` is a path, `S` a string, `N` a name constant, `I` an integer and `L` a literal value. See the [full contract](../specs/lintai-refactor-implementation-r6.md#appendix-a-complete-built-in-base-relation-contract) for populations and cardinalities.
+
+### A.1 Source identity and lexical evidence
+
+| Predicate | Ordered arguments | Meaning |
+|---|---|---|
+| `ts.module/1` | `Module:E!` | One entity per selected primary file. |
+| `ts.module_path/2` | `Module:E!, File:P` | The primary module’s canonical file path. |
+| `ts.fn/3` | `Fn:E!, File:P, Name:S` | Collected implementation/ownership function in a primary file; display name is not identity. |
+| `ts.fn_kind/2` | `Fn:E!, Kind:N` | One syntax kind: /function, /function_expression, /arrow_function, /method, /constructor, /get_accessor or /set_accessor. |
+| `ts.fn_container/2` | `Fn:E!, Name:S` | Known containing class/object display name; absent when unnamed. |
+| `ts.fn_exported/1` | `Fn:E!` | Syntactically exported collected function. |
+| `ts.fn_async/1` | `Fn:E!` | Function has the async modifier; this is not a statement about every promise-returning function. |
+| `ts.site/2` | `Site:E!, File:P` | Primary syntax-event population defined in section 7.2. |
+| `ts.site_owner/2` | `Site:E!, Owner:E!` | Unique representable lexical/execution owner: collected function or primary module. |
+| `ts.site_attribution_unsupported/2` | `Site:E!, Reason:N` | No representable owner; /instance_construction or /unsupported_context. |
+| `ts.suspension_site/2` | `Site:E!, Kind:N` | Ordinary /await, /for_await or /await_using syntax; not proof of execution. |
+| `ts.meta_access/2` | `Site:E!, AccessPath:S` | Observed import.meta member-access path. |
+| `ts.ambient_source/2` | `Source:N, Capability:N` | Registered ambient-source/capability pair, independent of observed use. |
+| `ts.ambient_use/3` | `Site:E!, Source:N, Capability:N` | Use matching a registered ambient source. File/owner are obtained from source-site relations. |
+| `ts.ambient_key/2` | `Site:E!, Key:S` | Static key used by an ambient read/write. |
+| `ts.ambient_dynamic/1` | `Site:E!` | Ambient key is dynamic or the relevant ambient object escapes. |
+| `ts.ambient_write/1` | `Site:E!` | Ambient use assigns to or deletes a keyed member. |
+| `ts.global_ref/2` | `Site:E!, Name:S` | Value reference to the resolved global binding; same-spelled local variables do not qualify. |
+| `ts.module_directive/2` | `Site:E!, Text:S` | Directive-prologue string in a primary module; no quotation marks in Text. |
+| `ts.module_parse_error/2` | `Site:E!, Message:S` | First syntax diagnostic for a primary file. Other source facts can be incomplete while it exists. |
+| `ts.config_adjusted/3` | `Config:P, Option:S, Action:N` | Option adaptation in the fixed applicable-context domain; /removed, /rewritten or /replaced. |
+
+### A.2 Imports and source type references
+
+| Predicate | Ordered arguments | Meaning |
+|---|---|---|
+| `ts.import_edge/4` | `Site:E!, From:P, To:S, Specifier:S` | String-literal module reference. From is source path; To is resolved workspace path for internal edges, otherwise specifier/origin data. To is never a module entity ID. |
+| `ts.import_form/2` | `Site:E!, Form:N` | /static, /reexport, /dynamic, /require, /import_equals or /import_type. |
+| `ts.import_internal/1` | `Site:E!` | Resolves to a workspace file outside node_modules; target need not be a primary module. |
+| `ts.import_unresolved/1` | `Site:E!` | No resolved file or declared module under an observed context; not a missing collection result. |
+| `ts.import_package/2` | `Site:E!, Package:S` | Resolved package name, including workspace packages when applicable. |
+| `ts.import_type_only/1` | `Site:E!` | Reference is exclusively type-oriented under the defined syntax classification. |
+| `ts.import_retained/1` | `Site:E!` | All-type named bindings whose statement is retained as a runtime load by verbatimModuleSyntax. |
+| `ts.import_symbol/3` | `Site:E!, Name:S, Kind:N` | Introduced binding; Kind is /default, /namespace or /named. Side-effect imports have no binding rows. |
+| `ts.import_symbol_type_only/2` | `Site:E!, Name:S` | Named binding uses the type modifier. |
+| `ts.import_opaque/1` | `Site:E!` | Dynamic import/require with a nonliteral specifier; no invented resolved edge. |
+| `ts.type_ref/2` | `Site:E!, Name:S` | Supported source type-reference syntax; not the expanded type graph. |
+| `ts.type_ref_target/2` | `Site:E!, TargetFile:P` | Known workspace file declaring the referenced type. |
+
+### A.3 Invocation, provenance and function-value evidence
+
+| Predicate | Ordered arguments | Meaning |
+|---|---|---|
+| `ts.call_site/1` | `Site:E!` | Every supported primary call/new/tagged-template invocation; does not include an argument merely because it is callable. |
+| `ts.call_edge/2` | `Site:E!, Callee:E!` | Observed call to a collected implementation. Caller is site_owner, not part of this row. |
+| `ts.external_call/4` | `Site:E!, OriginKind:N, Origin:S, Name:S` | Observed external declared target; origin kinds are defined in section 9.1. |
+| `ts.call_unresolved/1` | `Site:E!` | An observed invocation cannot be followed to a retained implementation or supported external target. |
+| `ts.call_target_conflict/1` | `Site:E!` | Relevant runtime-classification/target observations disagree; retain their positive evidence. |
+| `ts.call_declaration/2` | `Site:E!, Declaration:E?` | Concrete signature declaration selected by a checked context, independent of runtime implementation resolution. |
+| `ts.call_declaration_incomplete/2` | `Site:E!, Reason:N` | Selected declaration/member evidence is /unresolved, /synthetic, /unsupported or /conflict. |
+| `ts.declaration_member/3` | `Declaration:E?, OwnerDeclaration:E?, Name:S` | Supported lexical named member and declaring owner; not a claim about the receiver’s runtime implementation. |
+| `ts.fn_ref/2` | `Site:E!, Target:E!` | Collected function used as a value. It is not necessarily invoked. Owner comes from site_owner. |
+| `ts.fn_value_escape/2` | `Site:E!, Kind:N` | Supported direct function-valued argument to external/unresolved invocation; only /argument exists. |
+| `ts.fn_value_escape_target/2` | `Site:E!, Target:E!` | Definite collected implementation identified in a transfer observation. |
+| `ts.fn_value_escape_unknown/1` | `Site:E!` | At least one transfer observation could not establish a definite collected implementation. |
+
+### A.4 Function-signature observations
+
+| Predicate | Ordered arguments | Meaning |
+|---|---|---|
+| `ts.fn_signature/2` | `Fn:E!, Signature:E!` | Whole observed signature belonging to that collected function. |
+| `ts.signature_arity/2` | `Signature:E!, Count:I` | Number of parameter slots, including unresolved slots. |
+| `ts.signature_param/3` | `Signature:E!, Position:I, Type:E?` | Known parameter type at a slot in that signature observation. |
+| `ts.signature_param_optional/2` | `Signature:E!, Position:I` | The slot is known optional in that observation. |
+| `ts.signature_param_rest/2` | `Signature:E!, Position:I` | The slot is known to be a rest parameter. |
+| `ts.signature_returns/2` | `Signature:E!, Type:E?` | Known return type of that observation. |
+| `ts.signature_complete/1` | `Signature:E!` | All signature slots, marks and return were established; structural type completeness is separate. |
+| `ts.signature_incomplete/2` | `Signature:E!, Reason:N` | Whole observation is /unresolved or /unsupported; never coexists with signature_complete for the same ID. |
+| `ts.fn_signature_omitted/1` | `Fn:E!` | Fixed ownership-only omission policy, not selective-work omission. |
+| `ts.fn_signature_unresolved/1` | `Fn:E!` | At least one attempted observation lacked a complete usable signature. |
+| `ts.fn_signature_conflict/1` | `Fn:E!` | Two complete whole signatures for this function disagree. |
+
+### A.5 Structural type facts
+
+| Predicate | Ordered arguments | Meaning |
+|---|---|---|
+| `ts.type_kind/2` | `Type:E?, Kind:N` | Exactly one kind per published type; vocabulary follows section 7.4 and the list after this inventory. |
+| `ts.type_named/3` | `Type:E?, Origin:S, Name:S` | Named type metadata; arguments and declaration identity distinguish instantiations. Text is not an identity key by itself. |
+| `ts.type_origin_kind/2` | `Type:E?, Kind:N` | /lib, /package, /ambient_module, /declaration_file or /source_file. |
+| `ts.type_arg/3` | `Type:E?, Position:I, Argument:E?` | Named type argument or tuple element. Does not include the checker’s synthetic this argument. |
+| `ts.type_arg_optional/2` | `Type:E?, Position:I` | Optional tuple element. |
+| `ts.type_arg_rest/2` | `Type:E?, Position:I` | Rest tuple element. |
+| `ts.type_readonly/1` | `Type:E?` | Readonly tuple; a readonly array is represented by its named library type. |
+| `ts.type_member/2` | `Type:E?, Member:E?` | Unordered union/intersection membership. |
+| `ts.type_literal/3` | `Type:E?, Kind:N, Value:L` | Literal kind /string, /number, /bigint or /boolean plus payload. A bigint decimal string is not confused with an ordinary string literal. |
+| `ts.type_param_name/2` | `Type:E?, Name:S` | Descriptive type-parameter name; declaration identity distinguishes parameters. |
+| `ts.type_prop/3` | `Type:E?, Name:S, PropertyType:E?` | Represented anonymous-object property; omitted class/interface members are explicitly marked. |
+| `ts.type_prop_optional/2` | `Type:E?, Name:S` | Known optional property in represented structure. |
+| `ts.type_prop_readonly/2` | `Type:E?, Name:S` | Known readonly property in represented structure. |
+| `ts.type_sig_param/3` | `Type:E?, Position:I, ParameterType:E?` | Parameter of a represented structural /function type, not a function-declaration signature observation. |
+| `ts.type_sig_param_optional/2` | `Type:E?, Position:I` | Known optional structural function-type parameter. |
+| `ts.type_sig_param_rest/2` | `Type:E?, Position:I` | Known rest structural function-type parameter. |
+| `ts.type_sig_returns/2` | `Type:E?, ReturnType:E?` | Return of a represented structural /function type. |
+| `ts.type_incomplete/2` | `Type:E?, Reason:N` | /truncated, /unsupported, /signatures, /constraint, /conflict or /members_omitted. |
+| `ts.type_display/2` | `Type:E?, Text:S` | Canonical presentation candidate under section 7.4; not a supported semantic matcher. |
+
+### A.6 Declaration metadata and optional evidence
+
+| Predicate | Ordered arguments | Meaning |
+|---|---|---|
+| `ts.declaration/3` | `Declaration:E?, Name:S, Kind:N` | Endpoint union in section 7.3, with one canonical whole metadata observation. |
+| `ts.declaration_origin/3` | `Declaration:E?, OriginKind:N, Origin:S` | Descriptive origin; never substitutes an assumed source path for a checked declaration. |
+| `ts.declaration_metadata_incomplete/2` | `Declaration:E?, Reason:N` | Identity-associated metadata is /unresolved, /unsupported or /conflict; no type/map claim. |
+| `ts.declaration_type_subject/2` | `Declaration:E?, Space:N` | Attempted exported-declaration type domain; /type or /value. |
+| `ts.declaration_type/3` | `Declaration:E?, Space:N, Type:E?` | Known type association for a declaration-type subject. |
+| `ts.declaration_type_incomplete/3` | `Declaration:E?, Space:N, Reason:N` | Subject-specific /unresolved, /unsupported or /conflict evidence. |
+| `ts.declaration_fn/2` | `Declaration:E?, Fn:E!` | Observed direct correspondence to a collected implementation. |
+| `ts.declaration_fn_incomplete/2` | `Declaration:E?, Reason:N` | Attempted direct function association is /unresolved, /unsupported or /conflict. |
+
+### A.7 Export evidence
+
+| Predicate | Ordered arguments | Meaning |
+|---|---|---|
+| `ts.module_export/4` | `Export:E!, Module:E!, Name:S, Space:N` | Public binding of a primary module in /type or /value space; module is an entity, not a path. |
+| `ts.export_target/2` | `Export:E!, Declaration:E?` | Known endpoint of a binding; overload/merged endpoints form a set, not pairwise identities. |
+| `ts.export_via/2` | `Export:E!, Site:E?` | Syntax site contributing to the binding; a dependency site can have a physical location without being primary. |
+| `ts.export_reexport/5` | `Export:E!, Site:E?, SourceModule:P, SourceName:S, Space:N` | Immediate binding-specific re-export. SourceModule remains canonical path data; `*` marks star/namespace names. |
+| `ts.export_incomplete/2` | `Export:E!, Reason:N` | Binding target evidence is /unresolved, /unsupported or /conflict; known positives remain. |
+| `ts.module_exports_incomplete/2` | `Module:E!, Reason:N` | Public-name inventory incomplete/conflicted; propagates through wildcard-export dependencies. |
+
+### A.8 Source correspondence
+
+| Predicate | Ordered arguments | Meaning |
+|---|---|---|
+| `ts.declaration_source_candidate/3` | `Checked:E?, Source:E?, Method:N` | Validated map candidate; /declaration_map. Ambiguity retains candidates. |
+| `ts.declaration_source/3` | `Checked:E?, Source:E?, Method:N` | Unique nonconflicting precise map link; identities stay distinct. |
+| `ts.declaration_source_outcome/2` | `Checked:E?, Outcome:N` | Terminal failed/uncertain requested map attempt; outcome vocabulary follows below. |
+| `ts.source_entry/3` | `Entry:E, CheckedEntry:P, SourceEntry:P` | Validated configured source-links entry. No fabricated source range for this configuration entity. |
+| `ts.source_entry_tsconfig/2` | `Entry:E, Config:P` | Explicit source configuration chosen for the entry. |
+| `ts.source_entry_applied/1` | `Entry:E` | The checked entry matched an analyzed compiler input and its binding attempts were considered. |
+| `ts.source_entry_unapplied/1` | `Entry:E` | The valid checked entry matched no analyzed compiler input; exactly one applied/unapplied state after reconciliation. |
+| `ts.source_entry_incomplete/2` | `Entry:E, Reason:N` | Optional source program/inventory is /unresolved, /unsupported or /conflict. |
+| `ts.source_binding_attempt/5` | `Binding:E, Entry:E, CheckedFile:P, Name:S, Space:N` | Attempt to associate a checked public binding, in /type or /value space. |
+| `ts.source_binding/5` | `Binding:E, SourceFile:P, SourceName:S, Space:N, Method:N` | Configured binding correspondence by /source_entry; does not assert declaration identity or build freshness. |
+| `ts.source_binding_checked_decl/2` | `Binding:E, Declaration:E?` | Member of the independently observed checked declaration set. |
+| `ts.source_binding_source_decl/2` | `Binding:E, Declaration:E?` | Member of the independently observed source declaration set. |
+| `ts.source_binding_incomplete/2` | `Binding:E, Reason:N` | Association is /unresolved, /unsupported or /conflict; positives do not erase uncertainty. |
+
+### A.9 Explicit location queries
+
+| Predicate | Ordered arguments | Meaning |
+|---|---|---|
+| `ts.location/6` | `Entity:E!, File:P, StartLine:I, StartColumn:I, EndLine:I, EndColumn:I` | All physically locatable published entities in the full configured TypeScript domain. No implicit request during reporting. |
+
+
+Types are rooted in function-signature observations and exported-declaration type subjects. Structural limits appear in `ts.type_incomplete`; display text is for review, not semantic matching. Declaration metadata, declaration-type associations, direct function links and source-map outcomes have separate uncertainty relations. Source associations preserve checked and source identities rather than asserting build freshness.
 
 ## Prelude and caveats
 
-The prelude is loaded before every rule program. A rule cannot redefine a prelude or base predicate.
+These helpers derive from base facts and inherit their reporting support. They do not turn unknown callback transfer into an unresolved invocation.
 
-| Predicate | Meaning |
+| Helper | Meaning |
 |---|---|
-| `glob(Path, Pattern)` | `Path` matches the doublestar `Pattern`. `!glob(Path, Pattern)` holds when it does not match. |
-| `import_has_symbols(Imp)` | The import introduces at least one binding. |
-| `export_from(Site, Module, Name)` | The re-export at `Site` reads `Name` from the resolved module `Module`. `Name` is the source-side name, or `"*"` for `export *` and `export * as ns`. It comes from `export_reexport` and does not follow chains. |
-| `import_runtime(Imp)` | The import loads its target at runtime: it is not type-only, and it is a side-effect import, has a value binding, or has `import_retained`. |
-| `module_imports(From, To)` | `From` has a runtime import of `To`. |
-| `imports_reach(From, To)` | Transitive closure of `module_imports`. It stores every connected pair, O(nodes²) rows on a large graph. To check only whether a file reaches a target, use `module_reaches_ambient` or propagate backward from the target (example 16 in [examples.md](examples.md)). |
-| `calls_reach(Caller, Callee)` | Transitive closure of `call_edge`. It stores every connected pair, O(nodes²) rows on a large graph. To check only whether a function reaches a target, use `fn_reaches_ambient` or propagate backward from the target. |
-| `fn_suspends(Fn)` | `Fn` owns at least one suspension site of any of the three kinds. |
-| `module_has_suspension(File)` | The file contains a site at any scope, including unsupported sites. This alone does not mean module initialization suspends. |
-| `site_attribution_unknown(Site)` | The site has an unsupported attribution. Use `!site_attribution_unknown(Site)` after binding `Site` to exclude those sites. |
-| `fn_uses_ambient(Fn, Source)` | `Fn` contains a use of `Source`. |
-| `fn_reaches_ambient(Fn, Source)` | `Fn` uses `Source` directly or through a call chain. |
-| `module_uses_ambient(File, Source)` | `File` contains a use of `Source` at any scope. |
-| `module_reaches_ambient(File, Source)` | `File` uses `Source` directly or through runtime imports. |
-| `calls_or_refs_reach(From, To)` | Transitive closure over `call_edge` and `fn_ref` together. This includes a function value even if the program never calls it. It does not resolve every call through a function value. It stores every connected pair, O(nodes²) rows on a large graph. To check only whether a function reaches a target, use `fn_reaches_ambient_strict` or `fn_reaches_unresolved`, or propagate backward from the target. |
-| `fn_has_unresolved_call(Fn)` | `Fn` directly contains a `call_unresolved` site. |
-| `module_has_unresolved_call(File)` | `File` contains a `call_unresolved` site at any scope. |
-| `fn_reaches_unresolved(Fn)` | `Fn` contains an unresolved call, directly or through `call_edge` and `fn_ref` steps. A strict rule treats this as leaving the analyzed code. |
-| `fn_reaches_ambient_strict(Fn, Source)` | Like `fn_reaches_ambient`, but also follows `fn_ref` steps. |
-| `fn_calls_package(Fn, Pkg)` | `Fn` directly calls into the package `Pkg` (`external_call` with a module that is not `"lib"`). |
-| `module_calls_package(File, Pkg)` | `File` directly calls into the package `Pkg`, at any scope. |
-| `type_child(Type, Child)` | `Child` appears directly in `Type`: a type argument, tuple element, union or intersection member, property type, signature parameter or signature return. |
-| `type_contains(Type, Inner)` | Transitive closure of `type_child`. It does not look inside classes, interfaces or enums, whose members are not emitted, into the call, construct or index signatures of an `/object`, into type parameter constraints, or into `/other`, truncated and conflicting types. Named classes, interfaces and enums are marked `/members_omitted`, so `type_reaches_incomplete` catches them. It stores every connected pair, O(nodes²) rows on a large graph. To check only whether a type contains a target, propagate backward from the target over `type_child`. |
-| `type_reaches_incomplete(Type)` | `Type`, or a type that it contains through direct `type_child` edges, has a `type_incomplete` row. It detects named class, interface and enum opacity, but does not expand their members. Ordinary `Promise` and `Array` signatures can therefore fail strict completeness. |
-| `type_is_promise(Type)` | `Type` is the lib `Promise` (`type_origin_kind` `/lib`), with any type argument. A `Promise` declared in a `declare module "lib"` block is not. |
-| `fn_returns_awaited(Fn, Type)` | The return type of `Fn` with exactly one level of the lib `Promise` removed: the type argument of a returned `Promise`, otherwise the return type itself. This is not TypeScript's `Awaited`: it does not unwrap `PromiseLike`, a `Promise` inside a `Promise`, or a union that contains a `Promise`, so `Promise<A> \| undefined` is returned unchanged. |
+| `ts.site_in_fn(Site, Fn)` | `site_owner` whose owner is in `fn`. |
+| `ts.site_at_module(Site, Module)` | `site_owner` whose owner is in `module`. |
+| `ts.site_attribution_unknown(Site)` | Has a `site_attribution_unsupported` reason. |
+| `ts.fn_awaits(Fn)` | Function owns an ordinary `/await` site. |
+| `ts.fn_suspends(Fn)` | Function owns any supported suspension kind. |
+| `ts.module_has_suspension(File)` | File contains a suspension site at any ownership scope. |
+| `ts.import_has_symbols(Imp)` | Import has at least one introduced binding. |
+| `ts.import_runtime(Imp)` | Non-type-only side-effect/no-binding load, a value binding, or a retained all-type statement. |
+| `ts.module_imports(From, To)` | Runtime source/target path-or-specifier pairs from import evidence; these arguments are data, not IDs. |
+| `ts.imports_reach(From, To)` | One-or-more-step transitive closure of `module_imports`. |
+| `ts.export_from(Site, SourceModule, Name)` | Immediate source-side path and name from a binding-specific re-export. |
+| `ts.calls(Owner, Callee)` | `site_owner(Site, Owner)` joined with `call_edge(Site, Callee)`. |
+| `ts.references(Owner, Target)` | `site_owner(Site, Owner)` joined with `fn_ref(Site, Target)`. |
+| `ts.calls_reach(Owner, Callee)` | One-or-more-step closure of `calls`. |
+| `ts.calls_or_refs_reach(Owner, Target)` | One-or-more-step closure of the union of calls and function-value references. |
+| `ts.owner_uses_ambient(Owner, Source)` | Direct ambient use with a represented site owner. Owner may be a function or module. |
+| `ts.owner_reaches_ambient(Owner, Source)` | Direct use or propagation backward over calls only. |
+| `ts.owner_reaches_ambient_strict(Owner, Source)` | Direct use or propagation backward over calls and function-value references. |
+| `ts.module_uses_ambient(File, Source)` | An ambient site in that file, including sites with unsupported attribution. |
+| `ts.module_reaches_ambient(File, Source)` | Direct file use or propagation backward over runtime module imports. |
+| `ts.owner_has_unresolved_call(Owner)` | Owner of an actual unresolved invocation, not of a callback event alone. |
+| `ts.owner_reaches_unresolved(Owner)` | Direct unresolved invocation or propagation backward over calls and references. |
+| `ts.module_has_unresolved_call(File)` | File of an unresolved invocation, using `site`, not the broad `location` relation. |
+| `ts.owner_calls_package(Owner, Package)` | Direct external invocation with origin kind `/package` and a represented owner. |
+| `ts.module_calls_package(File, Package)` | File of a direct `/package` external invocation. |
+| `ts.type_child(Type, Child)` | Union of represented type argument/member/property/function-signature child edges. |
+| `ts.type_contains(Type, Inner)` | One-or-more-step closure of type_child; respects the producer's explicit structural limits. |
+| `ts.type_reaches_incomplete(Type)` | The type itself or a represented descendant has type-incomplete evidence. |
+| `ts.type_is_promise(Type)` | Named `Promise` with origin kind `/lib`, not a same-spelled ambient module/type. |
+| `ts.signature_returns_awaited(Signature, Type)` | One library-Promise layer removed from that signature's return, otherwise that return itself. |
 
-Caveats:
 
-- `glob` is an external predicate. Both arguments of `glob` and `!glob` must be bound by earlier premises in the same clause.
-- a clause can end with a name constant, as in `L != /composition.` lintai separates the final `.` from the constant when whitespace, a comment or the end of the program follows it. A name constant cannot itself end with `.`.
-- Mangle requires every variable in a negated atom to be bound. `_` in a negated atom is an error with phase `program_analysis`. Move the negated pattern into a helper predicate without the unused argument, and negate the helper.
-- `calls_reach(Caller, Callee)` and `fn_reaches_ambient(Fn, Source)` also have rows where the first argument is a module path, from calls at module scope. The strict predicates do the same for `fn_ref` rows at module scope.
-- LintAI evaluates only the prelude clauses that a rule uses.
+All-pairs closures may be quadratic; target-oriented helpers propagate backward instead.
 
 ## Ambient sources and caveats
 
@@ -518,7 +367,7 @@ Matching rules:
 6. **Key** (`member` only). `.K`, `?.K`, `["K"]` and `"K" in path` give key `K`. `[expr]` with a non-literal `expr` gives a dynamic site. A destructuring declaration or assignment gives one site per named property, and one more dynamic site for a rest element. Any other use of the object (argument, spread, assignment, return) gives one dynamic site.
 7. **Write.** When the keyed member is the target of an assignment, a compound assignment or `delete`, the site also has `ambient_write`.
 8. **One site per use.** When matchers overlap, only the matcher with the longest `Path` records a site. `process.env.FOO` is one `env` site.
-9. **Site identity.** The entity id is `<file>::ambient::<source>.<capability>::<key-or-*>`, with an ordinal suffix for repeats. The range covers the matched expression, including the key access.
+9. **Site identity.** Each use belongs to a producer-owned source site; its range covers the matched expression, including the key access.
 10. **Scope.** Every primary file is scanned, including module scope and class field initializers.
 
 ### Built-in sources
@@ -590,7 +439,7 @@ Caveats:
 lintai [flags]
 lintai schema
 lintai facts --workspace-root <dir> [--exclude <glob>]... [--files tsconfig|walk] [--source-links <file>] [--relation <name>]...
-lintai lock [--workspace-root <dir>] [--rules <globs>] [--lock-file <path>]
+lintai lock [--workspace-root <dir>] [--rules <globs>] [--lock-file <path>] [--suppressions-location <path>]
 lintai rules [--workspace-root <dir>] [--repo-root <dir>] [--rules <globs>] [--json]
 lintai serve
 ```
@@ -630,8 +479,12 @@ Flags for analysis:
 - `--json`
 - `--explain`: with `--json`, attach `explanation` to each violation
 - `--fact-limit`: the maximum number of facts that one rule may derive (default 5,000,000)
+- `--rule-workers N`: maximum concurrent rule jobs; `0` (the default) uses `GOMAXPROCS`, and `1` runs jobs sequentially
 - `--severity <rule-id>=<level>`: the severity of the violations of one rule. `<level>` is `error` (the default for every rule), `warning` or `off`. Repeat the flag for more rules. See "Rule severity".
 - `--rules-lock <path>`: a rules lock file, relative to the workspace root, that `lintai lock` wrote. See "Rules lock".
+- `--suppress-all`, `--suppress-rule <id>`: record all or selected rules' current error findings. Repeat `--suppress-rule` for more rules.
+- `--prune-suppressions`: reduce unused allowances within completed rules' primary coverage.
+- `--suppressions-location <path>`: choose a suppressions file relative to the workspace root.
 - `--setup-sandbox auto|on|off`: run `setup()` under the Node permission model. See "Setup sandbox".
 
 Example:
@@ -644,7 +497,7 @@ pnpm exec lintai \
   --json --explain
 ```
 
-`lintai schema` prints the base relation declarations, then the prelude.
+`lintai schema` prints each configured producer's declarations and prelude under its namespace, followed by the engine helper declarations.
 
 `lintai facts` builds the snapshot and prints its base facts in Mangle syntax, sorted. It accepts `--exclude`, `--files` and `--source-links`, and it accepts and ignores `--asset-root`. Use `--relation` one or more times to print only those relations:
 
@@ -696,14 +549,15 @@ Rules lock:
 
 ```json
 {
-  "version": 1,
-  "rules": {
-    "lintai-rules/no-service-imports.ts": { "hash": "sha256:..." }
-  }
+  "format": "lintai.rules-lock/4",
+  "rules": [
+    { "path": "lintai-rules/no-service-imports.ts", "id": "arch.no-service-imports", "version": 1, "artifact_hash": "sha256:..." }
+  ],
+  "approved_suppressions": []
 }
 ```
 
-The hash of a rule covers every source file that the bundler read for it: the rule file, the files it imports, the package files it imports and the `@lintai/sdk` files. Package files are recorded from the outermost `node_modules` directory, so the hash does not depend on the machine. The bundler output is not hashed. An upgrade of lintai changes every hash, so run `lintai lock` again after an upgrade.
+The artifact hash covers the rule's bundled source inputs, including imported `@lintai/sdk` code and its suppression policy. The lock also approves the current suppression groups and counts. New groups or increased counts require approval; reduced counts and removed groups do not. A recording under an enforced lock that would exceed approval fails without writing. To approve changes, record without the prior lock, review the suppression file, and explicitly regenerate the lock.
 
 With `--rules-lock`, lintai checks each rule against the lock after bundling and before `setup()`. These are `rule_execution_error` diagnostics with phase `integrity`, and exit code 3:
 
@@ -735,14 +589,14 @@ Exit codes:
 | Code | Meaning |
 |---|---|
 | 0 | No error diagnostics. |
-| 1 | At least one rule reported an error-severity violation, and every rule ran. |
-| 2 | Usage or configuration error: a bad flag, a bad `--severity` value, a bad root, a rule glob that matches no file, an invalid exclude glob, an invalid `--source-links` file. No rules ran. |
-| 3 | At least one rule could not run, a rule does not match the rules lock, or `--severity` names an unknown rule (`rule_execution_error`). Violations from the other rules are still in the output. |
+| 1 | At least one error-severity violation or unused suppression remains, and no execution failure took priority. |
+| 2 | Invalid arguments, configuration, saved format or suppression policy, including `suppression_policy_mismatch`. |
+| 3 | Integrity, setup, rule, producer, cancellation or input-instability failure. Violations from other rules may still be in the output. |
 
 CLI caveats:
 
 - relative rule globs are resolved from `workspaceRoot`
-- each rule glob must match at least one file; otherwise the run fails with an error
+- each rule glob must match at least one file; otherwise the run fails with an error. If no files match and a rules lock contains rules, a check reports those missing rules as integrity errors instead
 - `lintai serve` is for editor integration; it keeps the base facts of the current snapshot and rebuilds them when the snapshot changes
 
 ## Linter rules
@@ -753,7 +607,7 @@ Each plugin package exports `createLintaiPlugin(options)`. It runs `lintai rules
 
 - `lintai/<rule-id>` for each rule that `lintai rules` lists. It reports the violations of that rule. It has no options.
 - `lintai/analysis`: everything that is not a violation of a configured rule. This is every `rule_execution_error` (any phase), a failed analysis, a `serve` process that fell back to one `oneshot` run, each rule file that `lintai rules` could not load, the "save this file" message in `serve` mode, and a violation of a rule that has no linter rule in the plugin (see the caveats). Keep `lintai/analysis` at `"error"`.
-- the authoring rules `lintai/no-ambient-in-pure-phase` (forbids ambient APIs in callbacks passed to `.program(`, `.facts(` and `.message(`), `lintai/no-top-level-node-imports` and `lintai/require-rule-shape` (requires `.version(`, `.program(`, `.report(` and `.message(`, and rejects `.assert(`).
+- the authoring rules `lintai/no-ambient-in-pure-phase` (forbids ambient APIs in callbacks passed to `.program(`, `.facts(` and `.message(`), `lintai/no-top-level-node-imports` and `lintai/require-rule-shape` (requires `.version(`, `.program(`, `.report(` and `.message(`).
 
 The plugin object also has two configs:
 
@@ -776,7 +630,9 @@ type LintaiOptions = {
 	sourceLinks?: string;
 	env?: Record<string, unknown>;
 	factLimit?: number;
+	ruleWorkers?: number;
 	rulesLock?: string;
+	suppressionsLocation?: string;
 	setupSandbox?: "auto" | "on" | "off";
 };
 ```
@@ -785,7 +641,9 @@ type LintaiOptions = {
 - `exclude` is the same as the CLI `--exclude` flag
 - `files` is the same as the CLI `--files` flag
 - `sourceLinks` is the same as the CLI `--source-links` flag. A relative path is resolved from the workspace root
+- `ruleWorkers` is the same as the CLI `--rule-workers` flag
 - `rulesLock` is the same as the CLI `--rules-lock` flag. A relative path is resolved from the workspace root
+- `suppressionsLocation` corresponds to the CLI suppression option
 - `setupSandbox` is the same as the CLI `--setup-sandbox` flag
 - relative roots resolve from the directory that the linter runs in
 
@@ -842,7 +700,7 @@ Plugin caveats:
 - `oneshot` is the default under plain ESLint CLI detection
 - lintai reads the saved files on disk, not the editor buffer. In `serve` mode, when the editor text of a file is different from the saved file, `lintai/analysis` shows one message on line 1 that asks you to save the file, and the other lintai rules report nothing for that file. When the editor lints a file that was saved after the last analysis started, the plugin runs a new analysis first, so the diagnostics of the saved file are current. On a file system that stores modification times in whole seconds, a second save in the same second can show the diagnostics of the first save until the next background refresh.
 - rule-file edits force invalidation on the next lint pass. A new rule id still needs a restart (see "Linter rules").
-- in `serve` mode, the plugin also watches the extra files that the last analysis depended on: the source-links file, declaration maps, source entries, auxiliary tsconfig files and resolution candidates. Some of these files may not exist yet, because creating one, such as a new `.d.ts.map`, can change the facts. For a missing file or directory the plugin watches the nearest existing parent directory, without watching its subfolders. It also checks parent directories for replacement, so rebuilding a `dist` folder does not leave it watching the old folder. When one of these files changes, the plugin clears its diagnostics and the next lint pass runs a fresh analysis. After analysis it checks the parent directories again, even if the input list is unchanged. Before reusing cached diagnostics, it also checks input file metadata once per event-loop turn. This catches changes missed while a watcher starts, without checking every input again for each file in the same synchronous lint pass. If an input watcher fails, the plugin reports the problem and falls back to one-shot analysis.
+- in `serve` mode, the plugin also watches the extra files that the last analysis depended on: the source-links file, declaration maps, source entries, auxiliary tsconfig files and resolution candidates. Some of these files may not exist yet, because creating one, such as a new `.d.ts.map`, can change the facts. For a missing file or directory the plugin watches the nearest existing parent directory, without watching its subfolders. It also checks parent directories for replacement, so rebuilding a `dist` folder does not leave it watching the old folder. When one of these files changes, the plugin clears its diagnostics and the next lint pass runs a fresh analysis. After a check it updates the watches from producer-provided hints, including relevant source-membership directories. Events request another check; the producer validates captured contents and membership when that check runs. A newly discovered hint does not reject the completed result. If an input watcher fails, the plugin reports the problem and falls back to one-shot analysis.
 - when lintai cannot produce diagnostics, `lintai/analysis` reports the reason on line 1 of each linted file, so a broken setup does not look like a clean workspace. In an `eslint` CLI run, these messages appear on the first linted file only.
 - the ESLint path never computes `explanation`
 
@@ -940,19 +798,19 @@ CLI `--json` output emits diagnostics like:
       "endColumn": 42
     },
     "entity_identity": {
-      "semantic_key": "src/pure/a.ts::import::../services/b"
+      "semantic_key": "ts:site:..."
     },
     "provenance": {
       "snapshot_version": "abc123",
       "rule_version": 1,
-      "backend_id": "typescript"
+      "producer_namespaces": ["ts"]
     },
     "explanation": [
-      "violation(\"src/pure/a.ts::import::../services/b\",\"src/pure/a.ts\",\"src/services/b.ts\")",
-      "import_edge(\"src/pure/a.ts::import::../services/b\",\"src/pure/a.ts\",\"src/services/b.ts\",\"../services/b\")",
-      "import_internal(\"src/pure/a.ts::import::../services/b\")",
-      "glob(\"src/pure/a.ts\",\"src/pure/**\")",
-      "glob(\"src/services/b.ts\",\"src/services/**\")"
+      "violation(\"ts:site:...\",\"src/pure/a.ts\",\"src/services/b.ts\")",
+      "ts.import_edge(\"ts:site:...\",\"src/pure/a.ts\",\"src/services/b.ts\",\"../services/b\")",
+      "ts.import_internal(\"ts:site:...\")",
+      "lintai.glob(\"src/pure/a.ts\",\"src/pure/**\")",
+      "lintai.glob(\"src/services/b.ts\",\"src/services/**\")"
     ]
   }
 ]
@@ -962,13 +820,13 @@ Fields:
 
 - `rule_id`
 - `assertion_id`: the reported predicate, or `default` for execution errors
-- `diagnostic_kind`: `architecture_violation` or `rule_execution_error`
+- `diagnostic_kind`: `architecture_violation`, `rule_execution_error`, or `unused_suppression`
 - `severity`
 - `message`
 - `source_location`
-- `entity_identity`: the anchor
+- `entity_identity.semantic_key`: the producer's analysis anchor ID, not the cross-edit suppression tracking key
 - `provenance`
-- `phase`: for execution errors, one of `config`, `bundle`, `setup`, `program`, `program_parse`, `program_analysis`, `evaluation`, `premise`, `report`, `message`
+- `phase`: for execution errors, one of `config`, `bundle`, `integrity`, `setup`, `program`, `program_parse`, `program_analysis`, `evaluation`, `premise`, `report`, `message`
 - `explanation`: with `--explain`, the proof of the violation as ground atoms in depth-first order; `!atom` marks a negated premise that holds because the atom is absent
 
 Diagnostic caveat:

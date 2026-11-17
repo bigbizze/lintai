@@ -6,20 +6,23 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"codeberg.org/TauCeti/mangle-go/factstore"
+	"github.com/bigbizze/lintai/runtime"
 )
 
 var (
-	dlBlock      = regexp.MustCompile("(?s)\\.program\\((?:\\([^)]*\\)\\s*=>\\s*)?dl`(.*?)`")
-	quoted       = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
-	comment      = regexp.MustCompile(`(?m)#.*$`)
-	interpolated = regexp.MustCompile(`\$\{[^}]*\}`)
-	clauseEnd    = regexp.MustCompile(`\.(?:\s|$)`)
-	relationName = regexp.MustCompile(`^(?:Decl\s+)?([a-z_][A-Za-z0-9_]*)\s*\(`)
-	docSources   = []string{
+	dlBlock               = regexp.MustCompile("(?s)\\.program\\((?:\\([^)]*\\)\\s*=>\\s*)?dl`(.*?)`\\s*\\)")
+	quoted                = regexp.MustCompile(`"(?:[^"\\]|\\.)*"`)
+	comment               = regexp.MustCompile(`(?m)#.*$`)
+	interpolated          = regexp.MustCompile(`\$\{[^}]*\}`)
+	templateInterpolation = regexp.MustCompile("\\$\\{`[^\\n]*?`\\}")
+	clauseEnd             = regexp.MustCompile(`\.(?:\s|$)`)
+	relationName          = regexp.MustCompile(`^(?:Decl\s+)?([a-z_][A-Za-z0-9_]*)\s*\(`)
+	docSources            = []string{
 		"README.md",
 		"docs/api.md",
 		"docs/examples.md",
-		"specs/structural-type-facts.md",
 		"testdata/npm-smoke/lintai-rules/actions-return-action-result.ts",
 		"testdata/npm-smoke/lintai-rules/no-async.ts",
 		"testdata/oxlint-smoke/lintai-rules/actions-return-action-result.ts",
@@ -31,6 +34,7 @@ var (
 // reader who copies an example gets a program that declares its relations.
 func TestDocumentedProgramsDeclareTheirRelations(t *testing.T) {
 	checked := 0
+	catalog, declarations := typeScriptCatalogForTest(t)
 	for _, path := range docSources {
 		data, err := os.ReadFile(filepath.Join("..", path))
 		if err != nil {
@@ -38,6 +42,7 @@ func TestDocumentedProgramsDeclareTheirRelations(t *testing.T) {
 		}
 		for _, block := range dlBlock.FindAllStringSubmatch(string(data), -1) {
 			declared := map[string]bool{}
+			reported := map[string]bool{}
 			var heads []string
 			text := interpolated.ReplaceAllString(comment.ReplaceAllString(quoted.ReplaceAllString(block[1], `""`), ""), "x")
 			for _, clause := range clauseEnd.Split(text, -1) {
@@ -52,8 +57,9 @@ func TestDocumentedProgramsDeclareTheirRelations(t *testing.T) {
 				}
 				if strings.HasPrefix(clause, "Decl") {
 					declared[match[1]] = true
-				} else {
+				} else if !reported[match[1]] {
 					heads = append(heads, match[1])
+					reported[match[1]] = true
 				}
 			}
 			for _, head := range heads {
@@ -61,6 +67,12 @@ func TestDocumentedProgramsDeclareTheirRelations(t *testing.T) {
 				if !declared[head] {
 					t.Errorf("%s: %s is defined without a Decl", path, head)
 				}
+			}
+			program := templateInterpolation.ReplaceAllString(block[1], `"src/example/**"`)
+			program = interpolated.ReplaceAllString(program, `"src/example/**"`)
+			_, err := evaluateProgram(factstore.NewMultiIndexedArrayInMemoryStore(), catalog, declarations, nil, nil, []string{"ts"}, runtime.ProgramOutput{Text: program}, heads, nil, evalOptions{})
+			if err != nil {
+				t.Errorf("%s: example does not prepare (%s): %v", path, err.phase, err)
 			}
 		}
 	}

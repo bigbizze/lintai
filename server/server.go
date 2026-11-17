@@ -6,15 +6,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 	"sync"
 
-	"github.com/bigbizze/lintai/backend"
 	"github.com/bigbizze/lintai/bundle"
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/engine"
 	"github.com/bigbizze/lintai/jsonrpc"
-	"github.com/bigbizze/lintai/suppressions"
 )
 
 const (
@@ -26,11 +25,15 @@ const (
 )
 
 type Analyzer interface {
-	Analyze(ctx context.Context, options engine.Options) (engine.Result, error)
+	Check(ctx context.Context, options ...engine.Options) (engine.Result, error)
+	Close() error
 }
 
+type AnalyzerFactory func(InitializeParams) Analyzer
+
 type Server struct {
-	engine Analyzer
+	engine  Analyzer
+	factory AnalyzerFactory
 
 	mu                sync.RWMutex
 	diagnostics       []diagnostics.Diagnostic
@@ -55,6 +58,7 @@ type InitializeParams struct {
 	SourceLinks   string         `json:"sourceLinks,omitempty"`
 	Env           map[string]any `json:"env"`
 	FactLimit     int            `json:"factLimit,omitempty"`
+	RuleWorkers   int            `json:"ruleWorkers,omitempty"`
 	// Severity maps a rule id to "error", "warning" or "off".
 	Severity map[string]string `json:"severity,omitempty"`
 	// RulesLock is the path of a rules lock file to enforce.
@@ -64,9 +68,6 @@ type InitializeParams struct {
 	// SuppressionsLocation is the path of the suppressions file. The
 	// default is lintai-suppressions.json at the workspace root.
 	SuppressionsLocation string `json:"suppressionsLocation,omitempty"`
-	// PassOnUnprunedSuppressions leaves out the unused_suppression
-	// diagnostics.
-	PassOnUnprunedSuppressions bool `json:"passOnUnprunedSuppressions,omitempty"`
 }
 
 type FileDiagnosticsParams struct {
@@ -74,7 +75,8 @@ type FileDiagnosticsParams struct {
 }
 
 type ReanalyzeParams struct {
-	Reason string `json:"reason,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+	RuleWorkers *int   `json:"ruleWorkers,omitempty"`
 }
 
 type AnalysisResult struct {
@@ -82,7 +84,7 @@ type AnalysisResult struct {
 	DiagnosticCount int                      `json:"diagnosticCount"`
 	SnapshotVersion string                   `json:"snapshotVersion"`
 	Diagnostics     []diagnostics.Diagnostic `json:"diagnostics"`
-	InputPaths      []string                 `json:"inputPaths,omitempty"`
+	WatchHints      []string                 `json:"watchHints,omitempty"`
 }
 
 type FileDiagnosticsResult struct {
@@ -96,7 +98,21 @@ func New(selectedEngine Analyzer) *Server {
 	}
 }
 
-func (s *Server) Serve(ctx context.Context, input io.Reader, output io.Writer) error {
+func NewWithFactory(factory AnalyzerFactory) *Server {
+	return &Server{
+		factory:           factory,
+		diagnosticsByFile: make(map[string][]diagnostics.Diagnostic),
+	}
+}
+
+func (s *Server) Serve(ctx context.Context, input io.Reader, output io.Writer) (serveErr error) {
+	defer func() {
+		if s.engine != nil {
+			if err := s.engine.Close(); serveErr == nil {
+				serveErr = err
+			}
+		}
+	}()
 	reader := bufio.NewReader(input)
 	writer := bufio.NewWriter(output)
 
@@ -176,10 +192,6 @@ func (s *Server) handleInitialize(ctx context.Context, rawParams json.RawMessage
 	if params.Env == nil {
 		params.Env = map[string]any{}
 	}
-	scope, err := backend.ParseFileScope(params.Files)
-	if err != nil {
-		return AnalysisResult{}, err
-	}
 	ruleSeverity := make(map[string]diagnostics.Severity, len(params.Severity))
 	for ruleID, level := range params.Severity {
 		severity, err := diagnostics.ParseSeverity(level)
@@ -197,21 +209,24 @@ func (s *Server) handleInitialize(ctx context.Context, rawParams json.RawMessage
 		AssetRoot:     params.AssetRoot,
 		WorkspaceRoot: params.WorkspaceRoot,
 		RuleGlobs:     append([]string(nil), params.RuleGlobs...),
-		Excludes:      append([]string(nil), params.Excludes...),
-		Files:         scope,
-		SourceLinks:   params.SourceLinks,
 		Env:           params.Env,
 		Severity:      diagnostics.SeverityError,
 		RuleSeverity:  ruleSeverity,
 		FactLimit:     params.FactLimit,
+		RuleWorkers:   params.RuleWorkers,
 		RulesLock:     params.RulesLock,
 		SetupSandbox:  sandbox,
 
-		SuppressionsLocation:       params.SuppressionsLocation,
-		PassOnUnprunedSuppressions: params.PassOnUnprunedSuppressions,
+		SuppressionsLocation: params.SuppressionsLocation,
 	}
 	s.mu.Lock()
 	s.options = options
+	if s.factory != nil {
+		if s.engine != nil {
+			_ = s.engine.Close()
+		}
+		s.engine = s.factory(params)
+	}
 	s.initialized = true
 	s.analysisValid = false
 	s.diagnostics = nil
@@ -219,7 +234,7 @@ func (s *Server) handleInitialize(ctx context.Context, rawParams json.RawMessage
 	s.snapshotVersion = ""
 	s.rulesLoaded = 0
 	s.mu.Unlock()
-	result, err := s.engine.Analyze(ctx, options)
+	result, err := s.engine.Check(ctx, options)
 	if err != nil {
 		return AnalysisResult{}, err
 	}
@@ -262,9 +277,12 @@ func (s *Server) handleReanalyze(ctx context.Context, rawParams json.RawMessage)
 		if err := json.Unmarshal(rawParams, &params); err != nil {
 			return AnalysisResult{}, fmt.Errorf("invalid params: %w", err)
 		}
+		if params.RuleWorkers != nil {
+			options.RuleWorkers = *params.RuleWorkers
+		}
 	}
 
-	result, err := s.engine.Analyze(ctx, options)
+	result, err := s.engine.Check(ctx, options)
 	if err != nil {
 		s.invalidateAnalysis()
 		return AnalysisResult{}, err
@@ -294,7 +312,6 @@ func (s *Server) applyAnalysis(options engine.Options, result engine.Result) {
 		s.warned[warning] = struct{}{}
 		fmt.Fprintln(s.Log, warning)
 	}
-	s.options = options
 	s.diagnostics = append([]diagnostics.Diagnostic(nil), result.Diagnostics...)
 	s.diagnosticsByFile = byFile
 	s.snapshotVersion = result.SnapshotVersion
@@ -322,7 +339,7 @@ func analysisResult(result engine.Result) AnalysisResult {
 		DiagnosticCount: len(result.Diagnostics),
 		SnapshotVersion: result.SnapshotVersion,
 		Diagnostics:     items,
-		InputPaths:      append([]string(nil), result.InputPaths...),
+		WatchHints:      append([]string(nil), result.WatchHints...),
 	}
 }
 
@@ -350,8 +367,8 @@ func classifyError(err error) *jsonrpc.ResponseError {
 	}
 }
 
-// normalizeWorkspacePath is the key of a file: forward slashes and no
-// leading slash. The suppressions file uses the same key.
+// normalizeWorkspacePath uses a workspace-relative key for diagnostics and
+// file requests, including requests with a leading slash.
 func normalizeWorkspacePath(path string) string {
-	return suppressions.NormalizePath(path)
+	return strings.TrimPrefix(filepath.ToSlash(path), "/")
 }

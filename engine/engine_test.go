@@ -11,7 +11,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/bigbizze/lintai/backend"
+	"codeberg.org/TauCeti/mangle-go/ast"
 	"github.com/bigbizze/lintai/backend/typescript"
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/facts"
@@ -35,7 +35,7 @@ func TestRuleErrorPhases(t *testing.T) {
 			phase:   "program",
 			message: "cannot interpolate",
 			source: `export default rule("t.program-throws").version(1)
-	.program(() => dl` + "`" + `Decl v(F). v(F) :- module(F), glob(F, ${[1] as never}).` + "`" + `)
+	.program(() => dl` + "`" + `Decl v(F). v(F) :- ts.module(F), lintai.glob(F, ${[1] as never}).` + "`" + `)
 	.report("v").message(() => "x");`,
 		},
 		{
@@ -43,7 +43,7 @@ func TestRuleErrorPhases(t *testing.T) {
 			phase:   "program_parse",
 			message: "",
 			source: `export default rule("t.parse").version(1)
-	.program(dl` + "`" + `Decl v(F). v(F) :- module(F)` + "`" + `)
+	.program(dl` + "`" + `Decl v(F). v(F) :- ts.module(F)` + "`" + `)
 	.report("v").message(() => "x");`,
 		},
 		{
@@ -51,7 +51,7 @@ func TestRuleErrorPhases(t *testing.T) {
 			phase:   "program_analysis",
 			message: "calls_reach",
 			source: `export default rule("t.redefine").version(1)
-	.program(dl` + "`" + `Decl v(F). v(F) :- module(F). calls_reach(A, B) :- fn(A, _, _), fn(B, _, _).` + "`" + `)
+	.program(dl` + "`" + `Decl v(F). v(F) :- ts.module(F). ts.calls_reach(A, B) :- ts.fn(A, _, _), ts.fn(B, _, _).` + "`" + `)
 	.report("v").message(() => "x");`,
 		},
 		{
@@ -59,7 +59,7 @@ func TestRuleErrorPhases(t *testing.T) {
 			phase:   "evaluation",
 			message: "fact size limit",
 			source: `export default rule("t.limit").version(1)
-	.program(dl` + "`" + `Decl v(A, B). v(A, B) :- module(A), module(B).` + "`" + `)
+	.program(dl` + "`" + `Decl v(A, B, C). v(A, B, C) :- ts.module(A), ts.module(B), ts.module(C).` + "`" + `)
 	.report("v").message(() => "x");`,
 		},
 		{
@@ -67,15 +67,15 @@ func TestRuleErrorPhases(t *testing.T) {
 			phase:   "premise",
 			message: "nothing",
 			source: `export default rule("t.premise").version(1)
-	.program(dl` + "`" + `Decl nothing(F). nothing(F) :- module(F), glob(F, "no/such/dir/**"). Decl v(F). v(F) :- module(F).` + "`" + `)
+	.program(dl` + "`" + `Decl nothing(F). nothing(F) :- ts.module(F), lintai.glob(F, "no/such/dir/**"). Decl v(F). v(F) :- ts.module(F).` + "`" + `)
 	.report("v").expectNonEmpty("nothing").message(() => "x");`,
 		},
 		{
 			name:    "anchor-without-location",
 			phase:   "report",
-			message: "no location",
+			message: "no eligible producer-owned location",
 			source: `export default rule("t.report").version(1)
-	.program(dl` + "`" + `Decl v(F). v("not-an-entity") :- module(_).` + "`" + `)
+	.program(dl` + "`" + `Decl v(F). v("not-an-entity") :- ts.module(_).` + "`" + `)
 	.report("v").message(() => "x");`,
 		},
 		{
@@ -83,7 +83,7 @@ func TestRuleErrorPhases(t *testing.T) {
 			phase:   "message",
 			message: "message exploded",
 			source: `export default rule("t.message").version(1)
-	.program(dl` + "`" + `Decl v(F). v(F) :- module(F).` + "`" + `)
+	.program(dl` + "`" + `Decl v(F). v(F) :- ts.module(F).` + "`" + `)
 	.report("v").message(() => { throw new Error("message exploded"); });`,
 		},
 	}
@@ -94,18 +94,19 @@ func TestRuleErrorPhases(t *testing.T) {
 	}
 	rulePaths = append(rulePaths, filepath.Join(repoRoot, "testdata/fixtures/rules/pure-no-effects.ts"))
 
-	items, err := New(typescript.New()).Run(context.Background(), Options{
+	result, err := Open(Options{}, typescript.New()).Check(context.Background(), Options{
 		RepoRoot:      repoRoot,
 		AssetRoot:     filepath.Join(repoRoot, "packages", "client"),
 		WorkspaceRoot: filepath.Join(repoRoot, "testdata/fixtures/workspace"),
 		RuleGlobs:     rulePaths,
 		Env:           map[string]any{},
 		Severity:      diagnostics.SeverityError,
-		FactLimit:     50,
+		FactLimit:     200,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	items := result.Diagnostics
 
 	byRule := make(map[string][]diagnostics.Diagnostic)
 	for _, item := range items {
@@ -123,7 +124,7 @@ func TestRuleErrorPhases(t *testing.T) {
 	for _, item := range cases {
 		got := byRule[ruleIDs[item.name]]
 		if len(got) != 1 {
-			t.Fatalf("%s: expected only one error diagnostic, got %+v", item.name, got)
+			t.Fatalf("%s: expected only one error diagnostic, got %+v (all: %+v)", item.name, got, items)
 		}
 		if got[0].DiagnosticKind != diagnostics.KindRuleExecutionError || got[0].Phase != item.phase {
 			t.Fatalf("%s: expected phase %s, got %+v", item.name, item.phase, got[0])
@@ -146,10 +147,10 @@ func TestRelativeRuleGlobsResolveFromWorkspaceRoot(t *testing.T) {
 	writeTestFile(t, workspaceRoot, "src/bad.ts", "export async function bad() {\n\treturn 1;\n}\n")
 	writeTestFile(t, workspaceRoot, "lintai-rules/no-async.ts", `import { dl, rule } from "@lintai/sdk";
 export default rule("arch.no-async").version(1)
-	.program(dl`+"`"+`Decl v(Fn). v(Fn) :- fn_async(Fn).`+"`"+`)
+	.program(dl`+"`"+`Decl v(Fn). v(Fn) :- ts.fn_async(Fn).`+"`"+`)
 	.report("v").message(() => "no async");
 `)
-	items, err := New(typescript.New()).Run(context.Background(), Options{
+	result, err := Open(Options{}, typescript.New()).Check(context.Background(), Options{
 		RepoRoot:      repoRoot,
 		AssetRoot:     filepath.Join(repoRoot, "packages", "client"),
 		WorkspaceRoot: workspaceRoot,
@@ -160,6 +161,7 @@ export default rule("arch.no-async").version(1)
 	if err != nil {
 		t.Fatal(err)
 	}
+	items := result.Diagnostics
 	if len(items) != 1 || items[0].RuleID != "arch.no-async" || items[0].SourceLocation.File != "src/bad.ts" {
 		t.Fatalf("expected one arch.no-async violation in src/bad.ts, got %+v", items)
 	}
@@ -219,14 +221,15 @@ func TestDeclaredWriterCapabilityPolicy(t *testing.T) {
 				}
 				writeTestFile(t, root, file, source)
 			}
-			items, err := New(typescript.New()).Run(context.Background(), Options{
+			result, err := Open(Options{}, typescript.New(typescript.Options{Files: typescript.FileScopeWalk})).Check(context.Background(), Options{
 				RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages", "client"),
 				WorkspaceRoot: root, RuleGlobs: []string{filepath.Join(fixture, "writer-policy.ts")},
-				Files: backend.FileScopeWalk, Severity: diagnostics.SeverityError,
+				Severity: diagnostics.SeverityError,
 			})
 			if err != nil {
 				t.Fatal(err)
 			}
+			items := result.Diagnostics
 			var got []string
 			for _, item := range items {
 				if item.RuleID != "arch.no-writer-write" || item.DiagnosticKind != diagnostics.KindArchitectureViolation ||
@@ -272,11 +275,11 @@ func TestDlStringsRoundTripThroughMangle(t *testing.T) {
 	rulePath := writeTestFile(t, t.TempDir(), "round-trip.ts", `import { dl, rule } from "@lintai/sdk";
 const tricky = `+string(tricky)+`;
 export default rule("t.round-trip").version(1)
-	.program(dl`+"`"+`Decl v(F, S, N, K). v(F, ${tricky}, ${-12}, ${dl.name("a/b_c")}) :- module(F), F = "src/pure/math.ts".`+"`"+`)
+	.program(dl`+"`"+`Decl v(M, S, N, K). v(M, ${tricky}, ${-12}, ${dl.name("a/b_c")}) :- ts.module_path(M, F), F = "src/pure/math.ts".`+"`"+`)
 	.report("v")
-	.message((row) => JSON.stringify([row.S === tricky, row.N, row.K]));
+		.message((row) => JSON.stringify([row.S === tricky, row.N, row.K]));
 `)
-	items, err := New(typescript.New()).Run(context.Background(), Options{
+	result, err := Open(Options{}, typescript.New(typescript.Options{Files: typescript.FileScopeWalk})).Check(context.Background(), Options{
 		RepoRoot:      repoRoot,
 		AssetRoot:     filepath.Join(repoRoot, "packages", "client"),
 		WorkspaceRoot: filepath.Join(repoRoot, "testdata/fixtures/workspace"),
@@ -287,12 +290,13 @@ export default rule("t.round-trip").version(1)
 	if err != nil {
 		t.Fatal(err)
 	}
+	items := result.Diagnostics
 	if len(items) != 1 || items[0].Message != `[true,-12,"/a/b_c"]` {
 		t.Fatalf("expected the values to round-trip, got %+v", items)
 	}
 }
 
-// !glob(P, X) holds when P does not match X, a clause can end with a name
+// !lintai.glob(P, X) holds when P does not match X, a clause can end with a name
 // constant (Layer != /core.), and with verbatimModuleSyntax an
 // import { type X } is a runtime import. Before this, the first was an
 // error, the second did not parse, and the third was not a runtime import.
@@ -307,18 +311,18 @@ func TestNegatedGlobAndTrailingNameConstant(t *testing.T) {
 	writeTestFile(t, workspaceRoot, "src/ui/b.ts", "import { type A } from \"../core/a\";\nexport const b: A = 1;\n")
 	writeTestFile(t, workspaceRoot, "lintai-rules/runtime.ts", `import { dl, rule } from "@lintai/sdk";
 export default rule("t.runtime").version(1)
-	.program(dl`+"`"+`Decl r(Imp). r(Imp) :- import_edge(Imp, F, _, _), glob(F, "src/**"), import_runtime(Imp).`+"`"+`)
+	.program(dl`+"`"+`Decl r(Imp). r(Imp) :- ts.import_edge(Imp, F, _, _), lintai.glob(F, "src/**"), ts.import_runtime(Imp).`+"`"+`)
 	.report("r").message(() => "runtime");
 `)
 	writeTestFile(t, workspaceRoot, "lintai-rules/outside.ts", `import { dl, rule } from "@lintai/sdk";
 export default rule("t.outside").version(1)
-	.program(dl`+"`"+`Decl layer(F, L). layer(F, /ui) :- module(F), glob(F, "src/ui/**"). layer(F, /core) :- module(F), glob(F, "src/core/**").
-Decl v(F). v(F) :- module(F), !glob(F, "src/core/**"), layer(F, L), L != /core.
+	.program(dl`+"`"+`Decl layer(M, L). layer(M, /ui) :- ts.module_path(M, F), lintai.glob(F, "src/ui/**"). layer(M, /core) :- ts.module_path(M, F), lintai.glob(F, "src/core/**").
+Decl v(M). v(M) :- ts.module_path(M, F), !lintai.glob(F, "src/core/**"), layer(M, L), L != /core.
 # a comment with /core. in it
-Decl w(F). w(F) :- module(F), F = "src/a/b.c", layer(F, /ui.x).`+"`"+`)
+Decl w(M). w(M) :- ts.module_path(M, F), F = "src/a/b.c", layer(M, /ui.x).`+"`"+`)
 	.report("v").message(() => "outside");
 `)
-	items, err := New(typescript.New()).Run(context.Background(), Options{
+	result, err := Open(Options{}, typescript.New()).Check(context.Background(), Options{
 		RepoRoot:      repoRoot,
 		AssetRoot:     filepath.Join(repoRoot, "packages", "client"),
 		WorkspaceRoot: workspaceRoot,
@@ -329,8 +333,12 @@ Decl w(F). w(F) :- module(F), F = "src/a/b.c", layer(F, /ui.x).`+"`"+`)
 	if err != nil {
 		t.Fatal(err)
 	}
+	items := result.Diagnostics
 	byRule := map[string][]string{}
 	for _, item := range items {
+		if item.SourceLocation == nil {
+			t.Fatalf("rule execution failed: %+v", item)
+		}
 		byRule[item.RuleID] = append(byRule[item.RuleID], item.SourceLocation.File)
 	}
 	if got := byRule["t.outside"]; len(got) != 1 || got[0] != "src/ui/b.ts" {
@@ -353,22 +361,22 @@ func TestRuleSeverity(t *testing.T) {
 	writeTestFile(t, workspaceRoot, "src/a.ts", "export async function a() {\n\treturn 1;\n}\n")
 	writeTestFile(t, workspaceRoot, "lintai-rules/rules.ts", `import { dl, rule } from "@lintai/sdk";
 export const soft = rule("t.soft").version(1)
-	.program(dl`+"`"+`Decl v(Fn). v(Fn) :- fn_async(Fn).`+"`"+`)
+	.program(dl`+"`"+`Decl v(Fn). v(Fn) :- ts.fn_async(Fn).`+"`"+`)
 	.report("v").message(() => "soft");
 `)
 	writeTestFile(t, workspaceRoot, "lintai-rules/broken-off.ts", `import { dl, rule } from "@lintai/sdk";
 export default rule("t.broken-off").version(1)
-	.program(dl`+"`"+`Decl v(F). v(F) :- module(F)`+"`"+`)
+	.program(dl`+"`"+`Decl v(F). v(F) :- ts.module(F)`+"`"+`)
 	.report("v").message(() => "x");
 `)
 	writeTestFile(t, workspaceRoot, "lintai-rules/broken-warning.ts", `import { dl, rule } from "@lintai/sdk";
 export default rule("t.broken-warning").version(1)
-	.program(dl`+"`"+`Decl v(F). v(F) :- module(F)`+"`"+`)
+	.program(dl`+"`"+`Decl v(F). v(F) :- ts.module(F)`+"`"+`)
 	.report("v").message(() => "x");
 `)
 	writeTestFile(t, workspaceRoot, "lintai-rules/soft.ts", `export { soft as default } from "./rules";
 `)
-	items, err := New(typescript.New()).Run(context.Background(), Options{
+	result, err := Open(Options{}, typescript.New()).Check(context.Background(), Options{
 		RepoRoot:      repoRoot,
 		AssetRoot:     filepath.Join(repoRoot, "packages", "client"),
 		WorkspaceRoot: workspaceRoot,
@@ -384,6 +392,7 @@ export default rule("t.broken-warning").version(1)
 	if err != nil {
 		t.Fatal(err)
 	}
+	items := result.Diagnostics
 	got := make([]string, 0, len(items))
 	for _, item := range items {
 		got = append(got, item.RuleID+" "+string(item.DiagnosticKind)+" "+string(item.Severity)+" "+item.Phase)
@@ -444,11 +453,11 @@ export default rule("arch.domain-signatures").version(1)
 		Decl violation(Fn, Name).
 		Decl signature_type(Fn, T).
 		Decl mentions_infra(Fn).
-		signature_type(Fn, T) :- fn_param(Fn, _, T).
-		signature_type(Fn, T) :- fn_returns(Fn, T).
-		mentions_infra(Fn) :- signature_type(Fn, T), type_named(T, Origin, _), glob(Origin, "src/infra/**").
-		mentions_infra(Fn) :- signature_type(Fn, T), type_contains(T, Inner), type_named(Inner, Origin, _), glob(Origin, "src/infra/**").
-		violation(Fn, Name) :- fn(Fn, File, Name), fn_exported(Fn), glob(File, "src/domain/**"), mentions_infra(Fn).
+		signature_type(Fn, T) :- ts.fn_signature(Fn, Sig), ts.signature_param(Sig, _, T).
+		signature_type(Fn, T) :- ts.fn_signature(Fn, Sig), ts.signature_returns(Sig, T).
+		mentions_infra(Fn) :- signature_type(Fn, T), ts.type_named(T, Origin, _), lintai.glob(Origin, "src/infra/**").
+		mentions_infra(Fn) :- signature_type(Fn, T), ts.type_contains(T, Inner), ts.type_named(Inner, Origin, _), lintai.glob(Origin, "src/infra/**").
+		violation(Fn, Name) :- ts.fn(Fn, File, Name), ts.fn_exported(Fn), lintai.glob(File, "src/domain/**"), mentions_infra(Fn).
 	`+"`"+`)
 	.report("violation")
 	.message((row) => row.Name);
@@ -458,9 +467,9 @@ export default rule("arch.domain-signatures-strict").version(1)
 	.program(dl`+"`"+`
 		Decl violation(Fn, Name).
 		Decl signature_type(Fn, T).
-		signature_type(Fn, T) :- fn_param(Fn, _, T).
-		signature_type(Fn, T) :- fn_returns(Fn, T).
-		violation(Fn, Name) :- fn(Fn, File, Name), fn_exported(Fn), glob(File, "src/domain/**"), signature_type(Fn, T), type_reaches_incomplete(T).
+		signature_type(Fn, T) :- ts.fn_signature(Fn, Sig), ts.signature_param(Sig, _, T).
+		signature_type(Fn, T) :- ts.fn_signature(Fn, Sig), ts.signature_returns(Sig, T).
+		violation(Fn, Name) :- ts.fn(Fn, File, Name), ts.fn_exported(Fn), lintai.glob(File, "src/domain/**"), signature_type(Fn, T), ts.type_reaches_incomplete(T).
 	`+"`"+`)
 	.report("violation")
 	.message((row) => row.Name);
@@ -469,12 +478,12 @@ export default rule("arch.domain-signatures-strict").version(1)
 export default rule("t.awaited").version(1)
 	.program(dl`+"`"+`
 		Decl v(Fn, Name, Text).
-		v(Fn, Name, Text) :- fn(Fn, _, Name), fn_returns_awaited(Fn, T), type_display(T, Text).
+		v(Fn, Name, Text) :- ts.fn(Fn, _, Name), ts.fn_signature(Fn, Sig), ts.signature_returns_awaited(Sig, T), ts.type_display(T, Text).
 	`+"`"+`)
 	.report("v")
 	.message((row) => `+"`${row.Name}:${row.Text}`"+`);
 `)
-	items, err := New(typescript.New()).Run(context.Background(), Options{
+	result, err := Open(Options{}, typescript.New()).Check(context.Background(), Options{
 		RepoRoot:      repoRoot,
 		AssetRoot:     filepath.Join(repoRoot, "packages", "client"),
 		WorkspaceRoot: workspaceRoot,
@@ -485,6 +494,7 @@ export default rule("t.awaited").version(1)
 	if err != nil {
 		t.Fatal(err)
 	}
+	items := result.Diagnostics
 	byRule := map[string][]string{}
 	for _, item := range items {
 		byRule[item.RuleID] = append(byRule[item.RuleID], item.Message)
@@ -496,7 +506,7 @@ export default rule("t.awaited").version(1)
 	checkedName := fmt.Sprintf("<anonymous@%d>", strings.Index(actionSource, "async () => 3"))
 	defaultName := fmt.Sprintf("<anonymous@%d>", strings.Index(actionSource, "async () => 4"))
 	wantActions := []string{
-		"legacy must return Promise<ActionResult<T>>, but returns Promise<Legacy<number>>", "wrongDirect must return Promise<ActionResult<T>>, but returns Promise<number>",
+		"legacy must return Promise<ActionResult<T>>, but returns Promise<ActionResult<number>>", "wrongDirect must return Promise<ActionResult<T>>, but returns Promise<number>",
 		wrappedName + " must return Promise<ActionResult<T>>, but returns Promise<number>", checkedName + " must return Promise<ActionResult<T>>, but returns Promise<number>", defaultName + " must return Promise<ActionResult<T>>, but returns Promise<number>",
 	}
 	sort.Strings(wantActions)
@@ -515,7 +525,7 @@ export default rule("t.awaited").version(1)
 		t.Fatalf("strict domain rule: %v", got)
 	}
 	// fn_returns_awaited unwraps one lib Promise, not a union that has one.
-	want := []string{"Db.query:number", "constrained:void", "hidden:void", "legacy:Legacy<number>", "load:number", "maybe:Promise<number> | undefined", "picked:Db[K]", "plain:number", "save:ActionResult<number>", "sync:number", "wrongDirect:number", wrappedName + ":number", checkedName + ":number", defaultName + ":number"}
+	want := []string{"Db.query:number", "constrained:void", "hidden:void", "legacy:ActionResult<number>", "load:number", "maybe:Promise<number> | undefined", "picked:Db[K]", "plain:number", "save:ActionResult<number>", "sync:number", "wrongDirect:number", wrappedName + ":number", checkedName + ":number", defaultName + ":number"}
 	sort.Strings(want)
 	if got := byRule["t.awaited"]; strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("fn_returns_awaited: got %v, want %v", got, want)
@@ -579,7 +589,7 @@ export async function ambiguous(value: string | undefined): Promise<ActionResult
 				writeTestFile(t, root, group+"/use.ts", `export { mixed } from "../src/actions/save";`)
 			}
 			rulePath := filepath.Join(repoRoot, "testdata/npm-smoke/lintai-rules/actions-return-action-result.ts")
-			items, err := New(typescript.New()).Run(context.Background(), Options{
+			result, err := Open(Options{}, typescript.New()).Check(context.Background(), Options{
 				RepoRoot:      repoRoot,
 				AssetRoot:     filepath.Join(repoRoot, "packages", "client"),
 				WorkspaceRoot: root,
@@ -590,6 +600,7 @@ export async function ambiguous(value: string | undefined): Promise<ActionResult
 			if err != nil {
 				t.Fatal(err)
 			}
+			items := result.Diagnostics
 			got := make([]string, 0, len(items))
 			for _, item := range items {
 				if item.RuleID != "arch.actions-return-action-result" || item.SourceLocation == nil || item.SourceLocation.File != "src/actions/save.ts" {
@@ -627,21 +638,23 @@ export function bound() { return (stable as () => number)(); }
 export default rule("test.strict").version(1)
   .program(dl`+"`"+`
     Decl selected(Fn, Name).
-    selected(Fn, Name) :- fn(Fn, _, Name), fn_exported(Fn), Name != "replace".
+    selected(Fn, Name) :- ts.fn(Fn, _, Name), ts.fn_exported(Fn), Name != "replace".
     Decl ambient(Fn, Name).
-    ambient(Fn, Name) :- selected(Fn, Name), fn_reaches_ambient_strict(Fn, _).
+    ambient(Fn, Name) :- selected(Fn, Name), ts.owner_reaches_ambient_strict(Fn, _).
     Decl indeterminate(Fn, Name).
-    indeterminate(Fn, Name) :- selected(Fn, Name), fn_reaches_unresolved(Fn).
+    indeterminate(Fn, Name) :- selected(Fn, Name), ts.owner_reaches_unresolved(Fn).
+    indeterminate(Fn, Name) :- selected(Fn, Name), ts.site_owner(Site, Fn), ts.fn_value_escape_unknown(Site).
   `+"`"+`)
   .report("ambient", "indeterminate").message((row, ctx) => `+"`${row.Name}:${ctx.assertion_id}`"+`);
 `)
-	items, err := New(typescript.New()).Run(context.Background(), Options{
+	result, err := Open(Options{}, typescript.New()).Check(context.Background(), Options{
 		RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: root,
-		RuleGlobs: []string{"lintai-rules/*.ts"}, Files: backend.FileScopeWalk,
+		RuleGlobs: []string{"lintai-rules/*.ts"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	items := result.Diagnostics
 	var got []string
 	for _, item := range items {
 		if item.RuleID != "test.strict" {
@@ -685,10 +698,10 @@ export type { EventMessage } from "./rpc";
 export default rule("arch.public-api-infrastructure-types").version(1)
 	.program(dl` + "`" + `
 		Decl api_root(Export, File, Name, Type).
-		api_root(E, F, N, T) :- module_export(E, F, N, /type), glob(F, "src/common/index.ts"), export_target(E, D), declaration_type(D, /type, T).
+		api_root(E, F, N, T) :- ts.module_path(M, F), ts.module_export(E, M, N, /type), lintai.glob(F, "src/common/index.ts"), ts.export_target(E, D), ts.declaration_type(D, /type, T).
 		Decl reaches_knex(Type).
-		reaches_knex(T) :- type_named(T, "knex", _), type_origin_kind(T, /package).
-		reaches_knex(T) :- type_child(T, Child), reaches_knex(Child).
+		reaches_knex(T) :- ts.type_named(T, "knex", _), ts.type_origin_kind(T, /package).
+		reaches_knex(T) :- ts.type_child(T, Child), reaches_knex(Child).
 		Decl violation(Export, Name).
 		violation(Export, Name) :- api_root(Export, _, Name, Type), reaches_knex(Type).
 	` + "`" + `)
@@ -696,7 +709,7 @@ export default rule("arch.public-api-infrastructure-types").version(1)
 	.message((row) => row.Name);
 `
 	writeTestFile(t, workspaceRoot, "lintai-rules/public-api.ts", rule)
-	items, err := New(typescript.New()).Run(context.Background(), Options{
+	result, err := Open(Options{}, typescript.New()).Check(context.Background(), Options{
 		RepoRoot:      repoRoot,
 		AssetRoot:     filepath.Join(repoRoot, "packages", "client"),
 		WorkspaceRoot: workspaceRoot,
@@ -707,6 +720,7 @@ export default rule("arch.public-api-infrastructure-types").version(1)
 	if err != nil {
 		t.Fatal(err)
 	}
+	items := result.Diagnostics
 	var got []string
 	for _, item := range items {
 		if item.RuleID != "arch.public-api-infrastructure-types" {
@@ -761,48 +775,80 @@ export function choose(flag: boolean) {
 	root := t.TempDir()
 	writeTestFile(t, root, "src/scorecard/total.ts", source)
 	writeTestFile(t, root, "src/scorecard/only-unsupported.ts", `class Only { value = await unknown(); }`)
-	snapshot, err := typescript.New().BuildSnapshot(context.Background(), root, root, backend.SnapshotOptions{Files: backend.FileScopeWalk})
+	session := Open(Options{}, typescript.New(typescript.Options{Files: typescript.FileScopeWalk}))
+	defer session.Close()
+	catalog, err := session.describeProducers()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := facts.Validate(snapshot); err != nil {
+	requested := map[string]map[facts.Predicate]struct{}{"ts": {}}
+	for _, relation := range catalog.entries[0].description.BaseRelations {
+		requested["ts"][relation.Predicate] = struct{}{}
+	}
+	assembled, err := catalog.collect(context.Background(), Options{RepoRoot: root, WorkspaceRoot: root}, requested, nil)
+	if err != nil {
 		t.Fatal(err)
 	}
+	var snapshotFacts []facts.Fact
+	for predicate := range requested["ts"] {
+		sym := ast.PredicateSym{Symbol: predicate.Name, Arity: predicate.Arity}
+		err := assembled.base.GetFacts(ast.NewQuery(sym), func(atom ast.Atom) error {
+			values := make([]facts.Value, len(atom.Args))
+			for index, arg := range atom.Args {
+				value, err := factValue(arg.(ast.Constant))
+				if err != nil {
+					return err
+				}
+				values[index] = value
+			}
+			snapshotFacts = append(snapshotFacts, facts.Fact{Relation: strings.TrimPrefix(predicate.Name, "ts."), Values: values})
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	lines := map[string]int{}
-	for _, fact := range snapshot.Facts {
+	for _, fact := range snapshotFacts {
 		if fact.Relation == "location" && fact.Values[1].String == "src/scorecard/total.ts" {
 			lines[fact.Values[0].String] = int(fact.Values[2].Number)
 		}
 	}
 	find := func(relation string, line int) []facts.Fact {
 		var result []facts.Fact
-		for _, fact := range snapshot.Facts {
+		for _, fact := range snapshotFacts {
 			if fact.Relation == relation && lines[fact.Values[0].String] == line {
 				result = append(result, fact)
 			}
 		}
 		return result
 	}
+	fnIDs := make(map[string]string)
+	for _, fact := range snapshotFacts {
+		if fact.Relation == "fn" {
+			fnIDs[fact.Values[2].String] = fact.Values[0].String
+		}
+	}
 	owner := func(site string) string {
-		for _, fact := range snapshot.Facts {
-			if fact.Relation == "site_in_fn" && fact.Values[0].String == site {
+		for _, fact := range snapshotFacts {
+			if fact.Relation == "site_owner" && fact.Values[0].String == site {
 				return fact.Values[1].String
 			}
 		}
 		return ""
 	}
 	unsupported := func(site string) string {
-		for _, fact := range snapshot.Facts {
+		for _, fact := range snapshotFacts {
 			if fact.Relation == "site_attribution_unsupported" && fact.Values[0].String == site {
 				return fact.Values[1].String
 			}
 		}
 		return ""
 	}
-	callback := fmt.Sprintf("src/scorecard/total.ts::arrow_function::<anonymous@%d>", strings.Index(source, "async () =>"))
-	scorecard := "src/scorecard/total.ts::function::total"
-	known := "src/scorecard/total.ts::function::known"
-	constructor := "src/scorecard/total.ts::constructor::Present.constructor"
+	callback := fnIDs[fmt.Sprintf("<anonymous@%d>", strings.Index(source, "async () =>"))]
+	scorecard := fnIDs["total"]
+	known := fnIDs["known"]
+	constructor := fnIDs["Present.constructor"]
 	for _, check := range []struct {
 		relation   string
 		line       int
@@ -830,30 +876,26 @@ export function choose(flag: boolean) {
 		if got := unsupported(site); got != check.reason {
 			t.Errorf("%s line %d unsupported = %q, want %q", check.relation, check.line, got, check.reason)
 		}
-		if check.relation == "call_edge" || check.relation == "call_unresolved" || check.relation == "external_call" || check.relation == "fn_ref" {
-			if got := rows[0].Values[1].String; got != check.fn {
-				t.Errorf("%s line %d caller = %q, want %q", check.relation, check.line, got, check.fn)
-			}
-		}
+
 	}
-	if rows := find("call_edge", 5); len(rows) == 1 && rows[0].Values[2].String != known {
+	if rows := find("call_edge", 5); len(rows) == 1 && rows[0].Values[1].String != known {
 		t.Errorf("wrong callback target: %v", rows)
 	}
-	if rows := find("fn_ref", 7); len(rows) == 1 && rows[0].Values[2].String != known {
+	if rows := find("fn_ref", 7); len(rows) == 1 && rows[0].Values[1].String != known {
 		t.Errorf("wrong referenced function: %v", rows)
 	}
-	if rows := find("fn_ref", 3); len(rows) == 1 && rows[0].Values[2].String != "src/scorecard/total.ts::function::total.nested" {
+	if rows := find("fn_ref", 3); len(rows) == 1 && rows[0].Values[1].String != fnIDs["total.nested"] {
 		t.Errorf("wrong nested function reference: %v", rows)
 	}
 	var valueTargets []string
 	for _, row := range find("fn_ref", 28) {
-		if got := owner(row.Values[0].String); got != "src/scorecard/total.ts::function::values" {
+		if got := owner(row.Values[0].String); got != fnIDs["values"] {
 			t.Errorf("function value owner = %q: %v", got, row)
 		}
-		valueTargets = append(valueTargets, row.Values[2].String)
+		valueTargets = append(valueTargets, row.Values[1].String)
 	}
 	slices.Sort(valueTargets)
-	if want := []string{"src/scorecard/total.ts::arrow_function::values.saved", "src/scorecard/total.ts::function_expression::values.returned"}; !slices.Equal(valueTargets, want) {
+	if want := []string{fnIDs["values.saved"], fnIDs["values.returned"]}; !slices.Equal(valueTargets, slices.Sorted(slices.Values(want))) {
 		t.Errorf("assigned and returned references = %v, want %v", valueTargets, want)
 	}
 	if rows := find("suspension_site", 10); len(rows) != 1 {
@@ -861,12 +903,12 @@ export function choose(flag: boolean) {
 	} else {
 		site := rows[0].Values[0].String
 		found := false
-		for _, fact := range snapshot.Facts {
-			if fact.Relation == "suspension_in_fn" && fact.Values[0].String == site && fact.Values[1].String == callback {
+		for _, fact := range snapshotFacts {
+			if fact.Relation == "site_owner" && fact.Values[0].String == site && fact.Values[1].String == callback {
 				found = true
 			}
 		}
-		if !found || !strings.HasPrefix(site, "suspension:") {
+		if !found || !strings.HasPrefix(site, "ts:site:") {
 			t.Errorf("callback suspension owner or ID: %v", rows)
 		}
 	}
@@ -875,27 +917,27 @@ export function choose(flag: boolean) {
 	} else if reason := unsupported(rows[0].Values[0].String); reason != "instance_construction" {
 		t.Errorf("unsupported suspension reason = %q", reason)
 	}
-	if rows := find("ambient_use", 27); len(rows) != 1 || owner(rows[0].Values[0].String) != "" || unsupported(rows[0].Values[0].String) != "" {
+	if rows := find("ambient_use", 27); len(rows) != 1 || owner(rows[0].Values[0].String) != "ts:module:src/scorecard/total.ts" || unsupported(rows[0].Values[0].String) != "" {
 		t.Errorf("module ambient use: %v", rows)
 	}
-	choose := "src/scorecard/total.ts::function::choose"
+	choose := fnIDs["choose"]
 	for _, check := range []struct {
 		line             int
 		relation, target string
 	}{
 		{30, "call_unresolved", ""},
-		{31, "call_edge", fmt.Sprintf("src/scorecard/total.ts::arrow_function::<anonymous@%d>", strings.Index(source, "() => known()) as"))},
-		{33, "call_edge", fmt.Sprintf("src/scorecard/total.ts::arrow_function::<anonymous@%d>", strings.Index(source, "() => known()) satisfies"))},
+		{31, "call_edge", fnIDs[fmt.Sprintf("<anonymous@%d>", strings.Index(source, "() => known()) as"))]},
+		{33, "call_edge", fnIDs[fmt.Sprintf("<anonymous@%d>", strings.Index(source, "() => known()) satisfies"))]},
 	} {
 		var outcomes []facts.Fact
 		for _, relation := range []string{"call_edge", "external_call", "call_unresolved"} {
 			for _, row := range find(relation, check.line) {
-				if row.Values[1].String == choose {
+				if owner(row.Values[0].String) == choose {
 					outcomes = append(outcomes, row)
 				}
 			}
 		}
-		if len(outcomes) != 1 || outcomes[0].Relation != check.relation || check.target != "" && outcomes[0].Values[2].String != check.target {
+		if len(outcomes) != 1 || outcomes[0].Relation != check.relation || check.target != "" && outcomes[0].Values[1].String != check.target {
 			t.Errorf("choose line %d outcomes: %v", check.line, outcomes)
 		}
 	}
@@ -905,11 +947,11 @@ export function choose(flag: boolean) {
 	if rows := find("fn_ref", 31); len(rows) != 0 {
 		t.Errorf("direct IIFE was also treated as a function value: %v", rows)
 	}
-	for _, fact := range snapshot.Facts {
-		if fact.Relation == "fn_ref" && strings.HasSuffix(fact.Values[2].String, "::function::total.nestedAlone") {
+	for _, fact := range snapshotFacts {
+		if fact.Relation == "fn_ref" && fact.Values[1].String == fnIDs["total.nestedAlone"] {
 			t.Errorf("declaration created a reference: %v", fact)
 		}
-		if fact.Relation == "call_edge" && fact.Values[1].String == scorecard && fact.Values[2].String == callback {
+		if fact.Relation == "call_edge" && owner(fact.Values[0].String) == scorecard && fact.Values[1].String == callback {
 			t.Errorf("containment created a call: %v", fact)
 		}
 		if fact.Relation == "fn_awaits" && fact.Values[0].String != callback {
@@ -919,36 +961,28 @@ export function choose(flag: boolean) {
 			t.Errorf("callback suspension attributed to module: %v", fact)
 		}
 	}
-	base, err := facts.Store(snapshot.Facts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	decls, prelude, err := facts.ParseSchema(snapshot.Schema)
-	if err != nil {
-		t.Fatal(err)
-	}
 	output := runtime.ProgramOutput{Text: `
 Decl direct(Fn).
-direct(Fn) :- fn_suspends(Fn).
-direct(Fn) :- call_edge(Site, Fn, To), !site_attribution_unknown(Site), direct(To).
+direct(Fn) :- ts.fn_suspends(Fn).
+direct(Fn) :- ts.site_owner(Site, Fn), ts.call_edge(Site, To), !ts.site_attribution_unknown(Site), direct(To).
 Decl with_refs(Fn).
-with_refs(Fn) :- fn_suspends(Fn).
-with_refs(Fn) :- call_edge(Site, Fn, To), !site_attribution_unknown(Site), with_refs(To).
-with_refs(Fn) :- fn_ref(Site, Fn, To), !site_attribution_unknown(Site), with_refs(To).
+with_refs(Fn) :- ts.fn_suspends(Fn).
+with_refs(Fn) :- ts.site_owner(Site, Fn), ts.call_edge(Site, To), !ts.site_attribution_unknown(Site), with_refs(To).
+with_refs(Fn) :- ts.site_owner(Site, Fn), ts.fn_ref(Site, To), !ts.site_attribution_unknown(Site), with_refs(To).
 Decl selected(Fn).
-selected(Fn) :- fn(Fn, File, _), fn_exported(Fn), glob(File, "src/scorecard/**").
+selected(Fn) :- ts.fn(Fn, File, _), ts.fn_exported(Fn), lintai.glob(File, "src/scorecard/**").
 Decl call_only(Fn).
 call_only(Fn) :- selected(Fn), direct(Fn).
 Decl follow_refs(Fn).
 follow_refs(Fn) :- selected(Fn), with_refs(Fn).
 Decl module_seen(File).
-module_seen(File) :- module_has_suspension(File).
+module_seen(Module) :- ts.module_path(Module, File), ts.module_has_suspension(File).
 Decl bad_owner(Site).
-bad_owner(Site) :- site_attribution_unsupported(Site, _), call_edge(Site, "", _), calls_reach("", _).
+bad_owner(Site) :- ts.site_attribution_unsupported(Site, _), ts.site_owner(Site, _).
 Decl uncertain(Fn).
-uncertain(Fn) :- fn(Fn, _, "choose"), fn_has_unresolved_call(Fn).
+uncertain(Fn) :- ts.fn(Fn, _, "choose"), ts.owner_has_unresolved_call(Fn).
 `}
-	violations, perr := evaluateProgram(base, prelude, decls, output, []string{"call_only", "follow_refs", "module_seen", "bad_owner", "uncertain"}, nil, evalOptions{})
+	violations, perr := evaluateProgram(assembled.base, assembled.sources, assembled.schemaDecls, assembled.anchors, assembled.reportable, assembled.namespaces, output, []string{"call_only", "follow_refs", "module_seen", "bad_owner", "uncertain"}, nil, evalOptions{})
 	if perr != nil {
 		t.Fatal(perr)
 	}
@@ -957,7 +991,7 @@ uncertain(Fn) :- fn(Fn, _, "choose"), fn_has_unresolved_call(Fn).
 		got = append(got, item.predicate+":"+item.anchor)
 	}
 	slices.Sort(got)
-	want := []string{"follow_refs:" + scorecard, "module_seen:src/scorecard/only-unsupported.ts", "module_seen:src/scorecard/total.ts", "uncertain:" + choose}
+	want := []string{"follow_refs:" + scorecard, "module_seen:ts:module:src/scorecard/only-unsupported.ts", "module_seen:ts:module:src/scorecard/total.ts", "uncertain:" + choose}
 	if !slices.Equal(got, want) {
 		t.Fatalf("policy rows = %v, want %v", got, want)
 	}

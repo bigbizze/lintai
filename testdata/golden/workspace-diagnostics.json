@@ -3,11 +3,13 @@
     "assertion_id": "violation",
     "diagnostic_kind": "architecture_violation",
     "entity_identity": {
-      "semantic_key": "src/core/entry.ts"
+      "semantic_key": "ts:module:src/core/entry.ts"
     },
     "message": "src/core/entry.ts reaches src/services/fetch-data.ts through its imports",
     "provenance": {
-      "backend_id": "typescript",
+      "producer_namespaces": [
+        "ts"
+      ],
       "rule_version": 1
     },
     "rule_id": "arch.core-no-service-reach",
@@ -24,11 +26,13 @@
     "assertion_id": "violation",
     "diagnostic_kind": "architecture_violation",
     "entity_identity": {
-      "semantic_key": "src/core/leaf.ts"
+      "semantic_key": "ts:module:src/core/leaf.ts"
     },
     "message": "src/core/leaf.ts reaches src/services/fetch-data.ts through its imports",
     "provenance": {
-      "backend_id": "typescript",
+      "producer_namespaces": [
+        "ts"
+      ],
       "rule_version": 1
     },
     "rule_id": "arch.core-no-service-reach",
@@ -45,11 +49,13 @@
     "assertion_id": "violation",
     "diagnostic_kind": "architecture_violation",
     "entity_identity": {
-      "semantic_key": "src/core/mid.ts"
+      "semantic_key": "ts:module:src/core/mid.ts"
     },
     "message": "src/core/mid.ts reaches src/services/fetch-data.ts through its imports",
     "provenance": {
-      "backend_id": "typescript",
+      "producer_namespaces": [
+        "ts"
+      ],
       "rule_version": 1
     },
     "rule_id": "arch.core-no-service-reach",
@@ -66,20 +72,22 @@
     "assertion_id": "violation",
     "diagnostic_kind": "architecture_violation",
     "entity_identity": {
-      "semantic_key": "src/pure/helper.ts::import::../services/fetch-data"
+      "semantic_key": "ts:site:a5ac13e0a82ce2fafd3994c8a7559d361e40653d14e658a21c34c54b74789e68"
     },
     "message": "Layer /pure must not import layer /services (src/pure/helper.ts -\u003e src/services/fetch-data.ts)",
     "provenance": {
-      "backend_id": "typescript",
+      "producer_namespaces": [
+        "ts"
+      ],
       "rule_version": 1
     },
     "rule_id": "arch.layers",
     "severity": "error",
     "source_location": {
-      "endColumn": 51,
+      "endColumn": 52,
       "endLine": 1,
       "file": "src/pure/helper.ts",
-      "startColumn": 27,
+      "startColumn": 1,
       "startLine": 1
     }
   },
@@ -87,20 +95,22 @@
     "assertion_id": "violation",
     "diagnostic_kind": "architecture_violation",
     "entity_identity": {
-      "semantic_key": "src/pure/helper.ts::import::../services/fetch-data"
+      "semantic_key": "ts:site:a5ac13e0a82ce2fafd3994c8a7559d361e40653d14e658a21c34c54b74789e68"
     },
     "message": "Pure module src/pure/helper.ts must not import src/services/fetch-data.ts",
     "provenance": {
-      "backend_id": "typescript",
+      "producer_namespaces": [
+        "ts"
+      ],
       "rule_version": 1
     },
     "rule_id": "arch.pure-no-service-imports",
     "severity": "error",
     "source_location": {
-      "endColumn": 51,
+      "endColumn": 52,
       "endLine": 1,
       "file": "src/pure/helper.ts",
-      "startColumn": 27,
+      "startColumn": 1,
       "startLine": 1
     }
   },
@@ -108,20 +118,22 @@
     "assertion_id": "violation",
     "diagnostic_kind": "architecture_violation",
     "entity_identity": {
-      "semantic_key": "src/pure/helper.ts::function::loadValue"
+      "semantic_key": "ts:fn:88bf7e008e6418c044b0130cdf26383d0877144c63b2b8db4e144224bea475f4"
     },
     "message": "Pure function loadValue calls code with suspension syntax",
     "provenance": {
-      "backend_id": "typescript",
+      "producer_namespaces": [
+        "ts"
+      ],
       "rule_version": 1
     },
     "rule_id": "arch.pure-no-effects",
     "severity": "error",
     "source_location": {
-      "endColumn": 26,
-      "endLine": 3,
+      "endColumn": 2,
+      "endLine": 5,
       "file": "src/pure/helper.ts",
-      "startColumn": 17,
+      "startColumn": 1,
       "startLine": 3
     }
   },
@@ -129,20 +141,22 @@
     "assertion_id": "reaches_effect",
     "diagnostic_kind": "architecture_violation",
     "entity_identity": {
-      "semantic_key": "src/pure/helper.ts::function::loadValue"
+      "semantic_key": "ts:fn:88bf7e008e6418c044b0130cdf26383d0877144c63b2b8db4e144224bea475f4"
     },
     "message": "Pure function loadValue depends on an ambient source or suspension syntax through calls or function values",
     "provenance": {
-      "backend_id": "typescript",
+      "producer_namespaces": [
+        "ts"
+      ],
       "rule_version": 1
     },
     "rule_id": "arch.pure-no-effects-strict",
     "severity": "error",
     "source_location": {
-      "endColumn": 26,
-      "endLine": 3,
+      "endColumn": 2,
+      "endLine": 5,
       "file": "src/pure/helper.ts",
-      "startColumn": 17,
+      "startColumn": 1,
       "startLine": 3
     }
   },
@@ -150,20 +164,22 @@
     "assertion_id": "leaves_analysis",
     "diagnostic_kind": "architecture_violation",
     "entity_identity": {
-      "semantic_key": "src/pure/launder.ts::function::launder"
+      "semantic_key": "ts:fn:51f70d9d4e73ff706e4bbb4c7bc93e6bf19fbaa974efd779e7c46d88abc05169"
     },
     "message": "Pure function launder calls a function value that lintai cannot resolve",
     "provenance": {
-      "backend_id": "typescript",
+      "producer_namespaces": [
+        "ts"
+      ],
       "rule_version": 1
     },
     "rule_id": "arch.pure-no-effects-strict",
     "severity": "error",
     "source_location": {
-      "endColumn": 24,
-      "endLine": 1,
+      "endColumn": 2,
+      "endLine": 3,
       "file": "src/pure/launder.ts",
-      "startColumn": 17,
+      "startColumn": 1,
       "startLine": 1
     }
   },
@@ -171,20 +187,22 @@
     "assertion_id": "violation",
     "diagnostic_kind": "architecture_violation",
     "entity_identity": {
-      "semantic_key": "src/pure/math.ts::function::compute"
+      "semantic_key": "ts:fn:68c215719ed5a2861e9b17c6ac83126814afb01fd24e724c4a0c017e35be8cb9"
     },
     "message": "Pure function compute calls code with suspension syntax",
     "provenance": {
-      "backend_id": "typescript",
+      "producer_namespaces": [
+        "ts"
+      ],
       "rule_version": 1
     },
     "rule_id": "arch.pure-no-effects",
     "severity": "error",
     "source_location": {
-      "endColumn": 24,
-      "endLine": 3,
+      "endColumn": 2,
+      "endLine": 5,
       "file": "src/pure/math.ts",
-      "startColumn": 17,
+      "startColumn": 1,
       "startLine": 3
     }
   },
@@ -192,20 +210,22 @@
     "assertion_id": "reaches_effect",
     "diagnostic_kind": "architecture_violation",
     "entity_identity": {
-      "semantic_key": "src/pure/math.ts::function::compute"
+      "semantic_key": "ts:fn:68c215719ed5a2861e9b17c6ac83126814afb01fd24e724c4a0c017e35be8cb9"
     },
     "message": "Pure function compute depends on an ambient source or suspension syntax through calls or function values",
     "provenance": {
-      "backend_id": "typescript",
+      "producer_namespaces": [
+        "ts"
+      ],
       "rule_version": 1
     },
     "rule_id": "arch.pure-no-effects-strict",
     "severity": "error",
     "source_location": {
-      "endColumn": 24,
-      "endLine": 3,
+      "endColumn": 2,
+      "endLine": 5,
       "file": "src/pure/math.ts",
-      "startColumn": 17,
+      "startColumn": 1,
       "startLine": 3
     }
   },
@@ -213,20 +233,22 @@
     "assertion_id": "reaches_effect",
     "diagnostic_kind": "architecture_violation",
     "entity_identity": {
-      "semantic_key": "src/pure/time.ts::function::stamp"
+      "semantic_key": "ts:fn:aa234f78c375743203aea90966a67f772997a17b3d2d0e87d0814b5697bba0ef"
     },
     "message": "Pure function stamp depends on an ambient source or suspension syntax through calls or function values",
     "provenance": {
-      "backend_id": "typescript",
+      "producer_namespaces": [
+        "ts"
+      ],
       "rule_version": 1
     },
     "rule_id": "arch.pure-no-effects-strict",
     "severity": "error",
     "source_location": {
-      "endColumn": 22,
-      "endLine": 1,
+      "endColumn": 2,
+      "endLine": 3,
       "file": "src/pure/time.ts",
-      "startColumn": 17,
+      "startColumn": 1,
       "startLine": 1
     }
   },
@@ -234,11 +256,13 @@
     "assertion_id": "clock_in_pure",
     "diagnostic_kind": "architecture_violation",
     "entity_identity": {
-      "semantic_key": "src/pure/time.ts::arrow_function::\u003canonymous@59\u003e"
+      "semantic_key": "ts:fn:d8a4cdf2ac4c75456ffdf78b15242865e10a8f4cf8eea0909388bdec7dd27c52"
     },
     "message": "Pure function \u003canonymous@59\u003e reads the clock",
     "provenance": {
-      "backend_id": "typescript",
+      "producer_namespaces": [
+        "ts"
+      ],
       "rule_version": 1
     },
     "rule_id": "arch.ambient",
@@ -255,11 +279,13 @@
     "assertion_id": "reaches_effect",
     "diagnostic_kind": "architecture_violation",
     "entity_identity": {
-      "semantic_key": "src/pure/time.ts::arrow_function::\u003canonymous@59\u003e"
+      "semantic_key": "ts:fn:d8a4cdf2ac4c75456ffdf78b15242865e10a8f4cf8eea0909388bdec7dd27c52"
     },
     "message": "Pure function \u003canonymous@59\u003e depends on an ambient source or suspension syntax through calls or function values",
     "provenance": {
-      "backend_id": "typescript",
+      "producer_namespaces": [
+        "ts"
+      ],
       "rule_version": 1
     },
     "rule_id": "arch.pure-no-effects-strict",
@@ -276,20 +302,22 @@
     "assertion_id": "leaves_analysis",
     "diagnostic_kind": "architecture_violation",
     "entity_identity": {
-      "semantic_key": "src/pure/wired.ts::function::wired"
+      "semantic_key": "ts:fn:2a0440e6810928a512dc834d183e43f67f9df75b1f87bbb8a527797b6f355c60"
     },
     "message": "Pure function wired calls a function value that lintai cannot resolve",
     "provenance": {
-      "backend_id": "typescript",
+      "producer_namespaces": [
+        "ts"
+      ],
       "rule_version": 1
     },
     "rule_id": "arch.pure-no-effects-strict",
     "severity": "error",
     "source_location": {
-      "endColumn": 22,
-      "endLine": 3,
+      "endColumn": 2,
+      "endLine": 5,
       "file": "src/pure/wired.ts",
-      "startColumn": 17,
+      "startColumn": 1,
       "startLine": 3
     }
   },
@@ -297,11 +325,13 @@
     "assertion_id": "missing_marker",
     "diagnostic_kind": "architecture_violation",
     "entity_identity": {
-      "semantic_key": "src/server/config.ts"
+      "semantic_key": "ts:module:src/server/config.ts"
     },
     "message": "src/server/config.ts must import \"server-only\"",
     "provenance": {
-      "backend_id": "typescript",
+      "producer_namespaces": [
+        "ts"
+      ],
       "rule_version": 1
     },
     "rule_id": "arch.server-only",
@@ -318,11 +348,13 @@
     "assertion_id": "env_outside_config",
     "diagnostic_kind": "architecture_violation",
     "entity_identity": {
-      "semantic_key": "src/server/handler.ts::ambient::env.read::SECRET"
+      "semantic_key": "ts:site:f584aa5ba93d195baf499cb32291ee4e36acc30ceafff310ebe185f7dd585637"
     },
     "message": "Read environment variable SECRET only in src/server/config.ts",
     "provenance": {
-      "backend_id": "typescript",
+      "producer_namespaces": [
+        "ts"
+      ],
       "rule_version": 1
     },
     "rule_id": "arch.ambient",
@@ -339,11 +371,13 @@
     "assertion_id": "env_dynamic",
     "diagnostic_kind": "architecture_violation",
     "entity_identity": {
-      "semantic_key": "src/server/handler.ts::ambient::env.read::*"
+      "semantic_key": "ts:site:3c5347e49500f4129509f50c0d02a9bbc44b78eae5be42d09f4987311d66312d"
     },
     "message": "Dynamic environment access in src/server/handler.ts",
     "provenance": {
-      "backend_id": "typescript",
+      "producer_namespaces": [
+        "ts"
+      ],
       "rule_version": 1
     },
     "rule_id": "arch.ambient",
@@ -360,11 +394,13 @@
     "assertion_id": "wires",
     "diagnostic_kind": "architecture_violation",
     "entity_identity": {
-      "semantic_key": "src/server/wire-clock.ts"
+      "semantic_key": "ts:module:src/server/wire-clock.ts"
     },
     "message": "src/server/wire-clock.ts passes now from src/services as a value",
     "provenance": {
-      "backend_id": "typescript",
+      "producer_namespaces": [
+        "ts"
+      ],
       "rule_version": 1
     },
     "rule_id": "arch.server-wires-services",

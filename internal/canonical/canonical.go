@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"unicode/utf8"
 )
 
 func Normalize(value any) (any, error) {
@@ -22,6 +23,12 @@ func Normalize(value any) (any, error) {
 				return nil, err
 			}
 			items = append(items, normalized)
+		}
+		return items, nil
+	case []string:
+		items := make([]any, 0, len(typed))
+		for _, item := range typed {
+			items = append(items, item)
 		}
 		return items, nil
 	case map[string]any:
@@ -64,11 +71,9 @@ func writeCanonicalJSON(buffer *bytes.Buffer, value any) error {
 			buffer.WriteString("false")
 		}
 	case string:
-		raw, err := json.Marshal(typed)
-		if err != nil {
+		if err := writeJSONString(buffer, typed); err != nil {
 			return err
 		}
-		buffer.Write(raw)
 	case float64, float32, int, int32, int64, uint, uint32, uint64, json.Number:
 		raw, err := json.Marshal(typed)
 		if err != nil {
@@ -87,29 +92,73 @@ func writeCanonicalJSON(buffer *bytes.Buffer, value any) error {
 		}
 		buffer.WriteByte(']')
 	case map[string]any:
-		keys := make([]string, 0, len(typed))
-		for key := range typed {
-			keys = append(keys, key)
+		type encodedKey struct {
+			key     string
+			encoded string
 		}
-		sort.Strings(keys)
-		buffer.WriteByte('{')
+		keys := make([]encodedKey, 0, len(typed))
+		for key := range typed {
+			encoded := &bytes.Buffer{}
+			if err := writeJSONString(encoded, key); err != nil {
+				return err
+			}
+			keys = append(keys, encodedKey{key: key, encoded: encoded.String()})
+		}
+		sort.Slice(keys, func(i, j int) bool { return keys[i].encoded < keys[j].encoded })
+		buffer.WriteByte('[')
 		for index, key := range keys {
 			if index > 0 {
 				buffer.WriteByte(',')
 			}
-			rawKey, err := json.Marshal(key)
-			if err != nil {
+			buffer.WriteByte('[')
+			buffer.WriteString(key.encoded)
+			buffer.WriteByte(',')
+			if err := writeCanonicalJSON(buffer, typed[key.key]); err != nil {
 				return err
 			}
-			buffer.Write(rawKey)
-			buffer.WriteByte(':')
-			if err := writeCanonicalJSON(buffer, typed[key]); err != nil {
-				return err
-			}
+			buffer.WriteByte(']')
 		}
-		buffer.WriteByte('}')
+		buffer.WriteByte(']')
 	default:
 		return errors.New("encountered unsupported canonical value")
 	}
+	return nil
+}
+
+// writeJSONString emits the canonical JSON string form without HTML or
+// Unicode separator escaping. Invalid UTF-8 has no canonical representation.
+func writeJSONString(buffer *bytes.Buffer, value string) error {
+	if !utf8.ValidString(value) {
+		return errors.New("canonical string is not valid UTF-8")
+	}
+	buffer.WriteByte('"')
+	const hex = "0123456789abcdef"
+	for _, char := range value {
+		switch char {
+		case '"':
+			buffer.WriteString(`\"`)
+		case '\\':
+			buffer.WriteString(`\\`)
+		case '\b':
+			buffer.WriteString(`\b`)
+		case '\f':
+			buffer.WriteString(`\f`)
+		case '\n':
+			buffer.WriteString(`\n`)
+		case '\r':
+			buffer.WriteString(`\r`)
+		case '\t':
+			buffer.WriteString(`\t`)
+		default:
+			if char < 0x20 {
+				buffer.WriteString(`\u00`)
+				buffer.WriteByte(hex[byte(char)>>4])
+				buffer.WriteByte(hex[byte(char)&15])
+			} else {
+				buffer.WriteRune(char)
+			}
+		}
+	}
+	buffer.WriteByte('"')
 	return nil
 }

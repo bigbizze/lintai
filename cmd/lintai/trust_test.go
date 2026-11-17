@@ -59,7 +59,7 @@ func TestRulesLockStopsAChangedRuleBeforeSetup(t *testing.T) {
 import { pattern } from "./shared/glob";
 export default rule("t.no-async").version(1)
 	.setup(({ fs, workspaceRoot }) => { fs.writeFileSync(workspaceRoot + "/setup-ran.txt", "yes"); return {}; })
-	.program(dl` + "`Decl v(Fn). v(Fn) :- fn_async(Fn), fn(Fn, File, _), glob(File, ${pattern}).`" + `)
+	.program(dl` + "`Decl v(Fn). v(Fn) :- ts.fn_async(Fn), ts.fn(Fn, File, _), lintai.glob(File, ${pattern}).`" + `)
 	.report("v").message(() => "no async");
 `,
 	})
@@ -106,20 +106,20 @@ func TestSetupRestrictions(t *testing.T) {
 		"lintai-rules/dynamic-require.ts": `import { dl, rule } from "@lintai/sdk";
 export default rule("t.dynamic-require").version(1)
 	.setup(({ workspaceRoot }) => { const name = workspaceRoot + "/src/payload.js"; require(name); return {}; })
-	.program(dl` + "`Decl v(F). v(F) :- module(F), F = \"none\".`" + `)
+	.program(dl` + "`Decl v(F). v(F) :- ts.module(F), F = \"none\".`" + `)
 	.report("v").message(() => "x");
 `,
 		"lintai-rules/module-loader.ts": `import { dl, rule } from "@lintai/sdk";
 export default rule("t.module-loader").version(1)
 	.setup(({ workspaceRoot }) => { const { createRequire } = require("node:module"); createRequire(workspaceRoot + "/x.js")("./src/payload.js"); return {}; })
-	.program(dl` + "`Decl v(F). v(F) :- module(F), F = \"none\".`" + `)
+	.program(dl` + "`Decl v(F). v(F) :- ts.module(F), F = \"none\".`" + `)
 	.report("v").message(() => "x");
 `,
 		"lintai-rules/spawn.ts": `import { dl, rule } from "@lintai/sdk";
 import { execFileSync } from "node:child_process";
 export default rule("t.spawn").version(1)
 	.setup(() => { execFileSync("node", ["--version"]); return {}; })
-	.program(dl` + "`Decl v(F). v(F) :- module(F), F = \"none\".`" + `)
+	.program(dl` + "`Decl v(F). v(F) :- ts.module(F), F = \"none\".`" + `)
 	.report("v").message(() => "x");
 `,
 	})

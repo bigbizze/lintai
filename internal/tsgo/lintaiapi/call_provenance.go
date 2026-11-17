@@ -182,22 +182,6 @@ func (e *extractor) callUsesUnassociatedProperty(node, signature, lexicalMember 
 	return true
 }
 
-func escapedCallDeclarationObservation(site string) callDeclarationObservation {
-	return callDeclarationObservation{Site: site, Incomplete: []string{"unsupported"}}
-}
-
-func (e *extractor) recordEscapedCallDeclaration(source callSource, location SourceLocation) {
-	site := e.recordUnresolvedCall(source, location)
-	e.callDeclarationObservations = append(e.callDeclarationObservations, escapedCallDeclarationObservation(site))
-}
-
-// Filtering appends this observation only when it materializes the
-// callback's unresolved site. Never query a signature on the
-// escaped value, and never group it with real invocation observations.
-func (callback escapingCallback) callDeclarationObservation() callDeclarationObservation {
-	return escapedCallDeclarationObservation(callback.call.SemanticKey)
-}
-
 // Compare the original program observations before unioning any evidence. A
 // program that did not analyze an invocation contributes no observation. Compare
 // even observations whose emitted sites were filtered out, then emit only facts

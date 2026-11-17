@@ -99,8 +99,8 @@ export default rule("arch.no-service-imports")
   .program(dl`
     Decl violation(Imp, From, To).
     violation(Imp, From, To) :-
-      import_edge(Imp, From, To, _), import_internal(Imp),
-      glob(From, "src/pure/**"), glob(To, "src/services/**").
+      ts.import_edge(Imp, From, To, _), ts.import_internal(Imp),
+      lintai.glob(From, "src/pure/**"), lintai.glob(To, "src/services/**").
   `)
   .report("violation")
   .message((row) => `Pure module ${row.From} must not import ${row.To}`);
@@ -122,7 +122,7 @@ To inspect the import facts behind this example:
 pnpm exec lintai facts --workspace-root . --relation import_edge --relation import_internal
 ```
 
-`lintai schema` lists the available facts and built-in queries. The [examples](docs/examples.md) cover call chains, public types, suspension syntax, required imports and more.
+`lintai schema` prints the configured producer catalog under its namespace bindings, along with `lintai` helpers. The [examples](docs/examples.md) cover call chains, public types, suspension syntax, required imports and more.
 
 ## Use it in your editor
 
@@ -170,7 +170,7 @@ A few boundaries matter when choosing a policy:
 
 You do not need to fix every existing violation before adopting a rule. Run your normal lintai command with `--suppress-all` to record existing error violations in `lintai-suppressions.json`, then commit that file. Later runs can report new violations while you work through the existing ones.
 
-After fixing violations, use `--prune-suppressions` to remove stale entries. Review changes to the suppression file as you would changes to a rule. See [bulk suppressions](specs/bulk-suppressions.md) for details.
+After fixing violations, use `--prune-suppressions` to remove stale entries. Review changes to the suppression file as you would changes to a rule. See [bulk suppressions](docs/api.md#bulk-suppressions) for details.
 
 ## Further reading
 

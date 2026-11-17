@@ -1,734 +1,1288 @@
-# lintai base relations. lintai extracts these facts from the workspace.
-# Paths are workspace-relative strings with forward slashes.
-# Entity ids are semantic keys, as strings. A module's entity id is its path.
-# Booleans are presence facts. Closed vocabularies are name constants.
+# TypeScript producer base relations and reporting roles.
+# Allowed names omit the leading slash; ambient names come from the ambient registry.
 
-Decl module(File)
+Decl module(Module)
   descr [
     extensional(),
-    doc("A source file in the workspace."),
-    arg(File, "Workspace-relative path. This is also the module's entity id.")
+    doc("One entity per selected primary file."),
+    arg(Module, "Module"),
+    arg_role(Module, "entity"),
+    arg_report_support(Module, "required")
+  ].
+
+Decl module_path(Module, File)
+  descr [
+    extensional(),
+    doc("The primary module’s canonical file path."),
+    arg(Module, "Module"),
+    arg_role(Module, "entity"),
+    arg_report_support(Module, "required"),
+    arg(File, "File"),
+    arg_role(File, "path")
   ].
 
 Decl fn(Fn, File, Name)
   descr [
     extensional(),
-    doc("A collected function, method, arrow function or function expression."),
-    arg(Fn, "Function entity id."),
-    arg(File, "Path of the file that declares the function."),
-    arg(Name, "Display name, for example Container.local.")
+    doc("Collected implementation/ownership function in a primary file; display name is not identity."),
+    arg(Fn, "Fn"),
+    arg_role(Fn, "entity"),
+    arg_report_support(Fn, "required"),
+    arg(File, "File"),
+    arg_role(File, "path"),
+    arg(Name, "Name")
   ].
 
 Decl fn_kind(Fn, Kind)
   descr [
     extensional(),
-    doc("The syntactic kind of a function."),
-    arg(Fn, "Function entity id."),
-    arg(Kind, "\"function\", \"function_expression\", \"arrow_function\", \"method\", \"constructor\", \"get_accessor\" or \"set_accessor\".")
+    doc("One syntax kind: /function, /function_expression, /arrow_function, /method, /constructor, /get_accessor or /set_accessor."),
+    arg(Fn, "Fn"),
+    arg_role(Fn, "entity"),
+    arg_report_support(Fn, "required"),
+    arg(Kind, "Kind"),
+    arg_representation(Kind, "name"),
+    arg_allowed_name(Kind, "function"),
+    arg_allowed_name(Kind, "function_expression"),
+    arg_allowed_name(Kind, "arrow_function"),
+    arg_allowed_name(Kind, "method"),
+    arg_allowed_name(Kind, "constructor"),
+    arg_allowed_name(Kind, "get_accessor"),
+    arg_allowed_name(Kind, "set_accessor")
   ].
 
-Decl fn_container(Fn, Container)
+Decl fn_container(Fn, Name)
   descr [
     extensional(),
-    doc("The name of the class or object that contains a function. Only present when the name is not empty."),
-    arg(Fn, "Function entity id."),
-    arg(Container, "Container name.")
+    doc("Known containing class/object display name; absent when unnamed."),
+    arg(Fn, "Fn"),
+    arg_role(Fn, "entity"),
+    arg_report_support(Fn, "required"),
+    arg(Name, "Name")
   ].
 
 Decl fn_exported(Fn)
   descr [
     extensional(),
-    doc("The function is exported from its module."),
-    arg(Fn, "Function entity id.")
+    doc("Syntactically exported collected function."),
+    arg(Fn, "Fn"),
+    arg_role(Fn, "entity"),
+    arg_report_support(Fn, "required")
   ].
 
 Decl fn_async(Fn)
   descr [
     extensional(),
-    doc("The function has the async modifier."),
-    arg(Fn, "Function entity id.")
+    doc("Function has the async modifier; this is not a statement about every promise-returning function."),
+    arg(Fn, "Fn"),
+    arg_role(Fn, "entity"),
+    arg_report_support(Fn, "required")
   ].
 
-Decl fn_awaits(Fn)
+Decl site(Site, File)
   descr [
     extensional(),
-    doc("An ordinary await expression belongs to this function, including its parameter defaults."),
-    arg(Fn, "Function entity id.")
+    doc("Primary syntax-event population defined in section 7.2."),
+    arg(Site, "Site"),
+    arg_role(Site, "entity"),
+    arg_report_support(Site, "required"),
+    arg(File, "File"),
+    arg_role(File, "path")
   ].
 
-Decl fn_signature_omitted(Fn)
-  descr [extensional(), doc("Signature collection was skipped for an anonymous ownership-only function."), arg(Fn, "Function entity id.")].
-
-Decl fn_signature_unresolved(Fn)
-  descr [extensional(), doc("Signature collection was attempted but the checker did not provide a complete signature."), arg(Fn, "Function entity id.")].
-
-Decl suspension_site(Site, File, Kind)
+Decl site_owner(Site, Owner)
   descr [
     extensional(),
-    doc("One syntax site for ordinary await, for await or await using. This does not prove execution."),
-    arg(Site, "Suspension site entity id."),
-    arg(File, "Workspace-relative path."),
-    arg(Kind, "/await, /for_await or /await_using.")
+    doc("Unique representable lexical/execution owner: collected function or primary module."),
+    arg(Site, "Site"),
+    arg_role(Site, "entity"),
+    arg_report_support(Site, "required"),
+    arg(Owner, "Owner"),
+    arg_role(Owner, "entity"),
+    arg_report_support(Owner, "required")
   ].
-
-Decl suspension_in_fn(Site, Fn)
-  descr [extensional(), doc("The suspension site belongs to this function."), arg(Site, "Suspension site entity id."), arg(Fn, "Function entity id.")].
-
-Decl suspension_at_module(Site)
-  descr [extensional(), doc("The suspension site belongs to module evaluation."), arg(Site, "Suspension site entity id.")].
 
 Decl site_attribution_unsupported(Site, Reason)
   descr [
     extensional(),
-    doc("The site's lexical owner cannot be represented. It has no function or module owner."),
-    arg(Site, "Site entity id."),
-    arg(Reason, "/instance_construction or /unsupported_context.")
+    doc("No representable owner; /instance_construction or /unsupported_context."),
+    arg(Site, "Site"),
+    arg_role(Site, "entity"),
+    arg_report_support(Site, "required"),
+    arg(Reason, "Reason"),
+    arg_representation(Reason, "name"),
+    arg_allowed_name(Reason, "instance_construction"),
+    arg_allowed_name(Reason, "unsupported_context")
   ].
 
-Decl fn_param(Fn, Index, Type)
+Decl suspension_site(Site, Kind)
   descr [
     extensional(),
-    doc("One row per function parameter."),
-    arg(Fn, "Function entity id."),
-    arg(Index, "Parameter position, starting at 0."),
-    arg(Type, "Type entity id of the parameter.")
+    doc("Ordinary /await, /for_await or /await_using syntax; not proof of execution."),
+    arg(Site, "Site"),
+    arg_role(Site, "entity"),
+    arg_report_support(Site, "required"),
+    arg(Kind, "Kind"),
+    arg_representation(Kind, "name"),
+    arg_allowed_name(Kind, "await"),
+    arg_allowed_name(Kind, "for_await"),
+    arg_allowed_name(Kind, "await_using")
   ].
 
-Decl fn_returns(Fn, Type)
+Decl meta_access(Site, AccessPath)
   descr [
     extensional(),
-    doc("The return type of a function."),
-    arg(Fn, "Function entity id."),
-    arg(Type, "Type entity id of the return type.")
-  ].
-
-Decl import_edge(Imp, From, To, Specifier)
-  descr [
-    extensional(),
-    doc("One row per module reference with a string specifier: import declarations, export ... from, import(), require(), import x = require() and typeof import(). import_form gives the form."),
-    arg(Imp, "Import entity id."),
-    arg(From, "Path of the importing file."),
-    arg(To, "Workspace-relative path when import_internal is set, otherwise the specifier."),
-    arg(Specifier, "The module specifier as written.")
-  ].
-
-Decl import_form(Imp, Form)
-  descr [
-    extensional(),
-    doc("The syntax of a module reference. Every import_edge has one row."),
-    arg(Imp, "Import entity id."),
-    arg(Form, "/static (import declaration), /reexport (export ... from), /dynamic (import()), /require (require()), /import_equals (import x = require()) or /import_type (typeof import()).")
-  ].
-
-Decl import_internal(Imp)
-  descr [
-    extensional(),
-    doc("The import resolves to a workspace file that is not in node_modules."),
-    arg(Imp, "Import entity id.")
-  ].
-
-Decl import_unresolved(Imp)
-  descr [
-    extensional(),
-    doc("The import resolves to no file and to no declared module. A typo in a path or an alias, or a package that is not installed, gives this fact."),
-    arg(Imp, "Import entity id.")
-  ].
-
-Decl import_package(Imp, Pkg)
-  descr [
-    extensional(),
-    doc("The package name of an import that resolves to a package or to a declared module, for example \"next\" for \"next/server\" and \"@scope/pkg\" for \"@scope/pkg/sub\". Also present for an internal import that resolves through a workspace package."),
-    arg(Imp, "Import entity id."),
-    arg(Pkg, "Package name.")
-  ].
-
-Decl import_type_only(Imp)
-  descr [
-    extensional(),
-    doc("The reference loads only types: import type, export type ... from, or typeof import()."),
-    arg(Imp, "Import entity id.")
-  ].
-
-Decl import_retained(Imp)
-  descr [
-    extensional(),
-    doc("An import declaration whose bindings are all type-only, as in import { type X } from \"m\", when verbatimModuleSyntax is on. tsc emits it as import {} from \"m\", so the target loads at runtime."),
-    arg(Imp, "Import entity id.")
-  ].
-
-Decl import_symbol(Imp, Name, Kind)
-  descr [
-    extensional(),
-    doc("A binding that an import declaration introduces. A side-effect import has no rows."),
-    arg(Imp, "Import entity id."),
-    arg(Name, "Imported name."),
-    arg(Kind, "/default, /namespace or /named.")
-  ].
-
-Decl import_symbol_type_only(Imp, Name)
-  descr [
-    extensional(),
-    doc("A named import with the type modifier, as in import { type X }."),
-    arg(Imp, "Import entity id."),
-    arg(Name, "Imported name.")
-  ].
-
-Decl call_edge(Call, Caller, Callee)
-  descr [
-    extensional(),
-    doc("A call to a collected function. The callee is the declaration that the type checker resolves for the call. A call through a value whose type is a function type, for example a callback parameter or a property of a record of functions, has no row; it is a call_unresolved row."),
-    arg(Call, "Call entity id."),
-    arg(Caller, "Calling function, module path at module scope, or an empty string when attribution is unsupported."),
-    arg(Callee, "Entity id of the called function.")
-  ].
-
-Decl external_call(Call, Caller, Module, Name)
-  descr [
-    extensional(),
-    doc("A call whose resolved declaration is outside the workspace source files: in the default library, in a package or in a declaration file."),
-    arg(Call, "Call entity id."),
-    arg(Caller, "Calling function, module path at module scope, or an empty string when attribution is unsupported."),
-    arg(Module, "\"lib\" for the default library, the package name for a package (the @types/ prefix is removed), the module name of a declare module block, or the path of a workspace declaration file."),
-    arg(Name, "Name of the declaration with its containers, for example \"JSON.parse\", \"Set.add\" or \"DateConstructor.now\".")
-  ].
-
-Decl call_unresolved(Site, Caller)
-  descr [
-    extensional(),
-    doc("A call that lintai cannot follow: a call, new or tagged template whose target is not a retained workspace function or an external declaration, including a function in a file excluded by the file scope; f.call() or f.apply() when f is not a collected function; a function value that is not a collected function, passed to an external call (the row is at the argument); new of a workspace class without a constructor whose fields have initializers that run code. Every call site has exactly one of: call_edge, external_call, call_unresolved."),
-    arg(Site, "Call site entity id."),
-    arg(Caller, "Calling function, module path at module scope, or an empty string when attribution is unsupported.")
-  ].
-
-Decl call_declaration(Site, Declaration)
-  descr [
-    extensional(),
-    doc("The checked program selects this concrete signature declaration for the invocation. This evidence is independent of runtime target resolution. Differing program observations may retain multiple declarations with /conflict."),
-    arg(Site, "Existing call_edge, external_call or call_unresolved site SemanticKey, without an EntityID prefix; reuses its location and ownership."),
-    arg(Declaration, "Canonical checked signature declaration entity id.")
-  ].
-
-Decl declaration_member(Declaration, OwnerDecl, Name)
-  descr [
-    extensional(),
-    doc("The signature declaration belongs lexically to this named member of the owner declaration, independently of any call-site receiver. Absence of a row does not establish safety or absence of named member access."),
-    arg(Declaration, "Canonical signature declaration entity id."),
-    arg(OwnerDecl, "Canonical lexical owner declaration entity id."),
-    arg(Name, "Member name.")
-  ].
-
-Decl call_declaration_incomplete(Site, Reason)
-  descr [
-    extensional(),
-    doc("Declaration or member provenance is incomplete for this invocation. Partial concrete declaration evidence may coexist with an incomplete outcome; absence of this marker is not a general proof of type safety."),
-    arg(Site, "Existing call site SemanticKey, without an EntityID prefix; reuses its location and ownership."),
-    arg(Reason, "/unresolved: no usable selected signature; /synthetic: synthesized signature without one concrete declaration; /unsupported: signature or member shape cannot be represented safely; /conflict: checked-program observations disagree about declaration or member evidence.")
-  ].
-
-Decl import_opaque(Site, From)
-  descr [
-    extensional(),
-    doc("A dynamic import() or require() whose specifier is not a string literal. These references have no import_edge row; this fact makes them visible."),
-    arg(Site, "Reference site entity id."),
-    arg(From, "Path of the file that contains the reference.")
-  ].
-
-Decl fn_ref(Ref, From, To)
-  descr [
-    extensional(),
-    doc("A collected function used as a value, for example passed as an argument, stored, returned or used as a property value. An inline arrow function, function expression or object literal method creates a reference from its surrounding owner. A nested function declaration alone does not create a reference. Import and export specifiers are not references."),
-    arg(Ref, "Reference entity id."),
-    arg(From, "Surrounding function, module path at module scope, or an empty string when attribution is unsupported."),
-    arg(To, "Entity id of the referenced function.")
-  ].
-
-Decl type_ref(Ref, File, Name)
-  descr [
-    extensional(),
-    doc("A type reference."),
-    arg(Ref, "Type reference entity id."),
-    arg(File, "Path of the file that contains the reference."),
-    arg(Name, "Referenced type name.")
-  ].
-
-Decl type_ref_target(Ref, TargetFile)
-  descr [
-    extensional(),
-    doc("The file that declares the referenced type. Only present when that file is inside the workspace."),
-    arg(Ref, "Type reference entity id."),
-    arg(TargetFile, "Path of the declaring file.")
-  ].
-
-Decl type_kind(Type, Kind)
-  descr [
-    extensional(),
-    doc("The structure of a type. Every type entity has one row. A named type also has a type_named row; the kind describes what the name refers to."),
-    arg(Type, "Type entity id."),
-    arg(Kind, "/any, /unknown, /never, /void, /undefined, /null, /string, /number, /bigint, /boolean, /symbol, /object_keyword, /literal, /type_param, /union, /intersection, /tuple, /function, /object or /other.")
-  ].
-
-Decl type_named(Type, Origin, Name)
-  descr [
-    extensional(),
-    doc("The type is a class, interface, enum or type alias, or an instantiation of one. Two types with the same Origin and Name and different type arguments are different entities."),
-    arg(Type, "Type entity id."),
-    arg(Origin, "\"lib\" for the default library, the package name for a package (the @types/ prefix is removed), the module name of a declare module block, or the workspace-relative path of the declaring file. Matches the Module argument of external_call. type_origin_kind tells these apart."),
-    arg(Name, "Name with its containing namespaces, for example \"Promise\" or \"Models.User\".")
-  ].
-
-Decl type_arg(Type, Index, Arg)
-  descr [
-    extensional(),
-    doc("A type argument of a named type, or an element of a tuple. The this-type argument that the checker adds to class and interface references is not included."),
-    arg(Type, "Type entity id."),
-    arg(Index, "Position, starting at 0."),
-    arg(Arg, "Type entity id of the argument.")
-  ].
-
-Decl type_member(Type, Member)
-  descr [
-    extensional(),
-    doc("A member of a union or intersection. Members are unordered."),
-    arg(Type, "Type entity id of the union or intersection."),
-    arg(Member, "Type entity id of the member.")
-  ].
-
-Decl type_literal(Type, Value)
-  descr [
-    extensional(),
-    doc("The value of a literal type."),
-    arg(Type, "Type entity id."),
-    arg(Value, "A string for a string literal, a number for a number literal, /true or /false for a boolean literal, and the decimal digits as a string for a bigint literal.")
-  ].
-
-Decl type_param_name(Type, Name)
-  descr [
-    extensional(),
-    doc("The name of a type parameter."),
-    arg(Type, "Type entity id."),
-    arg(Name, "Type parameter name, for example \"T\".")
-  ].
-
-Decl type_prop(Type, Name, PropType)
-  descr [
-    extensional(),
-    doc("A property of an anonymous object type. Properties of classes and interfaces are not emitted."),
-    arg(Type, "Type entity id."),
-    arg(Name, "Property name."),
-    arg(PropType, "Type entity id of the property.")
-  ].
-
-Decl type_prop_optional(Type, Name)
-  descr [
-    extensional(),
-    doc("The property is optional."),
-    arg(Type, "Type entity id."),
-    arg(Name, "Property name.")
-  ].
-
-Decl type_sig_param(Type, Index, ParamType)
-  descr [
-    extensional(),
-    doc("A parameter of a /function type."),
-    arg(Type, "Type entity id."),
-    arg(Index, "Parameter position, starting at 0."),
-    arg(ParamType, "Type entity id of the parameter.")
-  ].
-
-Decl type_sig_returns(Type, ReturnType)
-  descr [
-    extensional(),
-    doc("The return type of a /function type."),
-    arg(Type, "Type entity id."),
-    arg(ReturnType, "Type entity id of the return type.")
-  ].
-
-Decl type_origin_kind(Type, Kind)
-  descr [
-    extensional(),
-    doc("The kind of the origin of a named type. The Origin of type_named alone is ambiguous: a declare module block can have the name \"lib\" or the path of a workspace file."),
-    arg(Type, "Type entity id."),
-    arg(Kind, "/lib, /package, /ambient_module, /declaration_file or /source_file.")
-  ].
-
-Decl type_arg_optional(Type, Index)
-  descr [
-    extensional(),
-    doc("The tuple element is optional."),
-    arg(Type, "Type entity id of the tuple."),
-    arg(Index, "Element position, starting at 0.")
-  ].
-
-Decl type_arg_rest(Type, Index)
-  descr [
-    extensional(),
-    doc("The tuple element is a rest element."),
-    arg(Type, "Type entity id of the tuple."),
-    arg(Index, "Element position, starting at 0.")
-  ].
-
-Decl type_readonly(Type)
-  descr [
-    extensional(),
-    doc("The tuple is readonly. A readonly array is the lib interface ReadonlyArray."),
-    arg(Type, "Type entity id of the tuple.")
-  ].
-
-Decl type_prop_readonly(Type, Name)
-  descr [
-    extensional(),
-    doc("The property is readonly."),
-    arg(Type, "Type entity id."),
-    arg(Name, "Property name.")
-  ].
-
-Decl type_sig_param_optional(Type, Index)
-  descr [
-    extensional(),
-    doc("The parameter of a /function type is optional."),
-    arg(Type, "Type entity id."),
-    arg(Index, "Parameter position, starting at 0.")
-  ].
-
-Decl type_sig_param_rest(Type, Index)
-  descr [
-    extensional(),
-    doc("The parameter of a /function type is a rest parameter."),
-    arg(Type, "Type entity id."),
-    arg(Index, "Parameter position, starting at 0.")
-  ].
-
-Decl type_incomplete(Type, Reason)
-  descr [
-    extensional(),
-    doc("The facts of the type leave out structure that a rule can depend on: /truncated, /unsupported, /signatures, /constraint, /conflict or /members_omitted. A rule that must see every type inside a signature can use type_reaches_incomplete."),
-    arg(Type, "Type entity id."),
-    arg(Reason, "/truncated (more than 16 levels), /unsupported (an /other type, or a type parameter with no declaration), /signatures (an /object with call, construct or index signatures), /constraint (a type parameter with a constraint), /conflict (config groups give different structure) or /members_omitted (a named class, interface or enum whose members are not inspected).")
-  ].
-
-Decl type_display(Type, Text)
-  descr [
-    extensional(),
-    doc("The type as the TypeScript 7 checker prints it. For messages and debugging. Do not match rules against it; use the structural relations."),
-    arg(Type, "Type entity id."),
-    arg(Text, "Type text.")
-  ].
-
-Decl declaration(Declaration, Name, Kind)
-  descr [
-    extensional(),
-    doc("An actual declaration endpoint observed by the TypeScript checker. Overloads and merged declarations have separate IDs."),
-    arg(Declaration, "Canonical declaration entity id."),
-    arg(Name, "Qualified declaration name, or default for an anonymous default declaration."),
-    arg(Kind, "/function, /variable, /type_alias, /interface, /class, /enum, /namespace, /method, /property, /signature or /export_expression.")
-  ].
-
-Decl declaration_origin(Declaration, OriginKind, Origin)
-  descr [
-    extensional(),
-    doc("Descriptive origin of an actual declaration. Origin is not part of declaration identity."),
-    arg(Declaration, "Canonical declaration entity id."),
-    arg(OriginKind, "/source_file, /declaration_file, /package, /ambient_module or /lib."),
-    arg(Origin, "Workspace path, package name/version, ambient module or library label.")
-  ].
-
-Decl declaration_type(Declaration, Space, Type)
-  descr [
-    extensional(),
-    doc("A checker-observed type association for a declaration. A class can have separate type and value-space associations."),
-    arg(Declaration, "Canonical declaration entity id."),
-    arg(Space, "/type or /value."),
-    arg(Type, "Type entity id.")
-  ].
-
-Decl declaration_fn(Declaration, Fn)
-  descr [
-    extensional(),
-    doc("Direct correspondence from a declaration endpoint to an already collected function."),
-    arg(Declaration, "Canonical declaration entity id."),
-    arg(Fn, "Function entity id.")
-  ].
-
-Decl declaration_incomplete(Declaration, Reason)
-  descr [
-    extensional(),
-    doc("The declaration's checker type or direct function association is unresolved, unsupported or conflicted. Optional source recovery failure is reported separately."),
-    arg(Declaration, "Canonical declaration entity id."),
-    arg(Reason, "/unresolved, /unsupported or /conflict.")
-  ].
-
-Decl module_export(Export, File, Name, Space)
-  descr [
-    extensional(),
-    doc("A checker-visible public binding of a retained analyzed module."),
-    arg(Export, "Canonical public export entity id."),
-    arg(File, "Analyzed module path."),
-    arg(Name, "Public export name; default and export= are explicit names."),
-    arg(Space, "/type or /value.")
-  ].
-
-Decl export_target(Export, Declaration)
-  descr [
-    extensional(),
-    doc("An actual declaration endpoint of a public binding. Overload and merge members are separate set members and are not paired."),
-    arg(Export, "Public export entity id."),
-    arg(Declaration, "Canonical declaration entity id.")
-  ].
-
-Decl export_via(Export, Site)
-  descr [
-    extensional(),
-    doc("Syntax site contributing to a public binding, including a local export statement."),
-    arg(Export, "Public export entity id."),
-    arg(Site, "Import/re-export statement or deterministic local export-site id.")
-  ].
-
-Decl export_reexport(Export, Site, Module, SourceName, Space)
-  descr [
-    extensional(),
-    doc("A binding-specific immediate re-export edge. Module is the resolved canonical module identity; star and namespace forms use source name *."),
-    arg(Export, "Public export entity id."),
-    arg(Site, "Re-export syntax site."),
-    arg(Module, "Resolved canonical source module path."),
-    arg(SourceName, "Immediate source-side name or * for star and namespace forms."),
-    arg(Space, "/type or /value.")
-  ].
-
-Decl export_incomplete(Export, Reason)
-  descr [
-    extensional(),
-    doc("A known public binding has an unresolved, unsupported or conflicted target. Known positive targets remain available."),
-    arg(Export, "Public export entity id."),
-    arg(Reason, "/unresolved, /unsupported or /conflict.")
-  ].
-
-Decl module_exports_incomplete(File, Reason)
-  descr [
-    extensional(),
-    doc("The module's public-name inventory is incomplete or conflicted. Absence is not a safe result while this fact applies."),
-    arg(File, "Analyzed module path."),
-    arg(Reason, "/unresolved, /unsupported or /conflict.")
-  ].
-
-Decl fn_signature_conflict(Fn)
-  descr [
-    extensional(),
-    doc("Complete checker observations for this function disagree as full parameter and return signatures. Flat fn_param and fn_returns facts are a union and must not be combined as one signature."),
-    arg(Fn, "Function entity id.")
-  ].
-
-Decl declaration_source_candidate(CheckedDecl, SourceDecl, Method)
-  descr [
-    extensional(),
-    doc("A declaration-map anchor that passed source-file and declaration-context validation. All candidates are retained when ambiguous."),
-    arg(CheckedDecl, "Checked declaration entity id."),
-    arg(SourceDecl, "Source declaration entity id."),
-    arg(Method, "/declaration_map.")
-  ].
-
-Decl declaration_source(CheckedDecl, SourceDecl, Method)
-  descr [
-    extensional(),
-    doc("A unique precise checked-to-source declaration link. It never equates the declaration identities."),
-    arg(CheckedDecl, "Checked declaration entity id."),
-    arg(SourceDecl, "Source declaration entity id."),
-    arg(Method, "/declaration_map.")
-  ].
-
-Decl declaration_source_outcome(CheckedDecl, Outcome)
-  descr [
-    extensional(),
-    doc("Terminal result of a requested declaration-map attempt. No row means there was no attempt or a unique link succeeded."),
-    arg(CheckedDecl, "Checked declaration entity id."),
-    arg(Outcome, "/missing_map, /unavailable_map, /malformed_map, /unavailable_source, /unsupported, /unresolved, /ambiguous or /conflict.")
-  ].
-
-Decl source_entry(Entry, CheckedEntry, SourceEntry)
-  descr [
-    extensional(),
-    doc("One validated, canonical source-links JSON entry."),
-    arg(Entry, "Deterministic configured-entry entity id."),
-    arg(CheckedEntry, "Workspace-relative checked entry path."),
-    arg(SourceEntry, "Workspace-relative source entry path." )
-  ].
-
-Decl source_entry_tsconfig(Entry, Tsconfig)
-  descr [
-    extensional(),
-    doc("Explicit source project configuration selected for an entry."),
-    arg(Entry, "Configured-entry entity id."),
-    arg(Tsconfig, "Workspace-relative tsconfig path.")
-  ].
-
-Decl source_entry_applied(Entry)
-  descr [
-    extensional(),
-    doc("The configured checked path matched a file used by an analyzed program and its binding attempts were evaluated."),
-    arg(Entry, "Configured-entry entity id.")
-  ].
-
-Decl source_entry_unapplied(Entry)
-  descr [
-    extensional(),
-    doc("The valid checked path did not match any file used by an analyzed program."),
-    arg(Entry, "Configured-entry entity id.")
-  ].
-
-Decl source_entry_incomplete(Entry, Reason)
-  descr [
-    extensional(),
-    doc("The optional source program or its export inventory is unresolved, unsupported or conflicted."),
-    arg(Entry, "Configured-entry entity id."),
-    arg(Reason, "/unresolved, /unsupported or /conflict.")
-  ].
-
-Decl source_binding_attempt(Assoc, Entry, CheckedFile, Name, Space)
-  descr [
-    extensional(),
-    doc("One configured attempt to associate a checker-visible public binding with the source entry."),
-    arg(Assoc, "Deterministic configured binding association id."),
-    arg(Entry, "Configured-entry entity id."),
-    arg(CheckedFile, "Canonical actual checked file identity."),
-    arg(Name, "Public binding name."),
-    arg(Space, "/type or /value.")
-  ].
-
-Decl source_binding(Assoc, SourceFile, SourceName, Space, Method)
-  descr [
-    extensional(),
-    doc("A configured binding association. The source public name and space must match; this is not declaration equality or build freshness evidence."),
-    arg(Assoc, "Configured binding association id."),
-    arg(SourceFile, "Canonical source entry file identity."),
-    arg(SourceName, "Matched source public name."),
-    arg(Space, "/type or /value."),
-    arg(Method, "/source_entry.")
-  ].
-
-Decl source_binding_checked_decl(Assoc, Declaration)
-  descr [
-    extensional(),
-    doc("Membership in the independently observed checked declaration set for this binding."),
-    arg(Assoc, "Configured binding association id."),
-    arg(Declaration, "Checked declaration entity id.")
-  ].
-
-Decl source_binding_source_decl(Assoc, Declaration)
-  descr [
-    extensional(),
-    doc("Membership in the independently observed source declaration set for this binding."),
-    arg(Assoc, "Configured binding association id."),
-    arg(Declaration, "Source declaration entity id.")
-  ].
-
-Decl source_binding_incomplete(Assoc, Reason)
-  descr [
-    extensional(),
-    doc("The source binding set is unresolved, unsupported or conflicted. Guard this before claiming a coherent association."),
-    arg(Assoc, "Configured binding association id."),
-    arg(Reason, "/unresolved, /unsupported or /conflict.")
-  ].
-
-Decl meta_access(Acc, File, AccessPath)
-  descr [
-    extensional(),
-    doc("An import.meta member access."),
-    arg(Acc, "Access entity id."),
-    arg(File, "Path of the file that contains the access."),
-    arg(AccessPath, "Accessed path, for example \"import.meta.env\".")
+    doc("Observed import.meta member-access path."),
+    arg(Site, "Site"),
+    arg_role(Site, "entity"),
+    arg_report_support(Site, "required"),
+    arg(AccessPath, "AccessPath")
   ].
 
 Decl ambient_source(Source, Capability)
   descr [
     extensional(),
-    doc("One row per capability of every registered ambient source."),
-    arg(Source, "Source name constant, for example /clock."),
-    arg(Capability, "Capability name constant, for example /now.")
+    doc("Registered ambient-source/capability pair, independent of observed use."),
+    arg(Source, "Source"),
+    arg_representation(Source, "name"),
+    arg(Capability, "Capability"),
+    arg_representation(Capability, "name")
   ].
 
-Decl ambient_use(Site, Source, Capability, File)
+Decl ambient_use(Site, Source, Capability)
   descr [
     extensional(),
-    doc("A use of an ambient source."),
-    arg(Site, "Site entity id."),
-    arg(Source, "Source name constant."),
-    arg(Capability, "Capability name constant."),
-    arg(File, "Path of the file that contains the site.")
+    doc("Use matching a registered ambient source. File/owner are obtained from source-site relations."),
+    arg(Site, "Site"),
+    arg_role(Site, "entity"),
+    arg_report_support(Site, "required"),
+    arg(Source, "Source"),
+    arg_representation(Source, "name"),
+    arg(Capability, "Capability"),
+    arg_representation(Capability, "name")
   ].
 
 Decl ambient_key(Site, Key)
   descr [
     extensional(),
-    doc("The static key that the site reads or writes."),
-    arg(Site, "Site entity id."),
-    arg(Key, "Key string.")
+    doc("Static key used by an ambient read/write."),
+    arg(Site, "Site"),
+    arg_role(Site, "entity"),
+    arg_report_support(Site, "required"),
+    arg(Key, "Key")
   ].
 
 Decl ambient_dynamic(Site)
   descr [
     extensional(),
-    doc("The key at the site is not static, or the whole object escapes."),
-    arg(Site, "Site entity id.")
+    doc("Ambient key is dynamic or the relevant ambient object escapes."),
+    arg(Site, "Site"),
+    arg_role(Site, "entity"),
+    arg_report_support(Site, "required")
   ].
 
 Decl ambient_write(Site)
   descr [
     extensional(),
-    doc("The site assigns to or deletes the keyed member."),
-    arg(Site, "Site entity id.")
+    doc("Ambient use assigns to or deletes a keyed member."),
+    arg(Site, "Site"),
+    arg_role(Site, "entity"),
+    arg_report_support(Site, "required")
   ].
 
-Decl global_ref(Site, Name, File)
+Decl global_ref(Site, Name)
   descr [
     extensional(),
-    doc("A reference to a global value: an identifier that resolves to the global binding with its name, from the default library, an @types package or a declaration file, or a member of globalThis, window, self or global with that name. A local binding with the same name is not a global reference. Type positions are not references."),
-    arg(Site, "Site entity id."),
-    arg(Name, "Global name, for example \"crypto\" or \"process\"."),
-    arg(File, "Path of the file that contains the reference.")
+    doc("Value reference to the resolved global binding; same-spelled local variables do not qualify."),
+    arg(Site, "Site"),
+    arg_role(Site, "entity"),
+    arg_report_support(Site, "required"),
+    arg(Name, "Name")
   ].
 
-Decl module_directive(Dir, File, Text)
+Decl module_directive(Site, Text)
   descr [
     extensional(),
-    doc("A directive in the prologue of a file, for example \"use client\" or \"use server\"."),
-    arg(Dir, "Directive entity id."),
-    arg(File, "Path of the file."),
-    arg(Text, "Directive text without quotes.")
+    doc("Directive-prologue string in a primary module; no quotation marks in Text."),
+    arg(Site, "Site"),
+    arg_role(Site, "entity"),
+    arg_report_support(Site, "required"),
+    arg(Text, "Text")
   ].
 
-Decl module_parse_error(Err, File, Message)
+Decl module_parse_error(Site, Message)
   descr [
     extensional(),
-    doc("The file has a syntax error. Only the first error of a file has a row. Facts for the file can be incomplete."),
-    arg(Err, "Parse error entity id."),
-    arg(File, "Path of the file."),
-    arg(Message, "Text of the first syntax error.")
+    doc("First syntax diagnostic for a primary file. Other source facts can be incomplete while it exists."),
+    arg(Site, "Site"),
+    arg_role(Site, "entity"),
+    arg_report_support(Site, "required"),
+    arg(Message, "Message")
   ].
 
 Decl config_adjusted(Config, Option, Action)
   descr [
     extensional(),
-    doc("lintai changed a compiler option that TypeScript 7 rejects before loading this tsconfig. The analysis uses the adjusted configuration, which can differ from the project's own build."),
-    arg(Config, "Workspace-relative path of the original tsconfig."),
-    arg(Option, "Compiler option name."),
-    arg(Action, "/removed, /rewritten or /replaced.")
+    doc("Option adaptation in the fixed applicable-context domain; /removed, /rewritten or /replaced."),
+    arg(Config, "Config"),
+    arg_role(Config, "path"),
+    arg(Option, "Option"),
+    arg(Action, "Action"),
+    arg_representation(Action, "name"),
+    arg_allowed_name(Action, "removed"),
+    arg_allowed_name(Action, "rewritten"),
+    arg_allowed_name(Action, "replaced")
   ].
 
-Decl site_in_fn(Site, Fn)
+Decl import_edge(Site, From, To, Specifier)
   descr [
     extensional(),
-    doc("The lexical function owner of a call, external-call, unresolved-call, function-reference, ambient-use, global-ref or meta-access site. Module and unsupported sites have no row."),
-    arg(Site, "Site entity id."),
-    arg(Fn, "Function entity id.")
+    doc("String-literal module reference. From is source path; To is resolved workspace path for internal edges, otherwise specifier/origin data. To is never a module entity ID."),
+    arg(Site, "Site"),
+    arg_role(Site, "entity"),
+    arg_report_support(Site, "required"),
+    arg(From, "From"),
+    arg_role(From, "path"),
+    arg(To, "To"),
+    arg(Specifier, "Specifier")
   ].
 
-Decl location(Entity, File, StartLine, StartCol, EndLine, EndCol)
+Decl import_form(Site, Form)
   descr [
     extensional(),
-    doc("The source range of an entity. Every entity id in the base relations has one row."),
-    arg(Entity, "Entity id."),
-    arg(File, "Path of the file."),
-    arg(StartLine, "1-based start line."),
-    arg(StartCol, "1-based start column."),
-    arg(EndLine, "1-based end line."),
-    arg(EndCol, "1-based end column.")
+    doc("/static, /reexport, /dynamic, /require, /import_equals or /import_type."),
+    arg(Site, "Site"),
+    arg_role(Site, "entity"),
+    arg_report_support(Site, "required"),
+    arg(Form, "Form"),
+    arg_representation(Form, "name"),
+    arg_allowed_name(Form, "static"),
+    arg_allowed_name(Form, "reexport"),
+    arg_allowed_name(Form, "dynamic"),
+    arg_allowed_name(Form, "require"),
+    arg_allowed_name(Form, "import_equals"),
+    arg_allowed_name(Form, "import_type")
+  ].
+
+Decl import_internal(Site)
+  descr [
+    extensional(),
+    doc("Resolves to a workspace file outside node_modules; target need not be a primary module."),
+    arg(Site, "Site"),
+    arg_role(Site, "entity"),
+    arg_report_support(Site, "required")
+  ].
+
+Decl import_unresolved(Site)
+  descr [
+    extensional(),
+    doc("No resolved file or declared module under an observed context; not a missing collection result."),
+    arg(Site, "Site"),
+    arg_role(Site, "entity"),
+    arg_report_support(Site, "required")
+  ].
+
+Decl import_package(Site, Pkg)
+  descr [
+    extensional(),
+    doc("Resolved package name, including workspace packages when applicable."),
+    arg(Site, "Site"),
+    arg_role(Site, "entity"),
+    arg_report_support(Site, "required"),
+    arg(Pkg, "Package")
+  ].
+
+Decl import_type_only(Site)
+  descr [
+    extensional(),
+    doc("Reference is exclusively type-oriented under the defined syntax classification."),
+    arg(Site, "Site"),
+    arg_role(Site, "entity"),
+    arg_report_support(Site, "required")
+  ].
+
+Decl import_retained(Site)
+  descr [
+    extensional(),
+    doc("All-type named bindings whose statement is retained as a runtime load by verbatimModuleSyntax."),
+    arg(Site, "Site"),
+    arg_role(Site, "entity"),
+    arg_report_support(Site, "required")
+  ].
+
+Decl import_symbol(Site, Name, Kind)
+  descr [
+    extensional(),
+    doc("Introduced binding; Kind is /default, /namespace or /named. Side-effect imports have no binding rows."),
+    arg(Site, "Site"),
+    arg_role(Site, "entity"),
+    arg_report_support(Site, "required"),
+    arg(Name, "Name"),
+    arg(Kind, "Kind"),
+    arg_representation(Kind, "name"),
+    arg_allowed_name(Kind, "default"),
+    arg_allowed_name(Kind, "namespace"),
+    arg_allowed_name(Kind, "named")
+  ].
+
+Decl import_symbol_type_only(Site, Name)
+  descr [
+    extensional(),
+    doc("Named binding uses the type modifier."),
+    arg(Site, "Site"),
+    arg_role(Site, "entity"),
+    arg_report_support(Site, "required"),
+    arg(Name, "Name")
+  ].
+
+Decl import_opaque(Site)
+  descr [
+    extensional(),
+    doc("Dynamic import/require with a nonliteral specifier; no invented resolved edge."),
+    arg(Site, "Site"),
+    arg_role(Site, "entity"),
+    arg_report_support(Site, "required")
+  ].
+
+Decl type_ref(Site, Name)
+  descr [
+    extensional(),
+    doc("Supported source type-reference syntax; not the expanded type graph."),
+    arg(Site, "Site"),
+    arg_role(Site, "entity"),
+    arg_report_support(Site, "required"),
+    arg(Name, "Name")
+  ].
+
+Decl type_ref_target(Site, TargetFile)
+  descr [
+    extensional(),
+    doc("Known workspace file declaring the referenced type."),
+    arg(Site, "Site"),
+    arg_role(Site, "entity"),
+    arg_report_support(Site, "required"),
+    arg(TargetFile, "TargetFile"),
+    arg_role(TargetFile, "path")
+  ].
+
+Decl call_site(Site)
+  descr [
+    extensional(),
+    doc("Every supported primary call/new/tagged-template invocation; does not include an argument merely because it is callable."),
+    arg(Site, "Site"),
+    arg_role(Site, "entity"),
+    arg_report_support(Site, "required")
+  ].
+
+Decl call_edge(Site, Callee)
+  descr [
+    extensional(),
+    doc("Observed call to a collected implementation. Caller is site_owner, not part of this row."),
+    arg(Site, "Site"),
+    arg_role(Site, "entity"),
+    arg_report_support(Site, "required"),
+    arg(Callee, "Callee"),
+    arg_role(Callee, "entity"),
+    arg_report_support(Callee, "required")
+  ].
+
+Decl external_call(Site, OriginKind, Origin, Name)
+  descr [
+    extensional(),
+    doc("Observed external declared target; origin kinds are defined in section 9.1."),
+    arg(Site, "Site"),
+    arg_role(Site, "entity"),
+    arg_report_support(Site, "required"),
+    arg(OriginKind, "OriginKind"),
+    arg_representation(OriginKind, "name"),
+    arg_allowed_name(OriginKind, "lib"),
+    arg_allowed_name(OriginKind, "package"),
+    arg_allowed_name(OriginKind, "ambient_module"),
+    arg_allowed_name(OriginKind, "declaration_file"),
+    arg_allowed_name(OriginKind, "source_file"),
+    arg(Origin, "Origin"),
+    arg(Name, "Name")
+  ].
+
+Decl call_unresolved(Site)
+  descr [
+    extensional(),
+    doc("An observed invocation cannot be followed to a retained implementation or supported external target."),
+    arg(Site, "Site"),
+    arg_role(Site, "entity"),
+    arg_report_support(Site, "required")
+  ].
+
+Decl call_target_conflict(Site)
+  descr [
+    extensional(),
+    doc("Relevant runtime-classification/target observations disagree; retain their positive evidence."),
+    arg(Site, "Site"),
+    arg_role(Site, "entity"),
+    arg_report_support(Site, "required")
+  ].
+
+Decl call_declaration(Site, Declaration)
+  descr [
+    extensional(),
+    doc("Concrete signature declaration selected by a checked context, independent of runtime implementation resolution."),
+    arg(Site, "Site"),
+    arg_role(Site, "entity"),
+    arg_report_support(Site, "required"),
+    arg(Declaration, "Declaration"),
+    arg_role(Declaration, "entity"),
+    arg_report_support(Declaration, "optional")
+  ].
+
+Decl call_declaration_incomplete(Site, Reason)
+  descr [
+    extensional(),
+    doc("Selected declaration/member evidence is /unresolved, /synthetic, /unsupported or /conflict."),
+    arg(Site, "Site"),
+    arg_role(Site, "entity"),
+    arg_report_support(Site, "required"),
+    arg(Reason, "Reason"),
+    arg_representation(Reason, "name"),
+    arg_allowed_name(Reason, "unresolved"),
+    arg_allowed_name(Reason, "synthetic"),
+    arg_allowed_name(Reason, "unsupported"),
+    arg_allowed_name(Reason, "conflict")
+  ].
+
+Decl declaration_member(Declaration, OwnerDeclaration, Name)
+  descr [
+    extensional(),
+    doc("Supported lexical named member and declaring owner; not a claim about the receiver’s runtime implementation."),
+    arg(Declaration, "Declaration"),
+    arg_role(Declaration, "entity"),
+    arg_report_support(Declaration, "optional"),
+    arg(OwnerDeclaration, "OwnerDeclaration"),
+    arg_role(OwnerDeclaration, "entity"),
+    arg_report_support(OwnerDeclaration, "optional"),
+    arg(Name, "Name")
+  ].
+
+Decl fn_ref(Site, Target)
+  descr [
+    extensional(),
+    doc("Collected function used as a value. It is not necessarily invoked. Owner comes from site_owner."),
+    arg(Site, "Site"),
+    arg_role(Site, "entity"),
+    arg_report_support(Site, "required"),
+    arg(Target, "Target"),
+    arg_role(Target, "entity"),
+    arg_report_support(Target, "required")
+  ].
+
+Decl fn_value_escape(Site, Kind)
+  descr [
+    extensional(),
+    doc("Supported direct function-valued argument to external/unresolved invocation; only /argument exists."),
+    arg(Site, "Site"),
+    arg_role(Site, "entity"),
+    arg_report_support(Site, "required"),
+    arg(Kind, "Kind"),
+    arg_representation(Kind, "name"),
+    arg_allowed_name(Kind, "argument")
+  ].
+
+Decl fn_value_escape_target(Site, Target)
+  descr [
+    extensional(),
+    doc("Definite collected implementation identified in a transfer observation."),
+    arg(Site, "Site"),
+    arg_role(Site, "entity"),
+    arg_report_support(Site, "required"),
+    arg(Target, "Target"),
+    arg_role(Target, "entity"),
+    arg_report_support(Target, "required")
+  ].
+
+Decl fn_value_escape_unknown(Site)
+  descr [
+    extensional(),
+    doc("At least one transfer observation could not establish a definite collected implementation."),
+    arg(Site, "Site"),
+    arg_role(Site, "entity"),
+    arg_report_support(Site, "required")
+  ].
+
+Decl fn_signature(Fn, Signature)
+  descr [
+    extensional(),
+    doc("Whole observed signature belonging to that collected function."),
+    arg(Fn, "Fn"),
+    arg_role(Fn, "entity"),
+    arg_report_support(Fn, "required"),
+    arg(Signature, "Signature"),
+    arg_role(Signature, "entity"),
+    arg_report_support(Signature, "required")
+  ].
+
+Decl signature_arity(Signature, Count)
+  descr [
+    extensional(),
+    doc("Number of parameter slots, including unresolved slots."),
+    arg(Signature, "Signature"),
+    arg_role(Signature, "entity"),
+    arg_report_support(Signature, "required"),
+    arg(Count, "Count"),
+    arg_representation(Count, "integer")
+  ].
+
+Decl signature_param(Signature, Position, Type)
+  descr [
+    extensional(),
+    doc("Known parameter type at a slot in that signature observation."),
+    arg(Signature, "Signature"),
+    arg_role(Signature, "entity"),
+    arg_report_support(Signature, "required"),
+    arg(Position, "Position"),
+    arg_representation(Position, "integer"),
+    arg(Type, "Type"),
+    arg_role(Type, "entity"),
+    arg_report_support(Type, "optional")
+  ].
+
+Decl signature_param_optional(Signature, Position)
+  descr [
+    extensional(),
+    doc("The slot is known optional in that observation."),
+    arg(Signature, "Signature"),
+    arg_role(Signature, "entity"),
+    arg_report_support(Signature, "required"),
+    arg(Position, "Position"),
+    arg_representation(Position, "integer")
+  ].
+
+Decl signature_param_rest(Signature, Position)
+  descr [
+    extensional(),
+    doc("The slot is known to be a rest parameter."),
+    arg(Signature, "Signature"),
+    arg_role(Signature, "entity"),
+    arg_report_support(Signature, "required"),
+    arg(Position, "Position"),
+    arg_representation(Position, "integer")
+  ].
+
+Decl signature_returns(Signature, Type)
+  descr [
+    extensional(),
+    doc("Known return type of that observation."),
+    arg(Signature, "Signature"),
+    arg_role(Signature, "entity"),
+    arg_report_support(Signature, "required"),
+    arg(Type, "Type"),
+    arg_role(Type, "entity"),
+    arg_report_support(Type, "optional")
+  ].
+
+Decl signature_complete(Signature)
+  descr [
+    extensional(),
+    doc("All signature slots, marks and return were established; structural type completeness is separate."),
+    arg(Signature, "Signature"),
+    arg_role(Signature, "entity"),
+    arg_report_support(Signature, "required")
+  ].
+
+Decl signature_incomplete(Signature, Reason)
+  descr [
+    extensional(),
+    doc("Whole observation is /unresolved or /unsupported; never coexists with signature_complete for the same ID."),
+    arg(Signature, "Signature"),
+    arg_role(Signature, "entity"),
+    arg_report_support(Signature, "required"),
+    arg(Reason, "Reason"),
+    arg_representation(Reason, "name"),
+    arg_allowed_name(Reason, "unresolved"),
+    arg_allowed_name(Reason, "unsupported")
+  ].
+
+Decl fn_signature_omitted(Fn)
+  descr [
+    extensional(),
+    doc("Fixed ownership-only omission policy, not selective-work omission."),
+    arg(Fn, "Fn"),
+    arg_role(Fn, "entity"),
+    arg_report_support(Fn, "required")
+  ].
+
+Decl fn_signature_unresolved(Fn)
+  descr [
+    extensional(),
+    doc("At least one attempted observation lacked a complete usable signature."),
+    arg(Fn, "Fn"),
+    arg_role(Fn, "entity"),
+    arg_report_support(Fn, "required")
+  ].
+
+Decl fn_signature_conflict(Fn)
+  descr [
+    extensional(),
+    doc("Two complete whole signatures for this function disagree."),
+    arg(Fn, "Fn"),
+    arg_role(Fn, "entity"),
+    arg_report_support(Fn, "required")
+  ].
+
+Decl type_kind(Type, Kind)
+  descr [
+    extensional(),
+    doc("Exactly one kind per published type; vocabulary follows section 7.4 and the list after this inventory."),
+    arg(Type, "Type"),
+    arg_role(Type, "entity"),
+    arg_report_support(Type, "optional"),
+    arg(Kind, "Kind"),
+    arg_representation(Kind, "name"),
+    arg_allowed_name(Kind, "any"),
+    arg_allowed_name(Kind, "unknown"),
+    arg_allowed_name(Kind, "never"),
+    arg_allowed_name(Kind, "void"),
+    arg_allowed_name(Kind, "undefined"),
+    arg_allowed_name(Kind, "null"),
+    arg_allowed_name(Kind, "string"),
+    arg_allowed_name(Kind, "number"),
+    arg_allowed_name(Kind, "bigint"),
+    arg_allowed_name(Kind, "boolean"),
+    arg_allowed_name(Kind, "symbol"),
+    arg_allowed_name(Kind, "object_keyword"),
+    arg_allowed_name(Kind, "literal"),
+    arg_allowed_name(Kind, "type_param"),
+    arg_allowed_name(Kind, "union"),
+    arg_allowed_name(Kind, "intersection"),
+    arg_allowed_name(Kind, "tuple"),
+    arg_allowed_name(Kind, "function"),
+    arg_allowed_name(Kind, "object"),
+    arg_allowed_name(Kind, "other")
+  ].
+
+Decl type_named(Type, Origin, Name)
+  descr [
+    extensional(),
+    doc("Named type metadata; arguments and declaration identity distinguish instantiations. Text is not an identity key by itself."),
+    arg(Type, "Type"),
+    arg_role(Type, "entity"),
+    arg_report_support(Type, "optional"),
+    arg(Origin, "Origin"),
+    arg(Name, "Name")
+  ].
+
+Decl type_origin_kind(Type, Kind)
+  descr [
+    extensional(),
+    doc("/lib, /package, /ambient_module, /declaration_file or /source_file."),
+    arg(Type, "Type"),
+    arg_role(Type, "entity"),
+    arg_report_support(Type, "optional"),
+    arg(Kind, "Kind"),
+    arg_representation(Kind, "name"),
+    arg_allowed_name(Kind, "lib"),
+    arg_allowed_name(Kind, "package"),
+    arg_allowed_name(Kind, "ambient_module"),
+    arg_allowed_name(Kind, "declaration_file"),
+    arg_allowed_name(Kind, "source_file")
+  ].
+
+Decl type_arg(Type, Position, Argument)
+  descr [
+    extensional(),
+    doc("Named type argument or tuple element. Does not include the checker’s synthetic this argument."),
+    arg(Type, "Type"),
+    arg_role(Type, "entity"),
+    arg_report_support(Type, "optional"),
+    arg(Position, "Position"),
+    arg_representation(Position, "integer"),
+    arg(Argument, "Argument"),
+    arg_role(Argument, "entity"),
+    arg_report_support(Argument, "optional")
+  ].
+
+Decl type_arg_optional(Type, Position)
+  descr [
+    extensional(),
+    doc("Optional tuple element."),
+    arg(Type, "Type"),
+    arg_role(Type, "entity"),
+    arg_report_support(Type, "optional"),
+    arg(Position, "Position"),
+    arg_representation(Position, "integer")
+  ].
+
+Decl type_arg_rest(Type, Position)
+  descr [
+    extensional(),
+    doc("Rest tuple element."),
+    arg(Type, "Type"),
+    arg_role(Type, "entity"),
+    arg_report_support(Type, "optional"),
+    arg(Position, "Position"),
+    arg_representation(Position, "integer")
+  ].
+
+Decl type_readonly(Type)
+  descr [
+    extensional(),
+    doc("Readonly tuple; a readonly array is represented by its named library type."),
+    arg(Type, "Type"),
+    arg_role(Type, "entity"),
+    arg_report_support(Type, "optional")
+  ].
+
+Decl type_member(Type, Member)
+  descr [
+    extensional(),
+    doc("Unordered union/intersection membership."),
+    arg(Type, "Type"),
+    arg_role(Type, "entity"),
+    arg_report_support(Type, "optional"),
+    arg(Member, "Member"),
+    arg_role(Member, "entity"),
+    arg_report_support(Member, "optional")
+  ].
+
+Decl type_literal(Type, Kind, Value)
+  descr [
+    extensional(),
+    doc("Literal kind /string, /number, /bigint or /boolean plus payload. A bigint decimal string is not confused with an ordinary string literal."),
+    arg(Type, "Type"),
+    arg_role(Type, "entity"),
+    arg_report_support(Type, "optional"),
+    arg(Kind, "Kind"),
+    arg_representation(Kind, "name"),
+    arg_allowed_name(Kind, "string"),
+    arg_allowed_name(Kind, "number"),
+    arg_allowed_name(Kind, "bigint"),
+    arg_allowed_name(Kind, "boolean"),
+    arg(Value, "Value"),
+    arg_representation(Value, "string"),
+    arg_representation(Value, "integer"),
+    arg_representation(Value, "float"),
+    arg_representation(Value, "name"),
+    arg_allowed_name(Value, "true"),
+    arg_allowed_name(Value, "false")
+  ].
+
+Decl type_param_name(Type, Name)
+  descr [
+    extensional(),
+    doc("Descriptive type-parameter name; declaration identity distinguishes parameters."),
+    arg(Type, "Type"),
+    arg_role(Type, "entity"),
+    arg_report_support(Type, "optional"),
+    arg(Name, "Name")
+  ].
+
+Decl type_prop(Type, Name, PropertyType)
+  descr [
+    extensional(),
+    doc("Represented anonymous-object property; omitted class/interface members are explicitly marked."),
+    arg(Type, "Type"),
+    arg_role(Type, "entity"),
+    arg_report_support(Type, "optional"),
+    arg(Name, "Name"),
+    arg(PropertyType, "PropertyType"),
+    arg_role(PropertyType, "entity"),
+    arg_report_support(PropertyType, "optional")
+  ].
+
+Decl type_prop_optional(Type, Name)
+  descr [
+    extensional(),
+    doc("Known optional property in represented structure."),
+    arg(Type, "Type"),
+    arg_role(Type, "entity"),
+    arg_report_support(Type, "optional"),
+    arg(Name, "Name")
+  ].
+
+Decl type_prop_readonly(Type, Name)
+  descr [
+    extensional(),
+    doc("Known readonly property in represented structure."),
+    arg(Type, "Type"),
+    arg_role(Type, "entity"),
+    arg_report_support(Type, "optional"),
+    arg(Name, "Name")
+  ].
+
+Decl type_sig_param(Type, Position, ParameterType)
+  descr [
+    extensional(),
+    doc("Parameter of a represented structural /function type, not a function-declaration signature observation."),
+    arg(Type, "Type"),
+    arg_role(Type, "entity"),
+    arg_report_support(Type, "optional"),
+    arg(Position, "Position"),
+    arg_representation(Position, "integer"),
+    arg(ParameterType, "ParameterType"),
+    arg_role(ParameterType, "entity"),
+    arg_report_support(ParameterType, "optional")
+  ].
+
+Decl type_sig_param_optional(Type, Position)
+  descr [
+    extensional(),
+    doc("Known optional structural function-type parameter."),
+    arg(Type, "Type"),
+    arg_role(Type, "entity"),
+    arg_report_support(Type, "optional"),
+    arg(Position, "Position"),
+    arg_representation(Position, "integer")
+  ].
+
+Decl type_sig_param_rest(Type, Position)
+  descr [
+    extensional(),
+    doc("Known rest structural function-type parameter."),
+    arg(Type, "Type"),
+    arg_role(Type, "entity"),
+    arg_report_support(Type, "optional"),
+    arg(Position, "Position"),
+    arg_representation(Position, "integer")
+  ].
+
+Decl type_sig_returns(Type, ReturnType)
+  descr [
+    extensional(),
+    doc("Return of a represented structural /function type."),
+    arg(Type, "Type"),
+    arg_role(Type, "entity"),
+    arg_report_support(Type, "optional"),
+    arg(ReturnType, "ReturnType"),
+    arg_role(ReturnType, "entity"),
+    arg_report_support(ReturnType, "optional")
+  ].
+
+Decl type_incomplete(Type, Reason)
+  descr [
+    extensional(),
+    doc("/truncated, /unsupported, /signatures, /constraint, /conflict or /members_omitted."),
+    arg(Type, "Type"),
+    arg_role(Type, "entity"),
+    arg_report_support(Type, "optional"),
+    arg(Reason, "Reason"),
+    arg_representation(Reason, "name"),
+    arg_allowed_name(Reason, "truncated"),
+    arg_allowed_name(Reason, "unsupported"),
+    arg_allowed_name(Reason, "signatures"),
+    arg_allowed_name(Reason, "constraint"),
+    arg_allowed_name(Reason, "conflict"),
+    arg_allowed_name(Reason, "members_omitted")
+  ].
+
+Decl type_display(Type, Text)
+  descr [
+    extensional(),
+    doc("Canonical presentation candidate under section 7.4; not a supported semantic matcher."),
+    arg(Type, "Type"),
+    arg_role(Type, "entity"),
+    arg_report_support(Type, "optional"),
+    arg(Text, "Text")
+  ].
+
+Decl declaration(Declaration, Name, Kind)
+  descr [
+    extensional(),
+    doc("Endpoint union in section 7.3, with one canonical whole metadata observation."),
+    arg(Declaration, "Declaration"),
+    arg_role(Declaration, "entity"),
+    arg_report_support(Declaration, "optional"),
+    arg(Name, "Name"),
+    arg(Kind, "Kind"),
+    arg_representation(Kind, "name"),
+    arg_allowed_name(Kind, "function"),
+    arg_allowed_name(Kind, "variable"),
+    arg_allowed_name(Kind, "type_alias"),
+    arg_allowed_name(Kind, "interface"),
+    arg_allowed_name(Kind, "class"),
+    arg_allowed_name(Kind, "enum"),
+    arg_allowed_name(Kind, "namespace"),
+    arg_allowed_name(Kind, "method"),
+    arg_allowed_name(Kind, "property"),
+    arg_allowed_name(Kind, "signature"),
+    arg_allowed_name(Kind, "export_expression"),
+    arg_allowed_name(Kind, "unknown")
+  ].
+
+Decl declaration_origin(Declaration, OriginKind, Origin)
+  descr [
+    extensional(),
+    doc("Descriptive origin; never substitutes an assumed source path for a checked declaration."),
+    arg(Declaration, "Declaration"),
+    arg_role(Declaration, "entity"),
+    arg_report_support(Declaration, "optional"),
+    arg(OriginKind, "OriginKind"),
+    arg_representation(OriginKind, "name"),
+    arg_allowed_name(OriginKind, "lib"),
+    arg_allowed_name(OriginKind, "package"),
+    arg_allowed_name(OriginKind, "ambient_module"),
+    arg_allowed_name(OriginKind, "declaration_file"),
+    arg_allowed_name(OriginKind, "source_file"),
+    arg(Origin, "Origin")
+  ].
+
+Decl declaration_metadata_incomplete(Declaration, Reason)
+  descr [
+    extensional(),
+    doc("Identity-associated metadata is /unresolved, /unsupported or /conflict; no type/map claim."),
+    arg(Declaration, "Declaration"),
+    arg_role(Declaration, "entity"),
+    arg_report_support(Declaration, "optional"),
+    arg(Reason, "Reason"),
+    arg_representation(Reason, "name"),
+    arg_allowed_name(Reason, "unresolved"),
+    arg_allowed_name(Reason, "unsupported"),
+    arg_allowed_name(Reason, "conflict")
+  ].
+
+Decl declaration_type_subject(Declaration, Space)
+  descr [
+    extensional(),
+    doc("Attempted exported-declaration type domain; /type or /value."),
+    arg(Declaration, "Declaration"),
+    arg_role(Declaration, "entity"),
+    arg_report_support(Declaration, "optional"),
+    arg(Space, "Space"),
+    arg_representation(Space, "name"),
+    arg_allowed_name(Space, "type"),
+    arg_allowed_name(Space, "value")
+  ].
+
+Decl declaration_type(Declaration, Space, Type)
+  descr [
+    extensional(),
+    doc("Known type association for a declaration-type subject."),
+    arg(Declaration, "Declaration"),
+    arg_role(Declaration, "entity"),
+    arg_report_support(Declaration, "optional"),
+    arg(Space, "Space"),
+    arg_representation(Space, "name"),
+    arg_allowed_name(Space, "type"),
+    arg_allowed_name(Space, "value"),
+    arg(Type, "Type"),
+    arg_role(Type, "entity"),
+    arg_report_support(Type, "optional")
+  ].
+
+Decl declaration_type_incomplete(Declaration, Space, Reason)
+  descr [
+    extensional(),
+    doc("Subject-specific /unresolved, /unsupported or /conflict evidence."),
+    arg(Declaration, "Declaration"),
+    arg_role(Declaration, "entity"),
+    arg_report_support(Declaration, "optional"),
+    arg(Space, "Space"),
+    arg_representation(Space, "name"),
+    arg_allowed_name(Space, "type"),
+    arg_allowed_name(Space, "value"),
+    arg(Reason, "Reason"),
+    arg_representation(Reason, "name"),
+    arg_allowed_name(Reason, "unresolved"),
+    arg_allowed_name(Reason, "unsupported"),
+    arg_allowed_name(Reason, "conflict")
+  ].
+
+Decl declaration_fn(Declaration, Fn)
+  descr [
+    extensional(),
+    doc("Observed direct correspondence to a collected implementation."),
+    arg(Declaration, "Declaration"),
+    arg_role(Declaration, "entity"),
+    arg_report_support(Declaration, "optional"),
+    arg(Fn, "Fn"),
+    arg_role(Fn, "entity"),
+    arg_report_support(Fn, "required")
+  ].
+
+Decl declaration_fn_incomplete(Declaration, Reason)
+  descr [
+    extensional(),
+    doc("Attempted direct function association is /unresolved, /unsupported or /conflict."),
+    arg(Declaration, "Declaration"),
+    arg_role(Declaration, "entity"),
+    arg_report_support(Declaration, "optional"),
+    arg(Reason, "Reason"),
+    arg_representation(Reason, "name"),
+    arg_allowed_name(Reason, "unresolved"),
+    arg_allowed_name(Reason, "unsupported"),
+    arg_allowed_name(Reason, "conflict")
+  ].
+
+Decl module_export(Export, Module, Name, Space)
+  descr [
+    extensional(),
+    doc("Public binding of a primary module in /type or /value space; module is an entity, not a path."),
+    arg(Export, "Export"),
+    arg_role(Export, "entity"),
+    arg_report_support(Export, "required"),
+    arg(Module, "Module"),
+    arg_role(Module, "entity"),
+    arg_report_support(Module, "required"),
+    arg(Name, "Name"),
+    arg(Space, "Space"),
+    arg_representation(Space, "name"),
+    arg_allowed_name(Space, "type"),
+    arg_allowed_name(Space, "value")
+  ].
+
+Decl export_target(Export, Declaration)
+  descr [
+    extensional(),
+    doc("Known endpoint of a binding; overload/merged endpoints form a set, not pairwise identities."),
+    arg(Export, "Export"),
+    arg_role(Export, "entity"),
+    arg_report_support(Export, "required"),
+    arg(Declaration, "Declaration"),
+    arg_role(Declaration, "entity"),
+    arg_report_support(Declaration, "optional")
+  ].
+
+Decl export_via(Export, Site)
+  descr [
+    extensional(),
+    doc("Syntax site contributing to the binding; a dependency site can have a physical location without being primary."),
+    arg(Export, "Export"),
+    arg_role(Export, "entity"),
+    arg_report_support(Export, "required"),
+    arg(Site, "Site"),
+    arg_role(Site, "entity"),
+    arg_report_support(Site, "optional")
+  ].
+
+Decl export_reexport(Export, Site, SourceModule, SourceName, Space)
+  descr [
+    extensional(),
+    doc("Immediate binding-specific re-export. SourceModule remains canonical path data; `*` marks star/namespace names."),
+    arg(Export, "Export"),
+    arg_role(Export, "entity"),
+    arg_report_support(Export, "required"),
+    arg(Site, "Site"),
+    arg_role(Site, "entity"),
+    arg_report_support(Site, "optional"),
+    arg(SourceModule, "SourceModule"),
+    arg_role(SourceModule, "path"),
+    arg(SourceName, "SourceName"),
+    arg(Space, "Space"),
+    arg_representation(Space, "name"),
+    arg_allowed_name(Space, "type"),
+    arg_allowed_name(Space, "value")
+  ].
+
+Decl export_incomplete(Export, Reason)
+  descr [
+    extensional(),
+    doc("Binding target evidence is /unresolved, /unsupported or /conflict; known positives remain."),
+    arg(Export, "Export"),
+    arg_role(Export, "entity"),
+    arg_report_support(Export, "required"),
+    arg(Reason, "Reason"),
+    arg_representation(Reason, "name"),
+    arg_allowed_name(Reason, "unresolved"),
+    arg_allowed_name(Reason, "unsupported"),
+    arg_allowed_name(Reason, "conflict")
+  ].
+
+Decl module_exports_incomplete(Module, Reason)
+  descr [
+    extensional(),
+    doc("Public-name inventory incomplete/conflicted; propagates through wildcard-export dependencies."),
+    arg(Module, "Module"),
+    arg_role(Module, "entity"),
+    arg_report_support(Module, "required"),
+    arg(Reason, "Reason"),
+    arg_representation(Reason, "name"),
+    arg_allowed_name(Reason, "unresolved"),
+    arg_allowed_name(Reason, "unsupported"),
+    arg_allowed_name(Reason, "conflict")
+  ].
+
+Decl declaration_source_candidate(Checked, Source, Method)
+  descr [
+    extensional(),
+    doc("Validated map candidate; /declaration_map. Ambiguity retains candidates."),
+    arg(Checked, "Checked"),
+    arg_role(Checked, "entity"),
+    arg_report_support(Checked, "optional"),
+    arg(Source, "Source"),
+    arg_role(Source, "entity"),
+    arg_report_support(Source, "optional"),
+    arg(Method, "Method"),
+    arg_representation(Method, "name"),
+    arg_allowed_name(Method, "declaration_map")
+  ].
+
+Decl declaration_source(Checked, Source, Method)
+  descr [
+    extensional(),
+    doc("Unique nonconflicting precise map link; identities stay distinct."),
+    arg(Checked, "Checked"),
+    arg_role(Checked, "entity"),
+    arg_report_support(Checked, "optional"),
+    arg(Source, "Source"),
+    arg_role(Source, "entity"),
+    arg_report_support(Source, "optional"),
+    arg(Method, "Method"),
+    arg_representation(Method, "name"),
+    arg_allowed_name(Method, "declaration_map")
+  ].
+
+Decl declaration_source_outcome(Checked, Outcome)
+  descr [
+    extensional(),
+    doc("Terminal failed/uncertain requested map attempt; outcome vocabulary follows below."),
+    arg(Checked, "Checked"),
+    arg_role(Checked, "entity"),
+    arg_report_support(Checked, "optional"),
+    arg(Outcome, "Outcome"),
+    arg_representation(Outcome, "name"),
+    arg_allowed_name(Outcome, "missing_map"),
+    arg_allowed_name(Outcome, "unavailable_map"),
+    arg_allowed_name(Outcome, "malformed_map"),
+    arg_allowed_name(Outcome, "unavailable_source"),
+    arg_allowed_name(Outcome, "unsupported"),
+    arg_allowed_name(Outcome, "unresolved"),
+    arg_allowed_name(Outcome, "ambiguous"),
+    arg_allowed_name(Outcome, "conflict")
+  ].
+
+Decl source_entry(Entry, CheckedEntry, SourceEntry)
+  descr [
+    extensional(),
+    doc("Validated configured source-links entry. No fabricated source range for this configuration entity."),
+    arg(Entry, "Entry"),
+    arg_role(Entry, "entity"),
+    arg(CheckedEntry, "CheckedEntry"),
+    arg_role(CheckedEntry, "path"),
+    arg(SourceEntry, "SourceEntry"),
+    arg_role(SourceEntry, "path")
+  ].
+
+Decl source_entry_tsconfig(Entry, Config)
+  descr [
+    extensional(),
+    doc("Explicit source configuration chosen for the entry."),
+    arg(Entry, "Entry"),
+    arg_role(Entry, "entity"),
+    arg(Config, "Config"),
+    arg_role(Config, "path")
+  ].
+
+Decl source_entry_applied(Entry)
+  descr [
+    extensional(),
+    doc("The checked entry matched an analyzed compiler input and its binding attempts were considered."),
+    arg(Entry, "Entry"),
+    arg_role(Entry, "entity")
+  ].
+
+Decl source_entry_unapplied(Entry)
+  descr [
+    extensional(),
+    doc("The valid checked entry matched no analyzed compiler input; exactly one applied/unapplied state after reconciliation."),
+    arg(Entry, "Entry"),
+    arg_role(Entry, "entity")
+  ].
+
+Decl source_entry_incomplete(Entry, Reason)
+  descr [
+    extensional(),
+    doc("Optional source program/inventory is /unresolved, /unsupported or /conflict."),
+    arg(Entry, "Entry"),
+    arg_role(Entry, "entity"),
+    arg(Reason, "Reason"),
+    arg_representation(Reason, "name"),
+    arg_allowed_name(Reason, "unresolved"),
+    arg_allowed_name(Reason, "unsupported"),
+    arg_allowed_name(Reason, "conflict")
+  ].
+
+Decl source_binding_attempt(Binding, Entry, CheckedFile, Name, Space)
+  descr [
+    extensional(),
+    doc("Attempt to associate a checked public binding, in /type or /value space."),
+    arg(Binding, "Binding"),
+    arg_role(Binding, "entity"),
+    arg(Entry, "Entry"),
+    arg_role(Entry, "entity"),
+    arg(CheckedFile, "CheckedFile"),
+    arg_role(CheckedFile, "path"),
+    arg(Name, "Name"),
+    arg(Space, "Space"),
+    arg_representation(Space, "name"),
+    arg_allowed_name(Space, "type"),
+    arg_allowed_name(Space, "value")
+  ].
+
+Decl source_binding(Binding, SourceFile, SourceName, Space, Method)
+  descr [
+    extensional(),
+    doc("Configured binding correspondence by /source_entry; does not assert declaration identity or build freshness."),
+    arg(Binding, "Binding"),
+    arg_role(Binding, "entity"),
+    arg(SourceFile, "SourceFile"),
+    arg_role(SourceFile, "path"),
+    arg(SourceName, "SourceName"),
+    arg(Space, "Space"),
+    arg_representation(Space, "name"),
+    arg_allowed_name(Space, "type"),
+    arg_allowed_name(Space, "value"),
+    arg(Method, "Method"),
+    arg_representation(Method, "name"),
+    arg_allowed_name(Method, "source_entry")
+  ].
+
+Decl source_binding_checked_decl(Binding, Declaration)
+  descr [
+    extensional(),
+    doc("Member of the independently observed checked declaration set."),
+    arg(Binding, "Binding"),
+    arg_role(Binding, "entity"),
+    arg(Declaration, "Declaration"),
+    arg_role(Declaration, "entity"),
+    arg_report_support(Declaration, "optional")
+  ].
+
+Decl source_binding_source_decl(Binding, Declaration)
+  descr [
+    extensional(),
+    doc("Member of the independently observed source declaration set."),
+    arg(Binding, "Binding"),
+    arg_role(Binding, "entity"),
+    arg(Declaration, "Declaration"),
+    arg_role(Declaration, "entity"),
+    arg_report_support(Declaration, "optional")
+  ].
+
+Decl source_binding_incomplete(Binding, Reason)
+  descr [
+    extensional(),
+    doc("Association is /unresolved, /unsupported or /conflict; positives do not erase uncertainty."),
+    arg(Binding, "Binding"),
+    arg_role(Binding, "entity"),
+    arg(Reason, "Reason"),
+    arg_representation(Reason, "name"),
+    arg_allowed_name(Reason, "unresolved"),
+    arg_allowed_name(Reason, "unsupported"),
+    arg_allowed_name(Reason, "conflict")
+  ].
+
+Decl location(Entity, File, StartLine, StartColumn, EndLine, EndColumn)
+  descr [
+    extensional(),
+    doc("All physically locatable published entities in the full configured TypeScript domain. No implicit request during reporting."),
+    arg(Entity, "Entity"),
+    arg_role(Entity, "entity"),
+    arg_report_support(Entity, "required"),
+    arg(File, "File"),
+    arg_role(File, "path"),
+    arg(StartLine, "StartLine"),
+    arg_representation(StartLine, "integer"),
+    arg(StartColumn, "StartColumn"),
+    arg_representation(StartColumn, "integer"),
+    arg(EndLine, "EndLine"),
+    arg_representation(EndLine, "integer"),
+    arg(EndColumn, "EndColumn"),
+    arg_representation(EndColumn, "integer")
   ].

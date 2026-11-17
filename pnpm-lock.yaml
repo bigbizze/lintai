@@ -52,7 +52,6 @@ importers:
       esbuild:
         specifier: ^0.25.2
         version: 0.25.12
-    devDependencies:
       typescript:
         specifier: ^5.7.0
         version: 5.9.3

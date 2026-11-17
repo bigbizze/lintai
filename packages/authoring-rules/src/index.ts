@@ -1,5 +1,5 @@
-import type { Rule } from "eslint";
 import { builtinModules } from "node:module";
+import type { Rule } from "eslint";
 
 const forbiddenIdentifiers = new Set([
 	"process",
@@ -10,9 +10,7 @@ const forbiddenIdentifiers = new Set([
 	"Date",
 ]);
 
-const nodeBuiltinSpecifiers = new Set(
-	builtinModules.flatMap((name) => [name, `node:${name}`]),
-);
+const nodeBuiltinSpecifiers = new Set(builtinModules.flatMap((name) => [name, `node:${name}`]));
 
 const noAmbientInPurePhase: Rule.RuleModule = {
 	meta: {
@@ -84,12 +82,6 @@ const requireRuleShape: Rule.RuleModule = {
 					context.report({
 						node,
 						message: `Rule default export must include ${requiredCall}`,
-					});
-				}
-				if (source.includes(".assert(")) {
-					context.report({
-						node,
-						message: "Rule default export must not use .assert(); write the rule as a Datalog program with .program() and .report()",
 					});
 				}
 			},

@@ -12,7 +12,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bigbizze/lintai/backend/typescript"
 	"github.com/bigbizze/lintai/diagnostics"
+	"github.com/bigbizze/lintai/engine"
+	"github.com/bigbizze/lintai/server"
 )
 
 // The fixture workspace contains planted violations of every fixture rule.
@@ -73,22 +76,51 @@ func TestFixtureRulesReportPlantedViolations(t *testing.T) {
 		t.Fatalf("planted violations differ:\ngot:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 
-	const source = `async function ordinary() { await task(); }
-async function iteration() { for await (const x of xs) {} }
-async function disposing() { await using x = acquire(); }
-function parent() { return async () => { await task(); }; }
-`
-	workspace := t.TempDir()
-	if err := os.WriteFile(filepath.Join(workspace, "source.ts"), []byte(source), 0o644); err != nil {
+}
+
+// V15/V18: serve re-resolves producer configuration and replaces the old
+// producer when scope changes, including retraction of its previous files.
+func TestServeSessionReplacesChangedProducerConfiguration(t *testing.T) {
+	repo, err := filepath.Abs("../..")
+	if err != nil {
 		t.Fatal(err)
 	}
-	var output bytes.Buffer
-	if err := run(context.Background(), []string{"facts", "--workspace-root", workspace, "--relation", "fn_awaits"}, &output); err != nil {
+	root := t.TempDir()
+	for _, name := range []string{"a.ts", "b.ts"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("export const value = 1;\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	config := filepath.Join(root, "lintai.toml")
+	setConfig := func(excluded string) {
+		t.Helper()
+		if err := os.WriteFile(config, []byte("[workspace]\nexclude = [\""+excluded+"\"]\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	setConfig("b.ts")
+	options := engine.Options{RepoRoot: repo, AssetRoot: filepath.Join(repo, "packages/client"), WorkspaceRoot: root,
+		RuleGlobs: []string{filepath.Join(repo, "testdata/fixtures/rules/layers.ts")}, RuleWorkers: 2}
+	instance := &serveSession{params: server.InitializeParams{WorkspaceRoot: root}}
+	defer instance.Close()
+	first, err := instance.Check(context.Background(), options)
+	if err != nil {
 		t.Fatal(err)
 	}
-	wantFacts := fmt.Sprintf("fn_awaits(\"source.ts::arrow_function::<anonymous@%d>\").\nfn_awaits(\"source.ts::function::ordinary\").\n", strings.Index(source, "async () =>"))
-	if output.String() != wantFacts {
-		t.Fatalf("ordinary-await CLI facts = %q, want %q", output.String(), wantFacts)
+	if !slices.Contains(first.AnalyzedFiles, "a.ts") || slices.Contains(first.AnalyzedFiles, "b.ts") {
+		t.Fatalf("initial scope: %v", first.AnalyzedFiles)
+	}
+	previous := instance.session
+	setConfig("a.ts")
+	second, err := instance.Check(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if instance.session == previous || slices.Contains(second.AnalyzedFiles, "a.ts") || !slices.Contains(second.AnalyzedFiles, "b.ts") {
+		t.Fatalf("changed configuration retained old producer scope: %v", second.AnalyzedFiles)
+	}
+	if _, err := previous.Current(); err == nil {
+		t.Fatal("old producer session was not closed")
 	}
 }
 
@@ -117,6 +149,9 @@ func TestExitCodes(t *testing.T) {
 		want int
 	}{
 		{"violations", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--rules", rule("layers.ts")}, exitViolations},
+		{"parallel check", []string{"check", "--workspace-root", workspace, "--repo-root", repoRoot, "--rules", rule("layers.ts"), "--rule-workers", "1", "--rule-workers", "2"}, exitViolations},
+		{"negative workers", []string{"--rule-workers", "-1"}, exitUsage},
+		{"noninteger workers", []string{"--rule-workers", "1.5"}, exitUsage},
 		{"clean", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--rules", rule("layers.ts"), "--exclude", "src/pure/**"}, exitClean},
 		{"warnings do not fail", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--rules", rule("layers.ts"), "--severity", "arch.layers=warning"}, exitClean},
 		{"rule off", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--rules", rule("layers.ts"), "--severity", "arch.layers=off"}, exitClean},
@@ -126,7 +161,7 @@ func TestExitCodes(t *testing.T) {
 		{"bad file scope", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--rules", rule("layers.ts"), "--files", "all"}, exitUsage},
 		{"glob matches nothing", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--rules", "missing/*.ts"}, exitUsage},
 		{"unknown relation", []string{"facts", "--workspace-root", workspace, "--relation", "no_such_relation"}, exitUsage},
-		{"facts accepts --asset-root", []string{"facts", "--workspace-root", workspace, "--relation", "module", "--asset-root", repoRoot}, exitClean},
+		{"facts accepts --asset-root", []string{"facts", "--workspace-root", workspace, "--relation", "ts.module", "--asset-root", repoRoot}, exitClean},
 	}
 	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {
@@ -154,6 +189,166 @@ func TestFactsCommandPropagatesSourceLinksConfigurationErrors(t *testing.T) {
 	}
 }
 
+func TestTypeScriptSettingsApplyConfigAndInvocationPrecedence(t *testing.T) {
+	root := t.TempDir()
+	config := `[workspace]
+exclude = ["tmp/**"]
+include = ["dist/**"]
+sources = ["configured.d.ts"]
+
+[producers.ts]
+implementation = "lintai.typescript"
+files = "walk"
+source_links = "links.json"
+`
+	if err := os.WriteFile(filepath.Join(root, "lintai.toml"), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	settings, err := loadTypeScriptSettings(root, "", "", false, "", false, []string{"cli/**"}, []string{"cli.d.ts"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(settings) != 1 || settings[0].Files != typescript.FileScopeWalk || settings[0].SourceLinks != "links.json" ||
+		!slices.Equal(settings[0].WorkspaceExcludes, []string{"tmp/**"}) || !slices.Equal(settings[0].Includes, []string{"dist/**"}) ||
+		!slices.Equal(settings[0].Excludes, []string{"cli/**"}) || !slices.Equal(settings[0].Sources, []string{"configured.d.ts", "cli.d.ts"}) {
+		t.Fatalf("configuration defaults or list appends were not applied: %+v", settings)
+	}
+	settings, err = loadTypeScriptSettings(root, "", "tsconfig", true, "", true, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if settings[0].Files != typescript.FileScopeTsconfig || settings[0].SourceLinks != "" {
+		t.Fatalf("explicit scalar flags did not override file values, including clearing source_links: %+v", settings[0])
+	}
+	if err := os.WriteFile(filepath.Join(root, "lintai.toml"), []byte(config+`
+[producers.catalog]
+implementation = "lintai.typescript"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadTypeScriptSettings(root, "", "walk", true, "", false, nil, nil); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("scalar TypeScript flags were accepted with multiple configured instances: %v", err)
+	}
+	if _, err := loadTypeScriptSettings(root, "", "", false, "", true, nil, nil); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("source-links flag was accepted with multiple configured instances: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "cli"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"configured.d.ts", "cli.d.ts", "cli/ignored.ts", "ordinary.ts"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("export {};"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var output bytes.Buffer
+	if err := run(context.Background(), []string{
+		"scope", "--explain", "--json", "--workspace-root", root, "--exclude", "cli/**", "--source", "cli.d.ts",
+	}, &output); err != nil {
+		t.Fatal(err)
+	}
+	var reports []struct {
+		Producer string `json:"producer"`
+		Scope    struct {
+			Sources  []string `json:"sources"`
+			Selected []struct {
+				Path string `json:"path"`
+			} `json:"selected"`
+		} `json:"scope"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &reports); err != nil {
+		t.Fatal(err)
+	}
+	if len(reports) != 2 {
+		t.Fatalf("got %d producer scopes, want 2", len(reports))
+	}
+	for _, report := range reports {
+		selected := make([]string, 0, len(report.Scope.Selected))
+		for _, file := range report.Scope.Selected {
+			selected = append(selected, file.Path)
+		}
+		if !slices.Equal(report.Scope.Sources, []string{"cli.d.ts", "configured.d.ts"}) ||
+			!slices.Equal(selected, []string{"cli.d.ts", "configured.d.ts", "ordinary.ts"}) {
+			t.Fatalf("list additions were not applied to producer %s: %+v", report.Producer, report.Scope)
+		}
+	}
+}
+
+func TestSchemaRendersConfiguredProducerNamespaceWithoutCollection(t *testing.T) {
+	root := t.TempDir()
+	config := `[producers.app]
+implementation = "lintai.typescript"
+source_links = "missing-source-links.json"
+`
+	if err := os.WriteFile(filepath.Join(root, "lintai.toml"), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var output bytes.Buffer
+	if err := run(context.Background(), []string{"schema", "--workspace-root", root}, &output); err != nil {
+		t.Fatalf("schema command failed: %v", err)
+	}
+	rendered := output.String()
+	if !strings.Contains(rendered, "Package app!") || strings.Contains(rendered, "Package ts!") {
+		t.Fatalf("schema did not use the configured producer namespace:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "Decl module(") || !strings.Contains(rendered, "Package lintai!") || !strings.Contains(rendered, "Decl glob(") {
+		t.Fatalf("schema omitted producer relations or engine helpers:\n%s", rendered)
+	}
+}
+
+func TestScopeExplainUsesConfiguredExactSourceSelection(t *testing.T) {
+	root := t.TempDir()
+	write := func(name, contents string) {
+		t.Helper()
+		path := filepath.Join(root, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("lintai.toml", `[workspace]
+exclude = ["src/extra.ts"]
+sources = ["src/extra.ts"]
+
+[producers.ts]
+files = "tsconfig"
+`)
+	write("tsconfig.json", `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler"},"files":["src/main.ts"]}`)
+	write("src/main.ts", "export const main = 1;\n")
+	write("src/extra.ts", "export const extra = 2;\n")
+	var output bytes.Buffer
+	if err := run(context.Background(), []string{"scope", "--explain", "--json", "--workspace-root", root}, &output); err != nil {
+		t.Fatal(err)
+	}
+	var reports []struct {
+		Producer string `json:"producer"`
+		Scope    struct {
+			ExactSources     []string `json:"sources"`
+			CompilerEligible []string `json:"compilerEligible"`
+			Selected         []struct {
+				Path  string `json:"path"`
+				Exact bool   `json:"exact"`
+			} `json:"selected"`
+		} `json:"scope"`
+	}
+	if err := json.Unmarshal(output.Bytes(), &reports); err != nil {
+		t.Fatal(err)
+	}
+	if len(reports) != 1 || reports[0].Producer != "ts" ||
+		!slices.Equal(reports[0].Scope.ExactSources, []string{"src/extra.ts"}) ||
+		!slices.Equal(reports[0].Scope.CompilerEligible, []string{"src/extra.ts", "src/main.ts"}) ||
+		!slices.ContainsFunc(reports[0].Scope.Selected, func(item struct {
+			Path  string `json:"path"`
+			Exact bool   `json:"exact"`
+		}) bool {
+			return item.Path == "src/extra.ts" && item.Exact
+		}) {
+		t.Fatalf("scope explanation did not match config and exact source selection: %s", output.String())
+	}
+}
+
 // Authoring mistakes give an error that names the cause. A helper module
 // under the rule glob is not a rule and is skipped.
 func TestAuthoringErrors(t *testing.T) {
@@ -165,13 +360,13 @@ func TestAuthoringErrors(t *testing.T) {
 	rules := map[string]string{
 		"helper.ts": `export const shared = "src/**";`,
 		"no-version.ts": `import { dl, rule } from "@lintai/sdk";
-export default rule("t.no-version").program(dl` + "`Decl v(F). v(F) :- module(F).`" + `).report("v").message((row) => String(row.F));`,
+export default rule("t.no-version").program(dl` + "`Decl v(F). v(F) :- ts.module(F).`" + `).report("v").message((row) => String(row.F));`,
 		"negated-wildcard.ts": `import { dl, rule } from "@lintai/sdk";
-export default rule("t.negated-wildcard").version(1).program(dl` + "`Decl v(F). v(F) :- module(F), !import_edge(_, F, _, \"server-only\").`" + `).report("v").message((row) => String(row.F));`,
+export default rule("t.negated-wildcard").version(1).program(dl` + "`Decl v(F). v(F) :- ts.module(F), !ts.import_edge(_, F, _, \"server-only\").`" + `).report("v").message((row) => String(row.F));`,
 		"unknown-column.ts": `import { dl, rule } from "@lintai/sdk";
-export default rule("t.unknown-column").version(1).program(dl` + "`Decl v(F). v(F) :- module(F).`" + `).report("v").message((row) => String(row.Nope));`,
+export default rule("t.unknown-column").version(1).program(dl` + "`Decl v(F). v(F) :- ts.module(F).`" + `).report("v").message((row) => String(row.Nope));`,
 		"expect-all.ts": `import { dl, rule } from "@lintai/sdk";
-export default rule("t.expect-all").version(1).program(dl` + "`Decl a(F). a(F) :- module(F), glob(F, \"none/**\"). Decl b(F). b(F) :- module(F), glob(F, \"nada/**\").`" + `).report("a").expectNonEmpty("a", "b").message((row) => String(row.F));`,
+export default rule("t.expect-all").version(1).program(dl` + "`Decl a(M). a(M) :- ts.module_path(M, F), lintai.glob(F, \"none/**\"). Decl b(M). b(M) :- ts.module_path(M, F), lintai.glob(F, \"nada/**\").`" + `).report("a").expectNonEmpty("a", "b").message((row) => String(row.M));`,
 	}
 	for name, text := range rules {
 		if err := os.WriteFile(filepath.Join(rulesDir, name), []byte(text), 0o644); err != nil {
@@ -226,7 +421,7 @@ func TestRulesCommand(t *testing.T) {
 	workspace := t.TempDir()
 	ruleSource := func(id string) string {
 		return `import { dl, rule } from "@lintai/sdk";
-export default rule(` + strconvQuote(id) + `).version(1).program(dl` + "`Decl v(F). v(F) :- module(F), glob(F, \"src/**\").`" + `).report("v").message(() => "x");
+export default rule(` + strconvQuote(id) + `).version(1).program(dl` + "`Decl v(M). v(M) :- ts.module_path(M, F), lintai.glob(F, \"src/**\").`" + `).report("v").message(() => "x");
 `
 	}
 	files := map[string]string{
@@ -246,7 +441,7 @@ export default rule("arch.metadata").version(7)
 		"lintai-rules/dup-one.ts": ruleSource("arch.dup"),
 		"lintai-rules/dup-two.ts": ruleSource("arch.dup"),
 		"lintai-rules/dup-setup.ts": `import { dl, rule } from "@lintai/sdk";
-export default rule("arch.dup-setup").version(1).setup(() => { throw new Error("setup failed"); }).program(dl` + "`Decl v(F). v(F) :- module(F), glob(F, \"src/**\").`" + `).report("v").message(() => "x");
+export default rule("arch.dup-setup").version(1).setup(() => { throw new Error("setup failed"); }).program(dl` + "`Decl v(M). v(M) :- ts.module_path(M, F), lintai.glob(F, \"src/**\").`" + `).report("v").message(() => "x");
 `,
 		"lintai-rules/dup-setup-ok.ts":       ruleSource("arch.dup-setup"),
 		"lintai-rules/bad-id.ts":             "export default { id: \"Arch.Bad\", versionValue: 1 };\n",
@@ -357,7 +552,7 @@ export default rule("arch.dup-setup").version(1).setup(() => { throw new Error("
 		"arch.dup rule_execution_error config",
 		"arch.dup rule_execution_error config",
 		"arch.dup-setup rule_execution_error config",
-		"arch.dup-setup rule_execution_error setup",
+		"arch.dup-setup rule_execution_error config",
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("normal run:\ngot  %q\nwant %q", got, want)
