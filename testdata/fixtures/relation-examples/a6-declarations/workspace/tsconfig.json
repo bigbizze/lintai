@@ -1,0 +1,1 @@
+{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","strict":true},"include":["src"],"references":[{"path":"./loose"},{"path":"./strict"}]}
