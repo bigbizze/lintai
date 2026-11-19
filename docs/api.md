@@ -447,10 +447,12 @@ Caveats:
 
 ```sh
 lintai [flags]
-lintai schema
-lintai facts --workspace-root <dir> [--exclude <glob>]... [--files tsconfig|walk] [--source-links <file>] [--relation <name>]...
-lintai lock [--workspace-root <dir>] [--rules <globs>] [--lock-file <path>] [--suppressions-location <path>]
-lintai rules [--workspace-root <dir>] [--repo-root <dir>] [--rules <globs>] [--json]
+lintai check [flags]
+lintai schema [--workspace-root <dir>] [--config <file>] [--asset-root <dir>]
+lintai facts [--workspace-root <dir>] [--config <file>] [--asset-root <dir>] [--exclude <glob>]... [--source <file>]... [--files tsconfig|walk] [--source-links <file>] [--relation <name>]...
+lintai scope --explain [--json] [--workspace-root <dir>] [--config <file>] [--exclude <glob>]... [--source <file>]... [--files tsconfig|walk] [--source-links <file>]
+lintai lock [--workspace-root <dir>] [--repo-root <dir>] [--asset-root <dir>] [--rules <globs>] [--lock-file <path>] [--suppressions-location <path>]
+lintai rules [--workspace-root <dir>] [--repo-root <dir>] [--asset-root <dir>] [--rules <globs>] [--json]
 lintai serve
 ```
 
@@ -476,15 +478,17 @@ lintai serve
 
 A rule file that does not bundle or load, has an invalid id, is not a complete rule (no `program()`, `report()` or `message()`), or has the same id as another rule file is in `errors` and not in `rules`. An error has `id` when the id is valid and known, as for a duplicate id or an incomplete rule. These errors do not change the exit code: it is 0, so that a linter plugin can still create the other rules. Exit code 2 has its usual meaning, for example a glob that matches no file. Listing a rule does not test it. The output tells you what the rule declares, but not whether it checks the intended files or can find a violation.
 
-Flags for analysis:
+`lintai` and `lintai check` use the same analysis flags:
 
 - `--workspace-root`
 - `--repo-root`
 - `--asset-root`
+- `--config <file>`: choose a `lintai.toml` file, relative to the invocation directory. See [Snapshot scope](#snapshot-scope).
 - `--rules`: a comma-separated list of globs (default `lintai-rules/**/*.ts`)
-- `--exclude`: a glob, relative to the workspace root, of files to leave out of the snapshot. Repeat the flag for more globs.
-- `--files`: `tsconfig` (default) or `walk`. See "Snapshot scope".
-- `--source-links <file>`: an optional JSON file of source entries, relative to the workspace root. See "Source links".
+- `--exclude`: a glob, relative to the workspace root, of files to leave out of the snapshot unless explicitly selected. Repeat the flag for more globs.
+- `--source <file>`: add an exact source file, relative to the workspace root or an absolute path inside it. Repeat the flag for more files.
+- `--files`: `tsconfig` or `walk`; absent configuration defaults to `tsconfig`. See [Snapshot scope](#snapshot-scope).
+- `--source-links <file>`: an optional JSON file of source entries; a relative path is based at the workspace root. See "Source links".
 - `--env-json`: a JSON object passed to every rule as `env`
 - `--json`
 - `--explain`: with `--json`, attach `explanation` to each violation
@@ -507,28 +511,47 @@ pnpm exec lintai \
   --json --explain
 ```
 
-`lintai schema` prints each configured producer's declarations and prelude under its namespace, followed by the engine helper declarations.
+`lintai schema` prints each configured producer's declarations and prelude under its namespace, followed by the engine helper declarations. It accepts `--workspace-root` and `--config`; it accepts and ignores `--asset-root`.
 
-`lintai facts` builds the snapshot and prints its base facts in Mangle syntax, sorted. It accepts `--exclude`, `--files` and `--source-links`, and it accepts and ignores `--asset-root`. Use `--relation` one or more times to print only those relations:
+`lintai facts` builds the snapshot and prints its base facts in Mangle syntax, sorted. It accepts the scope flags shown above, and accepts and ignores `--asset-root`. Use `--relation` one or more times with qualified names to print only those relations:
 
 ```sh
-pnpm exec lintai facts --workspace-root . --relation ambient_use --relation ambient_key
+pnpm exec lintai facts --workspace-root . --relation ts.ambient_use --relation ts.ambient_key
 ```
 
-Snapshot scope:
+`lintai scope --explain` prints the selected paths, compiler eligibility, configurations and pruned boundaries for each producer; `--json` emits the explanation as JSON. It accepts `--source-links` but does not read that file when explaining scope. Use the native executable for this command: the npm launcher appends `--asset-root`, which `scope` does not accept. `lintai serve` uses JSON-RPC initialization rather than analysis CLI flags.
+
+### Snapshot scope
+
+By default, lintai reads `lintai.toml` at the workspace root if it exists; it does not search parent directories. `--config` selects a file explicitly, and that file must exist. Relative scope paths and all globs are based at the workspace root.
+
+```toml
+[workspace]
+exclude = ["src/generated/**"]
+include = ["dist/contracts/**"]
+sources = ["types/contracts.d.ts"]
+
+[producers.ts]
+files = "tsconfig" # or "walk"
+source_links = "source-links.json" # optional; the file must exist
+```
+
+The workspace `include` patterns restore eligible source files excluded by built-in defaults or workspace `exclude`; they are not a whitelist and do not add `.d.ts` files. Invocation `--exclude` takes priority over those patterns. Exact `sources` and `--source` take priority over all of these exclusions and are added to the compiler roots even in `tsconfig` mode. Exact sources must be existing regular `.ts`, `.tsx`, `.js`, `.jsx` or `.d.ts` files inside the workspace; `.git` is never eligible. The walk does not follow symlinks, while exact paths may resolve through symlinks that stay inside the workspace and outside `.git`.
+
+`--files` and `--source-links` override their configured producer values. With multiple TypeScript producers those scalar CLI overrides are ambiguous and rejected; configure each producer instead. Workspace settings and repeatable `--exclude` and `--source` apply to each producer.
 
 lintai first walks the workspace root:
 
 - it finds every `.ts`, `.tsx`, `.js` and `.jsx` file, except `.d.ts` files
-- it skips `node_modules`, `dist` and every directory whose name starts with a dot, for example `.git` and `.next`
-- it skips the files that match an `--exclude` glob
+- by default it skips `node_modules`, `dist` and directories whose names start with a dot, for example `.next`; `include` or exact sources can restore them, except `.git`
+- it skips paths matched by workspace or invocation exclusions, subject to the precedence above
 
 Then `--files` selects the walked files that become modules:
 
-- `tsconfig` (default): a walked file under a `tsconfig.json` is a module only if `tsc` compiles it with that `tsconfig.json`. That is, `files` or `include` lists it and `exclude` does not remove it, or a compiled file imports it. `tsc` compiles an imported file even when `exclude` matches it, so lintai does too. For a solution-style `tsconfig.json` (`"files": []` with `references`), lintai uses the referenced `tsconfig` files. A walked file with no `tsconfig.json` above it in the workspace is always a module.
-- `walk`: every walked file is a module. A file that its `tsconfig.json` does not compile is analyzed with default compiler options.
+- `tsconfig` (default without a configured producer value): a selected file under a `tsconfig.json` is a module only if the compiler includes it, or it is an exact source. A compiled file can import another file even when the tsconfig's `exclude` matches it. For a solution-style `tsconfig.json` (`"files": []` with `references`), lintai uses the referenced `tsconfig` files. A selected file with no `tsconfig.json` above it in the workspace is a module.
+- `walk`: every selected file is a module. A file that its `tsconfig.json` does not compile is analyzed with default compiler options.
 
-A `tsconfig.json` that includes generated files, for example `.next/types/**/*.ts`, does not add them: a module must also be a walked file. Use `--exclude` to remove more files.
+A `tsconfig.json` that includes generated files, for example `.next/types/**/*.ts`, does not by itself add files excluded by the workspace selector. Use workspace `include` or exact sources to select them, and `--exclude` to remove other files from the primary scope. Excluded files may still be read by the compiler as dependencies.
 
 Source links:
 
