@@ -78,6 +78,96 @@ func TestFixtureRulesReportPlantedViolations(t *testing.T) {
 
 }
 
+// Each family has its own workspace, so its near-misses do not alter the
+// existing fixture goldens. The documentation contains the exact tested rules.
+func TestRelationExamples(t *testing.T) {
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	docs, err := os.ReadFile(filepath.Join(repoRoot, "docs/examples.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	families := []struct {
+		name string
+		want []string
+	}{
+		{
+			name: "a1-source-identity",
+			want: []string{
+				"arch.no-env-writes violation src/app/violation.ts:1",
+				"arch.checked-syntax-strict violation src/checked/violation.ts:1",
+				"arch.client-directive violation src/client/violation.ts:1",
+				"arch.domain-no-async-exports violation src/domain/violation.ts:1",
+				"arch.domain-no-global-fetch violation src/domain/violation.ts:2",
+				"arch.reducer-no-async-methods violation src/reducers/violation.ts:2",
+				"arch.ui-no-import-meta-env violation src/ui/violation.ts:1",
+			},
+		},
+		{
+			name: "a2-imports",
+			want: []string{
+				"arch.core-resolved-imports-strict violation src/core/violation.ts:1",
+				"arch.core-no-dynamic-loading-strict dynamic_load src/core/violation.ts:2",
+				"arch.core-no-dynamic-loading-strict opaque_load src/core/violation.ts:3",
+				"arch.no-broad-function-type violation src/types/violation.ts:1",
+			},
+		},
+	}
+	for _, family := range families {
+		t.Run(family.name, func(t *testing.T) {
+			base := filepath.Join(repoRoot, "testdata/fixtures/relation-examples", family.name)
+			ruleGlob := filepath.Join(base, "rules/*.ts")
+			rulePaths, err := filepath.Glob(ruleGlob)
+			if err != nil || len(rulePaths) == 0 {
+				t.Fatalf("find family rules: %v (found %d)", err, len(rulePaths))
+			}
+			for _, path := range rulePaths {
+				source, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				block := "```ts\n" + string(source) + "```\n"
+				if count := strings.Count(string(docs), block); count != 1 {
+					t.Errorf("%s: expected one exact rule source block in docs/examples.md, got %d", path, count)
+				}
+			}
+			args := []string{
+				"--json", "--explain",
+				"--repo-root", repoRoot,
+				"--workspace-root", filepath.Join(base, "workspace"),
+				"--rules", ruleGlob,
+			}
+			first := runJSON(t, args)
+			second := runJSON(t, args)
+			if !bytes.Equal(first, second) {
+				t.Fatalf("two runs produced different output:\n%s\n---\n%s", first, second)
+			}
+			var items []diagnostics.Diagnostic
+			if err := json.Unmarshal(first, &items); err != nil {
+				t.Fatal(err)
+			}
+			got := make([]string, 0, len(items))
+			for _, item := range items {
+				if item.DiagnosticKind != diagnostics.KindArchitectureViolation {
+					t.Fatalf("unexpected rule error: %+v", item)
+				}
+				got = append(got, fmt.Sprintf("%s %s %s:%d", item.RuleID, item.AssertionID, item.SourceLocation.File, item.SourceLocation.StartLine))
+				if len(item.Explanation) == 0 {
+					t.Fatalf("expected an explanation for %s", got[len(got)-1])
+				}
+			}
+			slices.Sort(got)
+			want := slices.Clone(family.want)
+			slices.Sort(want)
+			if !slices.Equal(got, want) {
+				t.Fatalf("planted violations differ:\ngot:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+			}
+		})
+	}
+}
+
 // V15/V18: serve re-resolves producer configuration and replaces the old
 // producer when scope changes, including retraction of its previous files.
 func TestServeSessionReplacesChangedProducerConfiguration(t *testing.T) {

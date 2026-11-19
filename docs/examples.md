@@ -909,3 +909,245 @@ The CLI and serve both report exactly two forbidden diagnostics and three indete
 The rule checks all four signature reasons, including `/conflict`, and catches missing declaration evidence without treating it as compliance. It also checks export inventory, export target and owner completeness. Owner selection does not require an observed `write` member: a scope containing no forbidden calls produces no false owner uncertainty. A forbidden result still requires the positive member join above. A retained forbidden member and an incomplete signature can produce both outcomes at one site. These calls are all actual invocations. A function-valued argument is a separate `ts.fn_value_escape` site, not a call site; use `ts.fn_value_escape_unknown` when a policy needs to report an unknown transferred implementation.
 
 The test also covers a variant with no forbidden writes. CLI analysis returns exit 1 for the five findings; serve returns the same five diagnostics and shuts down with exit 0.
+
+## 19. Synchronous domain exports
+
+Keep explicitly async function declarations out of a synchronous domain API.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Exported domain function declarations must not use the async modifier.
+export default rule("arch.domain-no-async-exports")
+	.version(1)
+	.program(dl`
+		Decl domain_function(Fn, Name).
+		domain_function(Fn, Name) :- ts.fn(Fn, File, Name), ts.fn_kind(Fn, /function),
+			lintai.glob(File, "src/domain/**").
+		Decl violation(Fn, Name).
+		violation(Fn, Name) :- domain_function(Fn, Name), ts.fn_exported(Fn), ts.fn_async(Fn).
+	`)
+	.report("violation")
+	.expectNonEmpty("domain_function")
+	.message(() => "Exported domain functions must not be async");
+```
+
+This selects syntactically exported function declarations; it does not detect every function that returns a promise. The fixture permits an unexported async function and an exported synchronous one.
+
+## 20. Synchronous reducer methods
+
+Keep methods on a Reducer class synchronous.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Reducer methods must not use the async modifier.
+export default rule("arch.reducer-no-async-methods")
+	.version(1)
+	.program(dl`
+		Decl reducer_method(Fn, Name).
+		reducer_method(Fn, Name) :- ts.fn(Fn, File, Name), lintai.glob(File, "src/reducers/**"),
+			ts.fn_kind(Fn, /method), ts.fn_container(Fn, "Reducer").
+		Decl violation(Fn, Name).
+		violation(Fn, Name) :- reducer_method(Fn, Name), ts.fn_async(Fn).
+	`)
+	.report("violation")
+	.expectNonEmpty("reducer_method")
+	.message(() => "Reducer methods must not be async");
+```
+
+The container is a display name rather than a class identity, so adjust the directory and name to the repository. The fixture permits a synchronous Reducer method and an async method on another class.
+
+## 21. Environment writes
+
+Keep application code from mutating process environment variables.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Application modules must not mutate the process environment.
+export default rule("arch.no-env-writes")
+	.version(1)
+	.program(dl`
+		Decl application_module(Module, File).
+		application_module(Module, File) :- ts.module(Module), ts.module_path(Module, File),
+			lintai.glob(File, "src/app/**").
+		Decl violation(Site, File).
+		violation(Site, File) :- application_module(_, File), ts.site(Site, File),
+			ts.ambient_use(Site, /env, /read), ts.ambient_write(Site).
+	`)
+	.report("violation")
+	.expectNonEmpty("application_module")
+	.message(() => "Application modules must not mutate the process environment");
+```
+
+The rule reports observed assignments and deletions, including dynamic keys; reading a variable is allowed. Alias and detection limits follow the registered ambient-source matchers.
+
+## 22. Inject network access into domain code
+
+Require domain modules to receive network access as a dependency instead of referencing global fetch.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Domain modules must obtain network access through an injected dependency.
+export default rule("arch.domain-no-global-fetch")
+	.version(1)
+	.program(dl`
+		Decl domain_module(File).
+		domain_module(File) :- ts.module_path(_, File), lintai.glob(File, "src/domain/**").
+		Decl violation(Site, File).
+		violation(Site, File) :- domain_module(File), ts.site(Site, File), ts.global_ref(Site, "fetch").
+	`)
+	.report("violation")
+	.expectNonEmpty("domain_module")
+	.message(() => "Domain modules must not reference the global fetch binding");
+```
+
+This checks value references to the resolved global binding, not just calls. A same-named local parameter is allowed.
+
+## 23. UI configuration access
+
+Keep direct import.meta.env reads in a configuration adapter instead of UI modules.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// UI modules must read configuration through a dedicated adapter.
+export default rule("arch.ui-no-import-meta-env")
+	.version(1)
+	.program(dl`
+		Decl ui_module(File).
+		ui_module(File) :- ts.module_path(_, File), lintai.glob(File, "src/ui/**").
+		Decl violation(Site, File).
+		violation(Site, File) :- ui_module(File), ts.site(Site, File), ts.meta_access(Site, "import.meta.env").
+	`)
+	.report("violation")
+	.expectNonEmpty("ui_module")
+	.message(() => "UI modules must not read import.meta.env directly");
+```
+
+Only supported direct member-access syntax is recorded; a different member such as import.meta.url is allowed. The access path stops at the first member.
+
+## 24. Client component directives
+
+Require files under the client component directory to start with the use client directive.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Client components must declare the use client directive.
+export default rule("arch.client-directive")
+	.version(1)
+	.program(dl`
+		Decl client_module(Module, File).
+		client_module(Module, File) :- ts.module(Module), ts.module_path(Module, File),
+			lintai.glob(File, "src/client/**").
+		Decl marked(Module).
+		marked(Module) :- client_module(Module, File), ts.site(Site, File), ts.module_directive(Site, "use client").
+		Decl violation(Module, File).
+		violation(Module, File) :- client_module(Module, File), !marked(Module).
+	`)
+	.report("violation")
+	.expectNonEmpty("client_module")
+	.message(() => "Client components must declare use client");
+```
+
+A directive counts only in the module's directive prologue. The directory is a project convention, not an inference about which components need client rendering.
+
+## 25. Strict syntax completeness
+
+Report syntax errors in modules whose architecture checks require complete source evidence.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Analysis of checked modules must not proceed silently past syntax errors.
+export default rule("arch.checked-syntax-strict")
+	.version(1)
+	.program(dl`
+		Decl checked_module(File).
+		checked_module(File) :- ts.module_path(_, File), lintai.glob(File, "src/checked/**").
+		Decl violation(Site, Message).
+		violation(Site, Message) :- checked_module(File), ts.site(Site, File), ts.module_parse_error(Site, Message).
+	`)
+	.report("violation")
+	.expectNonEmpty("checked_module")
+	.message(() => "A syntax error makes checked-module analysis incomplete");
+```
+
+This strict policy can report code while it is being edited and only records the first syntax diagnostic per file. Other source facts may be incomplete until the error is fixed.
+
+## 26. Strict code-loading boundaries
+
+Keep dynamic imports and computed module loads out of core modules.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Core modules must not use dynamic imports or opaque module loads.
+export default rule("arch.core-no-dynamic-loading-strict")
+	.version(1)
+	.program(dl`
+		Decl core_module(File).
+		core_module(File) :- ts.module_path(_, File), lintai.glob(File, "src/core/**").
+		Decl dynamic_load(Site, File).
+		dynamic_load(Site, File) :- core_module(File), ts.import_edge(Site, File, _, _),
+			ts.import_form(Site, /dynamic).
+		Decl opaque_load(Site, File).
+		opaque_load(Site, File) :- core_module(File), ts.site(Site, File), ts.import_opaque(Site).
+	`)
+	.report("dynamic_load", "opaque_load")
+	.expectNonEmpty("core_module")
+	.message(() => "Core modules must not use dynamic imports or opaque module loads");
+```
+
+The strict opaque-load result also reports computed require calls even when a runtime value might be safe; literal require calls are outside this policy. A static import is allowed.
+
+## 27. Strict import resolution
+
+Report unresolved literal imports in core modules so boundary checks do not silently miss their targets.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Core module imports must resolve before their boundaries can be checked.
+export default rule("arch.core-resolved-imports-strict")
+	.version(1)
+	.program(dl`
+		Decl core_module(File).
+		core_module(File) :- ts.module_path(_, File), lintai.glob(File, "src/core/**").
+		Decl violation(Site, File, Specifier).
+		violation(Site, File, Specifier) :- core_module(File), ts.import_edge(Site, File, _, Specifier),
+			ts.import_unresolved(Site).
+	`)
+	.report("violation")
+	.expectNonEmpty("core_module")
+	.message(() => "Core imports must resolve for boundary analysis");
+```
+
+This strict policy depends on the active compiler context and can report missing or deliberately virtual dependencies. Computed specifiers have separate opaque-load evidence.
+
+## 28. Avoid the broad `Function` type
+
+Use a specific callable signature in source annotations instead of TypeScript's broad `Function` type.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Source annotations must not use TypeScript's broad Function type.
+export default rule("arch.no-broad-function-type")
+	.version(1)
+	.program(dl`
+		Decl broad_function_type(Site, File).
+		broad_function_type(Site, File) :- ts.type_ref(Site, "Function"),
+			ts.site(Site, File), lintai.glob(File, "src/types/**").
+		Decl violation(Site, File).
+		violation(Site, File) :- broad_function_type(Site, File).
+	`)
+	.report("violation")
+	.expectNonEmpty("broad_function_type")
+	.message(() => "Use a specific callable type instead of Function");
+```
+
+This matches the written type name and does not resolve a differently named alias to `Function`.

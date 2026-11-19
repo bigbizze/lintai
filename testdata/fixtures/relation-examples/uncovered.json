@@ -1,11 +1,7 @@
 [
   {
     "relation": "ts.ambient_source",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.ambient_write",
-    "reason": "not yet reviewed"
+    "reason": "no realistic rule found: unanchored registry building block"
   },
   {
     "relation": "ts.call_declaration",
@@ -25,7 +21,7 @@
   },
   {
     "relation": "ts.config_adjusted",
-    "reason": "not yet reviewed"
+    "reason": "no realistic rule found: configuration evidence has no report anchor or module association"
   },
   {
     "relation": "ts.declaration",
@@ -96,22 +92,6 @@
     "reason": "not yet reviewed"
   },
   {
-    "relation": "ts.fn_async",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.fn_container",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.fn_exported",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.fn_kind",
-    "reason": "not yet reviewed"
-  },
-  {
     "relation": "ts.fn_signature",
     "reason": "not yet reviewed"
   },
@@ -136,40 +116,12 @@
     "reason": "not yet reviewed"
   },
   {
-    "relation": "ts.global_ref",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.import_form",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.import_opaque",
-    "reason": "not yet reviewed"
-  },
-  {
     "relation": "ts.import_package",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.import_unresolved",
-    "reason": "not yet reviewed"
+    "reason": "disagrees with its description: virtual declared modules can be labeled as packages"
   },
   {
     "relation": "ts.location",
     "reason": "reporting support"
-  },
-  {
-    "relation": "ts.meta_access",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.module",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.module_directive",
-    "reason": "not yet reviewed"
   },
   {
     "relation": "ts.module_export",
@@ -177,10 +129,6 @@
   },
   {
     "relation": "ts.module_exports_incomplete",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.module_parse_error",
     "reason": "not yet reviewed"
   },
   {
@@ -312,12 +260,8 @@
     "reason": "not yet reviewed"
   },
   {
-    "relation": "ts.type_ref",
-    "reason": "not yet reviewed"
-  },
-  {
     "relation": "ts.type_ref_target",
-    "reason": "not yet reviewed"
+    "reason": "disagrees with its description"
   },
   {
     "relation": "ts.type_sig_param",
