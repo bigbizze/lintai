@@ -1151,3 +1151,92 @@ export default rule("arch.no-broad-function-type")
 ```
 
 This matches the written type name and does not resolve a differently named alias to `Function`.
+
+## 29. Inject the clock into domain code
+
+Keep domain calculations deterministic by passing in the current time instead of calling the TypeScript library clock directly.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Domain modules must receive the current time instead of calling the library clock.
+export default rule("arch.domain-no-library-clock")
+	.version(1)
+	.program(dl`
+		Decl domain_module(File).
+		domain_module(File) :- ts.module_path(_, File), lintai.glob(File, "src/domain/**").
+		Decl violation(Site, File).
+		violation(Site, File) :- domain_module(File), ts.site(Site, File),
+			ts.external_call(Site, /lib, "lib", "DateConstructor.now").
+	`)
+	.report("violation")
+	.expectNonEmpty("domain_module")
+	.message(() => "Domain modules must receive the current time instead of calling Date.now");
+```
+
+This matches the library-declared `DateConstructor.now` target; an injected object with a `now` method is allowed. Other clock APIs and unresolved calls need separate policies.
+
+## 30. Strict read-only query calls
+
+Keep calls to methods declared as `write` out of query modules, and flag calls whose selected declaration cannot be established.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Query modules must not call write methods or calls whose declaration is uncertain.
+export default rule("arch.query-no-writes-strict")
+	.version(1)
+	.program(dl`
+		Decl query_call(Site, File).
+		query_call(Site, File) :- ts.site(Site, File), lintai.glob(File, "src/queries/**"),
+			ts.call_site(Site).
+		Decl forbidden(Site, File).
+		forbidden(Site, File) :- query_call(Site, File), ts.call_declaration(Site, Declaration),
+			ts.declaration_member(Declaration, _, "write").
+		Decl indeterminate(Site, File, Reason).
+		indeterminate(Site, File, Reason) :- query_call(Site, File),
+			ts.call_declaration_incomplete(Site, Reason).
+	`)
+	.report("forbidden", "indeterminate")
+	.expectNonEmpty("query_call")
+	.message((_row, ctx) => ctx.assertion_id === "forbidden"
+		? "Query modules must not call methods declared as write"
+		: "Cannot determine the declared member for this query call");
+```
+
+The selected declaration identifies a lexical member, not a runtime implementation; the rule matches the member name on any owner, so unrelated `write` methods are also reported. This strict variant can report unresolved, synthetic, unsupported, or conflicting declaration evidence even for safe calls; a positive forbidden result and an uncertainty result can coexist. A free function named `write` and a function-valued argument are not member calls.
+
+A separate strict call-graph policy could also report `ts.call_target_conflict` when runtime target observations disagree, but it may block a call that is safe in one compiler context. The current CLI fixture could not produce that marker; the [coverage report](followups/relation-coverage-report.md) records the attempt and its limits.
+
+## 31. Strict security callback transfers
+
+Keep security functions from being handed as callbacks to external or unresolved calls in handler modules, and flag transfers whose implementation is unknown.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Handler callbacks passed to external or unresolved calls must not be security functions or unknown functions.
+export default rule("arch.security-callbacks-strict")
+	.version(1)
+	.program(dl`
+		Decl handler_module(File).
+		handler_module(File) :- ts.module_path(_, File), lintai.glob(File, "src/handlers/**").
+		Decl security_fn(Fn, Name).
+		security_fn(Fn, Name) :- ts.fn(Fn, File, Name), lintai.glob(File, "src/security/**").
+		Decl transfer(Site, File).
+		transfer(Site, File) :- handler_module(File), ts.site(Site, File),
+			ts.fn_value_escape(Site, /argument).
+		Decl forbidden(Site, File, Name).
+		forbidden(Site, File, Name) :- transfer(Site, File), ts.fn_value_escape_target(Site, Fn),
+			security_fn(Fn, Name).
+		Decl indeterminate(Site, File).
+		indeterminate(Site, File) :- transfer(Site, File), ts.fn_value_escape_unknown(Site).
+	`)
+	.report("forbidden", "indeterminate")
+	.expectNonEmpty("handler_module", "security_fn")
+	.message((_row, ctx) => ctx.assertion_id === "forbidden"
+		? "Security functions must not be passed to external or unresolved calls"
+		: "Cannot determine the function passed to an external or unresolved call");
+```
+
+The strict unknown result can include safe callbacks whose implementation is not collected, including library functions or parameters. Only supported direct function-valued arguments to external or unresolved invocations are recorded; spreads, indirect transfers and some untyped values are outside this check. Direct calls and transfers to collected local functions are allowed.

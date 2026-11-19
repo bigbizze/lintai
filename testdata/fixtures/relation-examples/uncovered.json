@@ -4,20 +4,8 @@
     "reason": "no realistic rule found: unanchored registry building block"
   },
   {
-    "relation": "ts.call_declaration",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.call_declaration_incomplete",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.call_site",
-    "reason": "not yet reviewed"
-  },
-  {
     "relation": "ts.call_target_conflict",
-    "reason": "not yet reviewed"
+    "reason": "could not build a fixture: normal snapshot traversal assigns each primary file to one compiler context"
   },
   {
     "relation": "ts.config_adjusted",
@@ -33,10 +21,6 @@
   },
   {
     "relation": "ts.declaration_fn_incomplete",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.declaration_member",
     "reason": "not yet reviewed"
   },
   {
@@ -88,10 +72,6 @@
     "reason": "not yet reviewed"
   },
   {
-    "relation": "ts.external_call",
-    "reason": "not yet reviewed"
-  },
-  {
     "relation": "ts.fn_signature",
     "reason": "not yet reviewed"
   },
@@ -105,14 +85,6 @@
   },
   {
     "relation": "ts.fn_signature_unresolved",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.fn_value_escape",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.fn_value_escape_target",
     "reason": "not yet reviewed"
   },
   {
