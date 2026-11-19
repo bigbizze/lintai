@@ -124,6 +124,36 @@ func TestRelationExamples(t *testing.T) {
 				"arch.security-callbacks-strict indeterminate src/handlers/indeterminate.ts:2",
 			},
 		},
+		{
+			name: "a4-signatures",
+			want: []string{
+				"arch.handler-signatures wrong_arity src/handlers/violation.ts:1",
+				"arch.handler-signatures optional_request src/handlers/violation.ts:2",
+				"arch.handler-signatures rest_request src/handlers/violation.ts:3",
+				"arch.id-lookup-return violation src/ids/violation.ts:1",
+				"arch.id-lookup-return violation src/ids/lookalike.ts:2",
+				"arch.secure-signature-evidence-strict conflict src/secure/conflict.ts:1",
+				"arch.secure-signature-evidence-strict omitted src/secure/omitted.ts:1",
+			},
+		},
+		{
+			name: "a5-structural-types",
+			want: []string{
+				"arch.api-generic-names violation src/api/violation.ts:1",
+				"arch.event-id optional_id src/events/violation.ts:1",
+				"arch.event-id mutable_id src/events/violation.ts:2",
+				"arch.coordinate-tuples optional_element src/geometry/violation.ts:1",
+				"arch.coordinate-tuples rest_element src/geometry/violation.ts:2",
+				"arch.coordinate-tuples mutable_tuple src/geometry/violation.ts:3",
+				"arch.hook-callbacks optional_event src/hooks/violation.ts:1",
+				"arch.hook-callbacks rest_event src/hooks/violation.ts:2",
+				"arch.hook-callbacks nonvoid_callback src/hooks/violation.ts:3",
+				"arch.hook-callbacks missing_event src/hooks/violation.ts:4",
+				"arch.registration-no-admin-role violation src/registration/violation.ts:1",
+				"arch.parser-input-types-strict incomplete src/strict/violation.ts:2",
+				"arch.parser-input-types-strict forbidden src/strict/violation.ts:3",
+			},
+		},
 	}
 	for _, family := range families {
 		t.Run(family.name, func(t *testing.T) {

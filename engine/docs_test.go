@@ -40,6 +40,15 @@ var (
 		"testdata/fixtures/relation-examples/a3-invocations/rules/domain-clock.ts",
 		"testdata/fixtures/relation-examples/a3-invocations/rules/query-writes-strict.ts",
 		"testdata/fixtures/relation-examples/a3-invocations/rules/security-callbacks-strict.ts",
+		"testdata/fixtures/relation-examples/a4-signatures/rules/handler-signatures.ts",
+		"testdata/fixtures/relation-examples/a4-signatures/rules/signature-evidence-strict.ts",
+		"testdata/fixtures/relation-examples/a4-signatures/rules/id-lookup-return.ts",
+		"testdata/fixtures/relation-examples/a5-structural-types/rules/registration-role.ts",
+		"testdata/fixtures/relation-examples/a5-structural-types/rules/event-id.ts",
+		"testdata/fixtures/relation-examples/a5-structural-types/rules/coordinate-tuples.ts",
+		"testdata/fixtures/relation-examples/a5-structural-types/rules/hook-callbacks.ts",
+		"testdata/fixtures/relation-examples/a5-structural-types/rules/generic-names.ts",
+		"testdata/fixtures/relation-examples/a5-structural-types/rules/input-types-strict.ts",
 	}
 )
 
