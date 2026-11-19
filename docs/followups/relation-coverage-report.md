@@ -51,7 +51,7 @@ observations; neither uncertainty relation has a row. A strict policy for
 those markers would flag incomplete evidence, potentially blocking safe code,
 but a reachable positive fixture is needed before claiming example coverage.
 
-To reproduce the declaration uncertainty attempt:
+To reproduce the declaration uncertainty attempt against starting commit `6b3eb33`:
 
 ```sh
 GOPROXY=off GOTOOLCHAIN=local GOFLAGS=-buildvcs=false npm_config_offline=true go run ./cmd/lintai facts --workspace-root testdata/fixtures/relation-examples/a6-declarations/uncertainty-attempt --relation ts.declaration --relation ts.declaration_metadata_incomplete --relation ts.declaration_fn --relation ts.declaration_fn_incomplete --relation ts.declaration_type_incomplete
