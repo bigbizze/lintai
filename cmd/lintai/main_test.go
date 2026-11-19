@@ -114,6 +114,16 @@ func TestRelationExamples(t *testing.T) {
 				"arch.domain-no-infrastructure-types violation src/domain/violation.ts:3",
 			},
 		},
+		{
+			name: "a3-invocations",
+			want: []string{
+				"arch.domain-no-library-clock violation src/domain/violation.ts:2",
+				"arch.query-no-writes-strict forbidden src/queries/violation.ts:6",
+				"arch.query-no-writes-strict indeterminate src/queries/indeterminate.ts:2",
+				"arch.security-callbacks-strict forbidden src/handlers/violation.ts:3",
+				"arch.security-callbacks-strict indeterminate src/handlers/indeterminate.ts:2",
+			},
+		},
 	}
 	for _, family := range families {
 		t.Run(family.name, func(t *testing.T) {

@@ -37,6 +37,9 @@ var (
 		"testdata/fixtures/relation-examples/a2-imports/rules/explicit-loads-strict.ts",
 		"testdata/fixtures/relation-examples/a2-imports/rules/no-infrastructure-types.ts",
 		"testdata/fixtures/relation-examples/a2-imports/rules/resolved-imports-strict.ts",
+		"testdata/fixtures/relation-examples/a3-invocations/rules/domain-clock.ts",
+		"testdata/fixtures/relation-examples/a3-invocations/rules/query-writes-strict.ts",
+		"testdata/fixtures/relation-examples/a3-invocations/rules/security-callbacks-strict.ts",
 	}
 )
 
