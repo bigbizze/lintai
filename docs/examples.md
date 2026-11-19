@@ -1196,22 +1196,15 @@ export default rule("arch.query-no-writes-strict")
 		Decl indeterminate(Site, File, Reason).
 		indeterminate(Site, File, Reason) :- query_call(Site, File),
 			ts.call_declaration_incomplete(Site, Reason).
-		Decl has_declaration(Site).
-		has_declaration(Site) :- query_call(Site, _), ts.call_declaration(Site, _).
-		Decl has_incomplete(Site).
-		has_incomplete(Site) :- query_call(Site, _), ts.call_declaration_incomplete(Site, _).
-		Decl missing_declaration(Site, File).
-		missing_declaration(Site, File) :- query_call(Site, File),
-			!has_declaration(Site), !has_incomplete(Site).
 	`)
-	.report("forbidden", "indeterminate", "missing_declaration")
+	.report("forbidden", "indeterminate")
 	.expectNonEmpty("query_call")
 	.message((_row, ctx) => ctx.assertion_id === "forbidden"
 		? "Query modules must not call methods declared as write"
 		: "Cannot determine the declared member for this query call");
 ```
 
-The selected declaration identifies a lexical member, not a runtime implementation; the rule matches the member name on any owner, so unrelated `write` methods are also reported. This strict variant can report unresolved, synthetic, unsupported, conflicting, or missing declaration evidence even for safe calls; a positive forbidden result and an uncertainty result can coexist. A free function named `write` and a function-valued argument are not member calls.
+The selected declaration identifies a lexical member, not a runtime implementation; the rule matches the member name on any owner, so unrelated `write` methods are also reported. This strict variant can report unresolved, synthetic, unsupported, or conflicting declaration evidence even for safe calls; a positive forbidden result and an uncertainty result can coexist. A free function named `write` and a function-valued argument are not member calls.
 
 A separate strict call-graph policy could also report `ts.call_target_conflict` when runtime target observations disagree, but it may block a call that is safe in one compiler context. The current CLI fixture could not produce that marker; the [coverage report](followups/relation-coverage-report.md) records the attempt and its limits.
 
