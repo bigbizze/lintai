@@ -1,0 +1,338 @@
+[
+  {
+    "relation": "ts.ambient_source",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.ambient_write",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.call_declaration",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.call_declaration_incomplete",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.call_site",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.call_target_conflict",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.config_adjusted",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.declaration",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.declaration_fn",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.declaration_fn_incomplete",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.declaration_member",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.declaration_metadata_incomplete",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.declaration_origin",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.declaration_source",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.declaration_source_candidate",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.declaration_source_outcome",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.declaration_type",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.declaration_type_incomplete",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.declaration_type_subject",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.export_incomplete",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.export_reexport",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.export_target",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.export_via",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.external_call",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.fn_async",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.fn_container",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.fn_exported",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.fn_kind",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.fn_signature",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.fn_signature_conflict",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.fn_signature_omitted",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.fn_signature_unresolved",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.fn_value_escape",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.fn_value_escape_target",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.global_ref",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.import_form",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.import_opaque",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.import_package",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.import_unresolved",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.location",
+    "reason": "reporting support"
+  },
+  {
+    "relation": "ts.meta_access",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.module",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.module_directive",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.module_export",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.module_exports_incomplete",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.module_parse_error",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.signature_arity",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.signature_complete",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.signature_incomplete",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.signature_param",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.signature_param_optional",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.signature_param_rest",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.signature_returns",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.source_binding",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.source_binding_attempt",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.source_binding_checked_decl",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.source_binding_incomplete",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.source_binding_source_decl",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.source_entry",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.source_entry_applied",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.source_entry_incomplete",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.source_entry_tsconfig",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.source_entry_unapplied",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.type_arg",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.type_arg_optional",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.type_arg_rest",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.type_display",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.type_incomplete",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.type_kind",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.type_literal",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.type_member",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.type_named",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.type_origin_kind",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.type_param_name",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.type_prop",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.type_prop_optional",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.type_prop_readonly",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.type_readonly",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.type_ref",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.type_ref_target",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.type_sig_param",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.type_sig_param_optional",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.type_sig_param_rest",
+    "reason": "not yet reviewed"
+  },
+  {
+    "relation": "ts.type_sig_returns",
+    "reason": "not yet reviewed"
+  }
+]
