@@ -35,7 +35,7 @@ var (
 		"testdata/fixtures/relation-examples/a1-source-identity/rules/parse-errors-strict.ts",
 		"testdata/fixtures/relation-examples/a1-source-identity/rules/reducer-methods.ts",
 		"testdata/fixtures/relation-examples/a2-imports/rules/explicit-loads-strict.ts",
-		"testdata/fixtures/relation-examples/a2-imports/rules/no-infrastructure-types.ts",
+		"testdata/fixtures/relation-examples/a2-imports/rules/no-broad-function-type.ts",
 		"testdata/fixtures/relation-examples/a2-imports/rules/resolved-imports-strict.ts",
 		"testdata/fixtures/relation-examples/a3-invocations/rules/domain-clock.ts",
 		"testdata/fixtures/relation-examples/a3-invocations/rules/query-writes-strict.ts",

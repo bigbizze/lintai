@@ -111,7 +111,7 @@ func TestRelationExamples(t *testing.T) {
 				"arch.core-resolved-imports-strict violation src/core/violation.ts:1",
 				"arch.core-no-dynamic-loading-strict dynamic_load src/core/violation.ts:2",
 				"arch.core-no-dynamic-loading-strict opaque_load src/core/violation.ts:3",
-				"arch.domain-no-infrastructure-types violation src/domain/violation.ts:3",
+				"arch.no-broad-function-type violation src/types/violation.ts:1",
 			},
 		},
 		{
@@ -419,7 +419,7 @@ files = "tsconfig"
 	write("src/main.ts", "export const main = 1;\n")
 	write("src/extra.ts", "export const extra = 2;\n")
 	var output bytes.Buffer
-	if err := run(context.Background(), []string{"scope", "--explain", "--json", "--workspace-root", root}, &output); err != nil {
+	if err := run(context.Background(), []string{"scope", "--asset-root", "x", "--explain", "--json", "--workspace-root", root}, &output); err != nil {
 		t.Fatal(err)
 	}
 	var reports []struct {

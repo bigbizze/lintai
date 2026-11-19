@@ -232,6 +232,10 @@
     "reason": "not yet reviewed"
   },
   {
+    "relation": "ts.type_ref_target",
+    "reason": "disagrees with its description"
+  },
+  {
     "relation": "ts.type_sig_param",
     "reason": "not yet reviewed"
   },
