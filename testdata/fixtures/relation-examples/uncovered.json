@@ -72,20 +72,8 @@
     "reason": "not yet reviewed"
   },
   {
-    "relation": "ts.fn_signature",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.fn_signature_conflict",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.fn_signature_omitted",
-    "reason": "not yet reviewed"
-  },
-  {
     "relation": "ts.fn_signature_unresolved",
-    "reason": "not yet reviewed"
+    "reason": "could not build a fixture: missing types resolve to checker any and produce complete signature observations"
   },
   {
     "relation": "ts.import_package",
@@ -104,32 +92,8 @@
     "reason": "not yet reviewed"
   },
   {
-    "relation": "ts.signature_arity",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.signature_complete",
-    "reason": "not yet reviewed"
-  },
-  {
     "relation": "ts.signature_incomplete",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.signature_param",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.signature_param_optional",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.signature_param_rest",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.signature_returns",
-    "reason": "not yet reviewed"
+    "reason": "could not build a fixture: missing types resolve to checker any and produce complete signature observations"
   },
   {
     "relation": "ts.source_binding",
@@ -172,83 +136,7 @@
     "reason": "not yet reviewed"
   },
   {
-    "relation": "ts.type_arg",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.type_arg_optional",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.type_arg_rest",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.type_display",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.type_incomplete",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.type_kind",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.type_literal",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.type_member",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.type_named",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.type_origin_kind",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.type_param_name",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.type_prop",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.type_prop_optional",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.type_prop_readonly",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.type_readonly",
-    "reason": "not yet reviewed"
-  },
-  {
     "relation": "ts.type_ref_target",
     "reason": "disagrees with its description"
-  },
-  {
-    "relation": "ts.type_sig_param",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.type_sig_param_optional",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.type_sig_param_rest",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.type_sig_returns",
-    "reason": "not yet reviewed"
   }
 ]

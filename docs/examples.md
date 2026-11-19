@@ -1139,14 +1139,16 @@ import { dl, rule } from "@lintai/sdk";
 export default rule("arch.no-broad-function-type")
 	.version(1)
 	.program(dl`
+		Decl types_module(File).
+		types_module(File) :- ts.module_path(_, File), lintai.glob(File, "src/types/**").
 		Decl broad_function_type(Site, File).
 		broad_function_type(Site, File) :- ts.type_ref(Site, "Function"),
-			ts.site(Site, File), lintai.glob(File, "src/types/**").
+			ts.site(Site, File), types_module(File).
 		Decl violation(Site, File).
 		violation(Site, File) :- broad_function_type(Site, File).
 	`)
 	.report("violation")
-	.expectNonEmpty("broad_function_type")
+	.expectNonEmpty("types_module")
 	.message(() => "Use a specific callable type instead of Function");
 ```
 
@@ -1240,3 +1242,272 @@ export default rule("arch.security-callbacks-strict")
 ```
 
 The strict unknown result can include safe callbacks whose implementation is not collected, including library functions or parameters. Only supported direct function-valued arguments to external or unresolved invocations are recorded; spreads, indirect transfers and some untyped values are outside this check. Direct calls and transfers to collected local functions are allowed.
+
+## 32. Request handler signatures
+
+Keep request handlers on a consistent one-argument calling convention.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Exported request handlers must take exactly one required, non-rest argument.
+export default rule("arch.handler-signatures")
+	.version(1)
+	.program(dl`
+		Decl handler(Fn, Name).
+		handler(Fn, Name) :- ts.fn(Fn, File, Name), ts.fn_exported(Fn),
+			lintai.glob(File, "src/handlers/**").
+		Decl observed(Fn, Name, Sig).
+		observed(Fn, Name, Sig) :- handler(Fn, Name), ts.fn_signature(Fn, Sig), ts.signature_complete(Sig).
+		Decl wrong_arity(Fn, Name, Count).
+		wrong_arity(Fn, Name, Count) :- observed(Fn, Name, Sig), ts.signature_arity(Sig, Count), Count != 1.
+		Decl optional_request(Fn, Name).
+		optional_request(Fn, Name) :- observed(Fn, Name, Sig), ts.signature_param(Sig, 0, _),
+			ts.signature_param_optional(Sig, 0).
+		Decl rest_request(Fn, Name).
+		rest_request(Fn, Name) :- observed(Fn, Name, Sig), ts.signature_param(Sig, 0, _),
+			ts.signature_param_rest(Sig, 0).
+	`)
+	.report("wrong_arity", "optional_request", "rest_request")
+	.expectNonEmpty("handler", "observed")
+	.message(() => "Request handlers must take exactly one required, non-rest argument");
+```
+
+Only complete observed signatures are checked; omitted, unresolved, and conflicting observations need a separate strict policy. A complete signature does not imply that every referenced type is structurally complete.
+
+## 33. Strict security signature evidence
+
+Require observable, consistent signatures in security-sensitive code.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Security-sensitive functions must not have omitted or conflicting signatures.
+export default rule("arch.secure-signature-evidence-strict")
+	.version(1)
+	.program(dl`
+		Decl secure_function(Fn, Name).
+		secure_function(Fn, Name) :- ts.fn(Fn, File, Name), lintai.glob(File, "src/secure/**").
+		Decl omitted(Fn, Name).
+		omitted(Fn, Name) :- secure_function(Fn, Name), ts.fn_signature_omitted(Fn).
+		Decl conflict(Fn, Name).
+		conflict(Fn, Name) :- secure_function(Fn, Name), ts.fn_signature_conflict(Fn).
+	`)
+	.report("omitted", "conflict")
+	.expectNonEmpty("secure_function")
+	.message(() => "Cannot establish an unambiguous signature for this security-sensitive function");
+```
+
+This strict policy reports ownership-only anonymous callbacks whose signatures the producer intentionally omits, and functions with conflicting compiler-context observations; it can therefore block safe code. It does not handle unresolved or incomplete signature observations; the coverage report records why those variants lack a fixture.
+
+## 34. Identifier lookup return types
+
+Require identifier lookup functions to expose the same asynchronous result contract.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Exported identifier lookups must return a library Promise of string.
+export default rule("arch.id-lookup-return")
+	.version(1)
+	.program(dl`
+		Decl lookup(Fn, Name).
+		lookup(Fn, Name) :- ts.fn(Fn, File, Name), ts.fn_exported(Fn), lintai.glob(File, "src/ids/**").
+		Decl allowed_return(Sig).
+		allowed_return(Sig) :- ts.signature_returns(Sig, Promise), ts.type_named(Promise, "lib", "Promise"),
+			ts.type_origin_kind(Promise, /lib), ts.type_arg(Promise, 0, Value), ts.type_kind(Value, /string).
+		Decl violation(Fn, Name, Returned).
+		violation(Fn, Name, Returned) :- lookup(Fn, Name), ts.fn_signature(Fn, Sig),
+			ts.signature_complete(Sig), ts.signature_returns(Sig, Type), !allowed_return(Sig),
+			ts.type_display(Type, Returned).
+	`)
+	.report("violation")
+	.expectNonEmpty("lookup")
+	.message((row) => `Identifier lookups must return Promise<string>, but return ${row.Returned}`);
+```
+
+The rule checks only complete observed signatures and one library Promise layer; conflicting or incomplete observations require separate handling. The display text is used only in the diagnostic, never as the semantic match.
+
+## 35. Registration role literals
+
+Prevent explicitly allowing an administrator role in public registration inputs.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Public registration inputs must not include the admin role.
+export default rule("arch.registration-no-admin-role")
+	.version(1)
+	.program(dl`
+		Decl registration(Fn, Name, Input).
+		registration(Fn, Name, Input) :- ts.fn(Fn, File, Name), ts.fn_exported(Fn),
+			lintai.glob(File, "src/registration/**"), ts.fn_signature(Fn, Sig),
+			ts.signature_complete(Sig), ts.signature_param(Sig, 0, Input).
+		Decl admin_role(Type).
+		admin_role(Type) :- ts.type_literal(Type, /string, "admin").
+		admin_role(Type) :- ts.type_member(Type, Member), ts.type_literal(Member, /string, "admin").
+		Decl violation(Fn, Name).
+		violation(Fn, Name) :- registration(Fn, Name, Input), ts.type_prop(Input, "role", Role), admin_role(Role).
+	`)
+	.report("violation")
+	.expectNonEmpty("registration")
+	.message(() => "Public registration inputs must not include the admin role");
+```
+
+This checks a represented first-parameter object property and its literal union members; a broad string, any, omitted members, or other incomplete evidence is not proof that the input excludes admin. Validate authorization independently.
+
+## 36. Immutable event identifiers
+
+Keep represented event identifier properties required and readonly.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Published event id properties must be required and readonly.
+export default rule("arch.event-id")
+	.version(1)
+	.program(dl`
+		Decl event(Fn, Name, Input).
+		event(Fn, Name, Input) :- ts.fn(Fn, File, Name), ts.fn_exported(Fn),
+			lintai.glob(File, "src/events/**"), ts.fn_signature(Fn, Sig),
+			ts.signature_complete(Sig), ts.signature_param(Sig, 0, Input).
+		Decl has_id(Input).
+		has_id(Input) :- ts.type_prop(Input, "id", _).
+		Decl optional_id(Fn, Name).
+		optional_id(Fn, Name) :- event(Fn, Name, Input), ts.type_prop_optional(Input, "id").
+		Decl mutable_id(Fn, Name).
+		mutable_id(Fn, Name) :- event(Fn, Name, Input), has_id(Input), !ts.type_prop_readonly(Input, "id").
+	`)
+	.report("optional_id", "mutable_id")
+	.expectNonEmpty("event")
+	.message(() => "Published event id properties must be required and readonly");
+```
+
+This checks a known id property on the first parameter; it does not require that the property exists, and class or interface members can be omitted from structural facts. Readonly describes the TypeScript type rather than runtime immutability.
+
+## 37. Coordinate tuple shape
+
+Keep geometry coordinate tuples fixed and readonly.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Geometry coordinate tuples must be readonly and have no optional or rest elements.
+export default rule("arch.coordinate-tuples")
+	.version(1)
+	.program(dl`
+		Decl coordinate(Fn, Name, Type).
+		coordinate(Fn, Name, Type) :- ts.fn(Fn, File, Name), ts.fn_exported(Fn),
+			lintai.glob(File, "src/geometry/**"), ts.fn_signature(Fn, Sig), ts.signature_complete(Sig),
+			ts.signature_param(Sig, 0, Type), ts.type_kind(Type, /tuple).
+		Decl optional_element(Fn, Name, Position).
+		optional_element(Fn, Name, Position) :- coordinate(Fn, Name, Type), ts.type_arg(Type, Position, _),
+			ts.type_arg_optional(Type, Position).
+		Decl rest_element(Fn, Name, Position).
+		rest_element(Fn, Name, Position) :- coordinate(Fn, Name, Type), ts.type_arg(Type, Position, _),
+			ts.type_arg_rest(Type, Position).
+		Decl mutable_tuple(Fn, Name).
+		mutable_tuple(Fn, Name) :- coordinate(Fn, Name, Type), !ts.type_readonly(Type).
+	`)
+	.report("optional_element", "rest_element", "mutable_tuple")
+	.expectNonEmpty("coordinate")
+	.message(() => "Coordinate tuples must be readonly and have no optional or rest elements");
+```
+
+Only first parameters represented as tuples are checked; the rule does not enforce a specific element count or type and does not classify non-tuple parameters. Readonly arrays are named library types rather than readonly tuples.
+
+## 38. Subscription callback signatures
+
+Require event subscription callback types to accept an event and return void.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Subscription callbacks must take a required event and return void.
+export default rule("arch.hook-callbacks")
+	.version(1)
+	.program(dl`
+		Decl callback(Fn, Name, Type).
+		callback(Fn, Name, Type) :- ts.fn(Fn, File, Name), ts.fn_exported(Fn),
+			lintai.glob(File, "src/hooks/**"), ts.fn_signature(Fn, Sig), ts.signature_complete(Sig),
+			ts.signature_param(Sig, 0, Type), ts.type_kind(Type, /function).
+		Decl has_event(Type).
+		has_event(Type) :- ts.type_sig_param(Type, 0, _).
+		Decl missing_event(Fn, Name).
+		missing_event(Fn, Name) :- callback(Fn, Name, Type), !has_event(Type).
+		Decl optional_event(Fn, Name).
+		optional_event(Fn, Name) :- callback(Fn, Name, Type), ts.type_sig_param(Type, 0, _),
+			ts.type_sig_param_optional(Type, 0).
+		Decl rest_event(Fn, Name).
+		rest_event(Fn, Name) :- callback(Fn, Name, Type), ts.type_sig_param(Type, 0, _),
+			ts.type_sig_param_rest(Type, 0).
+		Decl nonvoid_callback(Fn, Name).
+		nonvoid_callback(Fn, Name) :- callback(Fn, Name, Type), ts.type_sig_returns(Type, Returned),
+			ts.type_kind(Returned, Kind), Kind != /void.
+	`)
+	.report("missing_event", "optional_event", "rest_event", "nonvoid_callback")
+	.expectNonEmpty("callback")
+	.message(() => "Subscription callbacks must take a required event and return void");
+```
+
+This checks the first parameter of a represented function type and its declared return, not the runtime callback implementation. Unsupported or incomplete type structures require separate handling, and extra callback parameters are not restricted.
+
+## 39. Generic names at API boundaries
+
+Use a consistent T prefix to distinguish generic parameters from concrete types at API boundaries.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Generic parameters exposed by API functions must have names beginning with T.
+export default rule("arch.api-generic-names")
+	.version(1)
+	.program(dl`
+		Decl api_function(Fn, Name).
+		api_function(Fn, Name) :- ts.fn(Fn, File, Name), ts.fn_exported(Fn), lintai.glob(File, "src/api/**").
+		Decl violation(Fn, Name, Parameter).
+		violation(Fn, Name, Parameter) :- api_function(Fn, Name), ts.fn_signature(Fn, Sig),
+			ts.signature_complete(Sig), ts.signature_param(Sig, _, Type), ts.type_param_name(Type, Parameter),
+			!lintai.glob(Parameter, "T*").
+	`)
+	.report("violation")
+	.expectNonEmpty("api_function")
+	.message((row) => `Generic parameter ${row.Parameter} must begin with T`);
+```
+
+Names are descriptive metadata, not type identities; the rule checks directly observed parameter types and does not inspect nested or return-only parameters. It is a project naming convention rather than a TypeScript requirement.
+
+## 40. Strict parser input types
+
+Flag parser inputs that expose any or whose structural type cannot be fully inspected.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Public parser input types must not contain any or structurally incomplete evidence.
+export default rule("arch.parser-input-types-strict")
+	.version(1)
+	.program(dl`
+		Decl parser_input(Fn, Name, Type).
+		parser_input(Fn, Name, Type) :- ts.fn(Fn, File, Name), ts.fn_exported(Fn),
+			lintai.glob(File, "src/strict/**"), ts.fn_signature(Fn, Sig), ts.signature_complete(Sig),
+			ts.signature_param(Sig, 0, Type).
+		Decl any_type(Type).
+		any_type(Type) :- ts.type_kind(Type, /any).
+		any_type(Type) :- ts.type_child(Type, Child), any_type(Child).
+		Decl forbidden(Fn, Name).
+		forbidden(Fn, Name) :- parser_input(Fn, Name, Type), any_type(Type).
+		Decl incomplete_type(Type, Reason).
+		incomplete_type(Type, Reason) :- ts.type_incomplete(Type, Reason).
+		incomplete_type(Type, Reason) :- ts.type_child(Type, Child), incomplete_type(Child, Reason).
+		Decl incomplete(Fn, Name, Reason).
+		incomplete(Fn, Name, Reason) :- parser_input(Fn, Name, Type), incomplete_type(Type, Reason).
+	`)
+	.report("forbidden", "incomplete")
+	.expectNonEmpty("parser_input")
+	.message((_row, ctx) => ctx.assertion_id === "forbidden"
+		? "Parser inputs must not contain any"
+		: "Cannot inspect the complete parser input type");
+```
+
+This strict variant can block safe inputs when interfaces, classes, library types, constrained parameters, or depth limits leave structural evidence incomplete. It checks represented descendants of the first input for complete observed signatures; missing or incomplete signature observations need separate handling.
