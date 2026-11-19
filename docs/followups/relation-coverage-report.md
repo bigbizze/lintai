@@ -38,7 +38,8 @@ strict policy on that relation would report inconsistent analyses, at the
 cost of blocking code that may be safe in one context, but needs a reachable
 positive fixture before it can be included as a tested example.
 
-To reproduce the unsuccessful signature-incompleteness attempt:
+To reproduce the unsuccessful signature-incompleteness attempt from U4's
+starting commit `84f473b`:
 
 ```sh
 GOPROXY=off GOTOOLCHAIN=local GOFLAGS=-buildvcs=false npm_config_offline=true go run ./cmd/lintai facts --workspace-root testdata/fixtures/relation-examples/a4-signatures/unresolved-attempt --relation ts.fn --relation ts.fn_signature --relation ts.signature_complete --relation ts.signature_incomplete --relation ts.fn_signature_unresolved --relation ts.signature_param --relation ts.signature_returns --relation ts.type_kind
