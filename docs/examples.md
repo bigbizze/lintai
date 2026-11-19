@@ -222,7 +222,7 @@ Caveats:
 
 - the built-in sources are `/clock`, `/env`, `/random`, `/network`, `/timer` and `/process`. `docs/api.md` gives their matchers.
 - a use inside an anonymous callback belongs to the callback. `owner_reaches_ambient` follows calls; `owner_reaches_ambient_strict` also follows function values explicitly.
-- a use at module scope has no `site_in_fn` row. `module_uses_ambient` and `module_reaches_ambient` see it, `owner_reaches_ambient` does not.
+- a use at module scope has no `site_in_fn` row. `module_uses_ambient` and `module_reaches_ambient` see it, and `owner_reaches_ambient` sees it when the site has a module owner.
 - aliases such as `const env = process.env` are recorded as a dynamic use, because the whole object escapes
 
 ## 5. Required import
@@ -500,7 +500,7 @@ import { now } from "../services/clock";
 export const reading = wired(now);
 ```
 
-The non-strict rule in section 1 reports nothing here. The strict rule reports `launder` and `wired` with `leaves_analysis`, because `read()` is a call that lintai cannot resolve. A rule over `ts.calls_or_refs_reach("src/server/wire-clock.ts", Fn)` also links the server module to the `now` value. That link does not prove that `now` runs.
+The non-strict rule in section 1 reports nothing here. The strict rule reports `launder` and `wired` with `leaves_analysis`, because `read()` is a call that lintai cannot resolve. A rule over `ts.module_path(Module, "src/server/wire-clock.ts"), ts.calls_or_refs_reach(Module, Fn)` also links the server module to the `now` value. That link does not prove that `now` runs.
 
 Caveats:
 
