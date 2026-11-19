@@ -1128,27 +1128,26 @@ export default rule("arch.core-resolved-imports-strict")
 
 This strict policy depends on the active compiler context and can report missing or deliberately virtual dependencies. Computed specifiers have separate opaque-load evidence.
 
-## 28. Keep infrastructure types out of the domain
+## 28. Avoid the broad `Function` type
 
-Keep source references to infrastructure-declared types out of domain modules.
+Use a specific callable signature in source annotations instead of TypeScript's broad `Function` type.
 
 ```ts
 import { dl, rule } from "@lintai/sdk";
 
-// Domain modules must not reference types declared in infrastructure modules.
-export default rule("arch.domain-no-infrastructure-types")
+// Source annotations must not use TypeScript's broad Function type.
+export default rule("arch.no-broad-function-type")
 	.version(1)
 	.program(dl`
-		Decl domain_module(File).
-		domain_module(File) :- ts.module_path(_, File), lintai.glob(File, "src/domain/**").
-		Decl violation(Site, Name, Target).
-		violation(Site, Name, Target) :- domain_module(File), ts.site(Site, File),
-			ts.type_ref(Site, Name), ts.type_ref_target(Site, Target),
-			lintai.glob(Target, "src/infrastructure/**").
+		Decl broad_function_type(Site, File).
+		broad_function_type(Site, File) :- ts.type_ref(Site, "Function"),
+			ts.site(Site, File), lintai.glob(File, "src/types/**").
+		Decl violation(Site, File).
+		violation(Site, File) :- broad_function_type(Site, File).
 	`)
 	.report("violation")
-	.expectNonEmpty("domain_module")
-	.message(() => "Domain modules must not reference infrastructure types");
+	.expectNonEmpty("broad_function_type")
+	.message(() => "Use a specific callable type instead of Function");
 ```
 
-The fixture uses resolved imports and permits a reference to a domain-declared type. This matches supported source syntax rather than the expanded type graph; unresolved NodeNext type imports can currently produce an incorrect target, so do not treat a missing match as proof of compliance.
+This matches the written type name and does not resolve a differently named alias to `Function`.
