@@ -306,6 +306,7 @@ func runScope(ctx context.Context, args []string, stdout io.Writer) error {
 	flags.SetOutput(os.Stderr)
 	workspaceRoot := flags.String("workspace-root", ".", "workspace root to inspect")
 	configPath := flags.String("config", "", "lintai.toml file (relative to the invocation directory)")
+	flags.String("asset-root", "", "ignored; the npm launcher passes it to every command")
 	explain := flags.Bool("explain", false, "explain the production source and compiler scope")
 	jsonOutput := flags.Bool("json", false, "print the scope explanation as JSON")
 	var excludes stringList

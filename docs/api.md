@@ -519,7 +519,7 @@ pnpm exec lintai \
 pnpm exec lintai facts --workspace-root . --relation ts.ambient_use --relation ts.ambient_key
 ```
 
-`lintai scope --explain` prints the selected paths, compiler eligibility, configurations and pruned boundaries for each producer; `--json` emits the explanation as JSON. It accepts `--source-links` but does not read that file when explaining scope. Use the native executable for this command: the npm launcher appends `--asset-root`, which `scope` does not accept. `lintai serve` uses JSON-RPC initialization rather than analysis CLI flags.
+`lintai scope --explain` prints the selected paths, compiler eligibility, configurations and pruned boundaries for each producer; `--json` emits the explanation as JSON. It accepts `--source-links` but does not read that file when explaining scope. `lintai serve` uses JSON-RPC initialization rather than analysis CLI flags.
 
 ### Snapshot scope
 

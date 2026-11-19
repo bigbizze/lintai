@@ -409,7 +409,7 @@ files = "tsconfig"
 	write("src/main.ts", "export const main = 1;\n")
 	write("src/extra.ts", "export const extra = 2;\n")
 	var output bytes.Buffer
-	if err := run(context.Background(), []string{"scope", "--explain", "--json", "--workspace-root", root}, &output); err != nil {
+	if err := run(context.Background(), []string{"scope", "--asset-root", "x", "--explain", "--json", "--workspace-root", root}, &output); err != nil {
 		t.Fatal(err)
 	}
 	var reports []struct {
