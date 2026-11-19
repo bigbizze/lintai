@@ -1,8 +1,7 @@
 # Relation coverage report
 
-This report records the reviewed gaps from units completed so far, plus a
-known disagreement for a relation with a resolved-import example. Remaining
-`not yet reviewed` entries belong to later units.
+This report records the reviewed gaps and known disagreements. Every entry
+remaining in the allowlist has a reason recorded below.
 
 | Relation | Outcome | What was tried | Why it failed | Suggestion |
 |---|---|---|---|---|
@@ -13,6 +12,8 @@ known disagreement for a relation with a resolved-import example. Remaining
 | `ts.signature_incomplete` | could not build a fixture | Tried the same strict policy and [fixture](../../testdata/fixtures/relation-examples/a4-signatures/unresolved-attempt), comparing missing types with an ordinary known signature. | Each attempted declaration produces a complete signature, including those whose missing type is the checker's `any`; no partial observation is available to report. | Keep as a signature-level strict-policy building block; ask the owner for a supported partial-observation fixture. |
 | `ts.import_package` | disagrees with its description | Considered a policy that bans a package in a domain directory. The minimal fixture [import-package](../../testdata/fixtures/relation-examples/disagreements/import-package) imports the declared virtual module `virtual:env`. | `ts.import_package` reports `virtual:env` even though the workspace declares a virtual ambient module and contains no package by that name; the description says it is a resolved package name. | Keep and document as a building block after the owner decides whether extraction or the description should change. |
 | `ts.type_ref_target` | disagrees with its description | The [type-ref-target](../../testdata/fixtures/relation-examples/disagreements/type-ref-target) fixture imports `./model` without the extension required by its NodeNext context, then references `Model`. A separate example uses only resolved imports and checks an allowed target. | The import is unresolved, but the reported target is `importer.ts`, which does not declare `Model`; the description says the target is the workspace file declaring the referenced type. | Keep and document as a building block after the owner decides whether extraction or the description should change. |
+| `ts.declaration_fn_incomplete` | could not build a fixture | Tried strict public function-association checking with overloads, renamed re-exports and different strictness contexts in the [fixture](../../testdata/fixtures/relation-examples/a6-declarations/uncertainty-attempt). | The same declaration retained one collected function identity; overload signatures are distinct declarations. The tested contexts produced a type conflict but no function-association conflict. | Keep as a strict-policy building block; ask the owner for a supported source-level case yielding multiple function identities for one declaration. |
+| `ts.declaration_metadata_incomplete` | could not build a fixture | Tried a strict metadata policy over overloaded functions, renamed exports, namespaces and declarations observed in differing compiler contexts in the [fixture](../../testdata/fixtures/relation-examples/a6-declarations/uncertainty-attempt). | The producer reported supported, consistent metadata for those endpoints; the type conflict did not make declaration metadata incomplete. No positive CLI example was found for unsupported or conflicting metadata. | Keep as a strict-policy building block; ask the owner for an actionable source-level fixture. |
 | `ts.location` | no realistic rule found | Considered a rule that reports every location. | Locations are reporting and query support, not actionable policy evidence on their own. | Keep and document as a building block for rules that need explicit locations. |
 
 From the repository root, these commands reproduce the disagreements:
@@ -48,3 +49,15 @@ The missing imported and unknown types appear as `/any` in complete signature
 observations; neither uncertainty relation has a row. A strict policy for
 those markers would flag incomplete evidence, potentially blocking safe code,
 but a reachable positive fixture is needed before claiming example coverage.
+
+To reproduce the declaration uncertainty attempt:
+
+```sh
+GOPROXY=off GOTOOLCHAIN=local GOFLAGS=-buildvcs=false npm_config_offline=true go run ./cmd/lintai facts --workspace-root testdata/fixtures/relation-examples/a6-declarations/uncertainty-attempt --relation ts.declaration --relation ts.declaration_metadata_incomplete --relation ts.declaration_fn --relation ts.declaration_fn_incomplete --relation ts.declaration_type_incomplete
+```
+
+The observed `check` declaration has a `/value, /conflict` type outcome, but
+neither metadata nor function-association incompleteness is emitted. A strict
+policy for either remaining marker could block safe declarations when evidence
+is incomplete, and needs a reachable positive fixture before it can be
+presented as a tested rule.

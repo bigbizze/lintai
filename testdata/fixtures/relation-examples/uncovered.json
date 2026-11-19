@@ -12,64 +12,12 @@
     "reason": "no realistic rule found: configuration evidence has no report anchor or module association"
   },
   {
-    "relation": "ts.declaration",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.declaration_fn",
-    "reason": "not yet reviewed"
-  },
-  {
     "relation": "ts.declaration_fn_incomplete",
-    "reason": "not yet reviewed"
+    "reason": "could not build a fixture: aliases, overloads and differing compiler contexts retained one function identity per declaration"
   },
   {
     "relation": "ts.declaration_metadata_incomplete",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.declaration_origin",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.declaration_source",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.declaration_source_candidate",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.declaration_source_outcome",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.declaration_type",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.declaration_type_incomplete",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.declaration_type_subject",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.export_incomplete",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.export_reexport",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.export_target",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.export_via",
-    "reason": "not yet reviewed"
+    "reason": "could not build a fixture: aliases, overloads, namespaces and differing compiler contexts produced complete supported declaration metadata"
   },
   {
     "relation": "ts.fn_signature_unresolved",
@@ -84,56 +32,8 @@
     "reason": "reporting support"
   },
   {
-    "relation": "ts.module_export",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.module_exports_incomplete",
-    "reason": "not yet reviewed"
-  },
-  {
     "relation": "ts.signature_incomplete",
     "reason": "could not build a fixture: missing types resolve to checker any and produce complete signature observations"
-  },
-  {
-    "relation": "ts.source_binding",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.source_binding_attempt",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.source_binding_checked_decl",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.source_binding_incomplete",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.source_binding_source_decl",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.source_entry",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.source_entry_applied",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.source_entry_incomplete",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.source_entry_tsconfig",
-    "reason": "not yet reviewed"
-  },
-  {
-    "relation": "ts.source_entry_unapplied",
-    "reason": "not yet reviewed"
   },
   {
     "relation": "ts.type_ref_target",
