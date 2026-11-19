@@ -90,8 +90,9 @@ func TestRelationExamples(t *testing.T) {
 		t.Fatal(err)
 	}
 	families := []struct {
-		name string
-		want []string
+		name        string
+		sourceLinks string
+		want        []string
 	}{
 		{
 			name: "a1-source-identity",
@@ -154,6 +155,37 @@ func TestRelationExamples(t *testing.T) {
 				"arch.parser-input-types-strict forbidden src/strict/violation.ts:3",
 			},
 		},
+		{
+			name: "a6-declarations",
+			want: []string{
+				"arch.public-declaration-types-strict incomplete src/api/conflict.ts:1",
+				"arch.public-domain-no-async violation src/api/violation.ts:2",
+				"arch.public-types-no-any violation src/api/violation.ts:1",
+			},
+		},
+		{
+			name: "a7-exports",
+			want: []string{
+				"arch.public-export-evidence-strict incomplete_binding src/api/incomplete.ts:1",
+				"arch.public-export-evidence-strict incomplete_binding src/api/incomplete.ts:1",
+				"arch.public-export-evidence-strict incomplete_inventory src/api/incomplete.ts:1",
+				"arch.public-no-internal-reexports violation src/api/violation.ts:1",
+			},
+		},
+		{
+			name:        "a8-source-correspondence",
+			sourceLinks: "source-links.json",
+			want: []string{
+				"arch.declaration-map-boundary-strict candidate src/app/ambiguous.ts:2",
+				"arch.declaration-map-boundary-strict uncertain src/app/ambiguous.ts:2",
+				"arch.declaration-map-boundary-strict uncertain src/app/incomplete.ts:2",
+				"arch.declaration-map-boundary-strict precise src/app/violation.ts:2",
+				"arch.configured-source-evidence-strict incomplete_binding src/app/incomplete.ts:2",
+				"arch.configured-source-evidence-strict incomplete_entry src/app/incomplete.ts:2",
+				"arch.no-private-configured-calls violation src/app/violation.ts:2",
+				"arch.selected-source-links-applied-strict unused packages/contracts/src/public.ts:1",
+			},
+		},
 	}
 	for _, family := range families {
 		t.Run(family.name, func(t *testing.T) {
@@ -178,6 +210,9 @@ func TestRelationExamples(t *testing.T) {
 				"--repo-root", repoRoot,
 				"--workspace-root", filepath.Join(base, "workspace"),
 				"--rules", ruleGlob,
+			}
+			if family.sourceLinks != "" {
+				args = append(args, "--source-links", family.sourceLinks)
 			}
 			first := runJSON(t, args)
 			second := runJSON(t, args)

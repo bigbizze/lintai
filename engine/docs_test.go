@@ -49,6 +49,15 @@ var (
 		"testdata/fixtures/relation-examples/a5-structural-types/rules/hook-callbacks.ts",
 		"testdata/fixtures/relation-examples/a5-structural-types/rules/generic-names.ts",
 		"testdata/fixtures/relation-examples/a5-structural-types/rules/input-types-strict.ts",
+		"testdata/fixtures/relation-examples/a6-declarations/rules/public-types.ts",
+		"testdata/fixtures/relation-examples/a6-declarations/rules/public-domain-async.ts",
+		"testdata/fixtures/relation-examples/a6-declarations/rules/declaration-type-evidence-strict.ts",
+		"testdata/fixtures/relation-examples/a7-exports/rules/public-boundary.ts",
+		"testdata/fixtures/relation-examples/a7-exports/rules/export-evidence-strict.ts",
+		"testdata/fixtures/relation-examples/a8-source-correspondence/rules/configured-boundary.ts",
+		"testdata/fixtures/relation-examples/a8-source-correspondence/rules/source-evidence-strict.ts",
+		"testdata/fixtures/relation-examples/a8-source-correspondence/rules/mapped-boundary-strict.ts",
+		"testdata/fixtures/relation-examples/a8-source-correspondence/rules/unused-links-strict.ts",
 	}
 )
 

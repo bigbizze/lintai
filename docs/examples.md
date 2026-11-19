@@ -1511,3 +1511,255 @@ export default rule("arch.parser-input-types-strict")
 ```
 
 This strict variant can block safe inputs when interfaces, classes, library types, constrained parameters, or depth limits leave structural evidence incomplete. It checks represented descendants of the first input for complete observed signatures; missing or incomplete signature observations need separate handling.
+
+## 41. Public type aliases without any
+
+Keep public type aliases from exposing the unchecked `any` type.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Public type aliases must not be any.
+export default rule("arch.public-types-no-any")
+	.version(1)
+	.program(dl`
+		Decl public_alias(Export, Name, Declaration).
+		public_alias(Export, Name, Declaration) :- ts.module_export(Export, Module, Name, /type),
+			ts.module_path(Module, File), lintai.glob(File, "src/api/**"),
+			ts.export_target(Export, Declaration), ts.declaration(Declaration, _, /type_alias),
+			ts.declaration_type_subject(Declaration, /type).
+		Decl violation(Export, Name).
+		violation(Export, Name) :- public_alias(Export, Name, Declaration),
+			ts.declaration_type(Declaration, /type, Type), ts.type_kind(Type, /any).
+	`)
+	.report("violation")
+	.expectNonEmpty("public_alias")
+	.message(() => "Public type aliases must not be any");
+```
+
+This checks the type directly associated with an exported type alias; it does not recursively inspect nested properties or type arguments. Incomplete declaration-type evidence needs separate handling.
+
+## 42. Synchronous domain functions at API boundaries
+
+Keep an API barrel from exposing async domain function declarations, including named re-exports.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Public API bindings must not expose async domain functions.
+export default rule("arch.public-domain-no-async")
+	.version(1)
+	.program(dl`
+		Decl domain_export(Export, Name, Declaration).
+		domain_export(Export, Name, Declaration) :- ts.module_export(Export, Module, Name, /value),
+			ts.module_path(Module, File), lintai.glob(File, "src/api/**"),
+			ts.export_target(Export, Declaration), ts.declaration(Declaration, _, /function),
+			ts.declaration_origin(Declaration, /source_file, Origin), lintai.glob(Origin, "src/domain/**").
+		Decl violation(Export, Name).
+		violation(Export, Name) :- domain_export(Export, Name, Declaration),
+			ts.declaration_fn(Declaration, Fn), ts.fn_async(Fn).
+	`)
+	.report("violation")
+	.expectNonEmpty("domain_export")
+	.message(() => "Public APIs must not expose async domain functions");
+```
+
+The rule follows known declaration-to-function associations and checks the async modifier, not all promise-returning functions. Overloads or unavailable associations require separate handling.
+
+## 43. Strict public declaration type evidence
+
+Require consistent declaration-type evidence before relying on API type policies.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Public API declaration types must have complete and consistent evidence.
+export default rule("arch.public-declaration-types-strict")
+	.version(1)
+	.program(dl`
+		Decl public_export(Export, Declaration, Space).
+		public_export(Export, Declaration, Space) :- ts.module_export(Export, Module, _, Space),
+			ts.module_path(Module, File), lintai.glob(File, "src/api/**"), ts.export_target(Export, Declaration),
+			ts.declaration_type_subject(Declaration, Space).
+		Decl incomplete(Export, Space, Reason).
+		incomplete(Export, Space, Reason) :- public_export(Export, Declaration, Space),
+			ts.declaration_type_incomplete(Declaration, Space, Reason).
+	`)
+	.report("incomplete")
+	.expectNonEmpty("public_export")
+	.message(() => "Public declaration type evidence is incomplete or inconsistent");
+```
+
+This strict variant can block safe exports when compiler contexts disagree or the type cannot be established. It checks observed exported declarations, not the completeness of their entire structural type graph.
+
+## 44. Public re-export boundaries
+
+Prevent public API barrels from re-exporting bindings directly from internal modules.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Public API modules must not re-export bindings from internal modules.
+export default rule("arch.public-no-internal-reexports")
+	.version(1)
+	.program(dl`
+		Decl public_module(Module, File).
+		public_module(Module, File) :- ts.module_path(Module, File), lintai.glob(File, "src/api/**").
+		Decl violation(Export, Name).
+		violation(Export, Name) :- public_module(Module, _), ts.module_export(Export, Module, Name, _),
+			ts.export_via(Export, Site), ts.export_reexport(Export, Site, Source, _, _),
+			lintai.glob(Source, "src/internal/**").
+	`)
+	.report("violation")
+	.expectNonEmpty("public_module")
+	.message(() => "Public APIs must not re-export internal bindings");
+```
+
+The source path is the immediate re-export source, so an indirect chain needs additional checks. Unresolved bindings and incomplete wildcard inventories need the strict variant below.
+
+## 45. Strict public export evidence
+
+Require public API binding targets and wildcard export inventories to be known.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Public API export bindings and inventories must have complete evidence.
+export default rule("arch.public-export-evidence-strict")
+	.version(1)
+	.program(dl`
+		Decl public_module(Module, File).
+		public_module(Module, File) :- ts.module_path(Module, File), lintai.glob(File, "src/api/**").
+		Decl incomplete_binding(Export, Name, Reason).
+		incomplete_binding(Export, Name, Reason) :- public_module(Module, _),
+			ts.module_export(Export, Module, Name, _), ts.export_incomplete(Export, Reason).
+		Decl incomplete_inventory(Module, File, Reason).
+		incomplete_inventory(Module, File, Reason) :- public_module(Module, File),
+			ts.module_exports_incomplete(Module, Reason).
+	`)
+	.report("incomplete_binding", "incomplete_inventory")
+	.expectNonEmpty("public_module")
+	.message(() => "Public API export evidence is incomplete");
+```
+
+This strict variant can block otherwise safe APIs when dependencies do not resolve or an inventory is incomplete. A named unresolved export can produce separate type-space and value-space diagnostics.
+
+## 46. Configured contract source boundaries
+
+Prevent application calls from using contract bindings whose configured source declarations live in private files. Configure source links as described in [Source links](api.md#snapshot-scope) and pass `--source-links source-links.json`.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Application calls must not use configured bindings from private contract source files.
+export default rule("arch.no-private-configured-calls")
+	.version(1)
+	.program(dl`
+		Decl tracked_call(Site, Binding).
+		tracked_call(Site, Binding) :- ts.site(Site, File), lintai.glob(File, "src/app/**"),
+			ts.call_declaration(Site, Checked), ts.source_binding_checked_decl(Binding, Checked).
+		Decl violation(Site, Source).
+		violation(Site, Source) :- tracked_call(Site, Binding),
+			ts.source_binding(Binding, _, _, /value, /source_entry),
+			ts.source_binding_source_decl(Binding, SourceDecl),
+			ts.declaration_origin(SourceDecl, /source_file, Source),
+			lintai.glob(Source, "packages/contracts/src/private*").
+	`)
+	.report("violation")
+	.expectNonEmpty("tracked_call")
+	.message(() => "Application calls must not use private contract source bindings");
+```
+
+The association connects independently observed public binding sets; it does not prove declaration identity, runtime implementation or build freshness. Calls without a configured matching checked declaration are outside this rule.
+
+## 47. Strict configured source evidence
+
+Require complete source-link evidence for application calls associated with configured checked declarations. Use `--source-links source-links.json` with explicit `sourceTsconfig` entries.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Application calls using configured source links must have complete source association evidence.
+export default rule("arch.configured-source-evidence-strict")
+	.version(1)
+	.program(dl`
+		Decl tracked_call(Site, Binding, Entry).
+		tracked_call(Site, Binding, Entry) :- ts.site(Site, File), lintai.glob(File, "src/app/**"),
+			ts.call_declaration(Site, Checked), ts.source_binding_checked_decl(Binding, Checked),
+			ts.source_binding_attempt(Binding, Entry, _, _, /value),
+			ts.source_entry(Entry, _, _), ts.source_entry_applied(Entry).
+		Decl incomplete_binding(Site, Reason).
+		incomplete_binding(Site, Reason) :- tracked_call(Site, Binding, _),
+			ts.source_binding_incomplete(Binding, Reason).
+		Decl incomplete_entry(Site, Config, Reason).
+		incomplete_entry(Site, Config, Reason) :- tracked_call(Site, _, Entry),
+			ts.source_entry_tsconfig(Entry, Config), ts.source_entry_incomplete(Entry, Reason).
+	`)
+	.report("incomplete_binding", "incomplete_entry")
+	.expectNonEmpty("tracked_call")
+	.message(() => "Configured source association evidence is incomplete");
+```
+
+This strict variant can block safe calls when the source program or binding cannot be resolved. The entry diagnostic covers entries with an explicit source tsconfig, while binding uncertainty is checked for all tracked calls; unapplied entries have no call anchor.
+
+## 48. Strict declaration-map boundaries
+
+Prevent application calls mapped to private contract source and flag uncertain declaration-map recovery.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Application calls must not map to private contract source and must have reliable declaration maps.
+export default rule("arch.declaration-map-boundary-strict")
+	.version(1)
+	.program(dl`
+		Decl application_call(Site, Checked).
+		application_call(Site, Checked) :- ts.site(Site, File), lintai.glob(File, "src/app/**"),
+			ts.call_declaration(Site, Checked), ts.declaration_origin(Checked, /declaration_file, _).
+		Decl precise(Site, Source).
+		precise(Site, Source) :- application_call(Site, Checked),
+			ts.declaration_source(Checked, Declaration, /declaration_map),
+			ts.declaration_origin(Declaration, /source_file, Source), lintai.glob(Source, "packages/contracts/src/private*").
+		Decl has_precise(Checked).
+		has_precise(Checked) :- ts.declaration_source(Checked, _, /declaration_map).
+		Decl candidate(Site, Source).
+		candidate(Site, Source) :- application_call(Site, Checked),
+			ts.declaration_source_candidate(Checked, Declaration, /declaration_map), !has_precise(Checked),
+			ts.declaration_origin(Declaration, /source_file, Source), lintai.glob(Source, "packages/contracts/src/private*").
+		Decl uncertain(Site, Outcome).
+		uncertain(Site, Outcome) :- application_call(Site, Checked), ts.declaration_source_outcome(Checked, Outcome).
+	`)
+	.report("precise", "candidate", "uncertain")
+	.expectNonEmpty("application_call")
+	.message((_row, ctx) => ctx.assertion_id === "precise"
+		? "Application call maps to private contract source"
+		: ctx.assertion_id === "candidate"
+			? "An uncertain map candidate points to private contract source"
+			: "Cannot reliably map the checked declaration to source");
+```
+
+This strict variant can block safe calls when maps are missing, ambiguous or otherwise uncertain. It distinguishes a unique link from a private candidate without a unique link, and checks only calls with checked declaration-file endpoints; source maps do not establish build freshness.
+
+## 49. Strict source-link application
+
+Flag configured source links that were not used for selected contract source modules. Pass the source-links file using `--source-links source-links.json`.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Configured source links to selected source modules must be applied.
+export default rule("arch.selected-source-links-applied-strict")
+	.version(1)
+	.program(dl`
+		Decl configured_source(Module, Entry, Checked).
+		configured_source(Module, Entry, Checked) :- ts.source_entry(Entry, Checked, Source),
+			ts.module_path(Module, Source), lintai.glob(Source, "packages/contracts/src/**").
+		Decl unused(Module, Checked).
+		unused(Module, Checked) :- configured_source(Module, Entry, Checked), ts.source_entry_unapplied(Entry).
+	`)
+	.report("unused")
+	.expectNonEmpty("configured_source")
+	.message(() => "A configured source link to this module was not applied");
+```
+
+This strict variant can block a safe configuration when a checked entry is simply outside the current analysis. It can anchor a diagnostic only when the configured source entry is itself a selected primary module, and it does not validate build freshness.
