@@ -26,7 +26,7 @@ GOPROXY=off GOTOOLCHAIN=local GOFLAGS=-buildvcs=false npm_config_offline=true go
 The first command returns a row with `"virtual:env"`. The second returns an
 unresolved import, and the third returns a target of `"importer.ts"`.
 
-To reproduce the unsuccessful call-target conflict attempt:
+To reproduce the unsuccessful call-target conflict attempt against starting commit `42a3000`:
 
 ```sh
 GOPROXY=off GOTOOLCHAIN=local GOFLAGS=-buildvcs=false npm_config_offline=true go run ./cmd/lintai facts --workspace-root testdata/fixtures/relation-examples/a3-invocations/conflict-attempt --relation ts.call_edge --relation ts.call_target_conflict --relation ts.fn --relation ts.location

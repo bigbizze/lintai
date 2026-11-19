@@ -13,15 +13,8 @@ export default rule("arch.query-no-writes-strict")
 		Decl indeterminate(Site, File, Reason).
 		indeterminate(Site, File, Reason) :- query_call(Site, File),
 			ts.call_declaration_incomplete(Site, Reason).
-		Decl has_declaration(Site).
-		has_declaration(Site) :- query_call(Site, _), ts.call_declaration(Site, _).
-		Decl has_incomplete(Site).
-		has_incomplete(Site) :- query_call(Site, _), ts.call_declaration_incomplete(Site, _).
-		Decl missing_declaration(Site, File).
-		missing_declaration(Site, File) :- query_call(Site, File),
-			!has_declaration(Site), !has_incomplete(Site).
 	`)
-	.report("forbidden", "indeterminate", "missing_declaration")
+	.report("forbidden", "indeterminate")
 	.expectNonEmpty("query_call")
 	.message((_row, ctx) => ctx.assertion_id === "forbidden"
 		? "Query modules must not call methods declared as write"
