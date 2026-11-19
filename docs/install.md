@@ -115,7 +115,9 @@ pnpm exec lintai \
 
 With npm, use `npm exec -- lintai` in place of `pnpm exec lintai`.
 
-The CLI exits with 0 when there are no violations, 1 when a rule found violations, 2 for a usage or configuration error, and 3 when a rule could not run. The snapshot contains only the files that `tsc` compiles with their `tsconfig.json`; use `--files walk` to include every source file. To leave more files out, add `--exclude 'src/generated/**'` (repeatable). `node_modules`, `dist` and dot-directories such as `.next` are always skipped.
+The CLI exits with 0 when there are no violations, 1 when a rule found violations, 2 for a usage or configuration error, and 3 when a rule could not run. By default, the snapshot contains selected files that their `tsconfig.json` compiles, plus selected files without a `tsconfig.json`. Use `--files walk` to include all selected source files, or repeat `--exclude 'src/generated/**'` to exclude more paths. The default walk skips `node_modules`, `dist` and dot-directories such as `.next`.
+
+For shared scope settings, put `exclude`, `include` and exact `sources` under `[workspace]` in `lintai.toml` at the workspace root. Repeat `--source <file>` to add exact files, including files otherwise excluded. Use `--config <file>` to choose a different config, relative to the invocation directory. See [Snapshot scope](api.md#snapshot-scope) for precedence, `--files`, and how to inspect the selection.
 
 Useful caveats:
 
