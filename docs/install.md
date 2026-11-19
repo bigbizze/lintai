@@ -213,7 +213,7 @@ Set `LINTAI_EXTRACT_TIMING=1` to print one line to stderr with the number of fil
 
 ## Linter cost
 
-Measured with lintai 0.9.0 (commit `29bbe41`) on an Apple M4 (10 cores, macOS 27.2) with Node 22.23, on the fixture workspace (`testdata/fixtures/workspace/src`, 16 files, with the 8 rules from `testdata/fixtures/rules` in `lintai-rules/`). The packages were packed and installed into a fresh project the same way `scripts/smoke-pack.mjs` does, with ESLint 9.39 and `@typescript-eslint/parser` 8.73 as the ESLint parser, and oxlint 1.90. Each value is the median wall-clock time of 5 cold CLI runs after one warm-up run. Each run is a new process, so it includes one full lintai analysis. Node 24 was not measured.
+Measured with lintai 0.9.0 (commit `29bbe41`) on an Apple M4 (10 cores, macOS 27.2) with Node 22.23, on the fixture workspace (`testdata/fixtures/workspace/src`, 16 files, with the 8 rules from `testdata/fixtures/rules` in `lintai-rules/`). The packages were packed and installed into a fresh project the same way `scripts/smoke-pack.mjs` does, with ESLint 9.39 and `@typescript-eslint/parser` 8.73 as the ESLint parser, and oxlint 1.90. Each value is the median wall-clock time of 5 runs of the whole command, each in a new process, after one warm-up run. Node 24 was not measured.
 
 | Command | Node 22.23 |
 |---|---|
@@ -224,7 +224,7 @@ Measured with lintai 0.9.0 (commit `29bbe41`) on an Apple M4 (10 cores, macOS 27
 | `oxlint src` with `@lintai/oxlint-plugin` loaded, one authoring rule | 730 ms |
 | `oxlint src` with the lintai rules (`configs.all`) | 1540 ms |
 
-Most of the time is the lintai analysis, which bundles and runs all 8 rules (about 790 ms alone). Under a host linter, loading the plugin also loads the rules, which is why one authoring rule under oxlint costs about 730 ms. The rest is the host linter: about 340 ms for ESLint and about 55 ms for oxlint. These figures are not comparable with the 0.6.0 figures that this table replaces, which used one bridge rule on a different machine.
+These are whole-command times; they were not broken down by component. They are not comparable with the 0.6.0 figures that this table replaces, which used one bridge rule on a different machine.
 
 The oxlint rule uses `create(context)`, not `createOnce`. `create()` costs about 28 µs per file (it resolves the options and gets the cached client), which is less than 0.1% of the run on this workspace. `createOnce` would save this cost but would make the oxlint rule different in structure from the ESLint rule.
 
