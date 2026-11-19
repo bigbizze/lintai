@@ -27,6 +27,16 @@ var (
 		"testdata/npm-smoke/lintai-rules/no-async.ts",
 		"testdata/oxlint-smoke/lintai-rules/actions-return-action-result.ts",
 		"testdata/oxlint-smoke/lintai-rules/no-async.ts",
+		"testdata/fixtures/relation-examples/a1-source-identity/rules/client-directive.ts",
+		"testdata/fixtures/relation-examples/a1-source-identity/rules/domain-async.ts",
+		"testdata/fixtures/relation-examples/a1-source-identity/rules/domain-fetch.ts",
+		"testdata/fixtures/relation-examples/a1-source-identity/rules/env-writes.ts",
+		"testdata/fixtures/relation-examples/a1-source-identity/rules/meta-env.ts",
+		"testdata/fixtures/relation-examples/a1-source-identity/rules/parse-errors-strict.ts",
+		"testdata/fixtures/relation-examples/a1-source-identity/rules/reducer-methods.ts",
+		"testdata/fixtures/relation-examples/a2-imports/rules/explicit-loads-strict.ts",
+		"testdata/fixtures/relation-examples/a2-imports/rules/no-infrastructure-types.ts",
+		"testdata/fixtures/relation-examples/a2-imports/rules/resolved-imports-strict.ts",
 	}
 )
 
