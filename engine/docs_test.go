@@ -21,6 +21,7 @@ var (
 	relationName          = regexp.MustCompile(`^(?:Decl\s+)?([a-z_][A-Za-z0-9_]*)\s*\(`)
 	docSources            = []string{
 		"README.md",
+		"docs/install.md",
 		"docs/api.md",
 		"docs/examples.md",
 		"testdata/npm-smoke/lintai-rules/actions-return-action-result.ts",

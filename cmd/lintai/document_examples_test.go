@@ -17,24 +17,35 @@ func TestFirstRunDocumentation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	readFence := func(path, marker string) string {
+	readFence := func(path, content string) string {
 		t.Helper()
 		data, err := os.ReadFile(filepath.Join(repo, path))
 		if err != nil {
 			t.Fatal(err)
 		}
-		if strings.Count(string(data), marker) != 1 {
-			t.Fatalf("%s: expected exactly one %q", path, marker)
+		source := string(data)
+		if strings.Count(source, content) != 1 {
+			t.Fatalf("%s: expected exactly one %q", path, content)
 		}
-		_, rest, _ := strings.Cut(string(data), marker)
-		body, _, ok := strings.Cut(rest, "\n```\n")
+		contentStart := strings.Index(source, content)
+		openFence := strings.LastIndex(source[:contentStart], "```")
+		if openFence < 0 {
+			t.Fatalf("%s: missing opening fence for %q", path, content)
+		}
+		lineEnd := strings.Index(source[openFence:], "\n")
+		if lineEnd < 0 {
+			t.Fatalf("%s: missing opening fence line ending", path)
+		}
+		bodyStart := openFence + lineEnd + 1
+		body := source[bodyStart:]
+		body, _, ok := strings.Cut(body, "\n```\n")
 		if !ok {
 			t.Fatalf("%s: missing closing fence", path)
 		}
 		return body
 	}
-	quickstart := readFence("docs/install.md", "Add a rule:\n\n```ts\n")
-	helper := "Decl permitted_opaque_leaf(Type).\n" + readFence("docs/examples.md", "```mangle\nDecl permitted_opaque_leaf(Type).\n")
+	quickstart := readFence("docs/install.md", `rule("arch.no-async")`)
+	helper := readFence("docs/examples.md", "Decl permitted_opaque_leaf(Type).")
 	workspace := t.TempDir()
 	write := func(path, content string) {
 		t.Helper()
