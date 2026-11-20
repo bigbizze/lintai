@@ -86,7 +86,7 @@ func TestSourceConfigOwnerDirectoriesCanChangeResolution(t *testing.T) {
 	owner := `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","types":["shared"]},"files":["../src/index.ts"]}`
 	writeWorkspace(t, root, map[string]string{
 		"tsconfig.json":                                     `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler"},"files":["app/main.ts"]}`,
-		"app/main.ts":                                       `export { Widget } from "../contracts/dist";`,
+		"app/main.ts":                                       `import "../contracts/src/index"; export { Widget } from "../contracts/dist";`,
 		"contracts/dist/index.d.ts":                         `export declare class Widget {}`,
 		"contracts/src/index.ts":                            `export { Widget } from "ambient-api";`,
 		"contracts/tsconfig.json":                           `{"files":[],"references":[{"path":"./a"},{"path":"./b"}]}`,

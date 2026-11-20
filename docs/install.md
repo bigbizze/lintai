@@ -117,6 +117,8 @@ With npm, use `npm exec -- lintai` in place of `pnpm exec lintai`.
 
 The CLI exits with 0 when there are no violations, 1 when a rule found violations, 2 for a usage or configuration error, and 3 when a rule could not run. By default, the snapshot contains selected files that their `tsconfig.json` compiles, plus selected files without a `tsconfig.json`. Use `--files walk` to include all selected source files, or repeat `--exclude 'src/generated/**'` to exclude more paths. The default walk skips `node_modules`, `dist` and dot-directories such as `.next`.
 
+Each selected file has one compiler owner: the nearest config when its original roots include the file, otherwise the first matching referenced config in traversal order, then the nearest config as a fallback. A file with no config uses a synthetic program. `tsconfig` mode excludes files absent from the chosen program; `walk` mode uses a synthetic fallback for them. `lintai scope --explain --json` shows the selected config, effective owner and known root memberships for every selected file.
+
 For shared scope settings, put `exclude`, `include` and exact `sources` under `[workspace]` in `lintai.toml` at the workspace root. Repeat `--source <file>` to add exact files, including files otherwise excluded. Use `--config <file>` to choose a different config, relative to the invocation directory. See [Snapshot scope](api.md#snapshot-scope) for precedence, `--files`, and how to inspect the selection.
 
 Useful caveats:

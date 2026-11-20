@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -93,6 +94,13 @@ func (b *Backend) extractSnapshot(ctx context.Context, workspaceRoot string, rel
 			RequestedRelations: relations, TsconfigFiles: scope == FileScopeTsconfig,
 		}, previous)
 		if err != nil {
+			if errors.Is(err, lintaiapi.ErrCompilerInputsChanged) {
+				if attempt == 0 {
+					total.retries++
+					continue
+				}
+				return nil, nil, fmt.Errorf("inputs_changed: %w", err)
+			}
 			return nil, nil, err
 		}
 		generation := &producerGeneration{snapshot: snapshot, plan: plan}
@@ -235,7 +243,7 @@ func scopeIdentity(plan *workspace.ScopePlan, snapshot *lintaiapi.Snapshot, tsco
 		if contextPath == "synthetic" {
 			contexts[i] = contextPath
 		} else {
-			contexts[i] = relativeScopePath(plan.Root, contextPath)
+			contexts[i] = lintaiapi.PublicConfigPath(plan.Root, contextPath)
 		}
 	}
 	slices.Sort(contexts)

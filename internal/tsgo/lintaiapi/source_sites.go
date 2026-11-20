@@ -58,31 +58,6 @@ func (e *extractor) registerSite(node *ast.Node, source callSource) string {
 	return id
 }
 
-// finalizeCallTargets compares runtime classifications after filtering.
-func finalizeCallTargets(snapshot *Snapshot) {
-	observed := make(map[string]map[string]bool)
-	add := func(site, evidence string) {
-		if observed[site] == nil {
-			observed[site] = make(map[string]bool)
-		}
-		observed[site][evidence] = true
-	}
-	for _, call := range snapshot.CallEdges {
-		add(call.SemanticKey, "local\x00"+call.ToSemanticKey)
-	}
-	for _, call := range snapshot.ExternalCalls {
-		add(call.SemanticKey, "external\x00"+call.OriginKind+"\x00"+call.Module+"\x00"+call.Name)
-	}
-	for _, call := range snapshot.CallsUnresolved {
-		add(call.SemanticKey, "unresolved")
-	}
-	for site, outcomes := range observed {
-		if len(outcomes) > 1 {
-			snapshot.CallTargetConflicts = append(snapshot.CallTargetConflicts, site)
-		}
-	}
-}
-
 // SignatureID identifies an entire observation, including unknown slots.
 func SignatureID(function string, observation FunctionSignatureObservation, namespaces ...string) string {
 	namespace := "ts"

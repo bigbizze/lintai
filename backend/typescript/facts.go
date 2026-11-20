@@ -35,6 +35,18 @@ func factsFromSnapshot(snapshot *lintaiapi.Snapshot, sources []ambient.Source, a
 		b.add("module_path", str(module.EntityID), str(module.Path))
 		b.location(module.EntityID, module.Range)
 	}
+	for _, file := range snapshot.CompilerFiles {
+		if !file.Eligible {
+			continue
+		}
+		module := str("module:" + file.Path)
+		for _, config := range file.RootConfigs {
+			b.add("module_config", module, str(config))
+		}
+		if file.OwnerConfig != nil {
+			b.add("module_owner_config", module, str(*file.OwnerConfig))
+		}
+	}
 	for _, fn := range snapshot.Functions {
 		id := str(fn.SemanticKey)
 		b.add("fn", id, str(fn.FilePath), str(fn.Name))
@@ -51,11 +63,8 @@ func factsFromSnapshot(snapshot *lintaiapi.Snapshot, sources []ambient.Source, a
 		if fn.SignatureOmitted {
 			b.add("fn_signature_omitted", id)
 		}
-		if fn.SignatureUnresolved {
-			b.add("fn_signature_unresolved", id)
-		}
-		for _, observation := range fn.SignatureObservations {
-			signature := lintaiapi.SignatureID(fn.SemanticKey, observation, namespace)
+		if observation := fn.Signature; observation != nil {
+			signature := lintaiapi.SignatureID(fn.SemanticKey, *observation, namespace)
 			sid := str(signature)
 			b.add("fn_signature", id, sid)
 			b.add("signature_arity", sid, facts.Number(int64(len(observation.ParameterTypes))))
@@ -76,9 +85,6 @@ func factsFromSnapshot(snapshot *lintaiapi.Snapshot, sources []ambient.Source, a
 				b.add("signature_incomplete", sid, facts.Name("unresolved"))
 			}
 			b.location(signature, fn.Range)
-		}
-		if fn.SignatureConflict {
-			b.add("fn_signature_conflict", id)
 		}
 		b.location(fn.SemanticKey, fn.Range)
 	}
@@ -146,9 +152,6 @@ func factsFromSnapshot(snapshot *lintaiapi.Snapshot, sources []ambient.Source, a
 	for site := range callSites {
 		b.add("call_site", str(site))
 	}
-	for _, site := range snapshot.CallTargetConflicts {
-		b.add("call_target_conflict", str(site))
-	}
 	for _, escape := range snapshot.FunctionEscapes {
 		b.add("fn_value_escape", str(escape.Site), facts.Name("argument"))
 		if escape.Target != "" {
@@ -190,6 +193,13 @@ func factsFromSnapshot(snapshot *lintaiapi.Snapshot, sources []ambient.Source, a
 		}
 		b.add("config_adjusted", str(adjustment.Config), str(adjustment.Option), action)
 	}
+	for _, adjustment := range snapshot.SourceConfigAdjustments {
+		action, err := name(adjustment.Action)
+		if err != nil {
+			return nil, err
+		}
+		b.add("source_config_adjusted", str(adjustment.Config), str(adjustment.Option), action)
+	}
 	for _, ref := range snapshot.TypeRefs {
 		id := str(ref.SemanticKey)
 		b.add("type_ref", id, str(ref.Name))
@@ -226,14 +236,8 @@ func factsFromSnapshot(snapshot *lintaiapi.Snapshot, sources []ambient.Source, a
 			}
 			b.add("declaration_type", id, space, str(value.Type))
 		}
-		for _, function := range item.FunctionObservations {
-			b.add("declaration_fn", id, str(function))
-		}
-		if len(item.FunctionObservations) == 0 && item.Function != "" {
+		if item.Function != "" {
 			b.add("declaration_fn", id, str(item.Function))
-		}
-		for _, reason := range item.FunctionIncomplete {
-			b.add("declaration_fn_incomplete", id, facts.Name(reason))
 		}
 		for _, value := range item.TypeIncomplete {
 			b.add("declaration_type_incomplete", id, facts.Name(value.Space), facts.Name(value.Reason))
@@ -312,6 +316,24 @@ func factsFromSnapshot(snapshot *lintaiapi.Snapshot, sources []ambient.Source, a
 			return nil, err
 		}
 		b.add("declaration_source_outcome", str(item.CheckedDecl), outcome)
+	}
+	for _, item := range snapshot.SourceEndpoints {
+		kind, err := name(item.Kind)
+		if err != nil {
+			return nil, err
+		}
+		originKind, err := name(item.OriginKind)
+		if err != nil {
+			return nil, err
+		}
+		b.add("source_endpoint", str(item.ID), str(item.Name), kind, originKind, str(item.Origin))
+		for _, reason := range item.Incomplete {
+			value, err := name(reason)
+			if err != nil {
+				return nil, err
+			}
+			b.add("source_endpoint_incomplete", str(item.ID), value)
+		}
 	}
 	for _, item := range snapshot.SourceEntries {
 		id := str(item.ID)

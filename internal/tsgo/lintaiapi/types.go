@@ -158,7 +158,10 @@ type shapeProp struct {
 
 // emitFunctionType records the facts of a parameter or return type and of
 // every type that those facts refer to, and returns the type ID.
-func (e *extractor) emitFunctionType(root *checker.Type, _ *ast.Node) string {
+func (e *extractor) emitFunctionType(root *checker.Type, origin observationOrigin) string {
+	if !e.validateOrigin(origin, "type", nil) {
+		return ""
+	}
 	if root == nil {
 		return ""
 	}
@@ -167,6 +170,9 @@ func (e *extractor) emitFunctionType(root *checker.Type, _ *ast.Node) string {
 	}
 	var visit func(t *checker.Type)
 	visit = func(t *checker.Type) {
+		if !e.validateOrigin(origin, "type contribution", nil) {
+			return
+		}
 		// A checker type is one observation, even when several roots reach it.
 		// Mark it before descending so recursive types terminate as well.
 		if _, ok := e.typeFactSeen[t]; ok {
@@ -941,13 +947,9 @@ func keepReachableTypes(snap *Snapshot) {
 		}
 	}
 	for _, fn := range snap.Functions {
-		visit(fn.ReturnType)
-		for _, param := range fn.ParameterTypes {
-			visit(param)
-		}
-		for _, observation := range fn.SignatureObservations {
-			visit(observation.ReturnType)
-			for _, param := range observation.ParameterTypes {
+		if fn.Signature != nil {
+			visit(fn.Signature.ReturnType)
+			for _, param := range fn.Signature.ParameterTypes {
 				visit(param)
 			}
 		}

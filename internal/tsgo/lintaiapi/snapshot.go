@@ -2,6 +2,7 @@ package lintaiapi
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -23,6 +24,9 @@ import (
 	"github.com/bigbizze/lintai/internal/tsgo/internal/vfs"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/vfs/osvfs"
 )
+
+// ErrCompilerInputsChanged asks the producer to retry an unstable plan.
+var ErrCompilerInputsChanged = errors.New("compiler inputs changed during planning")
 
 const (
 	ImportFormStatic       = "static"
@@ -70,24 +74,17 @@ type Module struct {
 }
 
 type Function struct {
-	EntityID       string
-	SemanticKey    string
-	Name           string
-	Kind           string
-	FilePath       string
-	ContainerName  string
-	IsExported     bool
-	IsAsync        bool
-	ParameterCount int
-	// ReturnType and ParameterTypes are type entity IDs. Snapshot.Types
-	// holds the facts of each type.
-	ReturnType            string
-	ParameterTypes        []string
-	SignatureObservations []FunctionSignatureObservation
-	SignatureConflict     bool
-	SignatureOmitted      bool
-	SignatureUnresolved   bool
-	Range                 SourceLocation
+	EntityID         string
+	SemanticKey      string
+	Name             string
+	Kind             string
+	FilePath         string
+	ContainerName    string
+	IsExported       bool
+	IsAsync          bool
+	Signature        *FunctionSignatureObservation
+	SignatureOmitted bool
+	Range            SourceLocation
 }
 
 type SuspensionSite struct {
@@ -118,21 +115,26 @@ type FunctionSignatureObservation struct {
 }
 
 type DeclarationFact struct {
-	ID                   string
-	Name                 string
-	Kind                 string
-	OriginKind           string
-	Origin               string
-	Types                []DeclarationType
-	TypeObservations     [][]DeclarationType
-	TypesComplete        bool
-	Function             string
-	FunctionObservations []string
-	Incomplete           []string // metadata uncertainty
-	TypeSubjects         []string
-	TypeIncomplete       []DeclarationTypeUncertainty
-	FunctionIncomplete   []string
-	Location             SourceLocation
+	ID               string
+	Name             string
+	Kind             string
+	OriginKind       string
+	Origin           string
+	Types            []DeclarationType
+	TypeObservations [][]DeclarationType
+	TypesComplete    bool
+	Function         string
+	Incomplete       []string // metadata uncertainty
+	TypeSubjects     []string
+	TypeIncomplete   []DeclarationTypeUncertainty
+	Location         SourceLocation
+}
+
+// SourceEndpointFact is metadata in the separate correspondence domain.
+type SourceEndpointFact struct {
+	ID, Name, Kind, OriginKind, Origin string
+	Incomplete                         []string
+	Location                           SourceLocation
 }
 
 type DeclarationTypeUncertainty struct{ Space, Reason string }
@@ -145,16 +147,15 @@ type DeclarationType struct {
 type declarationTypeSubject struct{ Declaration, Space string }
 
 type ExportFact struct {
-	ID                 string
-	File               string
-	Name               string
-	Space              string
-	Targets            []string
-	Via                []string
-	Reexports          []ExportReexportFact
-	Incomplete         []string
-	TargetObservations [][]string
-	Location           SourceLocation
+	ID         string
+	File       string
+	Name       string
+	Space      string
+	Targets    []string
+	Via        []string
+	Reexports  []ExportReexportFact
+	Incomplete []string
+	Location   SourceLocation
 	// A type-only export of a value uses type-space export identity but
 	// requests the target's value-space type. Preserve that pairing until the
 	// retained exports are known.
@@ -169,13 +170,10 @@ type ExportReexportFact struct {
 }
 
 type ModuleExportObservation struct {
-	Identity    string
-	File        string
-	Bindings    []string
-	Complete    bool
-	Reasons     []string
-	StarSources []string
-	Retained    bool
+	Identity string
+	File     string
+	Reasons  []string
+	Retained bool
 }
 
 type ModuleExportsIncompleteFact struct {
@@ -360,7 +358,6 @@ type Snapshot struct {
 	CallEdges                 []CallEdge
 	ExternalCalls             []ExternalCall
 	CallsUnresolved           []CallUnresolved
-	CallTargetConflicts       []string
 	CallDeclarations          []CallDeclarationFact
 	DeclarationMembers        []DeclarationMemberFact
 	CallDeclarationIncomplete []CallDeclarationIncompleteFact
@@ -383,13 +380,14 @@ type Snapshot struct {
 	Exports                     []ExportFact
 	ModuleExportObservations    []ModuleExportObservation
 	ModuleExportsIncomplete     []ModuleExportsIncompleteFact
-	FnSignatureConflicts        []string
 	ExportSites                 []ExportSiteFact
 	DeclarationSourceCandidates []DeclarationSourceFact
 	DeclarationSources          []DeclarationSourceFact
 	DeclarationSourceOutcomes   []DeclarationSourceOutcomeFact
 	SourceEntries               []SourceEntryFact
 	SourceBindings              []SourceBindingFact
+	SourceEndpoints             []SourceEndpointFact
+	SourceTracking              map[string]TrackingSupport
 	// ConfigFiles are the absolute paths of the tsconfig files that the
 	// snapshot read, including extended and referenced configs.
 	ConfigFiles []string
@@ -398,8 +396,10 @@ type Snapshot struct {
 	Inputs []SnapshotInput
 	// ConfigAdjustments are the compiler options that lintai changed because
 	// TypeScript 7 rejects them, sorted by config path and option.
-	ConfigAdjustments []ConfigAdjustment
-	ContextPaths      []string
+	ConfigAdjustments       []ConfigAdjustment
+	SourceConfigAdjustments []ConfigAdjustment
+	ContextPaths            []string
+	CompilerFiles           []CompilerFile
 	// CompilerInputs is detached evidence for compiler-input validation.
 	CompilerInputs      *CompilerInputValidity
 	capture             *resolutionInputFS
@@ -407,6 +407,13 @@ type Snapshot struct {
 	trackingKeyBuilds   int
 	trackingConflict    string
 	trackingCache       map[string]TrackingSupport
+}
+
+// validatedContribution is produced by buildSnapshotForGroup only after its
+// collector has validated every observation origin. Aggregation accepts this
+// type so an arbitrary Snapshot cannot cross the provenance boundary.
+type validatedContribution struct {
+	*Snapshot
 }
 
 type configGroup struct {
@@ -433,12 +440,11 @@ type extractor struct {
 	program                     *compiler.Program
 	resolver                    module.Resolver
 	checker                     *checker.Checker
-	requestedFiles              map[string]struct{}
 	primaryFiles                map[string]struct{}
 	filesByPath                 map[string]*ast.SourceFile
-	functionNodes               map[*ast.Node]*Function
-	functionKeys                map[string]*Function
-	functionSyms                map[*ast.Symbol]*Function
+	functionNodes               map[*ast.Node]*functionDescriptor
+	functionKeys                map[string]*functionDescriptor
+	functionSyms                map[*ast.Symbol]*functionDescriptor
 	instanceOwners              map[*ast.Node]*functionState
 	functions                   []Function
 	declarations                map[string]*DeclarationFact
@@ -450,7 +456,10 @@ type extractor struct {
 	declarationSourceOutcomes   []DeclarationSourceOutcomeFact
 	sourceEntryFacts            []SourceEntryFact
 	sourceBindingFacts          []SourceBindingFact
-	sourceProgramDeclarations   []DeclarationFact
+	sourceEndpoints             map[string]*DeclarationFact
+	sourceDeclarationNodes      map[string]*ast.Node
+	sourceTracking              map[string]TrackingSupport
+	sourceProgramEndpoints      []SourceEndpointFact
 	imports                     []ImportEdge
 	calls                       []CallEdge
 	externalCalls               []ExternalCall
@@ -484,6 +493,9 @@ type extractor struct {
 	moduleExportIndex           map[*ast.SourceFile]map[string]*ast.Symbol
 	semanticBindingCache        *semanticBindingCache
 	operations                  semanticOperations
+	plan                        *ordinaryPlan
+	owner                       *ordinaryProgram
+	originError                 error
 }
 
 // semanticOperations are private collection families, derived from relation
@@ -496,6 +508,29 @@ type semanticOperations struct {
 	trackingCache    map[string]TrackingSupport
 	trackingPrevious map[string]TrackingSupport
 	moduleFiles      map[string]bool
+	plan             *ordinaryPlan
+	owner            *ordinaryProgram
+}
+
+type observationOrigin struct {
+	rootFile string
+	context  *ordinaryProgram
+}
+
+func (e *extractor) validateOrigin(origin observationOrigin, family string, direct *ast.Node) bool {
+	var expected *ordinaryProgram
+	if e.plan != nil {
+		expected = e.plan.owners[origin.rootFile]
+	}
+	valid := origin.context != nil && expected == origin.context && e.owner == origin.context && origin.context.prepared.program == e.program
+	if valid && direct != nil {
+		file := ast.GetSourceFileOfNode(direct)
+		valid = file != nil && e.program.PathKeyForFileName(file.FileName()) == e.program.PathKeyForFileName(tspath.RootedFilePathFromAbsolute(origin.rootFile))
+	}
+	if !valid && e.originError == nil {
+		e.originError = fmt.Errorf("invalid %s origin: root %s, actual context %p, expected context %p", family, origin.rootFile, origin.context, expected)
+	}
+	return valid
 }
 
 func operationsForRelations(relations []string) semanticOperations {
@@ -504,9 +539,12 @@ func operationsForRelations(relations []string) semanticOperations {
 	}
 	var operations semanticOperations
 	for _, relation := range relations {
+		if isCorrespondenceRelation(relation) {
+			operations.sourceRecovery = true
+		}
 		switch {
 		case relation == "location":
-			return semanticOperations{signatures: true, declarationTypes: true, typeStructure: true, sourceRecovery: true}
+			operations.signatures, operations.declarationTypes, operations.typeStructure = true, true, true
 		case strings.HasPrefix(relation, "type_") && relation != "type_ref" && relation != "type_ref_target":
 			operations.signatures, operations.declarationTypes, operations.typeStructure = true, true, true
 		case strings.HasPrefix(relation, "fn_signature") || strings.HasPrefix(relation, "signature_"):
@@ -515,12 +553,22 @@ func operationsForRelations(relations []string) semanticOperations {
 			// of which signature or declaration first exposed the entity.
 			operations.signatures, operations.declarationTypes, operations.typeStructure = true, true, true
 		case relation == "declaration_type" || relation == "declaration_type_subject" || relation == "declaration_type_incomplete":
-			operations.signatures, operations.declarationTypes, operations.typeStructure, operations.sourceRecovery = true, true, true, true
-		case relation == "config_adjusted" || relation == "declaration" || strings.HasPrefix(relation, "declaration_") || strings.HasPrefix(relation, "source_"):
-			operations.sourceRecovery = true
+			operations.signatures, operations.declarationTypes, operations.typeStructure = true, true, true
 		}
 	}
 	return operations
+}
+
+func isCorrespondenceRelation(relation string) bool {
+	switch relation {
+	case "declaration_source_candidate", "declaration_source", "declaration_source_outcome",
+		"source_entry", "source_entry_tsconfig", "source_entry_applied", "source_entry_unapplied", "source_entry_incomplete",
+		"source_binding_attempt", "source_binding", "source_binding_checked_decl", "source_binding_source_decl", "source_binding_incomplete",
+		"source_endpoint", "source_endpoint_incomplete", "source_config_adjusted":
+		return true
+	default:
+		return false
+	}
 }
 
 type functionMeta struct {
@@ -533,9 +581,15 @@ type functionMeta struct {
 }
 
 type functionState struct {
-	record         *Function
+	record         *functionDescriptor
 	reason         string
 	decoratorOwner *functionState
+}
+
+type functionDescriptor struct {
+	SemanticKey string
+	Name        string
+	FilePath    string
 }
 
 // callSource is the caller of a call: a collected function, or module scope.
@@ -609,17 +663,32 @@ func buildSnapshotAttempt(ctx context.Context, req BuildSnapshotRequest) (*Snaps
 	defer auxiliary.close()
 	entryResolutions := newSourceEntryResolutions()
 	configStarted := time.Now()
-	groups, err := discoverConfigGroups(workspaceRoot, files, req.ExactFiles, configs)
+	exactFiles, err := normalizeFiles(req.ExactFiles)
 	if err != nil {
 		return nil, err
 	}
+	membership := req.RequestedRelations == nil || slices.Contains(req.RequestedRelations, "module_config")
+	plan, err := planOrdinary(ctx, host, workspaceRoot, files, exactFiles, req.TsconfigFiles, membership, configs, timing)
+	if err != nil {
+		var incomplete *incompleteCompilerMembership
+		if errors.As(err, &incomplete) {
+			stable, _, validationErr := trackedFS.validate()
+			if validationErr != nil {
+				return nil, validationErr
+			}
+			if !stable {
+				return nil, fmt.Errorf("%w: %v", ErrCompilerInputsChanged, err)
+			}
+		}
+		return nil, err
+	}
 	timing.config = time.Since(configStarted)
-	merged := &Snapshot{}
-	for _, group := range groups {
-		if group.ConfigPath == "" {
+	merged := &Snapshot{CompilerFiles: plan.compilerFiles(workspaceRoot, host)}
+	for _, owner := range plan.programs {
+		if owner.group.ConfigPath == "" {
 			merged.ContextPaths = append(merged.ContextPaths, "synthetic")
 		} else {
-			merged.ContextPaths = append(merged.ContextPaths, group.ConfigPath)
+			merged.ContextPaths = append(merged.ContextPaths, owner.group.ConfigPath)
 		}
 	}
 	slices.Sort(merged.ContextPaths)
@@ -630,63 +699,30 @@ func buildSnapshotAttempt(ctx context.Context, req BuildSnapshotRequest) (*Snaps
 			SnapshotInput{Path: entry.SourcePath, Exists: host.FS().FileExists(tspath.RootedFilePathFromAbsolute(entry.SourcePath))},
 		)
 	}
-	missing := make(map[string]struct{})
 	operations := operationsForRelations(req.RequestedRelations)
 	operations.trackingCache = req.trackingCache
 	operations.trackingPrevious = req.trackingPrevious
 	merged.trackingCache = req.trackingCache
-	// Determine the final module domain before classifying calls. A file can
-	// be visible as an import in one program but excluded by its own config.
-	programs := make([]groupProgram, len(groups))
-	if req.TsconfigFiles {
-		operations.moduleFiles = make(map[string]bool)
+	operations.moduleFiles = make(map[string]bool)
+	for _, file := range plan.files {
+		if file.owner != nil {
+			operations.moduleFiles[file.path] = true
+		}
 	}
-	for index, group := range groups {
-		programs[index], err = prepareGroupProgram(host, workspaceRoot, group, timing)
+	for _, owner := range plan.programs {
+		operations.plan, operations.owner = plan, owner
+		partial, _, err := buildSnapshotForGroup(ctx, host, workspaceRoot, files, owner.group, owner.prepared, req.AmbientMatchers, sourceEntries, configs, auxiliary, entryResolutions, timing, operations)
 		if err != nil {
 			return nil, err
 		}
-		if req.TsconfigFiles {
-			for _, file := range group.PrimaryFiles {
-				if group.Config == nil || programs[index].program.GetSourceFile(tspath.RootedFilePathFromAbsolute(file)) != nil {
-					operations.moduleFiles[file] = true
-				}
-			}
-		}
-	}
-	for index, group := range groups {
-		partial, groupMissing, err := buildSnapshotForGroup(ctx, host, workspaceRoot, files, group, programs[index], req.AmbientMatchers, sourceEntries, configs, auxiliary, entryResolutions, timing, operations)
-		programs[index] = groupProgram{}
-		if err != nil {
+		if err := mergeSnapshot(merged, partial); err != nil {
 			return nil, err
 		}
-		mergeSnapshot(merged, partial)
-		if req.TsconfigFiles && group.Config != nil {
-			continue
-		}
-		for _, file := range groupMissing {
-			missing[file] = struct{}{}
-		}
 	}
-	if len(missing) > 0 {
-		fallbackFiles := make([]string, 0, len(missing))
-		for file := range missing {
-			fallbackFiles = append(fallbackFiles, file)
+	if operations.sourceRecovery {
+		for _, entry := range sourceEntries {
+			merged.SourceEntries = append(merged.SourceEntries, SourceEntryFact{ID: entry.ID, CheckedEntry: entry.CheckedEntry, SourceEntry: entry.SourceEntry, Tsconfig: entry.SourceConfig})
 		}
-		slices.Sort(fallbackFiles)
-		fallback := configGroup{PrimaryFiles: fallbackFiles}
-		program, err := prepareGroupProgram(host, workspaceRoot, fallback, timing)
-		if err != nil {
-			return nil, err
-		}
-		partial, _, err := buildSnapshotForGroup(ctx, host, workspaceRoot, files, fallback, program, req.AmbientMatchers, sourceEntries, configs, auxiliary, entryResolutions, timing, operations)
-		if err != nil {
-			return nil, err
-		}
-		mergeSnapshot(merged, partial)
-	}
-	for _, entry := range sourceEntries {
-		merged.SourceEntries = append(merged.SourceEntries, SourceEntryFact{ID: entry.ID, CheckedEntry: entry.CheckedEntry, SourceEntry: entry.SourceEntry, Tsconfig: entry.SourceConfig})
 	}
 	if merged.siteConflict != "" {
 		return nil, fmt.Errorf("inconsistent TypeScript site ownership for %s", merged.siteConflict)
@@ -695,6 +731,15 @@ func buildSnapshotAttempt(ctx context.Context, req BuildSnapshotRequest) (*Snaps
 		return nil, fmt.Errorf("inconsistent TypeScript tracking support for %s", merged.trackingConflict)
 	}
 	entryResolutions.canonicalize(merged, sourceEntries)
+	entryConfigs := make(map[string]string, len(sourceEntries))
+	for _, entry := range sourceEntries {
+		if entry.ConfigPath != "" {
+			entryConfigs[entry.ID] = publicIdentityPath(workspaceRoot, entry.ConfigPath, host.FS().CaseSensitivity())
+		}
+	}
+	for i := range merged.SourceEntries {
+		merged.SourceEntries[i].Tsconfig = entryConfigs[merged.SourceEntries[i].ID]
+	}
 	if req.TsconfigFiles {
 		modules := make(map[string]bool, len(merged.Modules))
 		for _, module := range merged.Modules {
@@ -705,14 +750,15 @@ func buildSnapshotAttempt(ctx context.Context, req BuildSnapshotRequest) (*Snaps
 			item.Retained = item.Retained && modules[item.File]
 		}
 	}
-	finalizeSemanticObservations(merged)
+	if err := finalizeSemanticObservations(merged); err != nil {
+		return nil, err
+	}
 	if req.TsconfigFiles {
 		keepModuleFiles(merged)
 	}
 	finalizeCallDeclarationObservations(merged)
-	finalizeCallTargets(merged)
+	keepRetainedSemantics(merged)
 	if req.TsconfigFiles {
-		keepRetainedSemantics(merged)
 		keepReachableTypes(merged)
 	}
 	for i := range merged.Exports {
@@ -724,7 +770,17 @@ func buildSnapshotAttempt(ctx context.Context, req BuildSnapshotRequest) (*Snaps
 	if sourceLinksFile != "" {
 		merged.Inputs = append(merged.Inputs, SnapshotInput{Path: sourceLinksFile, Exists: true})
 	}
-	merged.ConfigAdjustments = configs.adjustments()
+	ordinaryConfigs := make(map[string]bool)
+	for _, owner := range plan.programs {
+		if owner.group.ConfigPath != "" {
+			ordinaryConfigs[owner.group.ConfigPath] = true
+		}
+	}
+	merged.ConfigAdjustments = configs.adjustmentsFor(ordinaryConfigs)
+	merged.SourceConfigAdjustments = configs.adjustmentsFor(auxiliary.usedConfigs)
+	for i := range merged.SourceConfigAdjustments {
+		merged.SourceConfigAdjustments[i].Config = publicIdentityPath(workspaceRoot, merged.SourceConfigAdjustments[i].Config, host.FS().CaseSensitivity())
+	}
 	merged.capture = trackedFS
 	sortSnapshot(merged)
 	if os.Getenv("LINTAI_EXTRACT_TIMING") == "1" {
@@ -787,20 +843,14 @@ func keepModuleFiles(snap *Snapshot) {
 			snap.FunctionEscapes[index].Unknown = true
 		}
 	}
-	snap.FnSignatureConflicts = slices.DeleteFunc(snap.FnSignatureConflicts, func(id string) bool {
-		return !hasFunction(id)
-	})
 	for index := range snap.Declarations {
 		if !hasFunction(snap.Declarations[index].Function) {
 			snap.Declarations[index].Function = ""
 		}
-		snap.Declarations[index].FunctionObservations = slices.DeleteFunc(snap.Declarations[index].FunctionObservations, func(id string) bool { return !hasFunction(id) })
 	}
 }
 
-// Retain declaration endpoints for surviving exports, configured associations,
-// and call provenance, then retain map endpoints reached from those declarations.
-// This runs after conflict detection so every program's observation counts.
+// Retain ordinary declarations independently from correspondence endpoints.
 func keepRetainedSemantics(snap *Snapshot) {
 	modules := make(map[string]bool, len(snap.Modules))
 	for _, module := range snap.Modules {
@@ -828,12 +878,13 @@ func keepRetainedSemantics(snap *Snapshot) {
 			sites[id] = true
 		}
 	}
+	mapKeep := maps.Clone(keep)
 	for _, binding := range snap.SourceBindings {
 		for _, id := range binding.CheckedDeclarations {
-			keep[id] = true
+			mapKeep[id] = true
 		}
 		for _, id := range binding.SourceDeclarations {
-			keep[id] = true
+			mapKeep[id] = true
 		}
 	}
 	mapTargets := make(map[string][]string)
@@ -842,18 +893,33 @@ func keepRetainedSemantics(snap *Snapshot) {
 			mapTargets[link.CheckedDecl] = append(mapTargets[link.CheckedDecl], link.SourceDecl)
 		}
 	}
-	queue := slices.Sorted(maps.Keys(keep))
+	queue := slices.Sorted(maps.Keys(mapKeep))
 	for index := 0; index < len(queue); index++ {
 		for _, source := range mapTargets[queue[index]] {
-			if !keep[source] {
-				keep[source] = true
+			if !mapKeep[source] {
+				mapKeep[source] = true
 				queue = append(queue, source)
 			}
 		}
 	}
-	snap.DeclarationSourceCandidates = slices.DeleteFunc(snap.DeclarationSourceCandidates, func(item DeclarationSourceFact) bool { return !keep[item.CheckedDecl] })
-	snap.DeclarationSources = slices.DeleteFunc(snap.DeclarationSources, func(item DeclarationSourceFact) bool { return !keep[item.CheckedDecl] })
-	snap.DeclarationSourceOutcomes = slices.DeleteFunc(snap.DeclarationSourceOutcomes, func(item DeclarationSourceOutcomeFact) bool { return !keep[item.CheckedDecl] })
+	snap.DeclarationSourceCandidates = slices.DeleteFunc(snap.DeclarationSourceCandidates, func(item DeclarationSourceFact) bool { return !mapKeep[item.CheckedDecl] })
+	snap.DeclarationSources = slices.DeleteFunc(snap.DeclarationSources, func(item DeclarationSourceFact) bool { return !mapKeep[item.CheckedDecl] })
+	snap.DeclarationSourceOutcomes = slices.DeleteFunc(snap.DeclarationSourceOutcomes, func(item DeclarationSourceOutcomeFact) bool { return !mapKeep[item.CheckedDecl] })
+	endpointDomain := make(map[string]bool)
+	for _, binding := range snap.SourceBindings {
+		for _, id := range append(slices.Clone(binding.CheckedDeclarations), binding.SourceDeclarations...) {
+			endpointDomain[id] = true
+		}
+	}
+	for _, links := range [][]DeclarationSourceFact{snap.DeclarationSourceCandidates, snap.DeclarationSources} {
+		for _, link := range links {
+			endpointDomain[link.CheckedDecl], endpointDomain[link.SourceDecl] = true, true
+		}
+	}
+	for _, outcome := range snap.DeclarationSourceOutcomes {
+		endpointDomain[outcome.CheckedDecl] = true
+	}
+	snap.SourceEndpoints = slices.DeleteFunc(snap.SourceEndpoints, func(item SourceEndpointFact) bool { return !endpointDomain[item.ID] })
 	snap.Declarations = slices.DeleteFunc(snap.Declarations, func(item DeclarationFact) bool { return !keep[item.ID] })
 	for index := range snap.Declarations {
 		item := &snap.Declarations[index]
@@ -898,7 +964,7 @@ func prepareGroupProgram(host compiler.CompilerHost, workspaceRoot string, group
 	return groupProgram{program: program, resolver: resolver}, nil
 }
 
-func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, workspaceRoot string, requestedFiles []string, group configGroup, prepared groupProgram, ambientMatchers []AmbientMatcher, sourceEntries []configuredSourceEntry, configs *configCache, auxiliary *auxiliarySourcePrograms, resolutions *sourceEntryResolutions, timing *extractTiming, demand ...semanticOperations) (*Snapshot, []string, error) {
+func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, workspaceRoot string, requestedFiles []string, group configGroup, prepared groupProgram, ambientMatchers []AmbientMatcher, sourceEntries []configuredSourceEntry, configs *configCache, auxiliary *auxiliarySourcePrograms, resolutions *sourceEntryResolutions, timing *extractTiming, demand ...semanticOperations) (*validatedContribution, []string, error) {
 	program, resolver := prepared.program, prepared.resolver
 	checkerStarted := time.Now()
 	typeChecker, done := program.GetTypeChecker(ctx)
@@ -913,12 +979,11 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 		program:        program,
 		resolver:       resolver,
 		checker:        typeChecker,
-		requestedFiles: make(map[string]struct{}, len(requestedFiles)),
 		primaryFiles:   make(map[string]struct{}, len(group.PrimaryFiles)),
 		filesByPath:    make(map[string]*ast.SourceFile, len(requestedFiles)),
-		functionNodes:  make(map[*ast.Node]*Function),
-		functionKeys:   make(map[string]*Function),
-		functionSyms:   make(map[*ast.Symbol]*Function),
+		functionNodes:  make(map[*ast.Node]*functionDescriptor),
+		functionKeys:   make(map[string]*functionDescriptor),
+		functionSyms:   make(map[*ast.Symbol]*functionDescriptor),
 		declarations:   make(map[string]*DeclarationFact),
 		exports:        make(map[string]*ExportFact),
 		ambientDone:    make(map[*ast.Node]struct{}),
@@ -938,8 +1003,8 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 	if len(demand) != 0 {
 		ex.operations = demand[0]
 	}
+	ex.plan, ex.owner = ex.operations.plan, ex.operations.owner
 	for _, file := range requestedFiles {
-		ex.requestedFiles[file] = struct{}{}
 		if sourceFile := program.GetSourceFile(tspath.RootedFilePathFromAbsolute(file)); sourceFile != nil {
 			ex.filesByPath[file] = sourceFile
 		}
@@ -956,6 +1021,9 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 		sourceFile := ex.filesByPath[file]
 		if sourceFile == nil {
 			missingPrimary = append(missingPrimary, file)
+			continue
+		}
+		if !ex.validateOrigin(observationOrigin{rootFile: file, context: ex.owner}, "module", sourceFile.AsNode()) {
 			continue
 		}
 		relative := ex.relativePath(file)
@@ -977,7 +1045,15 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 		if sourceFile == nil {
 			continue
 		}
-		ex.walkFunctions(sourceFile.AsNode())
+		if ex.operations.moduleFiles[file] {
+			ex.indexFunctions(sourceFile.AsNode())
+		}
+	}
+
+	for _, file := range group.PrimaryFiles {
+		if sourceFile := ex.filesByPath[file]; sourceFile != nil {
+			ex.walkFunctions(sourceFile.AsNode(), observationOrigin{rootFile: file, context: ex.owner})
+		}
 	}
 
 	for _, file := range group.PrimaryFiles {
@@ -986,13 +1062,16 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 			continue
 		}
 		ex.beginAmbientFile(sourceFile)
-		ex.walkFacts(sourceFile.AsNode(), nil)
+		ex.walkFacts(sourceFile.AsNode(), nil, observationOrigin{rootFile: file, context: ex.owner})
 	}
 	ex.ambientFile = nil
-	for _, file := range requestedFiles {
+	for _, file := range group.PrimaryFiles {
 		if sourceFile := ex.filesByPath[file]; sourceFile != nil {
-			ex.collectSemanticExports(sourceFile)
+			ex.collectSemanticExports(sourceFile, observationOrigin{rootFile: file, context: ex.owner})
 		}
+	}
+	if ex.originError != nil {
+		return nil, nil, ex.originError
 	}
 	if len(sourceEntries) > 0 && ex.operations.sourceRecovery {
 		if err := ex.applyConfiguredSourceEntries(sourceEntries, auxiliary, resolutions); err != nil {
@@ -1037,11 +1116,13 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 		DeclarationSourceOutcomes:   ex.declarationSourceOutcomes,
 		SourceEntries:               ex.sourceEntryFacts,
 		SourceBindings:              ex.sourceBindingFacts,
-		Declarations:                append(ex.sortedDeclarations(), ex.sourceProgramDeclarations...),
+		Declarations:                ex.sortedDeclarations(),
+		SourceEndpoints:             append(ex.sortedSourceEndpoints(), ex.sourceProgramEndpoints...),
+		SourceTracking:              ex.sourceTracking,
 		Inputs:                      ex.inputs,
 	}
 	sortSnapshot(partial)
-	return partial, missingPrimary, nil
+	return &validatedContribution{Snapshot: partial}, missingPrimary, nil
 }
 
 // parsedConfig is a parsed tsconfig file, the set of its root files and the
@@ -1068,6 +1149,10 @@ type configCache struct {
 
 func newConfigCache(host compiler.CompilerHost) *configCache {
 	return &configCache{host: host, configs: make(map[string]*parsedConfig), errors: make(map[string]error), candidates: make(map[string]bool)}
+}
+
+func (c *configCache) pathKey(path string) string {
+	return c.host.FS().CaseSensitivity().PathKey(tspath.RootedPath(path)).AsString()
 }
 
 // configInputFS records the files consulted while parsing a config, including
@@ -1124,7 +1209,7 @@ func (c *configCache) load(configPath string) (*parsedConfig, error) {
 	}
 	rootFiles := make(map[string]struct{}, len(command.FileNames()))
 	for _, fileName := range command.FileNames() {
-		rootFiles[normalizeSlash(fileName.AsString())] = struct{}{}
+		rootFiles[c.pathKey(normalizeSlash(fileName.AsString()))] = struct{}{}
 	}
 	references := make([]string, 0, len(command.ProjectReferences()))
 	referenceInputs := make([]string, 0, len(command.ProjectReferences()))
@@ -1195,13 +1280,14 @@ func (c *configCache) inputs() []SnapshotInput {
 	return uniqueSnapshotInputs(result)
 }
 
-// adjustments returns the option changes of every loaded config, sorted by
-// config path.
-func (c *configCache) adjustments() []ConfigAdjustment {
-	paths := slices.Sorted(maps.Keys(c.configs))
+// adjustmentsFor returns option changes only for programs used in the domain.
+func (c *configCache) adjustmentsFor(selected map[string]bool) []ConfigAdjustment {
+	paths := slices.Sorted(maps.Keys(selected))
 	var result []ConfigAdjustment
 	for _, configPath := range paths {
-		result = append(result, c.configs[configPath].adjustments...)
+		if parsed := c.configs[configPath]; parsed != nil {
+			result = append(result, parsed.adjustments...)
+		}
 	}
 	return result
 }
@@ -1224,7 +1310,7 @@ func (c *configCache) owningConfig(nearestPath string, file string) (string, err
 		if err != nil {
 			return "", err
 		}
-		if _, ok := parsed.rootFiles[file]; ok {
+		if _, ok := parsed.rootFiles[c.pathKey(file)]; ok {
 			return configPath, nil
 		}
 		for _, reference := range parsed.references {
@@ -1368,7 +1454,8 @@ func (c *configCache) findNearestConfigPath(workspaceRoot string, file string) (
 	}
 }
 
-func mergeSnapshot(into *Snapshot, partial *Snapshot) {
+func mergeSnapshot(into *Snapshot, contribution *validatedContribution) error {
+	partial := contribution.Snapshot
 	if partial.siteConflict != "" {
 		into.siteConflict = partial.siteConflict
 	}
@@ -1401,7 +1488,11 @@ func mergeSnapshot(into *Snapshot, partial *Snapshot) {
 	}
 	into.callDeclarationObservations = append(into.callDeclarationObservations, partial.callDeclarationObservations...)
 	into.Modules = mergeByEntityID(into.Modules, partial.Modules, func(item Module) string { return item.EntityID })
-	into.Functions = mergeFunctionSlices(into.Functions, partial.Functions)
+	var err error
+	into.Functions, err = mergeFunctionSlices(into.Functions, partial.Functions)
+	if err != nil {
+		return err
+	}
 	into.ImportEdges = mergeByEntityID(into.ImportEdges, partial.ImportEdges, func(item ImportEdge) string {
 		return fmt.Sprintf("%s\x00%s\x00%s\x00%t\x00%t\x00%s\x00%t\x00%t\x00%v", item.EntityID, item.ToPath, item.Form, item.Internal, item.Unresolved, item.Package, item.IsTypeOnly, item.Retained, item.ImportedSymbols)
 	})
@@ -1434,7 +1525,17 @@ func mergeSnapshot(into *Snapshot, partial *Snapshot) {
 	into.DeclarationSourceOutcomes = append(into.DeclarationSourceOutcomes, partial.DeclarationSourceOutcomes...)
 	into.SourceEntries = append(into.SourceEntries, partial.SourceEntries...)
 	into.SourceBindings = append(into.SourceBindings, partial.SourceBindings...)
+	into.SourceEndpoints = append(into.SourceEndpoints, partial.SourceEndpoints...)
+	if into.SourceTracking == nil {
+		into.SourceTracking = make(map[string]TrackingSupport)
+	}
+	for id, support := range partial.SourceTracking {
+		if _, exists := into.SourceTracking[id]; !exists {
+			into.SourceTracking[id] = support
+		}
+	}
 	into.Inputs = append(into.Inputs, partial.Inputs...)
+	return nil
 }
 
 func sortSnapshot(snapshot *Snapshot) {
@@ -1463,20 +1564,22 @@ func sortSnapshot(snapshot *Snapshot) {
 	snapshot.Inputs = uniqueSnapshotInputs(snapshot.Inputs)
 }
 
-func mergeFunctionSlices(existing []Function, incoming []Function) []Function {
+func mergeFunctionSlices(existing []Function, incoming []Function) ([]Function, error) {
 	index := make(map[string]int, len(existing))
 	for i, item := range existing {
 		index[item.EntityID] = i
 	}
 	for _, item := range incoming {
 		if i, ok := index[item.EntityID]; ok {
-			existing[i] = mergeFunctionObservations(existing[i], item)
+			if !reflect.DeepEqual(existing[i], item) {
+				return nil, fmt.Errorf("inconsistent owner function contribution for %s", item.EntityID)
+			}
 			continue
 		}
 		index[item.EntityID] = len(existing)
 		existing = append(existing, item)
 	}
-	return existing
+	return existing, nil
 }
 
 func mergeByEntityID[T any](existing []T, incoming []T, entityID func(T) string) []T {
@@ -1495,72 +1598,107 @@ func mergeByEntityID[T any](existing []T, incoming []T, entityID func(T) string)
 	return existing
 }
 
-func (e *extractor) walkFunctions(node *ast.Node) {
+func (e *extractor) walkFunctions(node *ast.Node, origin observationOrigin) {
 	if node == nil {
 		return
 	}
+	if !e.validateOrigin(origin, "function traversal", node) {
+		return
+	}
 	if ast.IsFunctionLike(node) {
-		e.collectFunction(node)
+		e.collectFunction(node, origin)
 	}
 	node.ForEachChild(func(child *ast.Node) bool {
-		e.walkFunctions(child)
+		e.walkFunctions(child, origin)
 		return false
 	})
 }
 
-func (e *extractor) walkFacts(node *ast.Node, currentFunction *functionState) {
+func (e *extractor) indexFunctions(node *ast.Node) {
 	if node == nil {
 		return
 	}
+	if ast.IsFunctionLike(node) && node.Body() != nil {
+		file := ast.GetSourceFileOfNode(node)
+		if file != nil && e.operations.moduleFiles[normalizeSlash(file.FileName().AsString())] {
+			meta, _, _, _, displayName := functionSyntax(node, file)
+			descriptor := &functionDescriptor{SemanticKey: e.sourceNodeID("fn", "function-v1", node), Name: displayName, FilePath: e.relativePath(file.FileName().AsString())}
+			for _, lookupNode := range meta.lookupNodes {
+				if lookupNode == nil {
+					continue
+				}
+				e.functionNodes[lookupNode] = descriptor
+				if key := nodeKey(lookupNode); key != "" {
+					e.functionKeys[key] = descriptor
+				}
+				if symbol := lookupNode.Symbol(); symbol != nil {
+					e.functionSyms[symbol] = descriptor
+				}
+			}
+		}
+	}
+	node.ForEachChild(func(child *ast.Node) bool {
+		e.indexFunctions(child)
+		return false
+	})
+}
+
+func (e *extractor) walkFacts(node *ast.Node, currentFunction *functionState, origin observationOrigin) {
+	if node == nil {
+		return
+	}
+	if !e.validateOrigin(origin, "source-site traversal", node) {
+		return
+	}
 	if node.Kind == ast.KindAwaitExpression {
-		e.collectSuspension(node, "await", currentFunction)
+		e.collectSuspension(node, "await", currentFunction, origin)
 	} else if node.Kind == ast.KindForOfStatement && node.AsForInOrOfStatement().AwaitModifier != nil {
-		e.collectSuspension(node, "for_await", currentFunction)
+		e.collectSuspension(node, "for_await", currentFunction, origin)
 	} else if node.Kind == ast.KindVariableDeclarationList && ast.IsVarAwaitUsing(node) {
-		e.collectSuspension(node, "await_using", currentFunction)
+		e.collectSuspension(node, "await_using", currentFunction, origin)
 	}
 	if ast.IsPropertyAccessExpression(node) {
-		e.collectAccess(node, currentFunction)
+		e.collectAccess(node, currentFunction, origin)
 	}
 	switch {
 	case ast.IsImportDeclaration(node):
-		e.collectImport(node, node.ModuleSpecifier(), ImportFormStatic, node.ImportClause() != nil && node.ImportClause().IsTypeOnly(), currentFunction)
+		e.collectImport(node, node.ModuleSpecifier(), ImportFormStatic, node.ImportClause() != nil && node.ImportClause().IsTypeOnly(), currentFunction, origin)
 	case ast.IsExportDeclaration(node) && node.ModuleSpecifier() != nil:
-		e.collectImport(node, node.ModuleSpecifier(), ImportFormReexport, node.IsTypeOnly(), currentFunction)
+		e.collectImport(node, node.ModuleSpecifier(), ImportFormReexport, node.IsTypeOnly(), currentFunction, origin)
 	case ast.IsExternalModuleImportEqualsDeclaration(node):
-		e.collectImport(node, node.AsImportEqualsDeclaration().ModuleReference.Expression(), ImportFormImportEquals, node.IsTypeOnly(), currentFunction)
+		e.collectImport(node, node.AsImportEqualsDeclaration().ModuleReference.Expression(), ImportFormImportEquals, node.IsTypeOnly(), currentFunction, origin)
 	case ast.IsLiteralImportTypeNode(node):
-		e.collectImport(node, node.AsImportTypeNode().Argument.AsLiteralTypeNode().Literal, ImportFormImportType, true, currentFunction)
+		e.collectImport(node, node.AsImportTypeNode().Argument.AsLiteralTypeNode().Literal, ImportFormImportType, true, currentFunction, origin)
 	case ast.IsImportCall(node):
 		if arguments := node.Arguments(); len(arguments) > 0 {
 			if ast.IsStringLiteralLike(arguments[0]) {
-				e.collectImport(node, arguments[0], ImportFormDynamic, false, currentFunction)
+				e.collectImport(node, arguments[0], ImportFormDynamic, false, currentFunction, origin)
 			} else {
-				e.collectOpaqueImport(node, currentFunction)
+				e.collectOpaqueImport(node, currentFunction, origin)
 			}
 		}
 	case ast.IsRequireCall(node, true):
-		e.collectImport(node, node.Arguments()[0], ImportFormRequire, false, currentFunction)
+		e.collectImport(node, node.Arguments()[0], ImportFormRequire, false, currentFunction, origin)
 	case ast.IsRequireCall(node, false):
-		e.collectOpaqueImport(node, currentFunction)
+		e.collectOpaqueImport(node, currentFunction, origin)
 	case ast.IsTypeReferenceNode(node):
-		e.collectTypeRef(node.AsTypeReferenceNode().TypeName, node.AsTypeReferenceNode().TypeName.AsNode(), currentFunction)
+		e.collectTypeRef(node.AsTypeReferenceNode().TypeName, node.AsTypeReferenceNode().TypeName.AsNode(), currentFunction, origin)
 	case ast.IsExpressionWithTypeArguments(node):
 		expression := node.AsExpressionWithTypeArguments().Expression
-		e.collectTypeRef(expression.AsNode(), expression.AsNode(), currentFunction)
+		e.collectTypeRef(expression.AsNode(), expression.AsNode(), currentFunction, origin)
 	case ast.IsCallExpression(node), ast.IsNewExpression(node), ast.IsTaggedTemplateExpression(node):
-		e.collectCall(e.callSourceFor(node, currentFunction), node)
+		e.collectCall(e.callSourceFor(node, currentFunction), node, origin)
 	case ast.IsIdentifier(node):
 		if e.ambientFile != nil {
-			e.matchAmbient(node, currentFunction)
-			e.matchGlobalRef(node, currentFunction)
-			e.matchFnRef(node, currentFunction)
+			e.matchAmbient(node, currentFunction, origin)
+			e.matchGlobalRef(node, currentFunction, origin)
+			e.matchFnRef(node, currentFunction, origin)
 		}
 	}
 	if e.ambientFile != nil {
 		switch node.Kind {
 		case ast.KindPropertyAccessExpression, ast.KindElementAccessExpression, ast.KindBindingElement, ast.KindShorthandPropertyAssignment, ast.KindPropertyAssignment:
-			e.matchAmbientMember(node, currentFunction)
+			e.matchAmbientMember(node, currentFunction, origin)
 		}
 	}
 
@@ -1583,7 +1721,7 @@ func (e *extractor) walkFacts(node *ast.Node, currentFunction *functionState) {
 		} else if ast.IsPropertyDeclaration(node) && !ast.IsStatic(node) && child == node.Initializer() {
 			owner = e.instanceInitializerOwner(node)
 		}
-		e.walkFacts(child, owner)
+		e.walkFacts(child, owner, origin)
 		return false
 	})
 }
@@ -1620,7 +1758,10 @@ func (e *extractor) classConstructorOwner(class *ast.Node) *functionState {
 	return &functionState{reason: "unsupported_context"}
 }
 
-func (e *extractor) collectSuspension(node *ast.Node, kind string, owner *functionState) {
+func (e *extractor) collectSuspension(node *ast.Node, kind string, owner *functionState, origin observationOrigin) {
+	if !e.validateOrigin(origin, "collectSuspension", node) {
+		return
+	}
 	file := ast.GetSourceFileOfNode(node)
 	if file == nil {
 		return
@@ -1635,7 +1776,10 @@ func (e *extractor) collectSuspension(node *ast.Node, kind string, owner *functi
 	e.suspensionSites = append(e.suspensionSites, site)
 }
 
-func (e *extractor) collectAccess(node *ast.Node, owner *functionState) {
+func (e *extractor) collectAccess(node *ast.Node, owner *functionState, origin observationOrigin) {
+	if !e.validateOrigin(origin, "collectAccess", node) {
+		return
+	}
 	access := node.AsPropertyAccessExpression()
 	meta := access.Expression
 	if meta == nil || !ast.IsMetaProperty(meta) || meta.AsMetaProperty().KeywordToken != ast.KindImportKeyword || !ast.NodeIsPresent(meta.Name()) || meta.Name().Text() != "meta" ||
@@ -1656,19 +1800,8 @@ func (e *extractor) collectAccess(node *ast.Node, owner *functionState) {
 	e.accesses = append(e.accesses, entry)
 }
 
-func (e *extractor) collectFunction(node *ast.Node) *Function {
-	if node.Body() == nil {
-		return nil
-	}
-	file := ast.GetSourceFileOfNode(node)
-	if file == nil {
-		return nil
-	}
-	fileName := normalizeSlash(file.FileName().AsString())
-	if _, ok := e.requestedFiles[fileName]; !ok {
-		return nil
-	}
-	meta := functionMetaForNode(node)
+func functionSyntax(node *ast.Node, file *ast.SourceFile) (meta, binding *functionMeta, omitted bool, containerName, displayName string) {
+	meta = functionMetaForNode(node)
 	positional := meta == nil || meta.localName == "" || meta.nameNode == nil
 	if positional {
 		kind := "function"
@@ -1690,7 +1823,6 @@ func (e *extractor) collectFunction(node *ast.Node) *Function {
 	}
 	// Keep existing positional identities for wrapped bindings, but use the
 	// binding to decide whether the function is an ownership-only callback.
-	var binding *functionMeta
 	if ast.IsFunctionExpressionOrArrowFunction(node) {
 		expression := node
 		for expression.Parent != nil && ast.IsOuterExpression(expression.Parent, ast.OEKAll) && expression.Parent.Expression() == expression {
@@ -1703,63 +1835,70 @@ func (e *extractor) collectFunction(node *ast.Node) *Function {
 			}
 		}
 	}
-	omitted := positional && binding == nil
+	omitted = positional && binding == nil
 
-	containerName := ""
 	if !positional {
 		containerName = containerNameForNode(node, meta.namingSource)
 	}
-	displayName := meta.localName
+	displayName = meta.localName
 	if containerName != "" {
 		displayName = containerName + "." + meta.localName
 	}
+	return meta, binding, omitted, containerName, displayName
+}
 
+func (e *extractor) collectFunction(node *ast.Node, origin observationOrigin) *functionDescriptor {
+	if !e.validateOrigin(origin, "function", node) {
+		return nil
+	}
+	if node.Body() == nil {
+		return nil
+	}
+	file := ast.GetSourceFileOfNode(node)
+	if file == nil {
+		return nil
+	}
+	if _, ok := e.primaryFiles[normalizeSlash(file.FileName().AsString())]; !ok {
+		return nil
+	}
+	stored := e.functionNodes[node]
+	if stored == nil {
+		return nil
+	}
+	meta, binding, omitted, containerName, displayName := functionSyntax(node, file)
 	nameRange := e.nodeLocation(file, meta.nameNode)
 	var returnType string
 	var parameterTypes []string
-	var observations []FunctionSignatureObservation
+	var observation *FunctionSignatureObservation
 	if !omitted && e.operations.signatures {
-		returnType, parameterTypes = e.functionTypes(node)
-		observations = []FunctionSignatureObservation{e.functionSignatureObservation(node, parameterTypes, returnType)}
+		returnType, parameterTypes = e.functionTypes(node, origin)
+		value := e.functionSignatureObservation(node, parameterTypes, returnType)
+		observation = &value
 	}
-	semanticKey := e.sourceNodeID("fn", "function-v1", node)
+	semanticKey := stored.SemanticKey
 	record := Function{
-		EntityID:              semanticKey,
-		SemanticKey:           semanticKey,
-		Name:                  displayName,
-		Kind:                  meta.kind,
-		FilePath:              nameRange.File,
-		ContainerName:         containerName,
-		IsExported:            meta.exported || e.isExportedFunction(node, meta) || binding != nil && (binding.exported || e.isExportedFunction(node, binding)),
-		IsAsync:               ast.HasSyntacticModifier(node, ast.ModifierFlagsAsync),
-		ParameterCount:        len(node.Parameters()),
-		ReturnType:            returnType,
-		ParameterTypes:        parameterTypes,
-		SignatureObservations: observations,
-		SignatureOmitted:      omitted,
-		SignatureUnresolved:   len(observations) != 0 && !observations[0].Complete,
-		Range:                 e.nodeLocation(file, node),
+		EntityID:         semanticKey,
+		SemanticKey:      semanticKey,
+		Name:             displayName,
+		Kind:             meta.kind,
+		FilePath:         nameRange.File,
+		ContainerName:    containerName,
+		IsExported:       meta.exported || e.isExportedFunction(node, meta) || binding != nil && (binding.exported || e.isExportedFunction(node, binding)),
+		IsAsync:          ast.HasSyntacticModifier(node, ast.ModifierFlagsAsync),
+		Signature:        observation,
+		SignatureOmitted: omitted,
+		Range:            e.nodeLocation(file, node),
 	}
 	e.trackNull(semanticKey, "function", node)
 	e.trackNamed(semanticKey, "function", node)
 	e.functions = append(e.functions, record)
-	stored := &e.functions[len(e.functions)-1]
-	for _, lookupNode := range meta.lookupNodes {
-		if lookupNode == nil {
-			continue
-		}
-		e.functionNodes[lookupNode] = stored
-		if key := nodeKey(lookupNode); key != "" {
-			e.functionKeys[key] = stored
-		}
-		if symbol := lookupNode.Symbol(); symbol != nil {
-			e.functionSyms[symbol] = stored
-		}
-	}
 	return stored
 }
 
-func (e *extractor) collectImport(node *ast.Node, moduleSpecifier *ast.Node, form string, typeOnly bool, owner *functionState) {
+func (e *extractor) collectImport(node *ast.Node, moduleSpecifier *ast.Node, form string, typeOnly bool, owner *functionState, origin observationOrigin) {
+	if !e.validateOrigin(origin, "collectImport", node) {
+		return
+	}
 	file := ast.GetSourceFileOfNode(node)
 	if file == nil {
 		return
@@ -1883,7 +2022,10 @@ func (source callSource) siteKey() string {
 
 // collectOpaqueImport records an import() or require() whose specifier is
 // not a string literal.
-func (e *extractor) collectOpaqueImport(node *ast.Node, owner *functionState) {
+func (e *extractor) collectOpaqueImport(node *ast.Node, owner *functionState, origin observationOrigin) {
+	if !e.validateOrigin(origin, "collectOpaqueImport", node) {
+		return
+	}
 	file := ast.GetSourceFileOfNode(node)
 	if file == nil {
 		return
@@ -1904,10 +2046,13 @@ func (e *extractor) collectOpaqueImport(node *ast.Node, owner *functionState) {
 
 // collectCall records one fact for a call or new expression: a call edge to
 // a collected function, an external call, or an unresolved call.
-func (e *extractor) collectCall(source callSource, node *ast.Node) {
+func (e *extractor) collectCall(source callSource, node *ast.Node, origin observationOrigin) {
+	if !e.validateOrigin(origin, "call", node) {
+		return
+	}
 	site := e.recordRuntimeCall(source, node)
 	if site != "" {
-		e.collectCallDeclaration(node, site)
+		e.collectCallDeclaration(node, site, origin)
 	}
 }
 
@@ -2011,7 +2156,7 @@ func (e *extractor) collectEscapingCallbacks(source callSource, file *ast.Source
 				continue
 			}
 		}
-		var target *Function
+		var target *functionDescriptor
 		if inline {
 			target = e.functionNodes[value]
 		} else if ast.IsIdentifier(value) || ast.IsPropertyAccessExpression(value) {
@@ -2058,7 +2203,7 @@ func createsFunctionValue(node *ast.Node) bool {
 }
 
 // recordFnRef records a reference from source to a collected function.
-func (e *extractor) recordFnRef(source callSource, target *Function, node *ast.Node) {
+func (e *extractor) recordFnRef(source callSource, target *functionDescriptor, node *ast.Node) {
 	semanticKey := e.registerSite(node, source)
 	location := e.nodeLocation(ast.GetSourceFileOfNode(node), node)
 	e.refs = append(e.refs, FnRef{
@@ -2213,7 +2358,10 @@ func hasInstanceInitializer(class *ast.Node) bool {
 // identifier or a property name that resolves to the function, outside the
 // callee of a call or new expression, a declaration name, an import or
 // export, an assignment target and a type position.
-func (e *extractor) matchFnRef(node *ast.Node, currentFunction *functionState) {
+func (e *extractor) matchFnRef(node *ast.Node, currentFunction *functionState, origin observationOrigin) {
+	if !e.validateOrigin(origin, "matchFnRef", node) {
+		return
+	}
 	parent := node.Parent
 	if parent == nil {
 		return
@@ -2282,7 +2430,7 @@ func calleeNameNode(node *ast.Node) *ast.Node {
 // resolveCallTarget uses the value being called, not the signature alone, to
 // identify a workspace function. A signature can describe a mutable binding
 // or just one branch of a conditional expression.
-func (e *extractor) resolveCallTarget(node *ast.Node) (*Function, *ast.Node) {
+func (e *extractor) resolveCallTarget(node *ast.Node) (*functionDescriptor, *ast.Node) {
 	expression := ast.SkipOuterExpressions(calleeOf(node), ast.OEKAll)
 	if expression != nil && ast.IsFunctionExpressionOrArrowFunction(expression) {
 		if target := e.lookupFunction(expression); target != nil {
@@ -2332,7 +2480,7 @@ func accessorSymbol(symbol *ast.Symbol) bool {
 	}))
 }
 
-func (e *extractor) certainBindingTarget(symbol *ast.Symbol) *Function {
+func (e *extractor) certainBindingTarget(symbol *ast.Symbol) *functionDescriptor {
 	if symbol == nil {
 		return nil
 	}
@@ -2519,7 +2667,7 @@ func (e *extractor) moduleParseError(file *ast.SourceFile, relative string) (Par
 	}, true
 }
 
-func (e *extractor) lookupFunction(value any) *Function {
+func (e *extractor) lookupFunction(value any) *functionDescriptor {
 	switch typed := value.(type) {
 	case *ast.Node:
 		if typed == nil {
@@ -2570,7 +2718,10 @@ func (e *extractor) lookupFunction(value any) *Function {
 	return nil
 }
 
-func (e *extractor) collectTypeRef(nameNode *ast.Node, rangeNode *ast.Node, owner *functionState) {
+func (e *extractor) collectTypeRef(nameNode *ast.Node, rangeNode *ast.Node, owner *functionState, origin observationOrigin) {
+	if !e.validateOrigin(origin, "collectTypeRef", rangeNode) {
+		return
+	}
 	if nameNode == nil || rangeNode == nil {
 		return
 	}
@@ -2626,12 +2777,12 @@ func (e *extractor) isExportedSymbol(symbol *ast.Symbol) bool {
 
 // functionTypes records the type facts of the return type and the
 // parameter types of a function and returns their type IDs.
-func (e *extractor) functionTypes(node *ast.Node) (string, []string) {
+func (e *extractor) functionTypes(node *ast.Node, origin observationOrigin) (string, []string) {
 	started := time.Now()
 	defer func() { e.timing.types += time.Since(started) }()
 	returnType := ""
 	if signature := e.checker.GetSignatureFromDeclaration(node); signature != nil {
-		returnType = e.emitFunctionType(e.checker.GetReturnTypeOfSignature(signature), node)
+		returnType = e.emitFunctionType(e.checker.GetReturnTypeOfSignature(signature), origin)
 	}
 	parameters := node.Parameters()
 	parameterTypes := make([]string, 0, len(parameters))
@@ -2643,7 +2794,7 @@ func (e *extractor) functionTypes(node *ast.Node) (string, []string) {
 			parameterTypes = append(parameterTypes, "")
 			continue
 		}
-		parameterTypes = append(parameterTypes, e.emitFunctionType(e.checker.GetTypeAtLocation(parameter.AsNode()), parameter.AsNode()))
+		parameterTypes = append(parameterTypes, e.emitFunctionType(e.checker.GetTypeAtLocation(parameter.AsNode()), origin))
 	}
 	return returnType, parameterTypes
 }

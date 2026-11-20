@@ -139,7 +139,7 @@ func TestRelationCoverageInventory(t *testing.T) {
 			t.Fatal(err)
 		}
 		users := map[facts.Predicate]*relationUsers{}
-		collectRelationUsers(unit, []string{"custom.imports_reach"}, "root.ts", customCatalog.sources,
+		collectRelationUsers(unit, []string{"custom.imports_reach", "custom.module_multi_config", "custom.fn_signature_unresolved"}, "root.ts", customCatalog.sources,
 			customBases, customByName, customHelpers, customHelperByName, users)
 		for _, name := range []string{"custom.import_edge", "custom.import_type_only", "custom.import_retained"} {
 			got := users[customByName[name]]
@@ -148,6 +148,20 @@ func TestRelationCoverageInventory(t *testing.T) {
 				continue
 			}
 			if _, ok := got.via["`custom.imports_reach` (`root.ts`)"]; !ok || len(got.via) != 1 {
+				t.Errorf("%s helper users: %#v", name, got.via)
+			}
+		}
+		for name, helper := range map[string]string{
+			"custom.module_config":        "custom.module_multi_config",
+			"custom.fn_signature":         "custom.fn_signature_unresolved",
+			"custom.signature_incomplete": "custom.fn_signature_unresolved",
+		} {
+			got := users[customByName[name]]
+			if got == nil || len(got.direct) != 0 {
+				t.Errorf("%s helper users: %#v", name, got)
+				continue
+			}
+			if _, ok := got.via["`"+helper+"` (`root.ts`)"]; !ok || len(got.via) != 1 {
 				t.Errorf("%s helper users: %#v", name, got.via)
 			}
 		}

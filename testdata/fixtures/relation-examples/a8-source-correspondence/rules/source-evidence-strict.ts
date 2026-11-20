@@ -15,7 +15,15 @@ export default rule("arch.configured-source-evidence-strict")
 		Decl incomplete_entry(Site, Config, Reason).
 		incomplete_entry(Site, Config, Reason) :- tracked_call(Site, _, Entry),
 			ts.source_entry_tsconfig(Entry, Config), ts.source_entry_incomplete(Entry, Reason).
+		Decl incomplete_endpoint(Site, Reason).
+		incomplete_endpoint(Site, Reason) :- tracked_call(Site, Binding, _),
+			ts.source_binding_checked_decl(Binding, Declaration), ts.source_endpoint_incomplete(Declaration, Reason).
+		incomplete_endpoint(Site, Reason) :- tracked_call(Site, Binding, _),
+			ts.source_binding_source_decl(Binding, Declaration), ts.source_endpoint_incomplete(Declaration, Reason).
+		Decl adjusted_source(Site, Config, Option, Action).
+		adjusted_source(Site, Config, Option, Action) :- tracked_call(Site, _, Entry),
+			ts.source_entry_tsconfig(Entry, Config), ts.source_config_adjusted(Config, Option, Action).
 	`)
-	.report("incomplete_binding", "incomplete_entry")
+	.report("incomplete_binding", "incomplete_entry", "incomplete_endpoint", "adjusted_source")
 	.expectNonEmpty("tracked_call")
 	.message(() => "Configured source association evidence is incomplete");
