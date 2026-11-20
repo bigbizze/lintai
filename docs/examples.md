@@ -2,6 +2,8 @@
 
 These examples use the 0.2 rule API. A rule is a Datalog program that LintAI evaluates with mangle-go over the base facts of the workspace. Each row of a reported predicate is one violation. Run `lintai schema` to see configured producer relations and helpers under their namespaces, plus engine helpers.
 
+Each execution creates a fresh pure runtime for the rule. Its program and messages share that runtime for the duration of the execution.
+
 ## 1. Transitive purity rule
 
 For example, a pure function may call a helper that contains `await`. This rule reports that caller. It also sees `for await` and `await using`:

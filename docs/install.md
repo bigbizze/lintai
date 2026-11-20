@@ -245,6 +245,8 @@ The asset root is the directory that contains `scripts/bundle-rule.mjs` and `scr
 
 ### Rule bundles fail unexpectedly
 
+An input that changes or disappears during bundling can produce a bundle error. Retry after the edit is complete; lintai does not reuse the incomplete artifact.
+
 Check:
 
 - `esbuild` install/build permissions in pnpm
