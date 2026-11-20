@@ -1186,6 +1186,8 @@ Each row below supplies the ordered arguments, all entity/report roles, and its 
 |---|---|---|
 | `ts.module/1` | `Module:E!` | One entity per selected primary file. |
 | `ts.module_path/2` | `Module:E!, File:P` | The primary module’s canonical file path. |
+| `ts.module_config/2` | `Module:E!, Config:P` | Original root-file membership in the bounded ordinary config inventory. |
+| `ts.module_owner_config/2` | `Module:E!, Config:P` | Effective real config owner of a retained ordinary module; synthetic owners have no row. |
 | `ts.fn/3` | `Fn:E!, File:P, Name:S` | Collected implementation/ownership function in a primary file; display name is not identity. |
 | `ts.fn_kind/2` | `Fn:E!, Kind:N` | One syntax kind: /function, /function_expression, /arrow_function, /method, /constructor, /get_accessor or /set_accessor. |
 | `ts.fn_container/2` | `Fn:E!, Name:S` | Known containing class/object display name; absent when unnamed. |
@@ -1231,7 +1233,6 @@ Each row below supplies the ordered arguments, all entity/report roles, and its 
 | `ts.call_edge/2` | `Site:E!, Callee:E!` | Observed call to a collected implementation. Caller is site_owner, not part of this row. |
 | `ts.external_call/4` | `Site:E!, OriginKind:N, Origin:S, Name:S` | Observed external declared target; origin kinds are defined in section 9.1. |
 | `ts.call_unresolved/1` | `Site:E!` | An observed invocation cannot be followed to a retained implementation or supported external target. |
-| `ts.call_target_conflict/1` | `Site:E!` | Relevant runtime-classification/target observations disagree; retain their positive evidence. |
 | `ts.call_declaration/2` | `Site:E!, Declaration:E?` | Concrete signature declaration selected by a checked context, independent of runtime implementation resolution. |
 | `ts.call_declaration_incomplete/2` | `Site:E!, Reason:N` | Selected declaration/member evidence is /unresolved, /synthetic, /unsupported or /conflict. |
 | `ts.declaration_member/3` | `Declaration:E?, OwnerDeclaration:E?, Name:S` | Supported lexical named member and declaring owner; not a claim about the receiver’s runtime implementation. |
@@ -1253,8 +1254,6 @@ Each row below supplies the ordered arguments, all entity/report roles, and its 
 | `ts.signature_complete/1` | `Signature:E!` | All signature slots, marks and return were established; structural type completeness is separate. |
 | `ts.signature_incomplete/2` | `Signature:E!, Reason:N` | Whole observation is /unresolved or /unsupported; never coexists with signature_complete for the same ID. |
 | `ts.fn_signature_omitted/1` | `Fn:E!` | Fixed ownership-only omission policy, not selective-work omission. |
-| `ts.fn_signature_unresolved/1` | `Fn:E!` | At least one attempted observation lacked a complete usable signature. |
-| `ts.fn_signature_conflict/1` | `Fn:E!` | Two complete whole signatures for this function disagree. |
 
 ### A.5 Structural type facts
 
@@ -1291,7 +1290,6 @@ Each row below supplies the ordered arguments, all entity/report roles, and its 
 | `ts.declaration_type/3` | `Declaration:E?, Space:N, Type:E?` | Known type association for a declaration-type subject. |
 | `ts.declaration_type_incomplete/3` | `Declaration:E?, Space:N, Reason:N` | Subject-specific /unresolved, /unsupported or /conflict evidence. |
 | `ts.declaration_fn/2` | `Declaration:E?, Fn:E!` | Observed direct correspondence to a collected implementation. |
-| `ts.declaration_fn_incomplete/2` | `Declaration:E?, Reason:N` | Attempted direct function association is /unresolved, /unsupported or /conflict. |
 
 ### A.7 Export evidence
 
@@ -1313,6 +1311,7 @@ Each row below supplies the ordered arguments, all entity/report roles, and its 
 | `ts.declaration_source_outcome/2` | `Checked:E?, Outcome:N` | Terminal failed/uncertain requested map attempt; outcome vocabulary follows below. |
 | `ts.source_entry/3` | `Entry:E, CheckedEntry:P, SourceEntry:P` | Validated configured source-links entry. No fabricated source range for this configuration entity. |
 | `ts.source_entry_tsconfig/2` | `Entry:E, Config:P` | Explicit source configuration chosen for the entry. |
+| `ts.source_config_adjusted/3` | `Config:P, Option:S, Action:N` | Option adaptation for a source-correspondence context. |
 | `ts.source_entry_applied/1` | `Entry:E` | The checked entry matched an analyzed compiler input and its binding attempts were considered. |
 | `ts.source_entry_unapplied/1` | `Entry:E` | The valid checked entry matched no analyzed compiler input; exactly one applied/unapplied state after reconciliation. |
 | `ts.source_entry_incomplete/2` | `Entry:E, Reason:N` | Optional source program/inventory is /unresolved, /unsupported or /conflict. |
@@ -1321,6 +1320,8 @@ Each row below supplies the ordered arguments, all entity/report roles, and its 
 | `ts.source_binding_checked_decl/2` | `Binding:E, Declaration:E?` | Member of the independently observed checked declaration set. |
 | `ts.source_binding_source_decl/2` | `Binding:E, Declaration:E?` | Member of the independently observed source declaration set. |
 | `ts.source_binding_incomplete/2` | `Binding:E, Reason:N` | Association is /unresolved, /unsupported or /conflict; positives do not erase uncertainty. |
+| `ts.source_endpoint/5` | `Declaration:E?, Name:S, Kind:N, OriginKind:N, Origin:S` | Whole metadata observation for a retained source-correspondence endpoint. |
+| `ts.source_endpoint_incomplete/2` | `Declaration:E?, Reason:N` | Endpoint metadata is /unsupported or /conflict. |
 
 ### A.9 Explicit location queries
 
@@ -1340,7 +1341,7 @@ The ambient source/capability vocabulary is the built-in ambient registry at the
 
 `type_literal` uses a string payload for /string, a canonical decimal string for /bigint, an integer or finite float for /number, and /true or /false for /boolean. Its kind is explicit data; rules never parse a type ID to recover literal meaning. This replaces the previously ambiguous two-column literal projection.
 
-All source-evidence rows use the same site/file/owner records. `site_owner` and unsupported-attribution evidence are exclusive. Call target observations can differ across contexts; `call_target_conflict` records that fact without changing site identity. Source-reference evidence is not execution evidence.
+All source-evidence rows use the same site/file/owner records. `site_owner` and unsupported-attribution evidence are exclusive. Runtime targets represent the retained owner-context result; source-reference evidence is not execution evidence.
 
 Attribute-only requests still receive complete attribute domains and reporting support. `E!` on an attribute row does not require publishing the entity's separate defining relation. It requires its independently defined location to be available in that batch.
 
@@ -1357,6 +1358,7 @@ Helpers are derived within each rule, not producer-materialized facts. They crea
 | `ts.site_attribution_unknown(Site)` | Has a `site_attribution_unsupported` reason. |
 | `ts.fn_awaits(Fn)` | Function owns an ordinary `/await` site. |
 | `ts.fn_suspends(Fn)` | Function owns any supported suspension kind. |
+| `ts.fn_signature_unresolved(Fn)` | `fn_signature(Fn, Signature)` and `signature_incomplete(Signature, _)` both hold. |
 | `ts.module_has_suspension(File)` | File contains a suspension site at any ownership scope. |
 | `ts.import_has_symbols(Imp)` | Import has at least one introduced binding. |
 | `ts.import_runtime(Imp)` | Non-type-only side-effect/no-binding load, a value binding, or a retained all-type statement. |
