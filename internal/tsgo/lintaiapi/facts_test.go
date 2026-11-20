@@ -55,7 +55,8 @@ func describeImport(edge ImportEdge) string {
 
 // Every import form makes an edge. An edge records its form, whether it
 // resolves to a workspace source file, whether it resolves at all, and
-// the package name for a bare specifier. Before this, only import
+// the package name when physical resolution supplies package evidence. Ambient
+// modules resolve without being labeled as packages. Before this, only import
 // declarations made edges, and an import that resolved into node_modules
 // was marked internal.
 func TestImportEdgesForEveryForm(t *testing.T) {
@@ -63,13 +64,13 @@ func TestImportEdgesForEveryForm(t *testing.T) {
 		"node_modules/pkg/package.json": `{ "name": "pkg", "version": "1.0.0", "types": "index.d.ts" }`,
 		"node_modules/pkg/index.d.ts":   "export declare function run(): void;\n",
 		"node_modules/pkg/sub.d.ts":     "export declare const sub: number;\n",
-		"src/types.d.ts":                "declare module \"virtual:env\" { export const mode: string; }\n",
+		"src/types.d.ts":                "declare module \"virtual:env\" { export const mode: string; export function read(): string; }\n",
 		"src/b.ts":                      "export const b = 1;\nexport type B = number;\n",
 		"src/a.ts": `import { b } from "./b";
 import type { B } from "./b";
 import { run } from "pkg";
 import { sub } from "pkg/sub";
-import { mode } from "virtual:env";
+import { mode, read } from "virtual:env";
 import { missing } from "./missing";
 import { alias } from "@/typo";
 export * from "./b";
@@ -80,6 +81,7 @@ const required = require("./b");
 export async function lazy() { return import("./b"); }
 export type Lazy = typeof import("./b");
 export const used = [b, run, sub, mode, missing, alias, eq, required] as unknown as B;
+read();
 `,
 	})
 	got := make([]string, 0, len(snapshot.ImportEdges))
@@ -100,12 +102,17 @@ export const used = [b, run, sub, mode, missing, alias, eq, required] as unknown
 		"src/a.ts @/typo -> @/typo static unresolved",
 		"src/a.ts pkg -> pkg static package=pkg",
 		"src/a.ts pkg/sub -> pkg/sub static package=pkg",
-		"src/a.ts virtual:env -> virtual:env static package=virtual:env",
+		"src/a.ts virtual:env -> virtual:env static",
 	}
 	slices.Sort(got)
 	slices.Sort(want)
 	if !slices.Equal(got, want) {
 		t.Fatalf("import edges differ:\ngot:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+	if !slices.ContainsFunc(snapshot.ExternalCalls, func(call ExternalCall) bool {
+		return call.OriginKind == OriginKindAmbientModule && call.Module == "virtual:env" && call.Name == "read"
+	}) {
+		t.Fatalf("ambient module call lost its origin: %+v", snapshot.ExternalCalls)
 	}
 }
 

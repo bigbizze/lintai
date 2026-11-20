@@ -24,19 +24,11 @@
     "reason": "could not build a fixture: missing types resolve to checker any and produce complete signature observations"
   },
   {
-    "relation": "ts.import_package",
-    "reason": "disagrees with its description: virtual declared modules can be labeled as packages"
-  },
-  {
     "relation": "ts.location",
     "reason": "reporting support"
   },
   {
     "relation": "ts.signature_incomplete",
     "reason": "could not build a fixture: missing types resolve to checker any and produce complete signature observations"
-  },
-  {
-    "relation": "ts.type_ref_target",
-    "reason": "disagrees with its description"
   }
 ]

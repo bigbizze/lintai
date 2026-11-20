@@ -1787,7 +1787,7 @@ func (e *extractor) collectImport(node *ast.Node, moduleSpecifier *ast.Node, for
 			packageName = packageNameFromSpecifier(specifier)
 		}
 	} else if e.checker.ResolveExternalModuleName(moduleSpecifier, nil) != nil {
-		packageName = packageNameFromSpecifier(specifier)
+		// An ambient module can resolve without corresponding to a physical package.
 	} else {
 		unresolved = true
 	}
@@ -2636,6 +2636,9 @@ func (e *extractor) functionTypes(node *ast.Node) (string, []string) {
 	parameters := node.Parameters()
 	parameterTypes := make([]string, 0, len(parameters))
 	for _, parameter := range parameters {
+		if parameter != nil && ast.IsThisParameter(parameter.AsNode()) {
+			continue
+		}
 		if parameter == nil {
 			parameterTypes = append(parameterTypes, "")
 			continue
@@ -2821,7 +2824,7 @@ func (e *extractor) enqueueTypeReferenceSymbols(nameNode *ast.Node, enqueue func
 }
 
 func (e *extractor) symbolTargetPath(symbol *ast.Symbol) string {
-	if symbol == nil {
+	if symbol == nil || symbol.Flags()&ast.SymbolFlagsAlias != 0 {
 		return ""
 	}
 	if path := e.nodeTargetPath(symbol.ValueDeclaration()); path != "" {

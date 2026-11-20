@@ -464,6 +464,45 @@ export function loadUser(user: Models.User): Models.User {
 	}
 }
 
+func TestNodeNextTypeReferenceAliasTargets(t *testing.T) {
+	root, err := filepath.Abs("../../../testdata/fixtures/relation-examples/disagreements/type-ref-target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var files []string
+	for _, name := range []string{"importer.ts", "valid.ts", "chain.ts", "barrel.ts", "model.ts"} {
+		files = append(files, filepath.Join(root, name))
+	}
+	snapshot, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{WorkspaceRoot: root, Files: files})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(snapshot.ImportEdges, func(edge ImportEdge) bool {
+		return edge.FromPath == "importer.ts" && edge.Specifier == "./model" && edge.Unresolved
+	}) {
+		t.Fatalf("NodeNext extensionless import must remain unresolved: %+v", snapshot.ImportEdges)
+	}
+	for _, tc := range []struct{ file, name, target string }{
+		{"importer.ts", "Model", ""},
+		{"valid.ts", "DirectModel", "model.ts"},
+		{"valid.ts", "ThroughChain", "model.ts"},
+	} {
+		found := false
+		for _, ref := range snapshot.TypeRefs {
+			if ref.FilePath != tc.file || ref.Name != tc.name {
+				continue
+			}
+			found = true
+			if ref.TargetPath != tc.target {
+				t.Errorf("%s %s: target = %q, want %q", tc.file, tc.name, ref.TargetPath, tc.target)
+			}
+		}
+		if !found {
+			t.Errorf("%s %s: expected target %q; refs: %+v", tc.file, tc.name, tc.target, snapshot.TypeRefs)
+		}
+	}
+}
+
 func writeWorkspace(t *testing.T, root string, files map[string]string) []string {
 	t.Helper()
 	paths := make([]string, 0, len(files))
