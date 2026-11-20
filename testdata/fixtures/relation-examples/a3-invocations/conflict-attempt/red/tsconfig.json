@@ -1,0 +1,9 @@
+{
+  "compilerOptions": {
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "baseUrl": ".",
+    "paths": { "contract": ["./contract.ts"] }
+  },
+  "files": ["../shared/use.ts", "../shared/stable.ts", "contract.ts"]
+}

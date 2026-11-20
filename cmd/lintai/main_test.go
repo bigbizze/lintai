@@ -78,6 +78,171 @@ func TestFixtureRulesReportPlantedViolations(t *testing.T) {
 
 }
 
+// Each family has its own workspace, so its near-misses do not alter the
+// existing fixture goldens. The documentation contains the exact tested rules.
+func TestRelationExamples(t *testing.T) {
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	docs, err := os.ReadFile(filepath.Join(repoRoot, "docs/examples.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	families := []struct {
+		name        string
+		sourceLinks string
+		want        []string
+	}{
+		{
+			name: "a1-source-identity",
+			want: []string{
+				"arch.no-env-writes violation src/app/violation.ts:1",
+				"arch.checked-syntax-strict violation src/checked/violation.ts:1",
+				"arch.client-directive violation src/client/violation.ts:1",
+				"arch.domain-no-async-exports violation src/domain/violation.ts:1",
+				"arch.domain-no-global-fetch violation src/domain/violation.ts:2",
+				"arch.reducer-no-async-methods violation src/reducers/violation.ts:2",
+				"arch.ui-no-import-meta-env violation src/ui/violation.ts:1",
+			},
+		},
+		{
+			name: "a2-imports",
+			want: []string{
+				"arch.core-resolved-imports-strict violation src/core/violation.ts:1",
+				"arch.core-no-dynamic-loading-strict dynamic_load src/core/violation.ts:2",
+				"arch.core-no-dynamic-loading-strict opaque_load src/core/violation.ts:3",
+				"arch.no-broad-function-type violation src/types/violation.ts:1",
+			},
+		},
+		{
+			name: "a3-invocations",
+			want: []string{
+				"arch.domain-no-library-clock violation src/domain/violation.ts:2",
+				"arch.query-no-writes-strict forbidden src/queries/violation.ts:6",
+				"arch.query-no-writes-strict indeterminate src/queries/indeterminate.ts:2",
+				"arch.security-callbacks-strict forbidden src/handlers/violation.ts:3",
+				"arch.security-callbacks-strict indeterminate src/handlers/indeterminate.ts:2",
+			},
+		},
+		{
+			name: "a4-signatures",
+			want: []string{
+				"arch.handler-signatures wrong_arity src/handlers/violation.ts:1",
+				"arch.handler-signatures optional_request src/handlers/violation.ts:2",
+				"arch.handler-signatures rest_request src/handlers/violation.ts:3",
+				"arch.id-lookup-return violation src/ids/violation.ts:1",
+				"arch.id-lookup-return violation src/ids/lookalike.ts:2",
+				"arch.secure-signature-evidence-strict conflict src/secure/conflict.ts:1",
+				"arch.secure-signature-evidence-strict omitted src/secure/omitted.ts:1",
+			},
+		},
+		{
+			name: "a5-structural-types",
+			want: []string{
+				"arch.api-generic-names violation src/api/violation.ts:1",
+				"arch.event-id optional_id src/events/violation.ts:1",
+				"arch.event-id mutable_id src/events/violation.ts:2",
+				"arch.coordinate-tuples optional_element src/geometry/violation.ts:1",
+				"arch.coordinate-tuples rest_element src/geometry/violation.ts:2",
+				"arch.coordinate-tuples mutable_tuple src/geometry/violation.ts:3",
+				"arch.hook-callbacks optional_event src/hooks/violation.ts:1",
+				"arch.hook-callbacks rest_event src/hooks/violation.ts:2",
+				"arch.hook-callbacks nonvoid_callback src/hooks/violation.ts:3",
+				"arch.hook-callbacks missing_event src/hooks/violation.ts:4",
+				"arch.registration-no-admin-role violation src/registration/violation.ts:1",
+				"arch.parser-input-types-strict incomplete src/strict/violation.ts:2",
+				"arch.parser-input-types-strict forbidden src/strict/violation.ts:3",
+			},
+		},
+		{
+			name: "a6-declarations",
+			want: []string{
+				"arch.public-declaration-types-strict incomplete src/api/conflict.ts:1",
+				"arch.public-domain-no-async violation src/api/violation.ts:2",
+				"arch.public-types-no-any violation src/api/violation.ts:1",
+			},
+		},
+		{
+			name: "a7-exports",
+			want: []string{
+				"arch.public-export-evidence-strict incomplete_binding src/api/incomplete.ts:1",
+				"arch.public-export-evidence-strict incomplete_binding src/api/incomplete.ts:1",
+				"arch.public-export-evidence-strict incomplete_inventory src/api/incomplete.ts:1",
+				"arch.public-no-internal-reexports violation src/api/violation.ts:1",
+			},
+		},
+		{
+			name:        "a8-source-correspondence",
+			sourceLinks: "source-links.json",
+			want: []string{
+				"arch.declaration-map-boundary-strict candidate src/app/ambiguous.ts:2",
+				"arch.declaration-map-boundary-strict uncertain src/app/ambiguous.ts:2",
+				"arch.declaration-map-boundary-strict uncertain src/app/incomplete.ts:2",
+				"arch.declaration-map-boundary-strict precise src/app/violation.ts:2",
+				"arch.configured-source-evidence-strict incomplete_binding src/app/incomplete.ts:2",
+				"arch.configured-source-evidence-strict incomplete_entry src/app/incomplete.ts:2",
+				"arch.no-private-configured-calls violation src/app/violation.ts:2",
+				"arch.selected-source-links-applied-strict unused packages/contracts/src/public.ts:1",
+			},
+		},
+	}
+	for _, family := range families {
+		t.Run(family.name, func(t *testing.T) {
+			base := filepath.Join(repoRoot, "testdata/fixtures/relation-examples", family.name)
+			ruleGlob := filepath.Join(base, "rules/*.ts")
+			rulePaths, err := filepath.Glob(ruleGlob)
+			if err != nil || len(rulePaths) == 0 {
+				t.Fatalf("find family rules: %v (found %d)", err, len(rulePaths))
+			}
+			for _, path := range rulePaths {
+				source, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				block := "```ts\n" + string(source) + "```\n"
+				if count := strings.Count(string(docs), block); count != 1 {
+					t.Errorf("%s: expected one exact rule source block in docs/examples.md, got %d", path, count)
+				}
+			}
+			args := []string{
+				"--json", "--explain",
+				"--repo-root", repoRoot,
+				"--workspace-root", filepath.Join(base, "workspace"),
+				"--rules", ruleGlob,
+			}
+			if family.sourceLinks != "" {
+				args = append(args, "--source-links", family.sourceLinks)
+			}
+			first := runJSON(t, args)
+			second := runJSON(t, args)
+			if !bytes.Equal(first, second) {
+				t.Fatalf("two runs produced different output:\n%s\n---\n%s", first, second)
+			}
+			var items []diagnostics.Diagnostic
+			if err := json.Unmarshal(first, &items); err != nil {
+				t.Fatal(err)
+			}
+			got := make([]string, 0, len(items))
+			for _, item := range items {
+				if item.DiagnosticKind != diagnostics.KindArchitectureViolation {
+					t.Fatalf("unexpected rule error: %+v", item)
+				}
+				got = append(got, fmt.Sprintf("%s %s %s:%d", item.RuleID, item.AssertionID, item.SourceLocation.File, item.SourceLocation.StartLine))
+				if len(item.Explanation) == 0 {
+					t.Fatalf("expected an explanation for %s", got[len(got)-1])
+				}
+			}
+			slices.Sort(got)
+			want := slices.Clone(family.want)
+			slices.Sort(want)
+			if !slices.Equal(got, want) {
+				t.Fatalf("planted violations differ:\ngot:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+			}
+		})
+	}
+}
+
 // V15/V18: serve re-resolves producer configuration and replaces the old
 // producer when scope changes, including retraction of its previous files.
 func TestServeSessionReplacesChangedProducerConfiguration(t *testing.T) {
@@ -319,7 +484,7 @@ files = "tsconfig"
 	write("src/main.ts", "export const main = 1;\n")
 	write("src/extra.ts", "export const extra = 2;\n")
 	var output bytes.Buffer
-	if err := run(context.Background(), []string{"scope", "--explain", "--json", "--workspace-root", root}, &output); err != nil {
+	if err := run(context.Background(), []string{"scope", "--asset-root", "x", "--explain", "--json", "--workspace-root", root}, &output); err != nil {
 		t.Fatal(err)
 	}
 	var reports []struct {

@@ -222,7 +222,7 @@ Caveats:
 
 - the built-in sources are `/clock`, `/env`, `/random`, `/network`, `/timer` and `/process`. `docs/api.md` gives their matchers.
 - a use inside an anonymous callback belongs to the callback. `owner_reaches_ambient` follows calls; `owner_reaches_ambient_strict` also follows function values explicitly.
-- a use at module scope has no `site_in_fn` row. `module_uses_ambient` and `module_reaches_ambient` see it, `owner_reaches_ambient` does not.
+- a use at module scope has no `site_in_fn` row. `module_uses_ambient` and `module_reaches_ambient` see it, and `owner_reaches_ambient` sees it when the site has a module owner.
 - aliases such as `const env = process.env` are recorded as a dynamic use, because the whole object escapes
 
 ## 5. Required import
@@ -500,7 +500,7 @@ import { now } from "../services/clock";
 export const reading = wired(now);
 ```
 
-The non-strict rule in section 1 reports nothing here. The strict rule reports `launder` and `wired` with `leaves_analysis`, because `read()` is a call that lintai cannot resolve. A rule over `ts.calls_or_refs_reach("src/server/wire-clock.ts", Fn)` also links the server module to the `now` value. That link does not prove that `now` runs.
+The non-strict rule in section 1 reports nothing here. The strict rule reports `launder` and `wired` with `leaves_analysis`, because `read()` is a call that lintai cannot resolve. A rule over `ts.module_path(Module, "src/server/wire-clock.ts"), ts.calls_or_refs_reach(Module, Fn)` also links the server module to the `now` value. That link does not prove that `now` runs.
 
 Caveats:
 
@@ -909,3 +909,857 @@ The CLI and serve both report exactly two forbidden diagnostics and three indete
 The rule checks all four signature reasons, including `/conflict`, and catches missing declaration evidence without treating it as compliance. It also checks export inventory, export target and owner completeness. Owner selection does not require an observed `write` member: a scope containing no forbidden calls produces no false owner uncertainty. A forbidden result still requires the positive member join above. A retained forbidden member and an incomplete signature can produce both outcomes at one site. These calls are all actual invocations. A function-valued argument is a separate `ts.fn_value_escape` site, not a call site; use `ts.fn_value_escape_unknown` when a policy needs to report an unknown transferred implementation.
 
 The test also covers a variant with no forbidden writes. CLI analysis returns exit 1 for the five findings; serve returns the same five diagnostics and shuts down with exit 0.
+
+## 19. Synchronous domain exports
+
+Keep explicitly async function declarations out of a synchronous domain API.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Exported domain function declarations must not use the async modifier.
+export default rule("arch.domain-no-async-exports")
+	.version(1)
+	.program(dl`
+		Decl domain_function(Fn, Name).
+		domain_function(Fn, Name) :- ts.fn(Fn, File, Name), ts.fn_kind(Fn, /function),
+			lintai.glob(File, "src/domain/**").
+		Decl violation(Fn, Name).
+		violation(Fn, Name) :- domain_function(Fn, Name), ts.fn_exported(Fn), ts.fn_async(Fn).
+	`)
+	.report("violation")
+	.expectNonEmpty("domain_function")
+	.message(() => "Exported domain functions must not be async");
+```
+
+This selects syntactically exported function declarations; it does not detect every function that returns a promise. The fixture permits an unexported async function and an exported synchronous one.
+
+## 20. Synchronous reducer methods
+
+Keep methods on a Reducer class synchronous.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Reducer methods must not use the async modifier.
+export default rule("arch.reducer-no-async-methods")
+	.version(1)
+	.program(dl`
+		Decl reducer_method(Fn, Name).
+		reducer_method(Fn, Name) :- ts.fn(Fn, File, Name), lintai.glob(File, "src/reducers/**"),
+			ts.fn_kind(Fn, /method), ts.fn_container(Fn, "Reducer").
+		Decl violation(Fn, Name).
+		violation(Fn, Name) :- reducer_method(Fn, Name), ts.fn_async(Fn).
+	`)
+	.report("violation")
+	.expectNonEmpty("reducer_method")
+	.message(() => "Reducer methods must not be async");
+```
+
+The container is a display name rather than a class identity, so adjust the directory and name to the repository. The fixture permits a synchronous Reducer method and an async method on another class.
+
+## 21. Environment writes
+
+Keep application code from mutating process environment variables.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Application modules must not mutate the process environment.
+export default rule("arch.no-env-writes")
+	.version(1)
+	.program(dl`
+		Decl application_module(Module, File).
+		application_module(Module, File) :- ts.module(Module), ts.module_path(Module, File),
+			lintai.glob(File, "src/app/**").
+		Decl violation(Site, File).
+		violation(Site, File) :- application_module(_, File), ts.site(Site, File),
+			ts.ambient_use(Site, /env, /read), ts.ambient_write(Site).
+	`)
+	.report("violation")
+	.expectNonEmpty("application_module")
+	.message(() => "Application modules must not mutate the process environment");
+```
+
+The rule reports observed assignments and deletions, including dynamic keys; reading a variable is allowed. Alias and detection limits follow the registered ambient-source matchers.
+
+## 22. Inject network access into domain code
+
+Require domain modules to receive network access as a dependency instead of referencing global fetch.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Domain modules must obtain network access through an injected dependency.
+export default rule("arch.domain-no-global-fetch")
+	.version(1)
+	.program(dl`
+		Decl domain_module(File).
+		domain_module(File) :- ts.module_path(_, File), lintai.glob(File, "src/domain/**").
+		Decl violation(Site, File).
+		violation(Site, File) :- domain_module(File), ts.site(Site, File), ts.global_ref(Site, "fetch").
+	`)
+	.report("violation")
+	.expectNonEmpty("domain_module")
+	.message(() => "Domain modules must not reference the global fetch binding");
+```
+
+This checks value references to the resolved global binding, not just calls. A same-named local parameter is allowed.
+
+## 23. UI configuration access
+
+Keep direct import.meta.env reads in a configuration adapter instead of UI modules.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// UI modules must read configuration through a dedicated adapter.
+export default rule("arch.ui-no-import-meta-env")
+	.version(1)
+	.program(dl`
+		Decl ui_module(File).
+		ui_module(File) :- ts.module_path(_, File), lintai.glob(File, "src/ui/**").
+		Decl violation(Site, File).
+		violation(Site, File) :- ui_module(File), ts.site(Site, File), ts.meta_access(Site, "import.meta.env").
+	`)
+	.report("violation")
+	.expectNonEmpty("ui_module")
+	.message(() => "UI modules must not read import.meta.env directly");
+```
+
+Only supported direct member-access syntax is recorded; a different member such as import.meta.url is allowed. The access path stops at the first member.
+
+## 24. Client component directives
+
+Require files under the client component directory to start with the use client directive.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Client components must declare the use client directive.
+export default rule("arch.client-directive")
+	.version(1)
+	.program(dl`
+		Decl client_module(Module, File).
+		client_module(Module, File) :- ts.module(Module), ts.module_path(Module, File),
+			lintai.glob(File, "src/client/**").
+		Decl marked(Module).
+		marked(Module) :- client_module(Module, File), ts.site(Site, File), ts.module_directive(Site, "use client").
+		Decl violation(Module, File).
+		violation(Module, File) :- client_module(Module, File), !marked(Module).
+	`)
+	.report("violation")
+	.expectNonEmpty("client_module")
+	.message(() => "Client components must declare use client");
+```
+
+A directive counts only in the module's directive prologue. The directory is a project convention, not an inference about which components need client rendering.
+
+## 25. Strict syntax completeness
+
+Report syntax errors in modules whose architecture checks require complete source evidence.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Analysis of checked modules must not proceed silently past syntax errors.
+export default rule("arch.checked-syntax-strict")
+	.version(1)
+	.program(dl`
+		Decl checked_module(File).
+		checked_module(File) :- ts.module_path(_, File), lintai.glob(File, "src/checked/**").
+		Decl violation(Site, Message).
+		violation(Site, Message) :- checked_module(File), ts.site(Site, File), ts.module_parse_error(Site, Message).
+	`)
+	.report("violation")
+	.expectNonEmpty("checked_module")
+	.message(() => "A syntax error makes checked-module analysis incomplete");
+```
+
+This strict policy can report code while it is being edited and only records the first syntax diagnostic per file. Other source facts may be incomplete until the error is fixed.
+
+## 26. Strict code-loading boundaries
+
+Keep dynamic imports and computed module loads out of core modules.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Core modules must not use dynamic imports or opaque module loads.
+export default rule("arch.core-no-dynamic-loading-strict")
+	.version(1)
+	.program(dl`
+		Decl core_module(File).
+		core_module(File) :- ts.module_path(_, File), lintai.glob(File, "src/core/**").
+		Decl dynamic_load(Site, File).
+		dynamic_load(Site, File) :- core_module(File), ts.import_edge(Site, File, _, _),
+			ts.import_form(Site, /dynamic).
+		Decl opaque_load(Site, File).
+		opaque_load(Site, File) :- core_module(File), ts.site(Site, File), ts.import_opaque(Site).
+	`)
+	.report("dynamic_load", "opaque_load")
+	.expectNonEmpty("core_module")
+	.message(() => "Core modules must not use dynamic imports or opaque module loads");
+```
+
+The strict opaque-load result also reports computed require calls even when a runtime value might be safe; literal require calls are outside this policy. A static import is allowed.
+
+## 27. Strict import resolution
+
+Report unresolved literal imports in core modules so boundary checks do not silently miss their targets.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Core module imports must resolve before their boundaries can be checked.
+export default rule("arch.core-resolved-imports-strict")
+	.version(1)
+	.program(dl`
+		Decl core_module(File).
+		core_module(File) :- ts.module_path(_, File), lintai.glob(File, "src/core/**").
+		Decl violation(Site, File, Specifier).
+		violation(Site, File, Specifier) :- core_module(File), ts.import_edge(Site, File, _, Specifier),
+			ts.import_unresolved(Site).
+	`)
+	.report("violation")
+	.expectNonEmpty("core_module")
+	.message(() => "Core imports must resolve for boundary analysis");
+```
+
+This strict policy depends on the active compiler context and can report missing or deliberately virtual dependencies. Computed specifiers have separate opaque-load evidence.
+
+## 28. Avoid the broad `Function` type
+
+Use a specific callable signature in source annotations instead of TypeScript's broad `Function` type.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Source annotations must not use TypeScript's broad Function type.
+export default rule("arch.no-broad-function-type")
+	.version(1)
+	.program(dl`
+		Decl types_module(File).
+		types_module(File) :- ts.module_path(_, File), lintai.glob(File, "src/types/**").
+		Decl broad_function_type(Site, File).
+		broad_function_type(Site, File) :- ts.type_ref(Site, "Function"),
+			ts.site(Site, File), types_module(File).
+		Decl violation(Site, File).
+		violation(Site, File) :- broad_function_type(Site, File).
+	`)
+	.report("violation")
+	.expectNonEmpty("types_module")
+	.message(() => "Use a specific callable type instead of Function");
+```
+
+This matches the written type name and does not resolve a differently named alias to `Function`.
+
+## 29. Inject the clock into domain code
+
+Keep domain calculations deterministic by passing in the current time instead of calling the TypeScript library clock directly.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Domain modules must receive the current time instead of calling the library clock.
+export default rule("arch.domain-no-library-clock")
+	.version(1)
+	.program(dl`
+		Decl domain_module(File).
+		domain_module(File) :- ts.module_path(_, File), lintai.glob(File, "src/domain/**").
+		Decl violation(Site, File).
+		violation(Site, File) :- domain_module(File), ts.site(Site, File),
+			ts.external_call(Site, /lib, "lib", "DateConstructor.now").
+	`)
+	.report("violation")
+	.expectNonEmpty("domain_module")
+	.message(() => "Domain modules must receive the current time instead of calling Date.now");
+```
+
+This matches the library-declared `DateConstructor.now` target; an injected object with a `now` method is allowed. Other clock APIs and unresolved calls need separate policies.
+
+## 30. Strict read-only query calls
+
+Keep calls to methods declared as `write` out of query modules, and flag calls whose selected declaration cannot be established.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Query modules must not call write methods or calls whose declaration is uncertain.
+export default rule("arch.query-no-writes-strict")
+	.version(1)
+	.program(dl`
+		Decl query_call(Site, File).
+		query_call(Site, File) :- ts.site(Site, File), lintai.glob(File, "src/queries/**"),
+			ts.call_site(Site).
+		Decl forbidden(Site, File).
+		forbidden(Site, File) :- query_call(Site, File), ts.call_declaration(Site, Declaration),
+			ts.declaration_member(Declaration, _, "write").
+		Decl indeterminate(Site, File, Reason).
+		indeterminate(Site, File, Reason) :- query_call(Site, File),
+			ts.call_declaration_incomplete(Site, Reason).
+	`)
+	.report("forbidden", "indeterminate")
+	.expectNonEmpty("query_call")
+	.message((_row, ctx) => ctx.assertion_id === "forbidden"
+		? "Query modules must not call methods declared as write"
+		: "Cannot determine the declared member for this query call");
+```
+
+The selected declaration identifies a lexical member, not a runtime implementation; the rule matches the member name on any owner, so unrelated `write` methods are also reported. This strict variant can report unresolved, synthetic, unsupported, or conflicting declaration evidence even for safe calls; a positive forbidden result and an uncertainty result can coexist. A free function named `write` and a function-valued argument are not member calls.
+
+A separate strict call-graph policy could also report `ts.call_target_conflict` when runtime target observations disagree, but it may block a call that is safe in one compiler context. The current CLI fixture could not produce that marker; the [coverage report](followups/relation-coverage-report.md) records the attempt and its limits.
+
+## 31. Strict security callback transfers
+
+Keep security functions from being handed as callbacks to external or unresolved calls in handler modules, and flag transfers whose implementation is unknown.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Handler callbacks passed to external or unresolved calls must not be security functions or unknown functions.
+export default rule("arch.security-callbacks-strict")
+	.version(1)
+	.program(dl`
+		Decl handler_module(File).
+		handler_module(File) :- ts.module_path(_, File), lintai.glob(File, "src/handlers/**").
+		Decl security_fn(Fn, Name).
+		security_fn(Fn, Name) :- ts.fn(Fn, File, Name), lintai.glob(File, "src/security/**").
+		Decl transfer(Site, File).
+		transfer(Site, File) :- handler_module(File), ts.site(Site, File),
+			ts.fn_value_escape(Site, /argument).
+		Decl forbidden(Site, File, Name).
+		forbidden(Site, File, Name) :- transfer(Site, File), ts.fn_value_escape_target(Site, Fn),
+			security_fn(Fn, Name).
+		Decl indeterminate(Site, File).
+		indeterminate(Site, File) :- transfer(Site, File), ts.fn_value_escape_unknown(Site).
+	`)
+	.report("forbidden", "indeterminate")
+	.expectNonEmpty("handler_module", "security_fn")
+	.message((_row, ctx) => ctx.assertion_id === "forbidden"
+		? "Security functions must not be passed to external or unresolved calls"
+		: "Cannot determine the function passed to an external or unresolved call");
+```
+
+The strict unknown result can include safe callbacks whose implementation is not collected, including library functions or parameters. Only supported direct function-valued arguments to external or unresolved invocations are recorded; spreads, indirect transfers and some untyped values are outside this check. Direct calls and transfers to collected local functions are allowed.
+
+## 32. Request handler signatures
+
+Keep request handlers on a consistent one-argument calling convention.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Exported request handlers must take exactly one required, non-rest argument.
+export default rule("arch.handler-signatures")
+	.version(1)
+	.program(dl`
+		Decl handler(Fn, Name).
+		handler(Fn, Name) :- ts.fn(Fn, File, Name), ts.fn_exported(Fn),
+			lintai.glob(File, "src/handlers/**").
+		Decl observed(Fn, Name, Sig).
+		observed(Fn, Name, Sig) :- handler(Fn, Name), ts.fn_signature(Fn, Sig), ts.signature_complete(Sig).
+		Decl wrong_arity(Fn, Name, Count).
+		wrong_arity(Fn, Name, Count) :- observed(Fn, Name, Sig), ts.signature_arity(Sig, Count), Count != 1.
+		Decl optional_request(Fn, Name).
+		optional_request(Fn, Name) :- observed(Fn, Name, Sig), ts.signature_param(Sig, 0, _),
+			ts.signature_param_optional(Sig, 0).
+		Decl rest_request(Fn, Name).
+		rest_request(Fn, Name) :- observed(Fn, Name, Sig), ts.signature_param(Sig, 0, _),
+			ts.signature_param_rest(Sig, 0).
+	`)
+	.report("wrong_arity", "optional_request", "rest_request")
+	.expectNonEmpty("handler", "observed")
+	.message(() => "Request handlers must take exactly one required, non-rest argument");
+```
+
+Only complete observed signatures are checked; omitted, unresolved, and conflicting observations need a separate strict policy. A complete signature does not imply that every referenced type is structurally complete.
+
+## 33. Strict security signature evidence
+
+Require observable, consistent signatures in security-sensitive code.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Security-sensitive functions must not have omitted or conflicting signatures.
+export default rule("arch.secure-signature-evidence-strict")
+	.version(1)
+	.program(dl`
+		Decl secure_function(Fn, Name).
+		secure_function(Fn, Name) :- ts.fn(Fn, File, Name), lintai.glob(File, "src/secure/**").
+		Decl omitted(Fn, Name).
+		omitted(Fn, Name) :- secure_function(Fn, Name), ts.fn_signature_omitted(Fn).
+		Decl conflict(Fn, Name).
+		conflict(Fn, Name) :- secure_function(Fn, Name), ts.fn_signature_conflict(Fn).
+	`)
+	.report("omitted", "conflict")
+	.expectNonEmpty("secure_function")
+	.message(() => "Cannot establish an unambiguous signature for this security-sensitive function");
+```
+
+This strict policy reports ownership-only anonymous callbacks whose signatures the producer intentionally omits, and functions with conflicting compiler-context observations; it can therefore block safe code. It does not handle unresolved or incomplete signature observations; the coverage report records why those variants lack a fixture.
+
+## 34. Identifier lookup return types
+
+Require identifier lookup functions to expose the same asynchronous result contract.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Exported identifier lookups must return a library Promise of string.
+export default rule("arch.id-lookup-return")
+	.version(1)
+	.program(dl`
+		Decl lookup(Fn, Name).
+		lookup(Fn, Name) :- ts.fn(Fn, File, Name), ts.fn_exported(Fn), lintai.glob(File, "src/ids/**").
+		Decl allowed_return(Sig).
+		allowed_return(Sig) :- ts.signature_returns(Sig, Promise), ts.type_named(Promise, "lib", "Promise"),
+			ts.type_origin_kind(Promise, /lib), ts.type_arg(Promise, 0, Value), ts.type_kind(Value, /string).
+		Decl violation(Fn, Name, Returned).
+		violation(Fn, Name, Returned) :- lookup(Fn, Name), ts.fn_signature(Fn, Sig),
+			ts.signature_complete(Sig), ts.signature_returns(Sig, Type), !allowed_return(Sig),
+			ts.type_display(Type, Returned).
+	`)
+	.report("violation")
+	.expectNonEmpty("lookup")
+	.message((row) => `Identifier lookups must return Promise<string>, but return ${row.Returned}`);
+```
+
+The rule checks only complete observed signatures and one library Promise layer; conflicting or incomplete observations require separate handling. The display text is used only in the diagnostic, never as the semantic match.
+
+## 35. Registration role literals
+
+Prevent explicitly allowing an administrator role in public registration inputs.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Public registration inputs must not include the admin role.
+export default rule("arch.registration-no-admin-role")
+	.version(1)
+	.program(dl`
+		Decl registration(Fn, Name, Input).
+		registration(Fn, Name, Input) :- ts.fn(Fn, File, Name), ts.fn_exported(Fn),
+			lintai.glob(File, "src/registration/**"), ts.fn_signature(Fn, Sig),
+			ts.signature_complete(Sig), ts.signature_param(Sig, 0, Input).
+		Decl admin_role(Type).
+		admin_role(Type) :- ts.type_literal(Type, /string, "admin").
+		admin_role(Type) :- ts.type_member(Type, Member), ts.type_literal(Member, /string, "admin").
+		Decl violation(Fn, Name).
+		violation(Fn, Name) :- registration(Fn, Name, Input), ts.type_prop(Input, "role", Role), admin_role(Role).
+	`)
+	.report("violation")
+	.expectNonEmpty("registration")
+	.message(() => "Public registration inputs must not include the admin role");
+```
+
+This checks a represented first-parameter object property and its literal union members; a broad string, any, omitted members, or other incomplete evidence is not proof that the input excludes admin. Validate authorization independently.
+
+## 36. Immutable event identifiers
+
+Keep represented event identifier properties required and readonly.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Published event id properties must be required and readonly.
+export default rule("arch.event-id")
+	.version(1)
+	.program(dl`
+		Decl event(Fn, Name, Input).
+		event(Fn, Name, Input) :- ts.fn(Fn, File, Name), ts.fn_exported(Fn),
+			lintai.glob(File, "src/events/**"), ts.fn_signature(Fn, Sig),
+			ts.signature_complete(Sig), ts.signature_param(Sig, 0, Input).
+		Decl has_id(Input).
+		has_id(Input) :- ts.type_prop(Input, "id", _).
+		Decl optional_id(Fn, Name).
+		optional_id(Fn, Name) :- event(Fn, Name, Input), ts.type_prop_optional(Input, "id").
+		Decl mutable_id(Fn, Name).
+		mutable_id(Fn, Name) :- event(Fn, Name, Input), has_id(Input), !ts.type_prop_readonly(Input, "id").
+	`)
+	.report("optional_id", "mutable_id")
+	.expectNonEmpty("event")
+	.message(() => "Published event id properties must be required and readonly");
+```
+
+This checks a known id property on the first parameter; it does not require that the property exists, and class or interface members can be omitted from structural facts. Readonly describes the TypeScript type rather than runtime immutability.
+
+## 37. Coordinate tuple shape
+
+Keep geometry coordinate tuples fixed and readonly.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Geometry coordinate tuples must be readonly and have no optional or rest elements.
+export default rule("arch.coordinate-tuples")
+	.version(1)
+	.program(dl`
+		Decl coordinate(Fn, Name, Type).
+		coordinate(Fn, Name, Type) :- ts.fn(Fn, File, Name), ts.fn_exported(Fn),
+			lintai.glob(File, "src/geometry/**"), ts.fn_signature(Fn, Sig), ts.signature_complete(Sig),
+			ts.signature_param(Sig, 0, Type), ts.type_kind(Type, /tuple).
+		Decl optional_element(Fn, Name, Position).
+		optional_element(Fn, Name, Position) :- coordinate(Fn, Name, Type), ts.type_arg(Type, Position, _),
+			ts.type_arg_optional(Type, Position).
+		Decl rest_element(Fn, Name, Position).
+		rest_element(Fn, Name, Position) :- coordinate(Fn, Name, Type), ts.type_arg(Type, Position, _),
+			ts.type_arg_rest(Type, Position).
+		Decl mutable_tuple(Fn, Name).
+		mutable_tuple(Fn, Name) :- coordinate(Fn, Name, Type), !ts.type_readonly(Type).
+	`)
+	.report("optional_element", "rest_element", "mutable_tuple")
+	.expectNonEmpty("coordinate")
+	.message(() => "Coordinate tuples must be readonly and have no optional or rest elements");
+```
+
+Only first parameters represented as tuples are checked; the rule does not enforce a specific element count or type and does not classify non-tuple parameters. Readonly arrays are named library types rather than readonly tuples.
+
+## 38. Subscription callback signatures
+
+Require event subscription callback types to accept an event and return void.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Subscription callbacks must take a required event and return void.
+export default rule("arch.hook-callbacks")
+	.version(1)
+	.program(dl`
+		Decl callback(Fn, Name, Type).
+		callback(Fn, Name, Type) :- ts.fn(Fn, File, Name), ts.fn_exported(Fn),
+			lintai.glob(File, "src/hooks/**"), ts.fn_signature(Fn, Sig), ts.signature_complete(Sig),
+			ts.signature_param(Sig, 0, Type), ts.type_kind(Type, /function).
+		Decl has_event(Type).
+		has_event(Type) :- ts.type_sig_param(Type, 0, _).
+		Decl missing_event(Fn, Name).
+		missing_event(Fn, Name) :- callback(Fn, Name, Type), !has_event(Type).
+		Decl optional_event(Fn, Name).
+		optional_event(Fn, Name) :- callback(Fn, Name, Type), ts.type_sig_param(Type, 0, _),
+			ts.type_sig_param_optional(Type, 0).
+		Decl rest_event(Fn, Name).
+		rest_event(Fn, Name) :- callback(Fn, Name, Type), ts.type_sig_param(Type, 0, _),
+			ts.type_sig_param_rest(Type, 0).
+		Decl nonvoid_callback(Fn, Name).
+		nonvoid_callback(Fn, Name) :- callback(Fn, Name, Type), ts.type_sig_returns(Type, Returned),
+			ts.type_kind(Returned, Kind), Kind != /void.
+	`)
+	.report("missing_event", "optional_event", "rest_event", "nonvoid_callback")
+	.expectNonEmpty("callback")
+	.message(() => "Subscription callbacks must take a required event and return void");
+```
+
+This checks the first parameter of a represented function type and its declared return, not the runtime callback implementation. Unsupported or incomplete type structures require separate handling, and extra callback parameters are not restricted.
+
+## 39. Generic names at API boundaries
+
+Use a consistent T prefix to distinguish generic parameters from concrete types at API boundaries.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Generic parameters exposed by API functions must have names beginning with T.
+export default rule("arch.api-generic-names")
+	.version(1)
+	.program(dl`
+		Decl api_function(Fn, Name).
+		api_function(Fn, Name) :- ts.fn(Fn, File, Name), ts.fn_exported(Fn), lintai.glob(File, "src/api/**").
+		Decl violation(Fn, Name, Parameter).
+		violation(Fn, Name, Parameter) :- api_function(Fn, Name), ts.fn_signature(Fn, Sig),
+			ts.signature_complete(Sig), ts.signature_param(Sig, _, Type), ts.type_param_name(Type, Parameter),
+			!lintai.glob(Parameter, "T*").
+	`)
+	.report("violation")
+	.expectNonEmpty("api_function")
+	.message((row) => `Generic parameter ${row.Parameter} must begin with T`);
+```
+
+Names are descriptive metadata, not type identities; the rule checks directly observed parameter types and does not inspect nested or return-only parameters. It is a project naming convention rather than a TypeScript requirement.
+
+## 40. Strict parser input types
+
+Flag parser inputs that expose any or whose structural type cannot be fully inspected.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Public parser input types must not contain any or structurally incomplete evidence.
+export default rule("arch.parser-input-types-strict")
+	.version(1)
+	.program(dl`
+		Decl parser_input(Fn, Name, Type).
+		parser_input(Fn, Name, Type) :- ts.fn(Fn, File, Name), ts.fn_exported(Fn),
+			lintai.glob(File, "src/strict/**"), ts.fn_signature(Fn, Sig), ts.signature_complete(Sig),
+			ts.signature_param(Sig, 0, Type).
+		Decl any_type(Type).
+		any_type(Type) :- ts.type_kind(Type, /any).
+		any_type(Type) :- ts.type_child(Type, Child), any_type(Child).
+		Decl forbidden(Fn, Name).
+		forbidden(Fn, Name) :- parser_input(Fn, Name, Type), any_type(Type).
+		Decl incomplete_type(Type, Reason).
+		incomplete_type(Type, Reason) :- ts.type_incomplete(Type, Reason).
+		incomplete_type(Type, Reason) :- ts.type_child(Type, Child), incomplete_type(Child, Reason).
+		Decl incomplete(Fn, Name, Reason).
+		incomplete(Fn, Name, Reason) :- parser_input(Fn, Name, Type), incomplete_type(Type, Reason).
+	`)
+	.report("forbidden", "incomplete")
+	.expectNonEmpty("parser_input")
+	.message((_row, ctx) => ctx.assertion_id === "forbidden"
+		? "Parser inputs must not contain any"
+		: "Cannot inspect the complete parser input type");
+```
+
+This strict variant can block safe inputs when interfaces, classes, library types, constrained parameters, or depth limits leave structural evidence incomplete. It checks represented descendants of the first input for complete observed signatures; missing or incomplete signature observations need separate handling.
+
+## 41. Public type aliases without any
+
+Keep public type aliases from exposing the unchecked `any` type.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Public type aliases must not be any.
+export default rule("arch.public-types-no-any")
+	.version(1)
+	.program(dl`
+		Decl public_alias(Export, Name, Declaration).
+		public_alias(Export, Name, Declaration) :- ts.module_export(Export, Module, Name, /type),
+			ts.module_path(Module, File), lintai.glob(File, "src/api/**"),
+			ts.export_target(Export, Declaration), ts.declaration(Declaration, _, /type_alias),
+			ts.declaration_type_subject(Declaration, /type).
+		Decl violation(Export, Name).
+		violation(Export, Name) :- public_alias(Export, Name, Declaration),
+			ts.declaration_type(Declaration, /type, Type), ts.type_kind(Type, /any).
+	`)
+	.report("violation")
+	.expectNonEmpty("public_alias")
+	.message(() => "Public type aliases must not be any");
+```
+
+This checks the type directly associated with an exported type alias; it does not recursively inspect nested properties or type arguments. Incomplete declaration-type evidence needs separate handling.
+
+## 42. Synchronous domain functions at API boundaries
+
+Keep an API barrel from exposing async domain function declarations, including named re-exports.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Public API bindings must not expose async domain functions.
+export default rule("arch.public-domain-no-async")
+	.version(1)
+	.program(dl`
+		Decl domain_export(Export, Name, Declaration).
+		domain_export(Export, Name, Declaration) :- ts.module_export(Export, Module, Name, /value),
+			ts.module_path(Module, File), lintai.glob(File, "src/api/**"),
+			ts.export_target(Export, Declaration), ts.declaration(Declaration, _, /function),
+			ts.declaration_origin(Declaration, /source_file, Origin), lintai.glob(Origin, "src/domain/**").
+		Decl violation(Export, Name).
+		violation(Export, Name) :- domain_export(Export, Name, Declaration),
+			ts.declaration_fn(Declaration, Fn), ts.fn_async(Fn).
+	`)
+	.report("violation")
+	.expectNonEmpty("domain_export")
+	.message(() => "Public APIs must not expose async domain functions");
+```
+
+The rule follows known declaration-to-function associations and checks the async modifier, not all promise-returning functions. Overloads or unavailable associations require separate handling.
+
+## 43. Strict public declaration type evidence
+
+Require consistent declaration-type evidence before relying on API type policies.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Public API declaration types must have complete and consistent evidence.
+export default rule("arch.public-declaration-types-strict")
+	.version(1)
+	.program(dl`
+		Decl public_export(Export, Declaration, Space).
+		public_export(Export, Declaration, Space) :- ts.module_export(Export, Module, _, Space),
+			ts.module_path(Module, File), lintai.glob(File, "src/api/**"), ts.export_target(Export, Declaration),
+			ts.declaration_type_subject(Declaration, Space).
+		Decl incomplete(Export, Space, Reason).
+		incomplete(Export, Space, Reason) :- public_export(Export, Declaration, Space),
+			ts.declaration_type_incomplete(Declaration, Space, Reason).
+	`)
+	.report("incomplete")
+	.expectNonEmpty("public_export")
+	.message(() => "Public declaration type evidence is incomplete or inconsistent");
+```
+
+This strict variant can block safe exports when compiler contexts disagree or the type cannot be established. It checks observed exported declarations, not the completeness of their entire structural type graph.
+
+## 44. Public re-export boundaries
+
+Prevent public API barrels from re-exporting bindings directly from internal modules.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Public API modules must not re-export bindings from internal modules.
+export default rule("arch.public-no-internal-reexports")
+	.version(1)
+	.program(dl`
+		Decl public_module(Module, File).
+		public_module(Module, File) :- ts.module_path(Module, File), lintai.glob(File, "src/api/**").
+		Decl violation(Export, Name).
+		violation(Export, Name) :- public_module(Module, _), ts.module_export(Export, Module, Name, _),
+			ts.export_via(Export, Site), ts.export_reexport(Export, Site, Source, _, _),
+			lintai.glob(Source, "src/internal/**").
+	`)
+	.report("violation")
+	.expectNonEmpty("public_module")
+	.message(() => "Public APIs must not re-export internal bindings");
+```
+
+The source path is the immediate re-export source, so an indirect chain needs additional checks. Unresolved bindings and incomplete wildcard inventories need the strict variant below.
+
+## 45. Strict public export evidence
+
+Require public API binding targets and wildcard export inventories to be known.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Public API export bindings and inventories must have complete evidence.
+export default rule("arch.public-export-evidence-strict")
+	.version(1)
+	.program(dl`
+		Decl public_module(Module, File).
+		public_module(Module, File) :- ts.module_path(Module, File), lintai.glob(File, "src/api/**").
+		Decl incomplete_binding(Export, Name, Reason).
+		incomplete_binding(Export, Name, Reason) :- public_module(Module, _),
+			ts.module_export(Export, Module, Name, _), ts.export_incomplete(Export, Reason).
+		Decl incomplete_inventory(Module, File, Reason).
+		incomplete_inventory(Module, File, Reason) :- public_module(Module, File),
+			ts.module_exports_incomplete(Module, Reason).
+	`)
+	.report("incomplete_binding", "incomplete_inventory")
+	.expectNonEmpty("public_module")
+	.message(() => "Public API export evidence is incomplete");
+```
+
+This strict variant can block otherwise safe APIs when dependencies do not resolve or an inventory is incomplete. A named unresolved export can produce separate type-space and value-space diagnostics.
+
+## 46. Configured contract source boundaries
+
+Prevent application calls from using contract bindings whose configured source declarations live in private files. Configure source links as described in [Source links](api.md#snapshot-scope) and pass `--source-links source-links.json`.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Application calls must not use configured bindings from private contract source files.
+export default rule("arch.no-private-configured-calls")
+	.version(1)
+	.program(dl`
+		Decl tracked_call(Site, Binding).
+		tracked_call(Site, Binding) :- ts.site(Site, File), lintai.glob(File, "src/app/**"),
+			ts.call_declaration(Site, Checked), ts.source_binding_checked_decl(Binding, Checked).
+		Decl violation(Site, Source).
+		violation(Site, Source) :- tracked_call(Site, Binding),
+			ts.source_binding(Binding, _, _, /value, /source_entry),
+			ts.source_binding_source_decl(Binding, SourceDecl),
+			ts.declaration_origin(SourceDecl, /source_file, Source),
+			lintai.glob(Source, "packages/contracts/src/private*").
+	`)
+	.report("violation")
+	.expectNonEmpty("tracked_call")
+	.message(() => "Application calls must not use private contract source bindings");
+```
+
+The association connects independently observed public binding sets; it does not prove declaration identity, runtime implementation or build freshness. Calls without a configured matching checked declaration are outside this rule.
+
+## 47. Strict configured source evidence
+
+Require complete source-link evidence for application calls associated with configured checked declarations. Use `--source-links source-links.json` with explicit `sourceTsconfig` entries.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Application calls using configured source links must have complete source association evidence.
+export default rule("arch.configured-source-evidence-strict")
+	.version(1)
+	.program(dl`
+		Decl tracked_call(Site, Binding, Entry).
+		tracked_call(Site, Binding, Entry) :- ts.site(Site, File), lintai.glob(File, "src/app/**"),
+			ts.call_declaration(Site, Checked), ts.source_binding_checked_decl(Binding, Checked),
+			ts.source_binding_attempt(Binding, Entry, _, _, /value),
+			ts.source_entry(Entry, _, _), ts.source_entry_applied(Entry).
+		Decl incomplete_binding(Site, Reason).
+		incomplete_binding(Site, Reason) :- tracked_call(Site, Binding, _),
+			ts.source_binding_incomplete(Binding, Reason).
+		Decl incomplete_entry(Site, Config, Reason).
+		incomplete_entry(Site, Config, Reason) :- tracked_call(Site, _, Entry),
+			ts.source_entry_tsconfig(Entry, Config), ts.source_entry_incomplete(Entry, Reason).
+	`)
+	.report("incomplete_binding", "incomplete_entry")
+	.expectNonEmpty("tracked_call")
+	.message(() => "Configured source association evidence is incomplete");
+```
+
+This strict variant can block safe calls when the source program or binding cannot be resolved. The entry diagnostic covers entries with an explicit source tsconfig, while binding uncertainty is checked for all tracked calls; unapplied entries have no call anchor.
+
+## 48. Strict declaration-map boundaries
+
+Prevent application calls mapped to private contract source and flag uncertain declaration-map recovery.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Application calls must not map to private contract source and must have reliable declaration maps.
+export default rule("arch.declaration-map-boundary-strict")
+	.version(1)
+	.program(dl`
+		Decl application_call(Site, Checked).
+		application_call(Site, Checked) :- ts.site(Site, File), lintai.glob(File, "src/app/**"),
+			ts.call_declaration(Site, Checked), ts.declaration_origin(Checked, /declaration_file, _).
+		Decl precise(Site, Source).
+		precise(Site, Source) :- application_call(Site, Checked),
+			ts.declaration_source(Checked, Declaration, /declaration_map),
+			ts.declaration_origin(Declaration, /source_file, Source), lintai.glob(Source, "packages/contracts/src/private*").
+		Decl has_precise(Checked).
+		has_precise(Checked) :- ts.declaration_source(Checked, _, /declaration_map).
+		Decl candidate(Site, Source).
+		candidate(Site, Source) :- application_call(Site, Checked),
+			ts.declaration_source_candidate(Checked, Declaration, /declaration_map), !has_precise(Checked),
+			ts.declaration_origin(Declaration, /source_file, Source), lintai.glob(Source, "packages/contracts/src/private*").
+		Decl uncertain(Site, Outcome).
+		uncertain(Site, Outcome) :- application_call(Site, Checked), ts.declaration_source_outcome(Checked, Outcome).
+	`)
+	.report("precise", "candidate", "uncertain")
+	.expectNonEmpty("application_call")
+	.message((_row, ctx) => ctx.assertion_id === "precise"
+		? "Application call maps to private contract source"
+		: ctx.assertion_id === "candidate"
+			? "An uncertain map candidate points to private contract source"
+			: "Cannot reliably map the checked declaration to source");
+```
+
+This strict variant can block safe calls when maps are missing, ambiguous or otherwise uncertain. It distinguishes a unique link from a private candidate without a unique link, and checks only calls with checked declaration-file endpoints; source maps do not establish build freshness.
+
+## 49. Strict source-link application
+
+Flag configured source links that were not used for selected contract source modules. Pass the source-links file using `--source-links source-links.json`.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Configured source links to selected source modules must be applied.
+export default rule("arch.selected-source-links-applied-strict")
+	.version(1)
+	.program(dl`
+		Decl configured_source(Module, Entry, Checked).
+		configured_source(Module, Entry, Checked) :- ts.source_entry(Entry, Checked, Source),
+			ts.module_path(Module, Source), lintai.glob(Source, "packages/contracts/src/**").
+		Decl unused(Module, Checked).
+		unused(Module, Checked) :- configured_source(Module, Entry, Checked), ts.source_entry_unapplied(Entry).
+	`)
+	.report("unused")
+	.expectNonEmpty("configured_source")
+	.message(() => "A configured source link to this module was not applied");
+```
+
+This strict variant can block a safe configuration when a checked entry is simply outside the current analysis. It can anchor a diagnostic only when the configured source entry is itself a selected primary module, and it does not validate build freshness.

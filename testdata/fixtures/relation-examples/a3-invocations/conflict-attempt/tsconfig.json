@@ -1,0 +1,4 @@
+{
+  "files": [],
+  "references": [{ "path": "./red" }, { "path": "./blue" }]
+}
