@@ -117,7 +117,9 @@ With npm, use `npm exec -- lintai` in place of `pnpm exec lintai`.
 
 The CLI exits with 0 when there are no violations, 1 when a rule found violations, 2 for a usage or configuration error, and 3 when a rule could not run. By default, the snapshot contains selected files that their `tsconfig.json` compiles, plus selected files without a `tsconfig.json`. Use `--files walk` to include all selected source files, or repeat `--exclude 'src/generated/**'` to exclude more paths. The default walk skips `node_modules`, `dist` and dot-directories such as `.next`.
 
-Each selected file has one compiler owner: the nearest config when its original roots include the file, otherwise the first matching referenced config in traversal order, then the nearest config as a fallback. A file with no config uses a synthetic program. `tsconfig` mode excludes files absent from the chosen program; `walk` mode uses a synthetic fallback for them. `lintai scope --explain --json` shows the selected config, effective owner and known root memberships for every selected file.
+Each selected file has one compiler owner. Starting in its directory, lintai finds the nearest ancestor named exactly `tsconfig.json` within the workspace. It selects that config when its original parsed roots contain the file; otherwise it searches existing project references depth first in resolver order, with cycle protection, for the first matching root, then falls back to the nearest config. Missing references are skipped; a malformed reached config is an error. A file with no nearest config uses the initial synthetic program. Exact `--source` roots are added after ownership selection. `tsconfig` mode excludes files absent from the chosen program; `walk` mode prepares a synthetic fallback for them. `lintai scope --explain --json` shows the selected config, effective owner and known root memberships for every selected file.
+
+For eligible modules, root membership is drawn from the bounded set of original config roots built from all selected files' nearest configs and their references. It is separate from the one effective owner and does not include files that are only visible through imports. Calls use the caller's owner; derived types and declarations keep the context of the root that requested them. Public config paths use one normalized representation, which supports joins from `module_owner_config` to `config_adjusted` and from `source_entry_tsconfig` to `source_config_adjusted`.
 
 For shared scope settings, put `exclude`, `include` and exact `sources` under `[workspace]` in `lintai.toml` at the workspace root. Repeat `--source <file>` to add exact files, including files otherwise excluded. Use `--config <file>` to choose a different config, relative to the invocation directory. See [Snapshot scope](api.md#snapshot-scope) for precedence, `--files`, and how to inspect the selection.
 
@@ -247,7 +249,9 @@ The asset root is the directory that contains `scripts/bundle-rule.mjs` and `scr
 
 ### Rule bundles fail unexpectedly
 
-An input that changes or disappears during bundling can produce a bundle error. Retry after the edit is complete; lintai does not reuse the incomplete artifact.
+The artifact identity covers the coherent inputs consumed by both bundle outputs: rule and generated-entry source, tool identity, configuration, package metadata and module-resolution observations. An input that changes, disappears, or cannot be accounted for during bundling produces a per-rule bundle error; lintai does not publish or reuse an incomplete artifact. Retry after the edit is complete.
+
+Each rule execution uses a fresh pure JavaScript runtime. Its program and message callbacks share state during that run, and the next execution starts with fresh module state. Metadata listing uses a separate runtime and does not invoke rule callbacks. See [the rules-lock reference](api.md#rules-lock) for artifact identity and integrity checks.
 
 Check:
 
