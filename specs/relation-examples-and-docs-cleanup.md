@@ -31,7 +31,7 @@ lintai is a general tool. Judge each example by whether a team in any TypeScript
 - `cmd/lintai/main_test.go`, `TestFixtureRulesReportPlantedViolations`: how fixture rules are run and checked today. It passes `--workspace-root` and a `--rules` glob. It uses no `lintai.toml`.
 - `cmd/lintai/golden_parity_test.go`: the golden files and `LINTAI_UPDATE_GOLDEN=1`.
 - `engine/docs_test.go`: the test that parses every rule program in `README.md`, `docs/api.md` and `docs/examples.md`. Its `docSources` list names the files it reads.
-- `engine/program.go`, `preludeFor`: the existing code that works out which prelude clauses a program depends on.
+- `engine/catalog.go`, `catalogForRule`: the production selection of catalog clauses a program depends on.
 - `testdata/call-provenance`: a recent example of a small, focused fixture.
 
 ## 4. Families and the inventory
@@ -46,9 +46,9 @@ A.9 (`ts.location/6`) is reporting support, not a family. Put it in the allowlis
 - works out, for each relation, whether an example rule uses it directly, or uses a prelude helper that depends on it
 - writes or checks `docs/followups/relation-coverage-inventory.md`. With `LINTAI_UPDATE_GOLDEN=1` it rewrites the file. Without it, the test fails when the file is out of date
 
-**Helper dependencies.** Work out which base relations a helper depends on by reusing the parsed-program dependency logic that `preludeFor` already uses. Do not keep a hand-written helper-to-relation map, and do not write a new dependency analyzer.
+**Helper dependencies.** Work out which base relations a helper depends on by reusing the production `catalogForRule` selection on the assembled, package-bearing catalog. Do not keep a hand-written helper-to-relation map, and do not write a new dependency analyzer.
 
-`preludeFor` returns the prelude clauses a program depends on, not relation names. Collecting the base predicates from the bodies of those clauses is expected and is part of reusing it, not a new analyzer.
+`catalogForRule` returns selected source units and the required predicate names. Qualify positive and negative premises using each unit's package before matching the base catalog; count explicit helper roots as well as clause references. This inventory records dependencies, not positive-emission witnesses.
 
 For orientation only, an earlier text search found these relations with no direct use in any example, fixture rule or helper. Treat it as a hint, and expect differences:
 

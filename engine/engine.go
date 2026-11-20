@@ -652,10 +652,15 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options) (Res
 		plan := planCache.get(planKey)
 		var perr *phaseError
 		if plan != nil {
-			var extraFacts factstore.ReadOnlyFactStore
-			extraFacts, perr = prepareExtraFacts(generatedRule.output, producerCatalog.namespaces)
+			var policies []suppressionPolicy
+			policies, perr = validateSuppressionPolicies(generatedRule.loaded.SuppressionDeclarations(), plan.reportDecls)
 			if perr == nil {
-				plan = planWithExtraFacts(plan, extraFacts)
+				var extraFacts factstore.ReadOnlyFactStore
+				extraFacts, perr = prepareExtraFacts(generatedRule.output, producerCatalog.namespaces)
+				if perr == nil {
+					plan = planWithExtraFacts(plan, extraFacts)
+					plan.suppressionRules = policies
+				}
 			}
 		} else {
 			e.stats.mangleCompiles.Add(1)
@@ -929,21 +934,6 @@ func ruleIDOrPath(ruleID, rulePath string) string {
 	return filepath.Base(rulePath)
 }
 
-func integrityFailuresByPath(lock *RulesLock, workspaceRoot string, rulePaths []string, artifacts map[string]bundle.Artifacts) map[string]integrityFailure {
-	if lock == nil {
-		return nil
-	}
-	return checkRulesLock(*lock, workspaceRoot, rulePaths, artifacts)
-}
-
-func hasIntegrityFailure(rulePath string, lock *RulesLock, workspaceRoot string, rulePaths []string, artifacts map[string]bundle.Artifacts) bool {
-	if lock == nil {
-		return false
-	}
-	_, failed := checkRulesLock(*lock, workspaceRoot, rulePaths, artifacts)[rulePath]
-	return failed
-}
-
 func restampDiagnostics(items []diagnostics.Diagnostic, snapshotID string, namespaces []string) {
 	for index := range items {
 		items[index].Provenance.SnapshotVersion = snapshotID
@@ -1023,13 +1013,6 @@ func compareDiagnostics(left, right diagnostics.Diagnostic) int {
 		return c
 	}
 	return strings.Compare(left.Message, right.Message)
-}
-
-func ruleIDForPrepareFailure(rulePath string, prepareErr bundle.PrepareError) string {
-	if prepareErr.RuleID != "" {
-		return prepareErr.RuleID
-	}
-	return filepath.Base(rulePath)
 }
 
 // errorDiagnostic reports a rule that could not run. Its severity is always

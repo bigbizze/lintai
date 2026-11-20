@@ -425,6 +425,8 @@ func cloneAnchor(support AnchorSupport) AnchorSupport {
 
 func cloneCanonical(value any) any {
 	switch typed := value.(type) {
+	case []string:
+		return slices.Clone(typed)
 	case []any:
 		result := make([]any, len(typed))
 		for i, item := range typed {

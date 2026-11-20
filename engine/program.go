@@ -858,49 +858,6 @@ func containsMangleKeyword(source, keyword string) bool {
 	return false
 }
 
-// preludeFor keeps the prelude declarations and only the prelude clauses that
-// the rule program depends on, so a rule does not derive prelude relations
-// that it never reads.
-func preludeFor(prelude, unit parse.SourceUnit, roots []string) parse.SourceUnit {
-	clausesByHead := make(map[string][]ast.Clause)
-	for _, clause := range prelude.Clauses {
-		clausesByHead[clause.Head.Predicate.Symbol] = append(clausesByHead[clause.Head.Predicate.Symbol], clause)
-	}
-	needed := make(map[string]struct{})
-	pending := append([]string(nil), roots...)
-	addPremises := func(clause ast.Clause) {
-		for _, premise := range clause.Premises {
-			switch typed := premise.(type) {
-			case ast.Atom:
-				pending = append(pending, typed.Predicate.Symbol)
-			case ast.NegAtom:
-				pending = append(pending, typed.Atom.Predicate.Symbol)
-			}
-		}
-	}
-	for _, clause := range unit.Clauses {
-		addPremises(clause)
-	}
-	for len(pending) > 0 {
-		symbol := pending[len(pending)-1]
-		pending = pending[:len(pending)-1]
-		if _, seen := needed[symbol]; seen {
-			continue
-		}
-		needed[symbol] = struct{}{}
-		for _, clause := range clausesByHead[symbol] {
-			addPremises(clause)
-		}
-	}
-	clauses := make([]ast.Clause, 0, len(prelude.Clauses))
-	for _, clause := range prelude.Clauses {
-		if _, ok := needed[clause.Head.Predicate.Symbol]; ok {
-			clauses = append(clauses, clause)
-		}
-	}
-	return parse.SourceUnit{Decls: prelude.Decls, Clauses: clauses}
-}
-
 // checkReservedPredicates rejects rule declarations and clauses for base and
 // prelude predicates. mangle-go accepts facts for declared extensional
 // predicates, so the check is done here.
