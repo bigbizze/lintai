@@ -102,10 +102,15 @@ type exactMapSegment struct {
 // registered. Mapped endpoints can themselves be declarations, so continue
 // until each newly retained endpoint has been visited once.
 func (e *extractor) recoverRetainedDeclarationMaps() {
+	// Ordinary roots can initiate map recovery, but their metadata is copied
+	// into the correspondence store before the map graph is traversed.
+	for id, node := range e.declarationNodes {
+		e.addDeclarationEndpoint(node, node.Symbol(), e.declarations[id].Name)
+	}
 	visited := make(map[string]bool)
 	for {
 		var pending []string
-		for id := range e.declarationNodes {
+		for id := range e.sourceDeclarationNodes {
 			if !visited[id] {
 				pending = append(pending, id)
 			}
@@ -116,7 +121,7 @@ func (e *extractor) recoverRetainedDeclarationMaps() {
 		slices.Sort(pending)
 		for _, id := range pending {
 			visited[id] = true
-			e.recoverDeclarationMap(e.declarationNodes[id], false, e.declarations[id].Name)
+			e.recoverDeclarationMap(e.sourceDeclarationNodes[id], false, e.sourceEndpoints[id].Name)
 		}
 	}
 }

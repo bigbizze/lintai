@@ -160,6 +160,10 @@ A passing result means the enabled rules found no reportable violations in the e
 
 Some calls cannot be resolved. Some type structures are not expanded. Different compiler configurations can disagree. LintAI exposes incomplete, missing or conflicting evidence where supported, and strict rules must explicitly report those cases instead of treating missing facts as approval. The [rule examples](docs/examples.md) show both violations and cases where a policy cannot be established.
 
+A selected file has one compiler owner. LintAI starts at its nearest `tsconfig.json` within the workspace, uses that config when the file is an original root, otherwise follows references in order to the first matching root and falls back to the nearest config. Files without a config use a synthetic program. In `tsconfig` mode files missing from the chosen program are excluded; `walk` mode analyzes them with a synthetic fallback. Scope output shows the selected config, effective owner and known root memberships. Overlap is useful evidence for review, but does not by itself mean that configurations disagree.
+
+Calls use the caller's owner, and a function's whole signature comes from its own file's owner. Derived types and declarations use the requesting root's context, so a shared type or declaration can still have conflicting evidence. Source links and declaration maps contribute separate correspondence metadata; they do not replace ordinary facts. See [snapshot scope and source associations](docs/api.md#snapshot-scope) for paths and reporting support.
+
 A few boundaries matter when choosing a policy:
 
 - A declared call target does not prove the runtime implementation, authorization or validation behavior.

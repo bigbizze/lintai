@@ -176,9 +176,11 @@ export const result = parse("value");`,
 		t.Fatalf("complete overload binding was marked incomplete: %+v", parse)
 	}
 	for _, declarationID := range slices.Concat(parse.CheckedDeclarations, parse.SourceDeclarations) {
-		declaration := semanticDeclaration(t, snapshot, declarationID)
-		if len(declaration.Types) != 0 {
-			t.Fatalf("source association endpoint became a type root: %+v", declaration)
+		sourceEndpoint(t, snapshot, declarationID)
+		for _, declaration := range snapshot.Declarations {
+			if declaration.ID == declarationID && len(declaration.TypeSubjects) != 0 {
+				t.Fatalf("source association endpoint became a type root: %+v", declaration)
+			}
 		}
 	}
 	checkedDeclarations := make(map[string]struct{})
@@ -197,7 +199,7 @@ export const result = parse("value");`,
 		if _, found := checkedDeclarations[outcome.CheckedDecl]; !found {
 			t.Fatalf("map outcome is unrelated to a configured binding: %+v", outcome)
 		}
-		declaration := semanticDeclaration(t, snapshot, outcome.CheckedDecl)
+		declaration := sourceEndpoint(t, snapshot, outcome.CheckedDecl)
 		if declaration.Location.File != "packages/contracts/dist/index.d.ts" || slices.Contains(declaration.Incomplete, AssociationUnresolved) {
 			t.Fatalf("missing source map changed checked declaration facts: %+v", declaration)
 		}
@@ -250,7 +252,7 @@ func TestUnavailableSourceEntryIsReportedAsUnresolved(t *testing.T) {
 	if binding.Name != "known" || binding.SourceFile != "" || !slices.Equal(binding.Incomplete, []string{AssociationUnresolved}) || len(binding.CheckedDeclarations) != 1 {
 		t.Fatalf("unavailable source binding outcome: %+v", binding)
 	}
-	checked := semanticDeclaration(t, snapshot, binding.CheckedDeclarations[0])
+	checked := sourceEndpoint(t, snapshot, binding.CheckedDeclarations[0])
 	if slices.Contains(checked.Incomplete, AssociationUnresolved) {
 		t.Fatalf("source failure changed known checked declaration facts: %+v", checked)
 	}
@@ -261,8 +263,8 @@ func TestUnavailableSourceEntryIsReportedAsUnresolved(t *testing.T) {
 			break
 		}
 	}
-	if use == nil || !slices.ContainsFunc(snapshot.Types, func(item TypeFact) bool {
-		return item.ID == use.ReturnType && item.Kind == TypeKindString
+	if use == nil || use.Signature == nil || !slices.ContainsFunc(snapshot.Types, func(item TypeFact) bool {
+		return item.ID == use.Signature.ReturnType && item.Kind == TypeKindString
 	}) {
 		t.Fatalf("the consumer's checked program type was changed by source recovery failure: %+v", use)
 	}
@@ -296,9 +298,9 @@ func TestDeclarationMapCreatesOnlyAnExactValidatedLink(t *testing.T) {
 	if link.CheckedDecl == link.SourceDecl || link.Method != "declaration_map" {
 		t.Fatalf("map link equated or mislabeled declaration endpoints: %+v", link)
 	}
-	checked := semanticDeclaration(t, snapshot, link.CheckedDecl)
-	sourceDecl := semanticDeclaration(t, snapshot, link.SourceDecl)
-	if checked.Location.File != "packages/contracts/dist/index.d.ts" || sourceDecl.Location.File != "packages/contracts/src/index.ts" || len(sourceDecl.Types) != 0 {
+	checked := sourceEndpoint(t, snapshot, link.CheckedDecl)
+	sourceDecl := sourceEndpoint(t, snapshot, link.SourceDecl)
+	if checked.Location.File != "packages/contracts/dist/index.d.ts" || sourceDecl.Location.File != "packages/contracts/src/index.ts" {
 		t.Fatalf("declaration endpoints or source type retention: checked=%+v source=%+v", checked, sourceDecl)
 	}
 	if !slices.ContainsFunc(snapshot.Inputs, func(input SnapshotInput) bool { return input.Path == mapPath && input.Exists }) ||
@@ -327,7 +329,7 @@ func TestMapLinkOutsideConfiguredSourceSetMarksBindingConflict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.DeclarationSources) != 1 || semanticDeclaration(t, snapshot, snapshot.DeclarationSources[0].SourceDecl).Location.File != "packages/contracts/src/legacy.ts" {
+	if len(snapshot.DeclarationSources) != 1 || sourceEndpoint(t, snapshot, snapshot.DeclarationSources[0].SourceDecl).Location.File != "packages/contracts/src/legacy.ts" {
 		t.Fatalf("precise map link was not preserved: %+v", snapshot.DeclarationSources)
 	}
 	if len(snapshot.SourceBindings) != 1 {
@@ -534,8 +536,10 @@ func TestSourceEntryReportsIncompleteExportInventoryAndKeepsKnownBinding(t *test
 		"packages/contracts/tsconfig.json":   `{"compilerOptions":{"strict":true,"module":"preserve","moduleResolution":"bundler"},"include":["src/**/*.ts"]}`,
 		"packages/contracts/dist/index.d.ts": `export declare const known: number;`,
 		"packages/contracts/src/index.ts":    `export const known = 1; export * from "./missing";`,
-		"src/app.ts":                         `import { known } from "../packages/contracts/dist"; export const result = known;`,
-		"source-links.json":                  `{"version":1,"entries":[{"checkedEntry":"packages/contracts/dist/index.d.ts","sourceEntry":"packages/contracts/src/index.ts"}]}`,
+		"packages/contracts/dist/good.d.ts":  `export declare const good: number;`,
+		"packages/contracts/src/good.ts":     `export const good = 1;`,
+		"src/app.ts":                         `import { known } from "../packages/contracts/dist"; import { good } from "../packages/contracts/dist/good"; export const result = known + good;`,
+		"source-links.json":                  `{"version":1,"entries":[{"checkedEntry":"packages/contracts/dist/index.d.ts","sourceEntry":"packages/contracts/src/index.ts"},{"checkedEntry":"packages/contracts/dist/good.d.ts","sourceEntry":"packages/contracts/src/good.ts"}]}`,
 	})
 	snapshot, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{
 		WorkspaceRoot: root,
@@ -549,6 +553,11 @@ func TestSourceEntryReportsIncompleteExportInventoryAndKeepsKnownBinding(t *test
 		return item.Applied && slices.Contains(item.Incomplete, AssociationUnresolved)
 	}) {
 		t.Fatalf("unresolved source star did not mark the source entry inventory incomplete: %+v", snapshot.SourceEntries)
+	}
+	if !slices.ContainsFunc(snapshot.SourceEntries, func(item SourceEntryFact) bool {
+		return item.Applied && item.SourceEntry == "packages/contracts/src/good.ts" && len(item.Incomplete) == 0
+	}) {
+		t.Fatalf("an unrelated failed inventory tainted the clean source entry: %+v", snapshot.SourceEntries)
 	}
 	var known *SourceBindingFact
 	for index := range snapshot.SourceBindings {

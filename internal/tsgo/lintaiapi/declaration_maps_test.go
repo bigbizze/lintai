@@ -97,8 +97,8 @@ func assertDeclarationMapLinks(t *testing.T, snapshot *Snapshot, want map[string
 	}
 	seen := make(map[string]bool, len(want))
 	for _, link := range snapshot.DeclarationSources {
-		checked := semanticDeclaration(t, snapshot, link.CheckedDecl)
-		source := semanticDeclaration(t, snapshot, link.SourceDecl)
+		checked := sourceEndpoint(t, snapshot, link.CheckedDecl)
+		source := sourceEndpoint(t, snapshot, link.SourceDecl)
 		kind, ok := want[checked.Name]
 		if !ok || seen[checked.Name] || checked.Kind != kind || source.Kind != kind || checked.ID == source.ID || link.Method != "declaration_map" || checked.Location.File != checkedFile || source.Location.File != sourceFile || source.Name != checked.Name || checked.Location.StartLine <= 0 || source.Location.StartLine <= 0 {
 			t.Fatalf("unexpected link: checked=%+v source=%+v link=%+v", checked, source, link)
@@ -225,7 +225,7 @@ func TestDeclarationMapReusesFilesAndSharedMap(t *testing.T) {
 	fs.mu.Unlock()
 	e := &extractor{workspaceRoot: root, host: host, program: program, declarations: make(map[string]*DeclarationFact), operations: semanticOperations{sourceRecovery: true}}
 	firstDeclaration := first.Statements.Nodes[0]
-	if _, _, ok := e.addDeclarationMetadata(firstDeclaration, nil, firstDeclaration.Name().Text()); !ok || e.declarationMaps != nil {
+	if _, _, ok := e.collectDeclarationMetadata(firstDeclaration, nil, firstDeclaration.Name().Text(), false); !ok || e.declarationMaps != nil {
 		t.Fatal("declaration metadata registration performed map recovery")
 	}
 	firstIDs := make(map[string]bool, count)
@@ -298,7 +298,7 @@ func TestDeclarationMapSourceChangesBetweenExtractions(t *testing.T) {
 	if len(second.DeclarationSources) != 19 || len(second.DeclarationSourceOutcomes) != 1 || second.DeclarationSourceOutcomes[0].Outcome != "unresolved" {
 		t.Fatalf("changed source reused stale map evidence: links=%d outcomes=%+v", len(second.DeclarationSources), second.DeclarationSourceOutcomes)
 	}
-	checked := semanticDeclaration(t, second, second.DeclarationSourceOutcomes[0].CheckedDecl)
+	checked := sourceEndpoint(t, second, second.DeclarationSourceOutcomes[0].CheckedDecl)
 	if checked.Name != "method000" {
 		t.Fatalf("wrong declaration became unresolved after the source edit: %+v", checked)
 	}
@@ -334,8 +334,8 @@ func TestDeclarationMapReverseAnchorRejectsDifferentGeneratedDeclaration(t *test
 	if len(snapshot.DeclarationSources) != 1 || len(snapshot.DeclarationSourceOutcomes) != 1 || snapshot.DeclarationSourceOutcomes[0].Outcome != "unresolved" {
 		t.Fatalf("non-round-tripping overload was accepted: links=%+v outcomes=%+v", snapshot.DeclarationSources, snapshot.DeclarationSourceOutcomes)
 	}
-	checked := semanticDeclaration(t, snapshot, snapshot.DeclarationSources[0].CheckedDecl)
-	rejected := semanticDeclaration(t, snapshot, snapshot.DeclarationSourceOutcomes[0].CheckedDecl)
+	checked := sourceEndpoint(t, snapshot, snapshot.DeclarationSources[0].CheckedDecl)
+	rejected := sourceEndpoint(t, snapshot, snapshot.DeclarationSourceOutcomes[0].CheckedDecl)
 	if checked.Location.StartLine != 1 || rejected.Location.StartLine != 2 {
 		t.Fatalf("unexpected round-trip endpoints: accepted=%+v rejected=%+v", checked, rejected)
 	}
@@ -474,14 +474,14 @@ func TestDeclarationMapKeepsOutcomesSeparateForSourcesInOneMap(t *testing.T) {
 		t.Fatalf("independent source results: links=%+v candidates=%+v outcomes=%+v", snapshot.DeclarationSources, snapshot.DeclarationSourceCandidates, snapshot.DeclarationSourceOutcomes)
 	}
 	link := snapshot.DeclarationSources[0]
-	checked := semanticDeclaration(t, snapshot, link.CheckedDecl)
-	source := semanticDeclaration(t, snapshot, link.SourceDecl)
+	checked := sourceEndpoint(t, snapshot, link.CheckedDecl)
+	source := sourceEndpoint(t, snapshot, link.SourceDecl)
 	if checked.Name != "good" || source.Name != "good" || source.Location.File != "source/good.ts" || source.Location.StartColumn != column+1 {
 		t.Fatalf("sourceRoot or UTF-16 anchor was not preserved: checked=%+v source=%+v", checked, source)
 	}
 	outcomes := make(map[string]string)
 	for _, outcome := range snapshot.DeclarationSourceOutcomes {
-		outcomes[semanticDeclaration(t, snapshot, outcome.CheckedDecl).Name] = outcome.Outcome
+		outcomes[sourceEndpoint(t, snapshot, outcome.CheckedDecl).Name] = outcome.Outcome
 	}
 	if outcomes["missing"] != "unavailable_source" || outcomes["bad"] != "unavailable_source" {
 		t.Fatalf("source failures were not isolated: %+v", outcomes)

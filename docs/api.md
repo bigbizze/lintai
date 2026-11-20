@@ -142,9 +142,19 @@ Each rule execution uses a fresh pure runtime. Its `facts()` and `program()` cal
 
 `lintai schema` reads the configured producer descriptions without collecting source facts. Rule programs use qualified names such as `ts.fn` or `app.fn`, according to the producer's configured namespace; `lintai.glob` belongs to the engine. Entity IDs are producer-owned strings and are distinct from file paths. A module ID is `ts:module:<file>`, not the file path. Location and tracking support are supplied by the producer for eligible anchors.
 
-Source syntax has one `ts.site` identity and either one `ts.site_owner` or unsupported-attribution evidence. A call's classification is evidence about that site. A direct callback argument uses its own site and is not an invocation. Function signatures are grouped observations: join through `ts.fn_signature` before reading parameters and returns. Incompleteness and conflict rows describe uncertainty, rather than proving absence.
+Source syntax has one `ts.site` identity and either one `ts.site_owner` or unsupported-attribution evidence. A call's classification is evidence about that site. A direct callback argument uses its own site and is not an invocation. Each function has at most one whole signature from its file’s owner; join through `ts.fn_signature` before reading parameters and returns. The `fn_signature_unresolved` helper follows signature incompleteness. Different owned roots can still expose conflicting views of a shared type or declaration type.
 
-The tables below are the Appendix A base contract. `E!` and `E?` are owned entities with required or optional location support; `E` is query-only, `P` is a path, `S` a string, `N` a name constant, `I` an integer and `L` a literal value. See the [full contract](../specs/lintai-refactor-implementation-r6.md#appendix-a-complete-built-in-base-relation-contract) for populations and cardinalities.
+The tables below are the Appendix A base contract. `E!` and `E?` are owned entities with required or optional location support; `E` is query-only, `P` is a path, `S` a string, `N` a name constant, `I` an integer and `L` a literal value. The owner-context contract in [the implementation specification](../specs/lintai-owner-context-implementation.md) defines populations and cardinalities.
+
+For each selected file, lintai finds the nearest ancestor `tsconfig.json` within the workspace. It selects that config if its original roots include the file; otherwise it follows project references depth first in recorded order and selects the first matching root, falling back to the nearest config. With no config it uses a synthetic program. Exact source roots are added after selection. In `tsconfig` mode a file absent from its selected program is excluded; `walk` mode uses a synthetic fallback. The compiler owner is fixed before collection. Calls resolve in the caller's owner and a function's signature comes from its own owner. Derived types and declarations retain the requesting root's context; shared canonical IDs can therefore have real `/conflict` type evidence.
+
+`module_config` describes original root membership in the union of nearest configs and their reference closures for all selected candidates. It does not mean import visibility. `module_owner_config` identifies the effective real owner; no row means a synthetic owner. `module_multi_config` is a conservative overlap test, not evidence of semantic disagreement. Config values use normalized workspace-relative paths, or normalized absolute paths outside the workspace, across ownership, adjustments and source entries. Scope output shows selected and effective owners and all known root configs for each candidate.
+
+Source correspondence is a separate domain: `source_endpoint` describes checked and source endpoints, while ordinary `declaration` and `location` rows remain rooted in ordinary collection. Source-only endpoints can have optional reporting anchors but no queryable `location` row. Source links and declaration maps cannot change ordinary facts or ordinary support when ordinary inputs are unchanged. Full correspondence is gathered when any correspondence relation is demanded, then the requested subset is projected. An explicitly configured links document is validated on the first nonempty collection even when correspondence is not demanded.
+
+The correspondence partition consists of `declaration_source_candidate`, `declaration_source`, `declaration_source_outcome`, all `source_entry*` and `source_binding*` relations, `source_endpoint`, `source_endpoint_incomplete` and `source_config_adjusted`. All other bases, including `declaration*`, `location`, `ambient_source` and `config_adjusted`, are ordinary. Endpoint metadata is published only for declaration IDs referenced by retained bindings, map links or map outcomes. An endpoint shared by both domains keeps its ordinary reporting support. Config values are paths, not entities, and have no reporting anchors.
+
+The `declaration_fn` relation is a direct link to a retained implementation. Its absence does not establish that an implementation does not exist. Overload declarations remain distinct. Each collected function has at most one whole signature, including its parameter marks and return. `fn_signature_unresolved` is a helper derived from `fn_signature` and `signature_incomplete`; request its bases when using `facts --relation`. The former `call_target_conflict`, `fn_signature_conflict` and `declaration_fn_incomplete` bases are removed.
 
 ### A.1 Source identity and lexical evidence
 
@@ -152,6 +162,8 @@ The tables below are the Appendix A base contract. `E!` and `E?` are owned entit
 |---|---|---|
 | `ts.module/1` | `Module:E!` | One entity per selected primary file. |
 | `ts.module_path/2` | `Module:E!, File:P` | The primary module’s canonical file path. |
+| `ts.module_config/2` | `Module:E!, Config:P` | Original root membership in the bounded ordinary config inventory. |
+| `ts.module_owner_config/2` | `Module:E!, Config:P` | Effective real config owner; absent for synthetic ownership. |
 | `ts.fn/3` | `Fn:E!, File:P, Name:S` | Collected implementation/ownership function in a primary file; display name is not identity. |
 | `ts.fn_kind/2` | `Fn:E!, Kind:N` | One syntax kind: /function, /function_expression, /arrow_function, /method, /constructor, /get_accessor or /set_accessor. |
 | `ts.fn_container/2` | `Fn:E!, Name:S` | Known containing class/object display name; absent when unnamed. |
@@ -197,9 +209,8 @@ The tables below are the Appendix A base contract. `E!` and `E?` are owned entit
 | `ts.call_edge/2` | `Site:E!, Callee:E!` | Observed call to a collected implementation. Caller is site_owner, not part of this row. |
 | `ts.external_call/4` | `Site:E!, OriginKind:N, Origin:S, Name:S` | Observed external declared target; origin kinds are defined in section 9.1. |
 | `ts.call_unresolved/1` | `Site:E!` | An observed invocation cannot be followed to a retained implementation or supported external target. |
-| `ts.call_target_conflict/1` | `Site:E!` | Relevant runtime-classification/target observations disagree; retain their positive evidence. |
 | `ts.call_declaration/2` | `Site:E!, Declaration:E?` | Concrete signature declaration selected by a checked context, independent of runtime implementation resolution. |
-| `ts.call_declaration_incomplete/2` | `Site:E!, Reason:N` | Selected declaration/member evidence is /unresolved, /synthetic, /unsupported or /conflict. |
+| `ts.call_declaration_incomplete/2` | `Site:E!, Reason:N` | Selected declaration/member evidence is /unresolved, /synthetic or /unsupported. |
 | `ts.declaration_member/3` | `Declaration:E?, OwnerDeclaration:E?, Name:S` | Supported lexical named member and declaring owner; not a claim about the receiver’s runtime implementation. |
 | `ts.fn_ref/2` | `Site:E!, Target:E!` | Collected function used as a value. It is not necessarily invoked. Owner comes from site_owner. |
 | `ts.fn_value_escape/2` | `Site:E!, Kind:N` | Supported direct function-valued argument to external/unresolved invocation; only /argument exists. |
@@ -217,10 +228,8 @@ The tables below are the Appendix A base contract. `E!` and `E?` are owned entit
 | `ts.signature_param_rest/2` | `Signature:E!, Position:I` | The slot is known to be a rest parameter. |
 | `ts.signature_returns/2` | `Signature:E!, Type:E?` | Known return type of that observation. |
 | `ts.signature_complete/1` | `Signature:E!` | All signature slots, marks and return were established; structural type completeness is separate. |
-| `ts.signature_incomplete/2` | `Signature:E!, Reason:N` | Whole observation is /unresolved or /unsupported; never coexists with signature_complete for the same ID. |
+| `ts.signature_incomplete/2` | `Signature:E!, Reason:N` | Whole observation is /unresolved; never coexists with signature_complete for the same ID. |
 | `ts.fn_signature_omitted/1` | `Fn:E!` | Fixed ownership-only omission policy, not selective-work omission. |
-| `ts.fn_signature_unresolved/1` | `Fn:E!` | At least one attempted observation lacked a complete usable signature. |
-| `ts.fn_signature_conflict/1` | `Fn:E!` | Two complete whole signatures for this function disagree. |
 
 ### A.5 Structural type facts
 
@@ -250,14 +259,13 @@ The tables below are the Appendix A base contract. `E!` and `E?` are owned entit
 
 | Predicate | Ordered arguments | Meaning |
 |---|---|---|
-| `ts.declaration/3` | `Declaration:E?, Name:S, Kind:N` | Endpoint union in section 7.3, with one canonical whole metadata observation. |
+| `ts.declaration/3` | `Declaration:E?, Name:S, Kind:N` | Ordinary declaration metadata in the initiating root context, with one canonical whole observation. |
 | `ts.declaration_origin/3` | `Declaration:E?, OriginKind:N, Origin:S` | Descriptive origin; never substitutes an assumed source path for a checked declaration. |
-| `ts.declaration_metadata_incomplete/2` | `Declaration:E?, Reason:N` | Identity-associated metadata is /unresolved, /unsupported or /conflict; no type/map claim. |
+| `ts.declaration_metadata_incomplete/2` | `Declaration:E?, Reason:N` | Identity-associated metadata is /unsupported or /conflict; no type/map claim. |
 | `ts.declaration_type_subject/2` | `Declaration:E?, Space:N` | Attempted exported-declaration type domain; /type or /value. |
 | `ts.declaration_type/3` | `Declaration:E?, Space:N, Type:E?` | Known type association for a declaration-type subject. |
 | `ts.declaration_type_incomplete/3` | `Declaration:E?, Space:N, Reason:N` | Subject-specific /unresolved, /unsupported or /conflict evidence. |
 | `ts.declaration_fn/2` | `Declaration:E?, Fn:E!` | Observed direct correspondence to a collected implementation. |
-| `ts.declaration_fn_incomplete/2` | `Declaration:E?, Reason:N` | Attempted direct function association is /unresolved, /unsupported or /conflict. |
 
 ### A.7 Export evidence
 
@@ -268,7 +276,7 @@ The tables below are the Appendix A base contract. `E!` and `E?` are owned entit
 | `ts.export_via/2` | `Export:E!, Site:E?` | Syntax site contributing to the binding; a dependency site can have a physical location without being primary. |
 | `ts.export_reexport/5` | `Export:E!, Site:E?, SourceModule:P, SourceName:S, Space:N` | Immediate binding-specific re-export. SourceModule remains canonical path data; `*` marks star/namespace names. |
 | `ts.export_incomplete/2` | `Export:E!, Reason:N` | Binding target evidence is /unresolved, /unsupported or /conflict; known positives remain. |
-| `ts.module_exports_incomplete/2` | `Module:E!, Reason:N` | Public-name inventory incomplete/conflicted; propagates through wildcard-export dependencies. |
+| `ts.module_exports_incomplete/2` | `Module:E!, Reason:N` | Public-name inventory is /unresolved or /unsupported; propagates through wildcard-export dependencies. |
 
 ### A.8 Source correspondence
 
@@ -277,11 +285,14 @@ The tables below are the Appendix A base contract. `E!` and `E?` are owned entit
 | `ts.declaration_source_candidate/3` | `Checked:E?, Source:E?, Method:N` | Validated map candidate; /declaration_map. Ambiguity retains candidates. |
 | `ts.declaration_source/3` | `Checked:E?, Source:E?, Method:N` | Unique nonconflicting precise map link; identities stay distinct. |
 | `ts.declaration_source_outcome/2` | `Checked:E?, Outcome:N` | Terminal failed/uncertain requested map attempt; outcome vocabulary follows below. |
+| `ts.source_endpoint/5` | `Declaration:E?, Name:S, Kind:N, OriginKind:N, Origin:S` | Whole metadata for a retained correspondence endpoint. |
+| `ts.source_endpoint_incomplete/2` | `Declaration:E?, Reason:N` | Endpoint metadata is /unsupported or /conflict. |
+| `ts.source_config_adjusted/3` | `Config:P, Option:S, Action:N` | Source-correspondence context adaptation: /removed, /rewritten or /replaced. |
 | `ts.source_entry/3` | `Entry:E, CheckedEntry:P, SourceEntry:P` | Validated configured source-links entry. No fabricated source range for this configuration entity. |
 | `ts.source_entry_tsconfig/2` | `Entry:E, Config:P` | Explicit source configuration chosen for the entry. |
 | `ts.source_entry_applied/1` | `Entry:E` | The checked entry matched an analyzed compiler input and its binding attempts were considered. |
 | `ts.source_entry_unapplied/1` | `Entry:E` | The valid checked entry matched no analyzed compiler input; exactly one applied/unapplied state after reconciliation. |
-| `ts.source_entry_incomplete/2` | `Entry:E, Reason:N` | Optional source program/inventory is /unresolved, /unsupported or /conflict. |
+| `ts.source_entry_incomplete/2` | `Entry:E, Reason:N` | Optional source program/inventory is /unresolved or /unsupported. |
 | `ts.source_binding_attempt/5` | `Binding:E, Entry:E, CheckedFile:P, Name:S, Space:N` | Attempt to associate a checked public binding, in /type or /value space. |
 | `ts.source_binding/5` | `Binding:E, SourceFile:P, SourceName:S, Space:N, Method:N` | Configured binding correspondence by /source_entry; does not assert declaration identity or build freshness. |
 | `ts.source_binding_checked_decl/2` | `Binding:E, Declaration:E?` | Member of the independently observed checked declaration set. |
@@ -303,6 +314,8 @@ These helpers derive from base facts and inherit their reporting support. They d
 
 | Helper | Meaning |
 |---|---|
+| `ts.module_multi_config(Module)` | The module is an original root of two known inventory configs. |
+| `ts.fn_signature_unresolved(Fn)` | Its signature has incomplete evidence. |
 | `ts.site_in_fn(Site, Fn)` | `site_owner` whose owner is in `fn`. |
 | `ts.site_at_module(Site, Module)` | `site_owner` whose owner is in `module`. |
 | `ts.site_attribution_unknown(Site)` | Has a `site_attribution_unsupported` reason. |
@@ -521,7 +534,7 @@ pnpm exec lintai \
 pnpm exec lintai facts --workspace-root . --relation ts.ambient_use --relation ts.ambient_key
 ```
 
-`lintai scope --explain` prints the selected paths, compiler eligibility, configurations and pruned boundaries for each producer; `--json` emits the explanation as JSON. It accepts and ignores `--asset-root` for launcher compatibility. It accepts `--source-links` but does not read that file when explaining scope. `lintai serve` uses JSON-RPC initialization rather than analysis CLI flags.
+`lintai scope --explain` prints the selected paths, compiler eligibility, configurations and pruned boundaries for each producer; `--json` emits the explanation as JSON. Its sorted `compilerFiles` records include the selected config before availability checking, the effective configured or synthetic owner, eligibility and the bounded original-root membership list, including for excluded files. `configurations` contains the real selected and owner configs, not a synthetic sentinel or inventory-only configs. It accepts and ignores `--asset-root` for launcher compatibility. It accepts `--source-links` but does not read that file when explaining scope. `lintai serve` uses JSON-RPC initialization rather than analysis CLI flags.
 
 ### Snapshot scope
 
@@ -557,7 +570,7 @@ A `tsconfig.json` that includes generated files, for example `.next/types/**/*.t
 
 Source links:
 
-Some workspace packages are imported through generated `.d.ts` files and have no declaration maps, so lintai cannot tell which source file belongs to the generated one. `--source-links` names a JSON file that tells it. Use it only when the checker does not already read the source through normal resolution or project references (see [Source resolution order](#source-resolution-order)). Version 1 of the file looks like this:
+Some workspace packages are imported through generated `.d.ts` files and have no declaration maps, so lintai cannot tell which source file belongs to the generated one. `--source-links` names a JSON file that tells it. The source side is analyzed in its own selected program even if the consumer can see that file. Version 1 of the file looks like this:
 
 ```json
 {
@@ -572,7 +585,7 @@ Some workspace packages are imported through generated `.d.ts` files and have no
 }
 ```
 
-`checkedEntry` is the file that the checker actually resolved, usually a generated `.d.ts` file. It is a path, not a package name or import specifier, so a package subpath needs its own entry. `sourceEntry` is the source file that should export the same names. `sourceTsconfig` is optional: set it when more than one tsconfig compiles the source file, so that lintai knows which one to use. It must name an existing JSON file in the workspace. The document has only `version` and `entries`, entries have only these three fields, and lintai rejects any other field. lintai does not expand wildcards or search parent directories.
+`checkedEntry` is the file that the checker actually resolved, usually a generated `.d.ts` file. It is a path, not a package name or import specifier, so a package subpath needs its own entry. `sourceEntry` is the source file that should export the same names. `sourceTsconfig` is optional: set it when more than one tsconfig compiles the source file, so that lintai knows which one to use. It must name an existing JSON file in the workspace whose original roots include the source. Without an explicit selector, lintai searches the nearest config and its references for a source root, accepting multiple candidates only when their effective settings and roots agree. The document has only `version` and `entries`, entries have only these three fields, and lintai rejects any other field. lintai does not expand wildcards or search parent directories.
 
 All paths in the file are relative to the workspace root, not to the current directory, and must stay inside the workspace, so absolute paths are rejected. A relative `--source-links` path is also resolved from the workspace root. With no option, or with an empty `entries` array, nothing happens, and identical entries are merged.
 

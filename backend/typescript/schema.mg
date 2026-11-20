@@ -21,6 +21,28 @@ Decl module_path(Module, File)
     arg_role(File, "path")
   ].
 
+Decl module_config(Module, Config)
+  descr [
+    extensional(),
+    doc("Original root-file membership in the bounded ordinary config inventory."),
+    arg(Module, "Module"),
+    arg_role(Module, "entity"),
+    arg_report_support(Module, "required"),
+    arg(Config, "Config"),
+    arg_role(Config, "path")
+  ].
+
+Decl module_owner_config(Module, Config)
+  descr [
+    extensional(),
+    doc("Effective real config owner of a retained ordinary module; synthetic owners have no row."),
+    arg(Module, "Module"),
+    arg_role(Module, "entity"),
+    arg_report_support(Module, "required"),
+    arg(Config, "Config"),
+    arg_role(Config, "path")
+  ].
+
 Decl fn(Fn, File, Name)
   descr [
     extensional(),
@@ -413,15 +435,6 @@ Decl call_unresolved(Site)
     arg_report_support(Site, "required")
   ].
 
-Decl call_target_conflict(Site)
-  descr [
-    extensional(),
-    doc("Relevant runtime-classification/target observations disagree; retain their positive evidence."),
-    arg(Site, "Site"),
-    arg_role(Site, "entity"),
-    arg_report_support(Site, "required")
-  ].
-
 Decl call_declaration(Site, Declaration)
   descr [
     extensional(),
@@ -437,7 +450,7 @@ Decl call_declaration(Site, Declaration)
 Decl call_declaration_incomplete(Site, Reason)
   descr [
     extensional(),
-    doc("Selected declaration/member evidence is /unresolved, /synthetic, /unsupported or /conflict."),
+    doc("Selected declaration/member evidence is /unresolved, /synthetic or /unsupported."),
     arg(Site, "Site"),
     arg_role(Site, "entity"),
     arg_report_support(Site, "required"),
@@ -445,8 +458,7 @@ Decl call_declaration_incomplete(Site, Reason)
     arg_representation(Reason, "name"),
     arg_allowed_name(Reason, "unresolved"),
     arg_allowed_name(Reason, "synthetic"),
-    arg_allowed_name(Reason, "unsupported"),
-    arg_allowed_name(Reason, "conflict")
+    arg_allowed_name(Reason, "unsupported")
   ].
 
 Decl declaration_member(Declaration, OwnerDeclaration, Name)
@@ -590,38 +602,19 @@ Decl signature_complete(Signature)
 Decl signature_incomplete(Signature, Reason)
   descr [
     extensional(),
-    doc("Whole observation is /unresolved or /unsupported; never coexists with signature_complete for the same ID."),
+    doc("Whole observation is /unresolved; never coexists with signature_complete for the same ID."),
     arg(Signature, "Signature"),
     arg_role(Signature, "entity"),
     arg_report_support(Signature, "required"),
     arg(Reason, "Reason"),
     arg_representation(Reason, "name"),
-    arg_allowed_name(Reason, "unresolved"),
-    arg_allowed_name(Reason, "unsupported")
+    arg_allowed_name(Reason, "unresolved")
   ].
 
 Decl fn_signature_omitted(Fn)
   descr [
     extensional(),
     doc("Fixed ownership-only omission policy, not selective-work omission."),
-    arg(Fn, "Fn"),
-    arg_role(Fn, "entity"),
-    arg_report_support(Fn, "required")
-  ].
-
-Decl fn_signature_unresolved(Fn)
-  descr [
-    extensional(),
-    doc("At least one attempted observation lacked a complete usable signature."),
-    arg(Fn, "Fn"),
-    arg_role(Fn, "entity"),
-    arg_report_support(Fn, "required")
-  ].
-
-Decl fn_signature_conflict(Fn)
-  descr [
-    extensional(),
-    doc("Two complete whole signatures for this function disagree."),
     arg(Fn, "Fn"),
     arg_role(Fn, "entity"),
     arg_report_support(Fn, "required")
@@ -885,7 +878,7 @@ Decl type_display(Type, Text)
 Decl declaration(Declaration, Name, Kind)
   descr [
     extensional(),
-    doc("Endpoint union in section 7.3, with one canonical whole metadata observation."),
+    doc("Ordinary declaration metadata in the initiating root context, with one canonical whole observation."),
     arg(Declaration, "Declaration"),
     arg_role(Declaration, "entity"),
     arg_report_support(Declaration, "optional"),
@@ -926,13 +919,12 @@ Decl declaration_origin(Declaration, OriginKind, Origin)
 Decl declaration_metadata_incomplete(Declaration, Reason)
   descr [
     extensional(),
-    doc("Identity-associated metadata is /unresolved, /unsupported or /conflict; no type/map claim."),
+    doc("Identity-associated metadata is /unsupported or /conflict; no type/map claim."),
     arg(Declaration, "Declaration"),
     arg_role(Declaration, "entity"),
     arg_report_support(Declaration, "optional"),
     arg(Reason, "Reason"),
     arg_representation(Reason, "name"),
-    arg_allowed_name(Reason, "unresolved"),
     arg_allowed_name(Reason, "unsupported"),
     arg_allowed_name(Reason, "conflict")
   ].
@@ -994,20 +986,6 @@ Decl declaration_fn(Declaration, Fn)
     arg(Fn, "Fn"),
     arg_role(Fn, "entity"),
     arg_report_support(Fn, "required")
-  ].
-
-Decl declaration_fn_incomplete(Declaration, Reason)
-  descr [
-    extensional(),
-    doc("Attempted direct function association is /unresolved, /unsupported or /conflict."),
-    arg(Declaration, "Declaration"),
-    arg_role(Declaration, "entity"),
-    arg_report_support(Declaration, "optional"),
-    arg(Reason, "Reason"),
-    arg_representation(Reason, "name"),
-    arg_allowed_name(Reason, "unresolved"),
-    arg_allowed_name(Reason, "unsupported"),
-    arg_allowed_name(Reason, "conflict")
   ].
 
 Decl module_export(Export, Module, Name, Space)
@@ -1087,15 +1065,14 @@ Decl export_incomplete(Export, Reason)
 Decl module_exports_incomplete(Module, Reason)
   descr [
     extensional(),
-    doc("Public-name inventory incomplete/conflicted; propagates through wildcard-export dependencies."),
+    doc("Public-name inventory is /unresolved or /unsupported; propagates through wildcard-export dependencies."),
     arg(Module, "Module"),
     arg_role(Module, "entity"),
     arg_report_support(Module, "required"),
     arg(Reason, "Reason"),
     arg_representation(Reason, "name"),
     arg_allowed_name(Reason, "unresolved"),
-    arg_allowed_name(Reason, "unsupported"),
-    arg_allowed_name(Reason, "conflict")
+    arg_allowed_name(Reason, "unsupported")
   ].
 
 Decl declaration_source_candidate(Checked, Source, Method)
@@ -1147,6 +1124,65 @@ Decl declaration_source_outcome(Checked, Outcome)
     arg_allowed_name(Outcome, "conflict")
   ].
 
+Decl source_endpoint(Declaration, Name, Kind, OriginKind, Origin)
+  descr [
+    extensional(),
+    doc("Whole metadata observation for a retained source-correspondence endpoint."),
+    arg(Declaration, "Declaration"),
+    arg_role(Declaration, "entity"),
+    arg_report_support(Declaration, "optional"),
+    arg(Name, "Name"),
+    arg(Kind, "Kind"),
+    arg_representation(Kind, "name"),
+    arg_allowed_name(Kind, "function"),
+    arg_allowed_name(Kind, "variable"),
+    arg_allowed_name(Kind, "type_alias"),
+    arg_allowed_name(Kind, "interface"),
+    arg_allowed_name(Kind, "class"),
+    arg_allowed_name(Kind, "enum"),
+    arg_allowed_name(Kind, "namespace"),
+    arg_allowed_name(Kind, "method"),
+    arg_allowed_name(Kind, "property"),
+    arg_allowed_name(Kind, "signature"),
+    arg_allowed_name(Kind, "export_expression"),
+    arg_allowed_name(Kind, "unknown"),
+    arg(OriginKind, "OriginKind"),
+    arg_representation(OriginKind, "name"),
+    arg_allowed_name(OriginKind, "lib"),
+    arg_allowed_name(OriginKind, "package"),
+    arg_allowed_name(OriginKind, "ambient_module"),
+    arg_allowed_name(OriginKind, "declaration_file"),
+    arg_allowed_name(OriginKind, "source_file"),
+    arg(Origin, "Origin")
+  ].
+
+Decl source_endpoint_incomplete(Declaration, Reason)
+  descr [
+    extensional(),
+    doc("Endpoint metadata is /unsupported or /conflict."),
+    arg(Declaration, "Declaration"),
+    arg_role(Declaration, "entity"),
+    arg_report_support(Declaration, "optional"),
+    arg(Reason, "Reason"),
+    arg_representation(Reason, "name"),
+    arg_allowed_name(Reason, "unsupported"),
+    arg_allowed_name(Reason, "conflict")
+  ].
+
+Decl source_config_adjusted(Config, Option, Action)
+  descr [
+    extensional(),
+    doc("Option adaptation for a source-correspondence context."),
+    arg(Config, "Config"),
+    arg_role(Config, "path"),
+    arg(Option, "Option"),
+    arg(Action, "Action"),
+    arg_representation(Action, "name"),
+    arg_allowed_name(Action, "removed"),
+    arg_allowed_name(Action, "rewritten"),
+    arg_allowed_name(Action, "replaced")
+  ].
+
 Decl source_entry(Entry, CheckedEntry, SourceEntry)
   descr [
     extensional(),
@@ -1188,14 +1224,13 @@ Decl source_entry_unapplied(Entry)
 Decl source_entry_incomplete(Entry, Reason)
   descr [
     extensional(),
-    doc("Optional source program/inventory is /unresolved, /unsupported or /conflict."),
+    doc("Optional source program/inventory is /unresolved or /unsupported."),
     arg(Entry, "Entry"),
     arg_role(Entry, "entity"),
     arg(Reason, "Reason"),
     arg_representation(Reason, "name"),
     arg_allowed_name(Reason, "unresolved"),
-    arg_allowed_name(Reason, "unsupported"),
-    arg_allowed_name(Reason, "conflict")
+    arg_allowed_name(Reason, "unsupported")
   ].
 
 Decl source_binding_attempt(Binding, Entry, CheckedFile, Name, Space)

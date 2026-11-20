@@ -11,7 +11,7 @@ export default rule("arch.no-private-configured-calls")
 		violation(Site, Source) :- tracked_call(Site, Binding),
 			ts.source_binding(Binding, _, _, /value, /source_entry),
 			ts.source_binding_source_decl(Binding, SourceDecl),
-			ts.declaration_origin(SourceDecl, /source_file, Source),
+			ts.source_endpoint(SourceDecl, _, _, /source_file, Source),
 			lintai.glob(Source, "packages/contracts/src/private*").
 	`)
 	.report("violation")
