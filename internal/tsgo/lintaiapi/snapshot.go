@@ -170,10 +170,8 @@ type ExportReexportFact struct {
 }
 
 type ModuleExportObservation struct {
-	Identity string
-	File     string
-	Reasons  []string
-	Retained bool
+	File    string
+	Reasons []string
 }
 
 type ModuleExportsIncompleteFact struct {
@@ -739,16 +737,6 @@ func buildSnapshotAttempt(ctx context.Context, req BuildSnapshotRequest) (*Snaps
 	}
 	for i := range merged.SourceEntries {
 		merged.SourceEntries[i].Tsconfig = entryConfigs[merged.SourceEntries[i].ID]
-	}
-	if req.TsconfigFiles {
-		modules := make(map[string]bool, len(merged.Modules))
-		for _, module := range merged.Modules {
-			modules[module.Path] = true
-		}
-		for index := range merged.ModuleExportObservations {
-			item := &merged.ModuleExportObservations[index]
-			item.Retained = item.Retained && modules[item.File]
-		}
 	}
 	if err := finalizeSemanticObservations(merged); err != nil {
 		return nil, err

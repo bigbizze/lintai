@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/bigbizze/lintai/runtime"
 )
 
 func TestBuildAllAndPrepareAllFixtureRules(t *testing.T) {
@@ -141,6 +143,142 @@ export default rule("fixture.second").version(1).program(dl`+"`"+`Decl violation
 		t.Fatalf("external rule: %v %v", err, externalFailures[externalRule])
 	}
 	assertUnrelatedData(externalArtifacts[externalRule], externalUnused)
+
+	t.Run("unrelated JSON in imported directory", func(t *testing.T) {
+		workspace := t.TempDir()
+		helpers := filepath.Join(workspace, "helpers")
+		if err := os.MkdirAll(helpers, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for name, content := range map[string]string{
+			"index.ts":     `import data from "./data.json"; export const message = data.message;`,
+			"data.json":    `{"message":"consumed"}`,
+			"notes.json":   `{"value":"before"}`,
+			"package.json": `{"main":"index.ts"}`,
+		} {
+			if err := os.WriteFile(filepath.Join(helpers, name), []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		configPackage := filepath.Join(workspace, "node_modules", "fixture-config")
+		if err := os.MkdirAll(configPackage, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for name, content := range map[string]string{
+			"index.ts":     `export const suffix = "";`,
+			"package.json": `{"main":"index.ts","tsconfig":"options.json"}`,
+			"options.json": `{}`,
+			"notes.json":   `{"value":"before"}`,
+		} {
+			if err := os.WriteFile(filepath.Join(configPackage, name), []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(workspace, "tsconfig.json"), []byte(`{"extends":"fixture-config"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		rule := filepath.Join(workspace, "rule.ts")
+		if err := os.WriteFile(rule, []byte(`import { dl, rule } from "@lintai/sdk";
+import { message } from "./helpers";
+import { suffix } from "fixture-config";
+export default rule("fixture.directory-json").version(1).program(dl`+"`"+`Decl violation(Entity).`+"`"+`).report("violation").message(() => message + suffix);`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		build := func() Artifacts {
+			t.Helper()
+			artifacts, failures, err := BuildAll(context.Background(), assetRoot, repoRoot, workspace, t.TempDir(), []string{rule})
+			if err != nil || failures[rule] != nil || len(artifacts) != 1 {
+				t.Fatalf("build: %v %v", err, failures[rule])
+			}
+			return artifacts[rule]
+		}
+		before := build()
+		for _, notes := range []string{filepath.Join(helpers, "notes.json"), filepath.Join(configPackage, "notes.json")} {
+			physicalNotes, err := filepath.EvalSymlinks(notes)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, input := range before.Manifest.Inputs {
+				if input.AbsolutePath == physicalNotes {
+					t.Errorf("unrelated JSON was captured as an input: %s", notes)
+				}
+			}
+			if err := os.WriteFile(notes, []byte(`{"value":"after"}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if !before.Manifest.Unchanged() {
+			t.Error("editing unrelated JSON invalidated the manifest")
+		}
+		after := build()
+		if before.Hash != after.Hash {
+			t.Errorf("editing unrelated JSON changed artifact identity: %s != %s", before.Hash, after.Hash)
+		}
+		if err := os.WriteFile(filepath.Join(helpers, "data.json"), []byte(`{"message":"changed"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if after.Manifest.Unchanged() {
+			t.Error("editing imported JSON did not invalidate the manifest")
+		}
+		afterData := build()
+		if err := os.WriteFile(filepath.Join(configPackage, "options.json"), []byte(`{"compilerOptions":{"useDefineForClassFields":true}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if afterData.Manifest.Unchanged() {
+			t.Error("editing the extended config did not invalidate the manifest")
+		}
+	})
+}
+
+func TestBuildAllPreservesLocallyBoundRequire(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := repoRootForBundleTest(t)
+	assetRoot := filepath.Join(repoRoot, "packages", "client")
+	workspace := t.TempDir()
+	modulePath := filepath.Join(workspace, "module.cjs")
+	if err := os.WriteFile(modulePath, []byte(`module.exports = { value: "module" };`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	absoluteModule, err := json.Marshal(modulePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rulePath := filepath.Join(workspace, "rule.ts")
+	source := `import { dl, rule } from "@lintai/sdk";
+declare const require: (value: string) => any;
+const imported = require(` + string(absoluteModule) + `).value;
+function localCall() {
+	function require(value: string) { return value; }
+	return require("/api");
+}
+function localResolve() {
+	const require = { resolve: (value: string) => value };
+	return require.resolve("/resolve");
+}
+export default rule("fixture.local-require").version(1).program(dl` + "`" + `Decl violation(Entity).` + "`" + `)
+	.report("violation").message(() => [localCall(), localResolve(), imported].join("|"));`
+	if err := os.WriteFile(rulePath, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		artifacts, failures, err := BuildAll(context.Background(), assetRoot, repoRoot, workspace, t.TempDir(), []string{rulePath})
+		if err != nil || failures[rulePath] != nil || len(artifacts) != 1 {
+			t.Fatalf("build: %v %v", err, failures[rulePath])
+		}
+		code, err := os.ReadFile(artifacts[rulePath].PureBundlePath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := runtime.LoadPureBundle(string(code))
+		if err != nil {
+			t.Fatal(err)
+		}
+		message, err := loaded.Message(nil, "violation")
+		if err != nil || message != "/api|/resolve|module" {
+			t.Errorf("locally bound require changed the diagnostic: %q, %v", message, err)
+		}
+	}
 }
 
 func TestBuildAllReportsPerRuleErrors(t *testing.T) {
