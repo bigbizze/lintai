@@ -78,6 +78,8 @@ For formatting, unused variables, or a simple banned import, an existing linter 
 
 Rules are TypeScript files containing small [Datalog](https://codeberg.org/TauCeti/mangle-go) queries. Datalog lets a rule say which combinations of facts constitute a violation, including recursive relationships such as “calls something that eventually reads the clock.” You will need to learn some of that syntax to write rules; the example below is a starting point.
 
+Rule bundles identify their captured source and resolution inputs. If those inputs change while a bundle is being made, lintai reports the failure instead of using an incomplete artifact. Each rule run gets a fresh pure runtime; its program and messages share that run's state.
+
 ## Try it
 
 The npm packages require Node 22 or later and support Linux and macOS on x64 and arm64. You do not need Go to use them.

@@ -75,85 +75,105 @@ func ReadRuleMetadata(code string) (metadata RuleMetadata, ok bool, err error) {
 	if _, err := vm.RunString(code); err != nil {
 		return RuleMetadata{}, false, err
 	}
-	// Property access and export can invoke JavaScript getters outside RunString.
-	if exception := vm.Try(func() {
-		metadata, ok, err = readRuleMetadata(vm)
-	}); exception != nil {
-		return metadata, true, fmt.Errorf("read rule metadata: %w", exception)
-	}
-	return metadata, ok, err
+	decoded, ok, err := readRuleMetadata(vm)
+	return decoded.metadata, ok, err
 }
 
-func readRuleMetadata(vm *goja.Runtime) (metadata RuleMetadata, ok bool, err error) {
+type decodedRule struct {
+	metadata     RuleMetadata
+	programValue goja.Value
+	factsFn      goja.Callable
+	messageFn    goja.Callable
+}
+
+// Property access and export can invoke JavaScript getters outside RunString.
+// Keep the partially decoded ID if a getter throws after it was read.
+func readRuleMetadata(vm *goja.Runtime) (decoded decodedRule, ok bool, err error) {
+	if exception := vm.Try(func() {
+		ok, err = decodeRuleMetadata(vm, &decoded)
+	}); exception != nil {
+		return decoded, true, fmt.Errorf("read rule metadata: %w", exception)
+	}
+	return decoded, ok, err
+}
+
+func decodeRuleMetadata(vm *goja.Runtime, decoded *decodedRule) (ok bool, err error) {
+	metadata := &decoded.metadata
 	moduleValue := vm.Get("LintAIPureModule")
 	if moduleValue == nil || goja.IsUndefined(moduleValue) || goja.IsNull(moduleValue) {
-		return RuleMetadata{}, false, fmt.Errorf("pure bundle did not initialize LintAIPureModule")
+		return false, fmt.Errorf("pure bundle did not initialize LintAIPureModule")
 	}
 	ruleValue := moduleValue.ToObject(vm).Get("rule")
 	if ruleValue == nil || goja.IsUndefined(ruleValue) || goja.IsNull(ruleValue) {
-		return RuleMetadata{}, false, nil
+		return false, nil
 	}
 	ruleObject := ruleValue.ToObject(vm)
 	idValue := ruleObject.Get("id")
 	if idValue == nil {
-		return RuleMetadata{}, true, fmt.Errorf("the default export is not a lintai rule; create it with rule(id) from @lintai/sdk")
+		return true, fmt.Errorf("the default export is not a lintai rule; create it with rule(id) from @lintai/sdk")
 	}
 	id, validID := idValue.Export().(string)
 	if !validID || id == "" {
-		return RuleMetadata{}, true, fmt.Errorf("the default export is not a lintai rule; create it with rule(id) from @lintai/sdk")
+		return true, fmt.Errorf("the default export is not a lintai rule; create it with rule(id) from @lintai/sdk")
 	}
 	metadata.ID = id
 	if err := ValidateRuleID(id); err != nil {
-		return metadata, true, err
+		return true, err
 	}
 	versionValue := ruleObject.Get("versionValue")
 	if !goja.IsNumber(versionValue) {
-		return metadata, true, fmt.Errorf("rule %s must call .version(n) with a positive integer", id)
+		return true, fmt.Errorf("rule %s must call .version(n) with a positive integer", id)
 	}
 	version := versionValue.ToFloat()
 	if math.IsNaN(version) || version < 1 || version > 9007199254740991 || math.Trunc(version) != version {
-		return metadata, true, fmt.Errorf("rule %s must call .version(n) with a positive integer", id)
+		return true, fmt.Errorf("rule %s must call .version(n) with a positive integer", id)
 	}
 	metadata.Version = int(version)
 	setupValue, configValue := ruleObject.Get("hasSetup"), ruleObject.Get("hasConfig")
 	if setupValue == nil || configValue == nil {
-		return metadata, true, fmt.Errorf("rule %s has invalid setup or config metadata", id)
+		return true, fmt.Errorf("rule %s has invalid setup or config metadata", id)
 	}
 	var validSetup, validConfig bool
 	metadata.HasSetup, validSetup = setupValue.Export().(bool)
 	metadata.HasConfig, validConfig = configValue.Export().(bool)
 	if !validSetup || !validConfig {
-		return metadata, true, fmt.Errorf("rule %s has invalid setup or config metadata", id)
+		return true, fmt.Errorf("rule %s has invalid setup or config metadata", id)
 	}
-	if programValue := ruleObject.Get("programValue"); programValue == nil || goja.IsUndefined(programValue) || goja.IsNull(programValue) {
-		return metadata, true, fmt.Errorf("rule is missing program()")
+	decoded.programValue = ruleObject.Get("programValue")
+	if decoded.programValue == nil || goja.IsUndefined(decoded.programValue) || goja.IsNull(decoded.programValue) {
+		return true, fmt.Errorf("rule is missing program()")
 	}
-	if _, ok := goja.AssertFunction(ruleObject.Get("messageFn")); !ok {
-		return metadata, true, fmt.Errorf("rule is missing message()")
+	var valid bool
+	decoded.messageFn, valid = goja.AssertFunction(ruleObject.Get("messageFn"))
+	if !valid {
+		return true, fmt.Errorf("rule is missing message()")
 	}
 	if value := ruleObject.Get("factsFn"); value != nil && !goja.IsUndefined(value) && !goja.IsNull(value) {
-		if _, ok := goja.AssertFunction(value); !ok {
-			return metadata, true, fmt.Errorf("facts() must be given a function")
+		decoded.factsFn, valid = goja.AssertFunction(value)
+		if !valid {
+			return true, fmt.Errorf("facts() must be given a function")
 		}
 	}
-	metadata.Report, err = stringList(vm, ruleObject.Get("reportPredicates"))
+	metadata.Report, err = stringList(ruleObject.Get("reportPredicates"))
 	if err != nil {
-		return metadata, true, fmt.Errorf("report(): %w", err)
+		return true, fmt.Errorf("report(): %w", err)
 	}
 	if len(metadata.Report) == 0 {
-		return metadata, true, fmt.Errorf("rule is missing report()")
+		return true, fmt.Errorf("rule is missing report()")
 	}
-	metadata.ExpectNonEmpty, err = stringList(vm, ruleObject.Get("expectNonEmptyPredicates"))
+	metadata.ExpectNonEmpty, err = stringList(ruleObject.Get("expectNonEmptyPredicates"))
 	if err != nil {
-		return metadata, true, fmt.Errorf("expectNonEmpty(): %w", err)
+		return true, fmt.Errorf("expectNonEmpty(): %w", err)
 	}
 	metadata.Suppressions, err = suppressionDeclarations(vm, ruleObject.Get("suppressionDeclarations"))
 	if err != nil {
-		return metadata, true, fmt.Errorf("suppression(): %w", err)
+		return true, fmt.Errorf("suppression(): %w", err)
 	}
-	return metadata, true, nil
+	return true, nil
 }
 
+// LoadPureBundle creates the execution VM shared by one run's program and
+// message callbacks. Callers must load again for a new run.
 func LoadPureBundle(code string) (*LoadedRule, error) {
 	vm := goja.New()
 	disableAmbientCapabilities(vm)
@@ -179,65 +199,30 @@ func LoadPureBundle(code string) (*LoadedRule, error) {
 	`); err != nil {
 		return nil, err
 	}
+	freezeFn, _ := goja.AssertFunction(vm.Get("lintaiDeepFreeze"))
+	strictRowFn, _ := goja.AssertFunction(vm.Get("lintaiStrictRow"))
 	if _, err := vm.RunString(code); err != nil {
 		return nil, err
 	}
-	moduleValue := vm.Get("LintAIPureModule")
-	if goja.IsUndefined(moduleValue) || goja.IsNull(moduleValue) {
-		return nil, fmt.Errorf("pure bundle did not initialize LintAIPureModule")
+	decoded, ok, err := readRuleMetadata(vm)
+	if err != nil {
+		return nil, err
 	}
-	ruleObject := moduleValue.ToObject(vm).Get("rule").ToObject(vm)
-	versionValue := ruleObject.Get("versionValue")
-	if !goja.IsNumber(versionValue) {
-		return nil, fmt.Errorf("rule %s must call .version(n) with a positive integer", ruleObject.Get("id"))
-	}
-	version := versionValue.ToFloat()
-	if math.IsNaN(version) || version < 1 || version > 9007199254740991 || math.Trunc(version) != version {
-		return nil, fmt.Errorf("rule %s must call .version(n) with a positive integer", ruleObject.Get("id"))
-	}
-	programValue := ruleObject.Get("programValue")
-	if programValue == nil || goja.IsUndefined(programValue) || goja.IsNull(programValue) {
-		return nil, fmt.Errorf("rule is missing program()")
-	}
-	messageFn, ok := goja.AssertFunction(ruleObject.Get("messageFn"))
 	if !ok {
-		return nil, fmt.Errorf("rule is missing message()")
+		return nil, fmt.Errorf("pure bundle has no default rule")
 	}
-	var factsFn goja.Callable
-	if value := ruleObject.Get("factsFn"); value != nil && !goja.IsUndefined(value) && !goja.IsNull(value) {
-		factsFn, ok = goja.AssertFunction(value)
-		if !ok {
-			return nil, fmt.Errorf("facts() must be given a function")
-		}
-	}
-	report, err := stringList(vm, ruleObject.Get("reportPredicates"))
-	if err != nil {
-		return nil, fmt.Errorf("report(): %w", err)
-	}
-	if len(report) == 0 {
-		return nil, fmt.Errorf("rule is missing report()")
-	}
-	expectNonEmpty, err := stringList(vm, ruleObject.Get("expectNonEmptyPredicates"))
-	if err != nil {
-		return nil, fmt.Errorf("expectNonEmpty(): %w", err)
-	}
-	freezeFn, _ := goja.AssertFunction(vm.Get("lintaiDeepFreeze"))
-	strictRowFn, _ := goja.AssertFunction(vm.Get("lintaiStrictRow"))
 	return &LoadedRule{
 		runtime:        vm,
-		id:             ruleObject.Get("id").String(),
-		version:        int(version),
-		programValue:   programValue,
-		factsFn:        factsFn,
-		messageFn:      messageFn,
+		id:             decoded.metadata.ID,
+		version:        decoded.metadata.Version,
+		programValue:   decoded.programValue,
+		factsFn:        decoded.factsFn,
+		messageFn:      decoded.messageFn,
 		freezeFn:       freezeFn,
 		strictRowFn:    strictRowFn,
-		report:         report,
-		expectNonEmpty: expectNonEmpty,
-		suppressions: func() []SuppressionDeclaration {
-			declarations, _ := suppressionDeclarations(vm, ruleObject.Get("suppressionDeclarations"))
-			return declarations
-		}(),
+		report:         decoded.metadata.Report,
+		expectNonEmpty: decoded.metadata.ExpectNonEmpty,
+		suppressions:   decoded.metadata.Suppressions,
 	}, nil
 }
 
@@ -263,7 +248,16 @@ func (r *LoadedRule) SuppressionDeclarations() []SuppressionDeclaration {
 
 // Program runs facts() and program() and returns the program text and the
 // rule's extra extensional tuples.
-func (r *LoadedRule) Program(env, setup any) (ProgramOutput, error) {
+func (r *LoadedRule) Program(env, setup any) (output ProgramOutput, err error) {
+	if exception := r.runtime.Try(func() {
+		output, err = r.program(env, setup)
+	}); exception != nil {
+		return ProgramOutput{}, exception
+	}
+	return output, err
+}
+
+func (r *LoadedRule) program(env, setup any) (ProgramOutput, error) {
 	contextObject, err := r.ruleContext(env, setup)
 	if err != nil {
 		return ProgramOutput{}, err
@@ -294,7 +288,16 @@ func (r *LoadedRule) Program(env, setup any) (ProgramOutput, error) {
 	return output, nil
 }
 
-func (r *LoadedRule) Message(row map[string]any, assertionID string) (string, error) {
+func (r *LoadedRule) Message(row map[string]any, assertionID string) (message string, err error) {
+	if exception := r.runtime.Try(func() {
+		message, err = r.message(row, assertionID)
+	}); exception != nil {
+		return "", exception
+	}
+	return message, err
+}
+
+func (r *LoadedRule) message(row map[string]any, assertionID string) (string, error) {
 	messageRow := make(map[string]any, len(row))
 	for key, value := range row {
 		if name, ok := value.(Name); ok {
@@ -326,16 +329,19 @@ func suppressionDeclarations(vm *goja.Runtime, value goja.Value) ([]SuppressionD
 	if err != nil {
 		return nil, err
 	}
-	var items []struct {
-		Assertion string `json:"assertion"`
-		Options   any    `json:"options"`
+	var items []*struct {
+		Assertion *string `json:"assertion"`
+		Options   any     `json:"options"`
 	}
 	if err := json.Unmarshal(raw, &items); err != nil {
 		return nil, fmt.Errorf("must be an array of assertion policies")
 	}
 	result := make([]SuppressionDeclaration, len(items))
 	for index, item := range items {
-		result[index] = SuppressionDeclaration{Assertion: item.Assertion, Options: item.Options}
+		if item == nil || item.Assertion == nil {
+			return nil, fmt.Errorf("item %d must declare an assertion string", index)
+		}
+		result[index] = SuppressionDeclaration{Assertion: *item.Assertion, Options: item.Options}
 	}
 	return result, nil
 }
@@ -449,13 +455,21 @@ func decodeCell(raw json.RawMessage) (any, error) {
 	return nil, fmt.Errorf("unsupported value %s: use a string, a number or dl.name()", string(raw))
 }
 
-func stringList(vm *goja.Runtime, value goja.Value) ([]string, error) {
+func stringList(value goja.Value) ([]string, error) {
 	if value == nil || goja.IsUndefined(value) || goja.IsNull(value) {
 		return nil, nil
 	}
-	var items []string
-	if err := vm.ExportTo(value, &items); err != nil {
-		return nil, err
+	raw, ok := value.Export().([]any)
+	if !ok {
+		return nil, fmt.Errorf("must be an array of strings")
+	}
+	items := make([]string, len(raw))
+	for index, item := range raw {
+		text, ok := item.(string)
+		if !ok {
+			return nil, fmt.Errorf("item %d must be a string", index)
+		}
+		items[index] = text
 	}
 	return items, nil
 }

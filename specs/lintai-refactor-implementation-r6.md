@@ -669,7 +669,9 @@ Escape sites receive no `call_declaration_incomplete`: they are not invocations.
 
 Rule discovery, listing, checking, and lock creation use one catalog/artifact owner. Listing does not run setup or extract application facts. Verify configured integrity before affected setup or evaluation. Determine identity, shape and duplicate rule IDs through one pure metadata load, not a second execution solely to reread the ID.
 
-Retain verified bundle code, bundle dependencies/resolution state and compiled JavaScript. A top-level source hash alone is insufficient when imports or package resolution change. Rule ID/version remain useful policy metadata; they do not authorize interpreting obsolete schema.
+Retain verified bundle code and bundle dependencies/resolution state. Compiled-JavaScript retention is held work and is not part of metadata consolidation. A top-level source hash alone is insufficient when imports or package resolution change. Rule ID/version remain useful policy metadata; they do not authorize interpreting obsolete schema.
+
+The bundler supplies a `lintai.bundle-inputs/1` manifest for its captured source, configuration, resolution and tool observations. Both bundle outputs use one captured view. Validate the manifest and its current inputs before publishing or reusing the artifact; missing, changed or unestablished evidence is a per-rule bundle failure. The rules-lock format is separate from this manifest.
 
 Disabled rules do not run setup, generate a program, request producer facts, evaluate, or authorize pruning. Metadata/configuration errors remain explicit. No producer work is justified by a disabled or unsuccessfully prepared rule.
 
@@ -795,7 +797,7 @@ No six-stage public preparation API is required. No captured-setup handle is imp
 
 ### 11.2 Retained work
 
-Retain the current verified rule artifacts/compiled code, eligible compiled plans, current producer/context observations, validated fact indexes, and current completed analysis. Keep only the current generation plus in-flight replacement and data still held by readers. The session does not retain a historical list. Memory held because a caller retains old immutable results belongs to that caller, not a hidden session cache. There is no historical LRU or special base-workspace state.
+Retain the current verified rule artifacts, eligible compiled plans, current producer/context observations, validated fact indexes, and current completed analysis. Compiled-JavaScript retention is held work. Keep only the current generation plus in-flight replacement and data still held by readers. The session does not retain a historical list. Memory held because a caller retains old immutable results belongs to that caller, not a hidden session cache. There is no historical LRU or special base-workspace state.
 
 A valid no-change check MUST reuse extraction, fact indexes and unchanged compilation. Rules without setup do not launch a setup process. Rules with arbitrary setup run it again for a fresh check. When code, catalog, explicit environment and newly obtained setup values match the current preparation, the previous generated program/dependency closure can be reused. No historical or per-rule outcome-cache subsystem is needed.
 

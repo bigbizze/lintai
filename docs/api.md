@@ -136,6 +136,8 @@ For each rule:
 
 A failing rule contributes only its error diagnostic. Other rules still run. Diagnostics are sorted by file, start line, start column, rule id, assertion id and anchor, so the output is identical across runs.
 
+Each rule execution uses a fresh pure runtime. Its `facts()` and `program()` callbacks and its `message()` callbacks share that runtime, so state initialized by the program is available to messages in that run. A later execution starts with fresh module state. Listing reads metadata in a separate runtime and does not call those callbacks.
+
 ## Base relations and caveats
 
 `lintai schema` reads the configured producer descriptions without collecting source facts. Rule programs use qualified names such as `ts.fn` or `app.fn`, according to the producer's configured namespace; `lintai.glob` belongs to the engine. Entity IDs are producer-owned strings and are distinct from file paths. A module ID is `ts:module:<file>`, not the file path. Location and tracking support are supplied by the producer for eligible anchors.
@@ -603,7 +605,7 @@ Rules lock:
 }
 ```
 
-The artifact hash covers the rule's bundled source inputs, including imported `@lintai/sdk` code and its suppression policy. The lock also approves the current suppression groups and counts. New groups or increased counts require approval; reduced counts and removed groups do not. A recording under an enforced lock that would exceed approval fails without writing. To approve changes, record without the prior lock, review the suppression file, and explicitly regenerate the lock.
+The artifact hash covers captured rule source, configuration and resolution inputs, including imported `@lintai/sdk` code, the suppression policy, and the bundler and generated-entry identity. The prepare and pure bundles use the same captured view. A changed, missing or incomplete input causes a bundle error instead of publishing or reusing that artifact. The lock also approves the current suppression groups and counts. New groups or increased counts require approval; reduced counts and removed groups do not. A recording under an enforced lock that would exceed approval fails without writing. To approve changes, record without the prior lock, review the suppression file, and explicitly regenerate the lock.
 
 With `--rules-lock`, lintai checks each rule against the lock after bundling and before `setup()`. These are `rule_execution_error` diagnostics with phase `integrity`, and exit code 3:
 
