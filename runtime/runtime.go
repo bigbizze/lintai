@@ -66,37 +66,6 @@ func ValidateRuleID(id string) error {
 	return nil
 }
 
-// ReadRuleID evaluates a pure bundle and returns the id of its rule. It does
-// not check the rest of the rule. ok is false when the module has no default
-// export, which makes it a helper module and not a rule.
-func ReadRuleID(code string) (id string, ok bool, err error) {
-	vm := goja.New()
-	disableAmbientCapabilities(vm)
-	if _, err := vm.RunString(code); err != nil {
-		return "", false, err
-	}
-	moduleValue := vm.Get("LintAIPureModule")
-	if moduleValue == nil || goja.IsUndefined(moduleValue) || goja.IsNull(moduleValue) {
-		return "", false, fmt.Errorf("pure bundle did not initialize LintAIPureModule")
-	}
-	ruleValue := moduleValue.ToObject(vm).Get("rule")
-	if ruleValue == nil || goja.IsUndefined(ruleValue) || goja.IsNull(ruleValue) {
-		return "", false, nil
-	}
-	idValue := ruleValue.ToObject(vm).Get("id")
-	if idValue == nil {
-		return "", true, fmt.Errorf("the default export is not a lintai rule; create it with rule(id) from @lintai/sdk")
-	}
-	value, isString := idValue.Export().(string)
-	if !isString || value == "" {
-		return "", true, fmt.Errorf("the default export is not a lintai rule; create it with rule(id) from @lintai/sdk")
-	}
-	if err := ValidateRuleID(value); err != nil {
-		return "", true, err
-	}
-	return value, true, nil
-}
-
 // ReadRuleMetadata executes a pure bundle once to read its identity and
 // declarations. It never runs setup(), facts(), program() or message().
 // ok is false for a helper module without a default rule export.

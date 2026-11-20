@@ -308,21 +308,6 @@ func sortedUnique(values []string) []string {
 	return slices.Compact(result)
 }
 
-// moduleFiles returns the walked files that are modules of the snapshot.
-func moduleFiles(workspaceRoot string, walked []string, modules []lintaiapi.Module) []string {
-	paths := make(map[string]struct{}, len(modules))
-	for _, item := range modules {
-		paths[item.Path] = struct{}{}
-	}
-	result := make([]string, 0, len(modules))
-	for _, file := range walked {
-		if _, ok := paths[workspace.RelativePath(workspaceRoot, file)]; ok {
-			result = append(result, file)
-		}
-	}
-	return result
-}
-
 func convertAdjustments(workspaceRoot string, items []lintaiapi.ConfigAdjustment) []lintaiapi.ConfigAdjustment {
 	result := slices.Clone(items)
 	for index := range result {

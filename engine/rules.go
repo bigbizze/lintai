@@ -402,16 +402,6 @@ func (catalog *ruleCatalog) close() {
 	}
 }
 
-func (catalog *ruleCatalog) rulePathsWithArtifacts() []string {
-	paths := make([]string, 0, len(catalog.artifacts))
-	for _, rulePath := range catalog.paths {
-		if _, exists := catalog.artifacts[rulePath]; exists {
-			paths = append(paths, rulePath)
-		}
-	}
-	return paths
-}
-
 // ListRules bundles the rules that options select and reads validated
 // metadata from each loaded pure bundle. It does not run setup(), facts(),
 // program() or message(), build a snapshot or evaluate a program. A rule
@@ -510,53 +500,4 @@ func duplicateIDMessage(id string, paths []string) string {
 	sorted := append([]string(nil), paths...)
 	sort.Strings(sorted)
 	return fmt.Sprintf("rule id %q is used by more than one rule file (%s); each rule needs its own id", id, strings.Join(sorted, ", "))
-}
-
-// preparedRuleFailure is a prepared rule that must not run.
-type preparedRuleFailure struct {
-	ruleID      string
-	phase       string
-	ruleVersion int
-	message     string
-}
-
-// invalidPreparedRules returns the prepared rules whose id does not match
-// runtime.RuleIDPattern (phase setup, as the other rule shape errors) and
-// the prepared rules whose id another rule file has (phase config). Linter
-// rule levels select rules by id, so two rules with one id cannot run. A
-// rule whose setup() failed still has its id, so it counts as a duplicate
-// too, as in lintai rules, which does not run setup().
-func invalidPreparedRules(workspaceRoot string, prepared map[string]bundle.PrepareResult, prepareFailures map[string]bundle.PrepareError) map[string]preparedRuleFailure {
-	failures := make(map[string]preparedRuleFailure)
-	pathsByID := make(map[string][]string)
-	for rulePath, item := range prepared {
-		if err := runtime.ValidateRuleID(item.RuleID); err != nil {
-			failures[rulePath] = preparedRuleFailure{ruleID: item.RuleID, phase: "setup", ruleVersion: item.RuleVersion, message: err.Error()}
-			continue
-		}
-		pathsByID[item.RuleID] = append(pathsByID[item.RuleID], rulePath)
-	}
-	for rulePath, item := range prepareFailures {
-		if item.RuleID != "" {
-			pathsByID[item.RuleID] = append(pathsByID[item.RuleID], rulePath)
-		}
-	}
-	for id, rulePaths := range pathsByID {
-		if len(rulePaths) < 2 {
-			continue
-		}
-		keys := make([]string, 0, len(rulePaths))
-		for _, rulePath := range rulePaths {
-			keys = append(keys, lockKey(workspaceRoot, rulePath))
-		}
-		message := duplicateIDMessage(id, keys)
-		for _, rulePath := range rulePaths {
-			item, ready := prepared[rulePath]
-			if !ready {
-				continue
-			}
-			failures[rulePath] = preparedRuleFailure{ruleID: id, phase: "config", ruleVersion: item.RuleVersion, message: message}
-		}
-	}
-	return failures
 }
