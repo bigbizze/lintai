@@ -153,7 +153,7 @@ export default rule("fixture.second").version(1).program(dl`+"`"+`Decl violation
 		for name, content := range map[string]string{
 			"index.ts":     `import data from "./data.json"; export const message = data.message;`,
 			"data.json":    `{"message":"consumed"}`,
-			"notes.json":   `{"value":"before"}`,
+			"notes.json":   `{"value":"` + strings.Repeat("../", 64) + `"}`,
 			"package.json": `{"main":"index.ts"}`,
 		} {
 			if err := os.WriteFile(filepath.Join(helpers, name), []byte(content), 0o600); err != nil {
@@ -214,10 +214,20 @@ export default rule("fixture.directory-json").version(1).program(dl`+"`"+`Decl v
 		if before.Hash != after.Hash {
 			t.Errorf("editing unrelated JSON changed artifact identity: %s != %s", before.Hash, after.Hash)
 		}
-		if err := os.WriteFile(filepath.Join(helpers, "data.json"), []byte(`{"message":"changed"}`), 0o600); err != nil {
+		if err := os.Mkdir(filepath.Join(helpers, "unrelated"), 0o755); err != nil {
 			t.Fatal(err)
 		}
 		if after.Manifest.Unchanged() {
+			t.Error("a changed directory listing did not invalidate freshness")
+		}
+		afterDirectory := build()
+		if after.Hash != afterDirectory.Hash {
+			t.Errorf("unrelated directory changed artifact identity: %s != %s", after.Hash, afterDirectory.Hash)
+		}
+		if err := os.WriteFile(filepath.Join(helpers, "data.json"), []byte(`{"message":"changed"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if afterDirectory.Manifest.Unchanged() {
 			t.Error("editing imported JSON did not invalidate the manifest")
 		}
 		afterData := build()
@@ -228,6 +238,56 @@ export default rule("fixture.directory-json").version(1).program(dl`+"`"+`Decl v
 			t.Error("editing the extended config did not invalidate the manifest")
 		}
 	})
+}
+
+func TestAbsoluteRequireResolveSetup(t *testing.T) {
+	repoRoot := repoRootForBundleTest(t)
+	assetRoot := filepath.Join(repoRoot, "packages", "client")
+	workspace := t.TempDir()
+	target := filepath.Join(workspace, "target.js")
+	if err := os.WriteFile(target, []byte(`module.exports = {};`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	target, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	literal, err := json.Marshal(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rule := filepath.Join(workspace, "rule.ts")
+	source := `import { dl, rule } from "@lintai/sdk";
+export default rule("fixture.resolve").version(1).setup(() => ({resolved: require.resolve(` + string(literal) + `)}))
+.program(dl` + "`" + `Decl violation(Entity).` + "`" + `).report("violation").message(() => "ok");`
+	if err := os.WriteFile(rule, []byte(source), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	build := func() map[string]Artifacts {
+		t.Helper()
+		artifacts, failures, err := BuildAll(context.Background(), assetRoot, repoRoot, workspace, t.TempDir(), []string{rule})
+		if err != nil || failures[rule] != nil {
+			t.Fatalf("build: %v %v", err, failures[rule])
+		}
+		return artifacts
+	}
+	first, second := build(), build()
+	if first[rule].Hash != second[rule].Hash {
+		t.Errorf("unchanged absolute require.resolve changed identity: %s != %s", first[rule].Hash, second[rule].Hash)
+	}
+	for _, resolution := range first[rule].Manifest.Resolutions {
+		if strings.Contains(resolution, "lintai-input-view-") || strings.Contains(resolution, "lintai-bundle-helper-") || strings.Contains(resolution, target) {
+			t.Errorf("resolution identity contains a staging or absolute path: %s", resolution)
+		}
+	}
+	prepared, failures, err := PrepareAll(context.Background(), assetRoot, repoRoot, workspace, first, nil, PrepareOptions{})
+	if err != nil || len(failures) != 0 {
+		t.Fatalf("unrestricted setup: %v %v", err, failures)
+	}
+	setup, ok := prepared[rule].Setup.(map[string]any)
+	if !ok || setup["resolved"] != target {
+		t.Fatalf("require.resolve returned %+v, want %s", prepared[rule].Setup, target)
+	}
 }
 
 func TestBuildAllPreservesLocallyBoundRequire(t *testing.T) {
