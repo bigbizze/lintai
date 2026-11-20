@@ -4,6 +4,10 @@ These examples use the 0.2 rule API. A rule is a Datalog program that LintAI eva
 
 Each execution creates a fresh pure runtime for the rule. Its program and messages share that runtime for the duration of the execution.
 
+Ownership-sensitive examples use one compiler owner per selected file. The nearest `tsconfig.json` wins when its original roots contain the file; otherwise references are searched depth first in resolver order, then the nearest config is the fallback. `tsconfig` mode excludes an unavailable file, while `walk` mode uses a synthetic fallback; without a nearest config, the initial synthetic program is used. The API reference explains the bounded `module_config` inventory, how it differs from ownership and import visibility, and how root-owned derived type/declaration views can retain real conflicts.
+
+Configured source links and automatic declaration maps are separate correspondence evidence. Their endpoint metadata does not replace ordinary declarations or locations; source-only endpoints can support a diagnostic through optional anchors but have no queryable `location` row. The source-boundary examples show the checked/source joins and the normalized Config values used by both correspondence and owner-adjustment rules.
+
 ## 1. Transitive purity rule
 
 For example, a pure function may call a helper that contains `await`. This rule reports that caller. It also sees `for await` and `await using`:
@@ -632,7 +636,7 @@ The rule reports `save`. Its return type is written `Promise<ActionResult<number
 
 Each function has one whole signature from its file’s effective owner. Other configurations cannot add competing signatures for that function.
 
-The rule also reports a signature that was omitted or could not be fully resolved. An unresolved signature can still have a return row, but that row alone does not establish a complete signature. If there is no return row and no signature marker, the rule reports the missing return type. These findings mean the rule cannot decide whether the return type is allowed.
+The rule also reports a signature that was omitted or could not be fully resolved. An unresolved signature can still have a return row, but that row alone does not establish a complete signature. `fn_signature_unresolved` is a helper derived from `fn_signature` and `signature_incomplete`, whose only reason is `/unresolved`; omission remains separate. There is no `fn_signature_conflict` base. If there is no return row and no signature marker, the rule reports the missing return type. These findings mean the rule cannot decide whether the return type is allowed.
 
 Caveats:
 
