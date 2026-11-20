@@ -377,7 +377,7 @@ func (e *extractor) collectSemanticExports(file *ast.SourceFile, origin observat
 	}
 	reasons := sortedUnique(append(inventory.reasons, e.exportInventoryIncomplete(file)...))
 	e.moduleExportObservations = append(e.moduleExportObservations, ModuleExportObservation{
-		Identity: moduleIdentity, File: moduleFile, Complete: len(reasons) == 0,
+		Identity: moduleIdentity, File: moduleFile,
 		Reasons: reasons, Retained: true,
 	})
 }

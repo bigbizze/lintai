@@ -170,13 +170,10 @@ type ExportReexportFact struct {
 }
 
 type ModuleExportObservation struct {
-	Identity    string
-	File        string
-	Bindings    []string
-	Complete    bool
-	Reasons     []string
-	StarSources []string
-	Retained    bool
+	Identity string
+	File     string
+	Reasons  []string
+	Retained bool
 }
 
 type ModuleExportsIncompleteFact struct {
@@ -412,6 +409,13 @@ type Snapshot struct {
 	trackingCache       map[string]TrackingSupport
 }
 
+// validatedContribution is produced by buildSnapshotForGroup only after its
+// collector has validated every observation origin. Aggregation accepts this
+// type so an arbitrary Snapshot cannot cross the provenance boundary.
+type validatedContribution struct {
+	*Snapshot
+}
+
 type configGroup struct {
 	ConfigPath   string
 	Config       *tsoptions.ParsedCommandLine
@@ -436,7 +440,6 @@ type extractor struct {
 	program                     *compiler.Program
 	resolver                    module.Resolver
 	checker                     *checker.Checker
-	requestedFiles              map[string]struct{}
 	primaryFiles                map[string]struct{}
 	filesByPath                 map[string]*ast.SourceFile
 	functionNodes               map[*ast.Node]*functionDescriptor
@@ -961,7 +964,7 @@ func prepareGroupProgram(host compiler.CompilerHost, workspaceRoot string, group
 	return groupProgram{program: program, resolver: resolver}, nil
 }
 
-func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, workspaceRoot string, requestedFiles []string, group configGroup, prepared groupProgram, ambientMatchers []AmbientMatcher, sourceEntries []configuredSourceEntry, configs *configCache, auxiliary *auxiliarySourcePrograms, resolutions *sourceEntryResolutions, timing *extractTiming, demand ...semanticOperations) (*Snapshot, []string, error) {
+func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, workspaceRoot string, requestedFiles []string, group configGroup, prepared groupProgram, ambientMatchers []AmbientMatcher, sourceEntries []configuredSourceEntry, configs *configCache, auxiliary *auxiliarySourcePrograms, resolutions *sourceEntryResolutions, timing *extractTiming, demand ...semanticOperations) (*validatedContribution, []string, error) {
 	program, resolver := prepared.program, prepared.resolver
 	checkerStarted := time.Now()
 	typeChecker, done := program.GetTypeChecker(ctx)
@@ -976,7 +979,6 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 		program:        program,
 		resolver:       resolver,
 		checker:        typeChecker,
-		requestedFiles: make(map[string]struct{}, len(requestedFiles)),
 		primaryFiles:   make(map[string]struct{}, len(group.PrimaryFiles)),
 		filesByPath:    make(map[string]*ast.SourceFile, len(requestedFiles)),
 		functionNodes:  make(map[*ast.Node]*functionDescriptor),
@@ -1003,7 +1005,6 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 	}
 	ex.plan, ex.owner = ex.operations.plan, ex.operations.owner
 	for _, file := range requestedFiles {
-		ex.requestedFiles[file] = struct{}{}
 		if sourceFile := program.GetSourceFile(tspath.RootedFilePathFromAbsolute(file)); sourceFile != nil {
 			ex.filesByPath[file] = sourceFile
 		}
@@ -1121,7 +1122,7 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 		Inputs:                      ex.inputs,
 	}
 	sortSnapshot(partial)
-	return partial, missingPrimary, nil
+	return &validatedContribution{Snapshot: partial}, missingPrimary, nil
 }
 
 // parsedConfig is a parsed tsconfig file, the set of its root files and the
@@ -1453,7 +1454,8 @@ func (c *configCache) findNearestConfigPath(workspaceRoot string, file string) (
 	}
 }
 
-func mergeSnapshot(into *Snapshot, partial *Snapshot) error {
+func mergeSnapshot(into *Snapshot, contribution *validatedContribution) error {
+	partial := contribution.Snapshot
 	if partial.siteConflict != "" {
 		into.siteConflict = partial.siteConflict
 	}
