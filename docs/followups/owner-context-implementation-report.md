@@ -14,7 +14,7 @@ Implements `specs/lintai-owner-context-implementation.md`.
 - **Owner plan:** one shared planner assigns each eligible source root one effective owner context, with file-mode fallback. Bounded original-root membership, effective owner and import visibility are kept separate (WP3+4).
 - **Provenance boundary:** a private `ObservationOrigin{RootFile, ContextHandle}` is passed explicitly through declaration and type collection, and validated before store mutation and cache-hit returns. Aggregation (`mergeSnapshot`) accepts only a private `validatedContribution` built after collector validation (integration of WP34 review finding WP34-01).
 - **Correspondence storage:** configured source correspondence is held in its own partition with endpoint metadata, optional anchors and `source_endpoint`/`source_endpoint_incomplete`/`source_config_adjusted` relations. It does not create source-only queryable ranges.
-- **Input mechanism:** the bundler stages sources, resolution and config candidates, and imported JSON. Tool bytes (helper, launcher, TypeScript, esbuild) are captured once per `BuildAll`. The manifest records traversed symlink hops; Go validates it and checks freshness before publishing or reusing an artifact. The landing review found native config reads that escaped the staging view, so the original completion claim was premature. The landing corrections rebase absolute metadata paths, reject paths that cannot be bounded, and stop unresolved config packages from falling through the view root. See [LR-fix-report.md](../../LR-fix-report.md) for regression evidence and remaining verification limits. Metadata goes through one guarded decoder, and each execution run uses a fresh VM.
+- **Input mechanism:** the bundler stages sources, resolution and config candidates, and imported JSON. Tool bytes (helper, launcher, TypeScript, esbuild) are captured once per `BuildAll`. The manifest records traversed symlink hops; Go validates it and checks freshness before publishing or reusing an artifact. The landing review found native config reads that escaped the staging view, so the original completion claim was premature. The landing corrections rebase absolute metadata paths, reject paths that cannot be bounded, and stop unresolved config packages from falling through the view root. Metadata goes through one guarded decoder, and each execution run uses a fresh VM.
 
 ## 3. Investigated hypotheses
 
@@ -33,7 +33,7 @@ Implements `specs/lintai-owner-context-implementation.md`.
 
 ## 5. Verification
 
-Earlier unit reports recorded local gates on their respective heads, including 13/13 on integration fix `9078baa`. Those runs did not cover the landing review's A19 counterexample and do not establish A19 for the reviewed head. The current correction's commands and results are recorded in [LR-fix-report.md](../../LR-fix-report.md).
+The landing and bundle-input corrections are exercised by `TestBuildAllAndPrepareAllFixtureRules` (including its colliding extends marker case), `TestBundleConfigViewAcrossBuilds`, `TestBundleConfigCannotSearchOutsideView`, `TestBundleConsumedInputEdit`, `TestBundleHelperInputEdit`, `TestBundleToolInputEdit`, and `TestBundleChainedLinkRetargetInvalidatesWarmSession`.
 
 Earlier reported environment: macOS arm64, Go 1.27.3, Node 22.23.4, pnpm 10.9.0, offline. The landing corrections were also exercised on macOS arm64 with Node 22.23.4; no Node 24 installation or other operating system was available locally.
 

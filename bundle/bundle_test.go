@@ -238,6 +238,29 @@ export default rule("fixture.directory-json").version(1).program(dl`+"`"+`Decl v
 			t.Error("editing the extended config did not invalidate the manifest")
 		}
 	})
+	t.Run("deduplicate colliding extends boundary markers", func(t *testing.T) {
+		workspace := t.TempDir()
+		write := func(relative, content string) string {
+			t.Helper()
+			file := filepath.Join(workspace, relative)
+			if err := os.MkdirAll(filepath.Dir(file), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(file, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return file
+		}
+		write("node_modules/fixture-config/package.json", `{}`)
+		write("node_modules/fixture-config/tsconfig.json", `{"compilerOptions":{"strict":true}}`)
+		write("tsconfig.json", `{"extends":["fixture-config","fixture-config/tsconfig"]}`)
+		rule := write("rule.ts", `import { dl, rule } from "@lintai/sdk";
+export default rule("fixture.config-marker-dedup").version(1).program(dl`+"`"+`Decl violation(Entity).`+"`"+`).report("violation").message(() => "ok");`)
+		artifacts, failures, err := BuildAll(context.Background(), assetRoot, repoRoot, workspace, t.TempDir(), []string{rule})
+		if err != nil || failures[rule] != nil || len(artifacts) != 1 {
+			t.Fatalf("valid config extends aliases should build once: artifacts=%d failures=%v error=%v", len(artifacts), failures[rule], err)
+		}
+	})
 }
 
 func TestAbsoluteRequireResolveSetup(t *testing.T) {

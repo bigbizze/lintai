@@ -707,6 +707,7 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 		// deliberately invalid final candidate so an unresolved lookup fails
 		// inside the view instead of reading a subsequently created ancestor.
 		const boundaryPackages = new Set();
+		const boundaryMarkers = new Set();
 		for (const specifier of configPackages) {
 			const parts = specifier.split("/");
 			const nameLength = specifier.startsWith("@") ? 2 : 1;
@@ -733,6 +734,8 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 			}
 			const marker =
 				parts.length === nameLength ? path.join(base, "tsconfig.json") : `${base}.json`;
+			if (boundaryMarkers.has(marker)) continue;
+			boundaryMarkers.add(marker);
 			await fs.mkdir(path.dirname(marker), { recursive: true });
 			await fs.writeFile(marker, "{ unresolved config outside captured view", { flag: "wx" });
 		}
