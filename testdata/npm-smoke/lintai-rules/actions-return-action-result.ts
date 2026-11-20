@@ -12,10 +12,9 @@ export default rule("arch.actions-return-action-result")
 		Decl signature_issue(Fn, Reason).
 		signature_issue(Fn, "omitted") :- action(Fn, _), ts.fn_signature_omitted(Fn).
 		signature_issue(Fn, "unresolved") :- action(Fn, _), ts.fn_signature_unresolved(Fn).
-		signature_issue(Fn, "conflict") :- action(Fn, _), ts.fn_signature_conflict(Fn).
 		signature_issue(Fn, "missing") :-
 			action(Fn, _), !has_return(Fn), !ts.fn_signature_omitted(Fn),
-			!ts.fn_signature_unresolved(Fn), !ts.fn_signature_conflict(Fn).
+			!ts.fn_signature_unresolved(Fn).
 		Decl signature_uncertain(Fn).
 		signature_uncertain(Fn) :- signature_issue(Fn, _).
 
@@ -31,9 +30,6 @@ export default rule("arch.actions-return-action-result")
 	`)
 	.report("violation")
 	.message((row) => {
-		if (row.Reason === "conflict") {
-			return `${row.Name} has conflicting checked signatures; cannot determine whether its return type is allowed`;
-		}
 		if (row.Reason === "omitted") {
 			return `${row.Name} has no collected signature; cannot determine whether its return type is allowed`;
 		}

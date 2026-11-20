@@ -445,16 +445,16 @@ export default ((() => 1) satisfies () => number);
 		offset := strings.Index(source, item.fragment) + strings.Index(item.fragment, item.token)
 		key := byName[fmt.Sprintf("<anonymous@%d>", offset)]
 		fn, ok := functions[key]
-		if !ok || fn.IsExported != item.exported || fn.SignatureOmitted || fn.SignatureUnresolved || len(fn.ParameterTypes) != item.parameters || fn.ReturnType == "" || len(fn.SignatureObservations) != 1 || !fn.SignatureObservations[0].Complete {
+		if !ok || fn.IsExported != item.exported || fn.SignatureOmitted || fn.Signature == nil || len(fn.Signature.ParameterTypes) != item.parameters || fn.Signature.ReturnType == "" || !fn.Signature.Complete {
 			t.Errorf("wrapped function %q: %+v", item.fragment, fn)
 		}
 		anonymous = append(anonymous, key)
 	}
-	if direct := functions[byName["directAsync"]]; direct.ReturnType == "" || direct.ReturnType != functions[anonymous[5]].ReturnType || direct.ReturnType != functions[anonymous[6]].ReturnType {
-		t.Errorf("direct, wrapped and satisfies bindings have different return types: %q, %q, %q", direct.ReturnType, functions[anonymous[5]].ReturnType, functions[anonymous[6]].ReturnType)
+	if direct := functions[byName["directAsync"]]; direct.Signature.ReturnType == "" || direct.Signature.ReturnType != functions[anonymous[5]].Signature.ReturnType || direct.Signature.ReturnType != functions[anonymous[6]].Signature.ReturnType {
+		t.Errorf("direct, wrapped and satisfies bindings have different return types: %q, %q, %q", direct.Signature.ReturnType, functions[anonymous[5]].Signature.ReturnType, functions[anonymous[6]].Signature.ReturnType)
 	}
 	for _, key := range []string{byName["original"], byName["direct"]} {
-		if fn, ok := functions[key]; !ok || fn.SignatureOmitted || fn.ReturnType == "" {
+		if fn, ok := functions[key]; !ok || fn.SignatureOmitted || fn.Signature == nil || fn.Signature.ReturnType == "" {
 			t.Errorf("named function identity or signature changed: %+v", fn)
 		}
 	}
@@ -480,10 +480,10 @@ export default ((() => 1) satisfies () => number);
 	if !slices.Equal(suspensionOwners, wantOwners) {
 		t.Errorf("suspension owners = %v, want %v", suspensionOwners, wantOwners)
 	}
-	if fn := functions[anonymous[0]]; len(fn.ParameterTypes) == 1 {
+	if fn := functions[anonymous[0]]; len(fn.Signature.ParameterTypes) == 1 {
 		var parameter *TypeFact
 		for i := range snapshot.Types {
-			if snapshot.Types[i].ID == fn.ParameterTypes[0] {
+			if snapshot.Types[i].ID == fn.Signature.ParameterTypes[0] {
 				parameter = &snapshot.Types[i]
 				break
 			}
@@ -735,15 +735,15 @@ async function factory() {
 			zero = fn
 		}
 	}
-	if anonymous == nil || !anonymous.SignatureOmitted || anonymous.SignatureUnresolved || len(anonymous.ParameterTypes) != 0 || anonymous.ReturnType != "" {
+	if anonymous == nil || !anonymous.SignatureOmitted || anonymous.Signature != nil {
 		t.Fatalf("anonymous signature was not omitted: %+v", anonymous)
 	}
-	if zero == nil || zero.SignatureOmitted || zero.SignatureUnresolved || len(zero.ParameterTypes) != 0 || zero.ReturnType == "" {
+	if zero == nil || zero.SignatureOmitted || zero.Signature == nil || !zero.Signature.Complete || len(zero.Signature.ParameterTypes) != 0 || zero.Signature.ReturnType == "" {
 		t.Fatalf("zero-parameter signature was not collected: %+v", zero)
 	}
 	var void bool
 	for _, typ := range snapshot.Types {
-		if typ.ID == zero.ReturnType && typ.Kind == "void" {
+		if typ.ID == zero.Signature.ReturnType && typ.Kind == "void" {
 			void = true
 		}
 		if typ.Name == "OwnershipOnly" {

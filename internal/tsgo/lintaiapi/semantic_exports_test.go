@@ -211,7 +211,7 @@ export type Unused = { hidden: bigint };`,
 	}
 }
 
-func TestExportTargetConflictsRetainAllProgramObservations(t *testing.T) {
+func TestExportTargetsUseOwnerContext(t *testing.T) {
 	build := func(redGroup, blueGroup string, tsconfigFiles bool) ExportFact {
 		root := t.TempDir()
 		config := func(target string) string {
@@ -221,6 +221,7 @@ func TestExportTargetConflictsRetainAllProgramObservations(t *testing.T) {
 			"targets/red.ts":             `export interface Api { red: string }`,
 			"targets/blue.ts":            `export interface Api { blue: number }`,
 			"shared/index.ts":            `export { Api } from "contract";`,
+			"shared/tsconfig.json":       `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","baseUrl":".","paths":{"contract":["../targets/red"]}},"files":["index.ts"]}`,
 			redGroup + "/tsconfig.json":  config("red"),
 			redGroup + "/use.ts":         `import type { Api } from "../shared"; export const red: Api = { red: "ok" };`,
 			blueGroup + "/tsconfig.json": config("blue"),
@@ -236,24 +237,25 @@ func TestExportTargetConflictsRetainAllProgramObservations(t *testing.T) {
 			t.Fatal(err)
 		}
 		item := semanticExport(t, snapshot, "shared/index.ts", "Api", SpaceType)
+		if len(item.Targets) != 1 || len(item.Incomplete) != 0 {
+			t.Fatalf("owner export target: %+v", item)
+		}
 		for _, target := range item.Targets {
-			if len(semanticDeclaration(t, snapshot, target).Types) == 0 {
-				t.Fatalf("retention dropped a conflicting declaration endpoint or type: %+v", item)
+			declaration := semanticDeclaration(t, snapshot, target)
+			if len(declaration.Types) == 0 || declaration.Location.File != "targets/red.ts" {
+				t.Fatalf("owner target or its type was lost: %+v", declaration)
 			}
 		}
 		return item
 	}
 	first := build("a-red", "z-blue", false)
 	second := build("z-red", "a-blue", false)
-	if len(first.Targets) != 2 || !slices.Equal(first.Incomplete, []string{AssociationConflict}) {
-		t.Fatalf("differing complete export targets were not retained as a conflict: %+v", first)
-	}
 	if !slices.Equal(first.Targets, second.Targets) || !slices.Equal(first.Incomplete, second.Incomplete) {
 		t.Fatalf("export observations depend on config group order: first=%+v second=%+v", first, second)
 	}
 	filtered := build("a-red", "z-blue", true)
 	if !slices.Equal(first.Targets, filtered.Targets) || !slices.Equal(first.Incomplete, filtered.Incomplete) {
-		t.Fatalf("tsconfig retention lost conflicting observations: unfiltered=%+v filtered=%+v", first, filtered)
+		t.Fatalf("tsconfig retention changed the owner target: unfiltered=%+v filtered=%+v", first, filtered)
 	}
 }
 
@@ -284,6 +286,17 @@ func semanticDeclaration(t *testing.T, snapshot *Snapshot, id string) Declaratio
 	}
 	t.Fatalf("missing declaration endpoint %q", id)
 	return DeclarationFact{}
+}
+
+func sourceEndpoint(t *testing.T, snapshot *Snapshot, id string) SourceEndpointFact {
+	t.Helper()
+	for _, item := range snapshot.SourceEndpoints {
+		if item.ID == id {
+			return item
+		}
+	}
+	t.Fatalf("missing source endpoint %q", id)
+	return SourceEndpointFact{}
 }
 
 func TestMergedDeclarationsContributeOnlyTheirOwnSpaces(t *testing.T) {
@@ -805,5 +818,29 @@ func BenchmarkStarDiamonds(b *testing.B) {
 				}
 			}
 		})
+	}
+}
+
+func TestExportInventoryUsesOnlyItsOwnerGraph(t *testing.T) {
+	root := t.TempDir()
+	config := `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","baseUrl":".","paths":{"contract":["./ok.ts"]}},"files":["main.ts"]}`
+	writeWorkspace(t, root, map[string]string{
+		"a/tsconfig.json": config,
+		"a/main.ts":       `export * from "../shared/index";`,
+		"a/ok.ts":         `export const value = 1;`,
+		"b/tsconfig.json": config,
+		"b/main.ts":       `export * from "../shared/index";`,
+		"shared/index.ts": `export * from "./cycle"; export * from "contract";`,
+		"shared/cycle.ts": `export * from "./index";`,
+	})
+	snapshot, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{
+		WorkspaceRoot: root, Files: []string{filepath.Join(root, "a/main.ts"), filepath.Join(root, "b/main.ts")}, TsconfigFiles: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if slices.ContainsFunc(snapshot.ModuleExportsIncomplete, func(item ModuleExportsIncompleteFact) bool { return item.File == "a/main.ts" }) ||
+		!slices.Contains(snapshot.ModuleExportsIncomplete, ModuleExportsIncompleteFact{File: "b/main.ts", Reason: AssociationUnresolved}) {
+		t.Fatalf("foreign inventory contaminated an owner or lost its own unresolved result: %+v", snapshot.ModuleExportsIncomplete)
 	}
 }

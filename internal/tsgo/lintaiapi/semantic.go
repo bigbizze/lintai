@@ -1,9 +1,10 @@
 package lintaiapi
 
 import (
+	"fmt"
+	"maps"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 
 	"github.com/bigbizze/lintai/internal/tsgo/internal/ast"
@@ -306,8 +307,11 @@ func commonJSInventoryUnsupported(file *ast.SourceFile) bool {
 	return visit(file.AsNode())
 }
 
-func (e *extractor) collectSemanticExports(file *ast.SourceFile) {
+func (e *extractor) collectSemanticExports(file *ast.SourceFile, origin observationOrigin) {
 	if file == nil {
+		return
+	}
+	if !e.validateOrigin(origin, "exports", file.AsNode()) {
 		return
 	}
 	if !ast.IsExternalOrCommonJSModule(file) || file.Symbol == nil {
@@ -339,9 +343,7 @@ func (e *extractor) collectSemanticExports(file *ast.SourceFile) {
 	for _, item := range inventory.stars {
 		registerSite(item)
 	}
-	var names []string
 	for _, binding := range inventory.bindings {
-		names = append(names, jsonList(jsonQuote(binding.name), jsonQuote(binding.space)))
 		var targetIDs []string
 		if binding.symbol != nil {
 			targetIDs = e.declarationIDs(binding.symbol.Declarations())
@@ -354,7 +356,7 @@ func (e *extractor) collectSemanticExports(file *ast.SourceFile) {
 			items = e.exportContributionsForBinding(file, binding.name, binding.space, nil, inventory.contributions, inventory.stars)
 		} else {
 			for _, declaration := range binding.declarations {
-				id, supported := e.addDeclaration(declaration, binding.symbol, binding.name, binding.declarationSpace)
+				id, supported := e.addDeclaration(origin, declaration, binding.symbol, binding.name, binding.declarationSpace)
 				if id != "" {
 					targets = append(targets, id)
 				}
@@ -371,12 +373,12 @@ func (e *extractor) collectSemanticExports(file *ast.SourceFile) {
 		if !complete && len(reasons) == 0 {
 			reasons = append(reasons, AssociationUnresolved)
 		}
-		e.addExport(moduleIdentity, moduleFile, binding.name, binding.space, binding.declarationSpace, targets, complete, reasons, items)
+		e.addExport(moduleIdentity, moduleFile, binding.name, binding.space, binding.declarationSpace, targets, reasons, items)
 	}
-	e.collectStarSourceObservations(inventory.starSources, map[string]struct{}{moduleIdentity: {}})
+	reasons := sortedUnique(append(inventory.reasons, e.exportInventoryIncomplete(file)...))
 	e.moduleExportObservations = append(e.moduleExportObservations, ModuleExportObservation{
-		Identity: moduleIdentity, File: moduleFile, Bindings: sortedUnique(names), Complete: len(inventory.reasons) == 0,
-		Reasons: inventory.reasons, StarSources: inventory.starSources, Retained: true,
+		Identity: moduleIdentity, File: moduleFile, Complete: len(reasons) == 0,
+		Reasons: reasons, Retained: true,
 	})
 }
 
@@ -562,15 +564,34 @@ func (e *extractor) sourceFileByIdentity(identity string) *ast.SourceFile {
 }
 
 func (e *extractor) exportInventoryIncomplete(file *ast.SourceFile) []string {
-	if file == nil {
-		return []string{AssociationUnresolved}
+	visited := make(map[string]bool)
+	var reasons []string
+	var visit func(*ast.SourceFile)
+	visit = func(current *ast.SourceFile) {
+		if current == nil {
+			reasons = append(reasons, AssociationUnresolved)
+			return
+		}
+		identity := e.canonicalFileIdentity(current.FileName().AsString())
+		if visited[identity] {
+			return
+		}
+		visited[identity] = true
+		if current.Symbol == nil || !ast.IsExternalOrCommonJSModule(current) {
+			if commonJSInventoryUnsupported(current) {
+				reasons = append(reasons, AssociationUnsupported)
+			} else {
+				reasons = append(reasons, AssociationUnresolved)
+			}
+			return
+		}
+		sources, local := e.starExportInventory(current)
+		reasons = append(reasons, local...)
+		for _, source := range sources {
+			visit(e.sourceFileByIdentity(source))
+		}
 	}
-	sources, reasons := e.starExportInventory(file)
-	identity := e.canonicalFileIdentity(file.FileName().AsString())
-	e.collectStarSourceObservations(sources, map[string]struct{}{identity: {}})
-	for _, observation := range e.moduleExportObservations {
-		reasons = append(reasons, observation.Reasons...)
-	}
+	visit(file)
 	return sortedUnique(reasons)
 }
 
@@ -600,33 +621,14 @@ func (e *extractor) starExportInventory(file *ast.SourceFile) ([]string, []strin
 	return sortedUnique(sources), sortedUnique(reasons)
 }
 
-func (e *extractor) collectStarSourceObservations(modules []string, visited map[string]struct{}) {
-	for _, identity := range modules {
-		if _, done := visited[identity]; done {
-			continue
-		}
-		visited[identity] = struct{}{}
-		file := e.sourceFileByIdentity(identity)
-		if file == nil || file.Symbol == nil || !ast.IsExternalOrCommonJSModule(file) {
-			reason := AssociationUnresolved
-			if commonJSInventoryUnsupported(file) {
-				reason = AssociationUnsupported
-			}
-			e.moduleExportObservations = append(e.moduleExportObservations, ModuleExportObservation{
-				Identity: identity, File: identity, Complete: false, Reasons: []string{reason},
-			})
-			continue
-		}
-		sources, reasons := e.starExportInventory(file)
-		e.moduleExportObservations = append(e.moduleExportObservations, ModuleExportObservation{
-			Identity: identity, File: e.relativePath(file.FileName().AsString()),
-			Complete: len(reasons) == 0, Reasons: reasons, StarSources: sources,
-		})
-		e.collectStarSourceObservations(sources, visited)
+func (e *extractor) addDeclarationMetadata(origin observationOrigin, node *ast.Node, symbol *ast.Symbol, publicName string) (string, *DeclarationFact, bool) {
+	if !e.validateOrigin(origin, "declaration metadata", nil) {
+		return "", nil, false
 	}
+	return e.collectDeclarationMetadata(node, symbol, publicName, false)
 }
 
-func (e *extractor) addDeclarationMetadata(node *ast.Node, symbol *ast.Symbol, publicName string) (string, *DeclarationFact, bool) {
+func (e *extractor) collectDeclarationMetadata(node *ast.Node, symbol *ast.Symbol, publicName string, correspondence bool) (string, *DeclarationFact, bool) {
 	if node == nil {
 		return "", nil, false
 	}
@@ -635,8 +637,17 @@ func (e *extractor) addDeclarationMetadata(node *ast.Node, symbol *ast.Symbol, p
 	if id == "" {
 		return "", nil, false
 	}
-	e.trackNull(id, "declaration", node)
-	e.trackNamed(id, "declaration", node)
+	if correspondence {
+		ordinaryTracking := e.tracking
+		e.tracking = e.sourceTracking
+		e.trackNull(id, "declaration", node)
+		e.trackNamed(id, "declaration", node)
+		e.sourceTracking = e.tracking
+		e.tracking = ordinaryTracking
+	} else {
+		e.trackNull(id, "declaration", node)
+		e.trackNamed(id, "declaration", node)
+	}
 	name := publicName
 	if symbol != nil {
 		if qualified := qualifiedSymbolName(symbol); qualified != "" {
@@ -648,10 +659,17 @@ func (e *extractor) addDeclarationMetadata(node *ast.Node, symbol *ast.Symbol, p
 	file := ast.GetSourceFileOfNode(node)
 	originKind, origin := e.declarationOrigin(node)
 	location := e.nodeLocation(file, node)
-	fact := e.declarations[id]
+	store := e.declarations
+	if correspondence {
+		if e.sourceEndpoints == nil {
+			e.sourceEndpoints = make(map[string]*DeclarationFact)
+		}
+		store = e.sourceEndpoints
+	}
+	fact := store[id]
 	if fact == nil {
 		fact = &DeclarationFact{ID: id, Name: name, Kind: kind, OriginKind: originKind, Origin: origin, Location: location}
-		e.declarations[id] = fact
+		store[id] = fact
 	} else {
 		old := jsonList(jsonQuote(fact.Name), jsonQuote(fact.Kind), jsonQuote(fact.OriginKind), jsonQuote(fact.Origin))
 		current := jsonList(jsonQuote(name), jsonQuote(kind), jsonQuote(originKind), jsonQuote(origin))
@@ -662,10 +680,17 @@ func (e *extractor) addDeclarationMetadata(node *ast.Node, symbol *ast.Symbol, p
 			}
 		}
 	}
-	if e.declarationNodes == nil {
-		e.declarationNodes = make(map[string]*ast.Node)
+	if correspondence {
+		if e.sourceDeclarationNodes == nil {
+			e.sourceDeclarationNodes = make(map[string]*ast.Node)
+		}
+		e.sourceDeclarationNodes[id] = node
+	} else {
+		if e.declarationNodes == nil {
+			e.declarationNodes = make(map[string]*ast.Node)
+		}
+		e.declarationNodes[id] = node
 	}
-	e.declarationNodes[id] = node
 	if !supported {
 		fact.Incomplete = append(fact.Incomplete, AssociationUnsupported)
 		fact.TypesComplete = false
@@ -673,8 +698,8 @@ func (e *extractor) addDeclarationMetadata(node *ast.Node, symbol *ast.Symbol, p
 	return id, fact, supported
 }
 
-func (e *extractor) addDeclaration(node *ast.Node, symbol *ast.Symbol, publicName string, space string) (string, bool) {
-	id, fact, supported := e.addDeclarationMetadata(node, symbol, publicName)
+func (e *extractor) addDeclaration(origin observationOrigin, node *ast.Node, symbol *ast.Symbol, publicName string, space string) (string, bool) {
+	id, fact, supported := e.addDeclarationMetadata(origin, node, symbol, publicName)
 	if fact == nil {
 		return id, false
 	}
@@ -692,8 +717,7 @@ func (e *extractor) addDeclaration(node *ast.Node, symbol *ast.Symbol, publicNam
 		function = e.functionKeys[nodeKey(node)]
 	}
 	if function != nil {
-		fact.FunctionObservations = append(fact.FunctionObservations, function.SemanticKey)
-		fact.Function = function.SemanticKey
+		e.linkDeclarationFunction(fact, function.SemanticKey)
 	}
 	if !e.operations.declarationTypes {
 		return id, true
@@ -704,7 +728,7 @@ func (e *extractor) addDeclaration(node *ast.Node, symbol *ast.Symbol, publicNam
 			if expression := node.AsExportAssignment().Expression; expression != nil {
 				typeValue := e.checker.GetTypeAtLocation(expression)
 				if typeValue != nil {
-					e.addDeclarationType(fact, SpaceValue, e.emitFunctionType(typeValue, expression))
+					e.addDeclarationType(origin, fact, SpaceValue, e.emitFunctionType(typeValue, origin))
 					return id, true
 				}
 			}
@@ -727,11 +751,24 @@ func (e *extractor) addDeclaration(node *ast.Node, symbol *ast.Symbol, publicNam
 		fact.TypeIncomplete = append(fact.TypeIncomplete, DeclarationTypeUncertainty{space, AssociationUnresolved})
 		return id, true
 	}
-	e.addDeclarationType(fact, space, e.emitFunctionType(typeValue, node))
+	e.addDeclarationType(origin, fact, space, e.emitFunctionType(typeValue, origin))
 	return id, true
 }
 
-func (e *extractor) addDeclarationType(fact *DeclarationFact, space string, typeID string) {
+func (e *extractor) linkDeclarationFunction(fact *DeclarationFact, function string) {
+	if fact.Function != "" && fact.Function != function {
+		if e.originError == nil {
+			e.originError = fmt.Errorf("inconsistent function links for declaration %s", fact.ID)
+		}
+		return
+	}
+	fact.Function = function
+}
+
+func (e *extractor) addDeclarationType(origin observationOrigin, fact *DeclarationFact, space string, typeID string) {
+	if !e.validateOrigin(origin, "declaration type", nil) {
+		return
+	}
 	if typeID == "" {
 		fact.TypesComplete = false
 		fact.TypeIncomplete = append(fact.TypeIncomplete, DeclarationTypeUncertainty{space, AssociationUnresolved})
@@ -746,7 +783,7 @@ func (e *extractor) addDeclarationType(fact *DeclarationFact, space string, type
 	fact.Types = append(fact.Types, item)
 }
 
-func (e *extractor) addExport(moduleIdentity string, file string, name string, space string, declarationSpace string, targetIDs []string, complete bool, reasons []string, contributions []syntaxExportContribution) {
+func (e *extractor) addExport(moduleIdentity string, file string, name string, space string, declarationSpace string, targetIDs []string, reasons []string, contributions []syntaxExportContribution) {
 	id := exportEntityID(moduleIdentity, name, space)
 	e.trackExport(id, name, space)
 	fact := e.exports[id]
@@ -760,9 +797,6 @@ func (e *extractor) addExport(moduleIdentity string, file string, name string, s
 		for _, target := range targetIDs {
 			fact.typeSubjects = append(fact.typeSubjects, declarationTypeSubject{target, declarationSpace})
 		}
-	}
-	if complete {
-		fact.TargetObservations = append(fact.TargetObservations, slices.Clone(targetIDs))
 	}
 	fact.Incomplete = append(fact.Incomplete, reasons...)
 	for _, item := range contributions {
@@ -821,21 +855,7 @@ func (e *extractor) exportSiteLocation(site string) (SourceLocation, bool) {
 }
 
 func (e *extractor) canonicalFileIdentity(path string) string {
-	var pathKey string
-	if tspath.IsUrl(path) {
-		pathKey = e.program.PathKeyForFileName(tspath.RootedFilePath(path)).AsString()
-	} else {
-		rooted := tspath.RootedFilePathFromAbsolute(path)
-		pathKey = e.program.PathKeyForFileName(rooted).AsString()
-	}
-	pathKey = normalizeSlash(pathKey)
-	root := normalizeSlash(e.program.PathKeyForFileName(tspath.RootedFilePathFromAbsolute(e.workspaceRoot)).AsString())
-	if isWithinRoot(root, pathKey) {
-		if relative, err := filepath.Rel(filepath.FromSlash(root), filepath.FromSlash(pathKey)); err == nil {
-			return filepath.ToSlash(relative)
-		}
-	}
-	return pathKey
+	return publicIdentityPath(e.workspaceRoot, path, e.program.CaseSensitivity())
 }
 
 func (e *extractor) sortedDeclarations() []DeclarationFact {
@@ -846,10 +866,19 @@ func (e *extractor) sortedDeclarations() []DeclarationFact {
 		if fact.TypesComplete && len(fact.TypeObservations) == 0 {
 			fact.TypeObservations = [][]DeclarationType{sortedDeclarationTypes(fact.Types)}
 		}
-		fact.FunctionObservations = sortedUnique(fact.FunctionObservations)
 		result = append(result, *fact)
 	}
 	slices.SortFunc(result, func(left, right DeclarationFact) int { return strings.Compare(left.ID, right.ID) })
+	return result
+}
+
+func (e *extractor) sortedSourceEndpoints() []SourceEndpointFact {
+	result := make([]SourceEndpointFact, 0, len(e.sourceEndpoints))
+	for _, fact := range e.sourceEndpoints {
+		result = append(result, SourceEndpointFact{ID: fact.ID, Name: fact.Name, Kind: fact.Kind,
+			OriginKind: fact.OriginKind, Origin: fact.Origin, Incomplete: sortedUnique(fact.Incomplete), Location: fact.Location})
+	}
+	slices.SortFunc(result, func(a, b SourceEndpointFact) int { return strings.Compare(a.ID, b.ID) })
 	return result
 }
 
@@ -860,7 +889,6 @@ func (e *extractor) sortedExports() []ExportFact {
 		fact.Via = sortedUnique(fact.Via)
 		fact.Incomplete = sortedUnique(fact.Incomplete)
 		fact.Reexports = uniqueReexports(fact.Reexports)
-		fact.TargetObservations = uniqueStringSets(fact.TargetObservations)
 		result = append(result, *fact)
 	}
 	slices.SortFunc(result, func(left, right ExportFact) int { return strings.Compare(left.ID, right.ID) })
@@ -1308,24 +1336,46 @@ func exportEntityID(file, name, space string) string {
 	return "export:" + hashKey(key)
 }
 
-func finalizeSemanticObservations(snapshot *Snapshot) {
-	snapshot.Declarations = mergeDeclarationObservations(snapshot.Declarations)
+func finalizeSemanticObservations(snapshot *Snapshot) error {
+	var err error
+	snapshot.Declarations, err = mergeDeclarationObservations(snapshot.Declarations)
+	if err != nil {
+		return err
+	}
 	snapshot.Exports = mergeExportObservations(snapshot.Exports)
 	snapshot.ModuleExportsIncomplete = moduleInventoryOutcomes(snapshot.ModuleExportObservations)
-	snapshot.FnSignatureConflicts = nil
-	for index := range snapshot.Functions {
-		snapshot.Functions[index] = mergeFunctionObservations(snapshot.Functions[index], Function{})
-		if snapshot.Functions[index].SignatureConflict {
-			snapshot.FnSignatureConflicts = append(snapshot.FnSignatureConflicts, snapshot.Functions[index].SemanticKey)
-		}
-	}
-	snapshot.FnSignatureConflicts = sortedUnique(snapshot.FnSignatureConflicts)
-
 	snapshot.SourceBindings = mergeSourceBindingObservations(snapshot.SourceBindings)
+	snapshot.SourceEndpoints = mergeSourceEndpoints(snapshot.SourceEndpoints)
 	snapshot.DeclarationSourceCandidates = uniqueDeclarationSources(snapshot.DeclarationSourceCandidates)
 	snapshot.DeclarationSources, snapshot.DeclarationSourceOutcomes = finalizeDeclarationSourceObservations(snapshot.DeclarationSources, snapshot.DeclarationSourceOutcomes)
 	snapshot.SourceBindings = conflictSourceBindingsWithMaps(snapshot.SourceBindings, snapshot.DeclarationSources)
 	snapshot.SourceEntries = mergeSourceEntryFacts(snapshot.SourceEntries)
+	return nil
+}
+
+func mergeSourceEndpoints(items []SourceEndpointFact) []SourceEndpointFact {
+	byID := make(map[string]SourceEndpointFact, len(items))
+	for _, item := range items {
+		current, ok := byID[item.ID]
+		if !ok {
+			byID[item.ID] = item
+			continue
+		}
+		incomplete := sortedUnique(append(current.Incomplete, item.Incomplete...))
+		old := jsonList(jsonQuote(current.Name), jsonQuote(current.Kind), jsonQuote(current.OriginKind), jsonQuote(current.Origin))
+		observed := jsonList(jsonQuote(item.Name), jsonQuote(item.Kind), jsonQuote(item.OriginKind), jsonQuote(item.Origin))
+		if old != observed {
+			incomplete = sortedUnique(append(incomplete, AssociationConflict))
+			if observed < old {
+				current = item
+			}
+		}
+		current.Incomplete = incomplete
+		byID[item.ID] = current
+	}
+	result := slices.Collect(maps.Values(byID))
+	slices.SortFunc(result, func(a, b SourceEndpointFact) int { return strings.Compare(a.ID, b.ID) })
+	return result
 }
 
 func uniqueSnapshotInputs(items []SnapshotInput) []SnapshotInput {
@@ -1522,7 +1572,7 @@ func conflictSourceBindingsWithMaps(bindings []SourceBindingFact, links []Declar
 	return bindings
 }
 
-func mergeDeclarationObservations(items []DeclarationFact) []DeclarationFact {
+func mergeDeclarationObservations(items []DeclarationFact) ([]DeclarationFact, error) {
 	byID := make(map[string]DeclarationFact, len(items))
 	for _, item := range items {
 		current, exists := byID[item.ID]
@@ -1535,7 +1585,6 @@ func mergeDeclarationObservations(items []DeclarationFact) []DeclarationFact {
 		current.Incomplete = sortedUnique(append(current.Incomplete, item.Incomplete...))
 		current.TypeSubjects = sortedUnique(append(current.TypeSubjects, item.TypeSubjects...))
 		current.TypeIncomplete = append(current.TypeIncomplete, item.TypeIncomplete...)
-		current.FunctionIncomplete = sortedUnique(append(current.FunctionIncomplete, item.FunctionIncomplete...))
 		currentMetadata := jsonList(jsonQuote(current.Name), jsonQuote(current.Kind), jsonQuote(current.OriginKind), jsonQuote(current.Origin))
 		itemMetadata := jsonList(jsonQuote(item.Name), jsonQuote(item.Kind), jsonQuote(item.OriginKind), jsonQuote(item.Origin))
 		if currentMetadata != itemMetadata {
@@ -1545,9 +1594,11 @@ func mergeDeclarationObservations(items []DeclarationFact) []DeclarationFact {
 			}
 		}
 		current.TypesComplete = current.TypesComplete || item.TypesComplete
-		current.FunctionObservations = append(current.FunctionObservations, item.FunctionObservations...)
-		if len(item.FunctionObservations) == 0 && item.Function != "" {
-			current.FunctionObservations = append(current.FunctionObservations, item.Function)
+		if current.Function != "" && item.Function != "" && current.Function != item.Function {
+			return nil, fmt.Errorf("inconsistent function links for declaration %s", item.ID)
+		}
+		if current.Function == "" {
+			current.Function = item.Function
 		}
 		byID[item.ID] = current
 	}
@@ -1571,23 +1622,10 @@ func mergeDeclarationObservations(items []DeclarationFact) []DeclarationFact {
 				item.TypeIncomplete = append(item.TypeIncomplete, DeclarationTypeUncertainty{space, AssociationConflict})
 			}
 		}
-		if len(item.FunctionObservations) == 0 && item.Function != "" {
-			item.FunctionObservations = append(item.FunctionObservations, item.Function)
-		}
-		item.FunctionObservations = sortedUnique(item.FunctionObservations)
-		switch len(item.FunctionObservations) {
-		case 0:
-			item.Function = ""
-		case 1:
-			item.Function = item.FunctionObservations[0]
-		default:
-			item.Function = ""
-			item.FunctionIncomplete = sortedUnique(append(item.FunctionIncomplete, AssociationConflict))
-		}
 		result = append(result, item)
 	}
 	slices.SortFunc(result, func(left, right DeclarationFact) int { return strings.Compare(left.ID, right.ID) })
-	return result
+	return result, nil
 }
 
 func uniqueDeclarationSets(items [][]DeclarationType) [][]DeclarationType {
@@ -1654,7 +1692,6 @@ func mergeExportObservations(items []ExportFact) []ExportFact {
 		current.Via = sortedUnique(append(current.Via, item.Via...))
 		current.Reexports = uniqueReexports(append(current.Reexports, item.Reexports...))
 		current.Incomplete = sortedUnique(append(current.Incomplete, item.Incomplete...))
-		current.TargetObservations = uniqueStringSets(append(current.TargetObservations, item.TargetObservations...))
 		if current.Location == (SourceLocation{}) || item.Location != (SourceLocation{}) && sourceLocationLess(item.Location, current.Location) {
 			current.Location = item.Location
 		}
@@ -1662,9 +1699,6 @@ func mergeExportObservations(items []ExportFact) []ExportFact {
 	}
 	result := make([]ExportFact, 0, len(byID))
 	for _, item := range byID {
-		if stringSetsDisagree(item.TargetObservations) {
-			item.Incomplete = sortedUnique(append(item.Incomplete, AssociationConflict))
-		}
 		result = append(result, item)
 	}
 	slices.SortFunc(result, func(left, right ExportFact) int { return strings.Compare(left.ID, right.ID) })
@@ -1685,72 +1719,15 @@ func stringSetsDisagree(items [][]string) bool {
 }
 
 func moduleInventoryOutcomes(observations []ModuleExportObservation) []ModuleExportsIncompleteFact {
-	byIdentity := make(map[string][]ModuleExportObservation)
-	retained := make(map[string]bool)
-	fileByIdentity := make(map[string]string)
-	for _, observation := range observations {
-		identity := observation.Identity
-		if identity == "" {
-			identity = observation.File
-		}
-		byIdentity[identity] = append(byIdentity[identity], observation)
-		retained[identity] = retained[identity] || observation.Retained
-		if observation.File != "" && (fileByIdentity[identity] == "" || observation.File < fileByIdentity[identity]) {
-			fileByIdentity[identity] = observation.File
-		}
-	}
-	reasonsByIdentity := make(map[string]map[string]struct{})
-	for identity, values := range byIdentity {
-		for _, observation := range values {
-			for _, reason := range observation.Reasons {
-				if reasonsByIdentity[identity] == nil {
-					reasonsByIdentity[identity] = make(map[string]struct{})
-				}
-				reasonsByIdentity[identity][reason] = struct{}{}
-			}
-		}
-		var complete [][]string
-		for _, observation := range values {
-			if observation.Retained && observation.Complete {
-				complete = append(complete, observation.Bindings)
-			}
-		}
-		if stringSetsDisagree(uniqueStringSets(complete)) {
-			if reasonsByIdentity[identity] == nil {
-				reasonsByIdentity[identity] = make(map[string]struct{})
-			}
-			reasonsByIdentity[identity][AssociationConflict] = struct{}{}
-		}
-	}
-	// Propagate incompleteness only over direct star edges. The loop reaches
-	// a fixed point and terminates for cyclic re-export graphs.
-	for changed := true; changed; {
-		changed = false
-		for identity, values := range byIdentity {
-			for _, observation := range values {
-				for _, source := range observation.StarSources {
-					for reason := range reasonsByIdentity[source] {
-						if reasonsByIdentity[identity] == nil {
-							reasonsByIdentity[identity] = make(map[string]struct{})
-						}
-						if _, exists := reasonsByIdentity[identity][reason]; !exists {
-							reasonsByIdentity[identity][reason] = struct{}{}
-							changed = true
-						}
-					}
-				}
-			}
-		}
-	}
 	var result []ModuleExportsIncompleteFact
-	for identity, reasons := range reasonsByIdentity {
-		if !retained[identity] {
+	for _, observation := range observations {
+		if !observation.Retained {
 			continue
 		}
-		for reason := range reasons {
-			file := fileByIdentity[identity]
+		for _, reason := range observation.Reasons {
+			file := observation.File
 			if file == "" {
-				file = identity
+				file = observation.Identity
 			}
 			result = append(result, ModuleExportsIncompleteFact{File: file, Reason: reason})
 		}
@@ -1758,56 +1735,7 @@ func moduleInventoryOutcomes(observations []ModuleExportObservation) []ModuleExp
 	slices.SortFunc(result, func(left, right ModuleExportsIncompleteFact) int {
 		return strings.Compare(left.File+"\x00"+left.Reason, right.File+"\x00"+right.Reason)
 	})
-	return result
-}
-
-func mergeFunctionObservations(existing, incoming Function) Function {
-	if existing.SemanticKey == "" {
-		return incoming
-	}
-	if incoming.SemanticKey != "" {
-		existing.SignatureObservations = append(existing.SignatureObservations, incoming.SignatureObservations...)
-		existing.SignatureUnresolved = existing.SignatureUnresolved || incoming.SignatureUnresolved
-	}
-	byKey := make(map[string]FunctionSignatureObservation)
-	for _, observation := range existing.SignatureObservations {
-		key := functionSignatureKey(observation)
-		byKey[key] = observation
-	}
-	existing.SignatureObservations = existing.SignatureObservations[:0]
-	for _, observation := range byKey {
-		existing.SignatureObservations = append(existing.SignatureObservations, observation)
-	}
-	slices.SortFunc(existing.SignatureObservations, func(left, right FunctionSignatureObservation) int {
-		return strings.Compare(functionSignatureKey(left), functionSignatureKey(right))
-	})
-	var complete []string
-	for _, observation := range existing.SignatureObservations {
-		if observation.Complete {
-			complete = append(complete, functionSignatureKey(observation))
-		}
-	}
-	existing.SignatureConflict = len(sortedUnique(complete)) > 1
-	existing.ParameterTypes = nil
-	existing.ReturnType = ""
-	if len(existing.SignatureObservations) == 1 && existing.SignatureObservations[0].Complete {
-		observation := existing.SignatureObservations[0]
-		existing.ParameterTypes = slices.Clone(observation.ParameterTypes)
-		existing.ReturnType = observation.ReturnType
-	}
-	return existing
-}
-
-func functionSignatureKey(observation FunctionSignatureObservation) string {
-	params := make([]string, len(observation.ParameterTypes))
-	for index, param := range observation.ParameterTypes {
-		mark := ""
-		if index < len(observation.ParameterMarks) {
-			mark = observation.ParameterMarks[index]
-		}
-		params[index] = jsonList(jsonQuote(mark), jsonQuote(param))
-	}
-	return jsonList(jsonQuote(strconv.FormatBool(observation.Complete)), jsonList(params...), jsonQuote(observation.ReturnType))
+	return slices.Compact(result)
 }
 
 func (e *extractor) functionSignatureObservation(node *ast.Node, params []string, returns string) FunctionSignatureObservation {

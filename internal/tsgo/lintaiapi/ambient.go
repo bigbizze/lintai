@@ -158,7 +158,10 @@ func (e *extractor) beginAmbientFile(file *ast.SourceFile) {
 	}
 }
 
-func (e *extractor) matchAmbient(node *ast.Node, currentFunction *functionState) {
+func (e *extractor) matchAmbient(node *ast.Node, currentFunction *functionState, origin observationOrigin) {
+	if !e.validateOrigin(origin, "matchAmbient", node) {
+		return
+	}
 	state := e.ambientFile
 	if state == nil || e.ambient == nil || !ast.IsIdentifier(node) || !isAmbientCandidatePosition(node) {
 		return
@@ -200,7 +203,10 @@ func (e *extractor) matchAmbient(node *ast.Node, currentFunction *functionState)
 // destructuring-assignment property by the symbol that the checker resolves
 // for it. This finds uses through aliases, for example const p = process;
 // p.env.X, const D = Date; D.now() and const { now } = Date.
-func (e *extractor) matchAmbientMember(node *ast.Node, currentFunction *functionState) {
+func (e *extractor) matchAmbientMember(node *ast.Node, currentFunction *functionState, origin observationOrigin) {
+	if !e.validateOrigin(origin, "matchAmbientMember", node) {
+		return
+	}
 	state := e.ambientFile
 	if state == nil || e.ambient == nil {
 		return
@@ -371,7 +377,10 @@ var globalObjectNames = map[string]struct{}{"globalThis": {}, "window": {}, "sel
 // matchGlobalRef records a reference to a global value: an identifier that
 // resolves to the global binding with its name, or a member of a global
 // object, as in globalThis.crypto or window.fetch.
-func (e *extractor) matchGlobalRef(node *ast.Node, currentFunction *functionState) {
+func (e *extractor) matchGlobalRef(node *ast.Node, currentFunction *functionState, origin observationOrigin) {
+	if !e.validateOrigin(origin, "matchGlobalRef", node) {
+		return
+	}
 	state := e.ambientFile
 	if state == nil || !ast.IsIdentifier(node) || node.Parent == nil {
 		return

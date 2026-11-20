@@ -2,7 +2,6 @@ package lintaiapi
 
 import (
 	"cmp"
-	"encoding/json"
 	"maps"
 	"slices"
 	"strings"
@@ -29,22 +28,19 @@ type CallDeclarationIncompleteFact struct {
 	Site, Reason string
 }
 
-// An observation belongs to one checked program. Do not flatten or reconcile
-// these until the program merge has compared the original observations.
-// InvocationKey is empty for escaped values, which are not invocations.
+// An observation belongs to the invocation's checked program.
 type callDeclarationObservation struct {
-	InvocationKey string
-	Site          string
-	Declaration   string
-	Member        *DeclarationMemberFact
-	Incomplete    []string
+	Site        string
+	Declaration string
+	Member      *DeclarationMemberFact
+	Incomplete  []string
 }
 
-func (e *extractor) collectCallDeclaration(node *ast.Node, site string) {
-	file := ast.GetSourceFileOfNode(node)
-	// End offsets distinguish nested invocations that share a start token.
-	key, _ := json.Marshal([]any{e.canonicalFileIdentity(file.FileName().AsString()), scanner.GetTokenPosOfNode(node, file, false), node.End(), node.Kind})
-	observation := callDeclarationObservation{InvocationKey: string(key), Site: site}
+func (e *extractor) collectCallDeclaration(node *ast.Node, site string, origin observationOrigin) {
+	if !e.validateOrigin(origin, "call declaration", node) {
+		return
+	}
+	observation := callDeclarationObservation{Site: site}
 	defer func() {
 		e.callDeclarationObservations = append(e.callDeclarationObservations, observation)
 	}()
@@ -69,13 +65,13 @@ func (e *extractor) collectCallDeclaration(node *ast.Node, site string) {
 		observation.Incomplete = []string{"unsupported"}
 		return
 	}
-	id, supported := e.addCallDeclarationMetadata(declaration)
+	id, supported := e.addCallDeclarationMetadata(origin, declaration)
 	observation.Declaration = id
 	if id == "" || !supported {
 		observation.Incomplete = []string{"unsupported"}
 		return
 	}
-	member, lexicalMember, unsupported := e.callDeclarationMember(declaration, id)
+	member, lexicalMember, unsupported := e.callDeclarationMember(origin, declaration, id)
 	observation.Member = member
 	if unsupported || e.callUsesUnassociatedProperty(node, declaration, lexicalMember) {
 		observation.Incomplete = []string{"unsupported"}
@@ -97,7 +93,7 @@ func concreteCallDeclaration(node *ast.Node) bool {
 	return start >= node.Pos() && start < node.End()
 }
 
-func (e *extractor) addCallDeclarationMetadata(node *ast.Node) (string, bool) {
+func (e *extractor) addCallDeclarationMetadata(origin observationOrigin, node *ast.Node) (string, bool) {
 	if !concreteCallDeclaration(node) {
 		return "", false
 	}
@@ -105,18 +101,17 @@ func (e *extractor) addCallDeclarationMetadata(node *ast.Node) (string, bool) {
 	if node.Name() != nil {
 		name, _ = ast.TryGetTextOfPropertyName(node.Name())
 	}
-	id, fact, supported := e.addDeclarationMetadata(node, node.Symbol(), name)
+	id, fact, supported := e.addDeclarationMetadata(origin, node, node.Symbol(), name)
 	if fact != nil {
 		// A symbol fallback can select a different overload or implementation.
 		if function := e.functionNodes[node]; function != nil {
-			fact.Function = function.SemanticKey
-			fact.FunctionObservations = append(fact.FunctionObservations, function.SemanticKey)
+			e.linkDeclarationFunction(fact, function.SemanticKey)
 		}
 	}
 	return id, supported
 }
 
-func (e *extractor) callDeclarationMember(declaration *ast.Node, id string) (*DeclarationMemberFact, *ast.Node, bool) {
+func (e *extractor) callDeclarationMember(origin observationOrigin, declaration *ast.Node, id string) (*DeclarationMemberFact, *ast.Node, bool) {
 	member := declaration
 	switch declaration.Kind {
 	case ast.KindMethodDeclaration, ast.KindMethodSignature:
@@ -153,7 +148,7 @@ func (e *extractor) callDeclarationMember(declaration *ast.Node, id string) (*De
 	if !ok {
 		return nil, member, true
 	}
-	ownerID, supported := e.addCallDeclarationMetadata(owner)
+	ownerID, supported := e.addCallDeclarationMetadata(origin, owner)
 	if ownerID == "" || !supported {
 		return nil, member, true
 	}
@@ -188,22 +183,6 @@ func (e *extractor) callUsesUnassociatedProperty(node, signature, lexicalMember 
 // attached to surviving runtime sites. Escaped values have no invocation key and
 // therefore never enter the disagreement groups.
 func finalizeCallDeclarationObservations(snapshot *Snapshot) {
-	first := make(map[string]string)
-	conflicts := make(map[string]bool)
-	for _, observation := range snapshot.callDeclarationObservations {
-		if observation.InvocationKey == "" {
-			continue
-		}
-		key, _ := json.Marshal([]any{observation.Site, observation.Declaration, observation.Member,
-			strings.Join(sortedUnique(observation.Incomplete), "\x00")})
-		if previous, exists := first[observation.InvocationKey]; exists {
-			if previous != string(key) {
-				conflicts[observation.InvocationKey] = true
-			}
-		} else {
-			first[observation.InvocationKey] = string(key)
-		}
-	}
 	sites := make(map[string]bool)
 	for _, call := range snapshot.CallEdges {
 		sites[call.SemanticKey] = true
@@ -229,9 +208,6 @@ func finalizeCallDeclarationObservations(snapshot *Snapshot) {
 		}
 		for _, reason := range observation.Incomplete {
 			incomplete[CallDeclarationIncompleteFact{Site: observation.Site, Reason: reason}] = struct{}{}
-		}
-		if observation.InvocationKey != "" && conflicts[observation.InvocationKey] {
-			incomplete[CallDeclarationIncompleteFact{Site: observation.Site, Reason: "conflict"}] = struct{}{}
 		}
 	}
 	snapshot.CallDeclarations = slices.Collect(maps.Keys(declarations))

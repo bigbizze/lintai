@@ -2,100 +2,122 @@ package lintaiapi
 
 import (
 	"context"
-	"fmt"
+	"path/filepath"
 	"slices"
 
 	"github.com/bigbizze/lintai/internal/tsgo/internal/bundled"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/compiler"
+	"github.com/bigbizze/lintai/internal/tsgo/internal/tspath"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/vfs/osvfs"
 )
 
-// CompilerEligibility contains only compiler membership evidence. The producer
-// supplies the selected paths and assembles the scope explanation.
+// CompilerFile describes one selected file's planned compiler ownership and
+// original root membership. A nil root list means membership was not collected.
+type CompilerFile struct {
+	Path           string   `json:"path"`
+	Eligible       bool     `json:"eligible"`
+	OwnerKind      *string  `json:"ownerKind"`
+	OwnerConfig    *string  `json:"ownerConfig"`
+	SelectedConfig *string  `json:"selectedConfig"`
+	RootConfigs    []string `json:"rootConfigs"`
+}
+
 type CompilerEligibility struct {
 	Files          []string
 	Configurations []string
+	CompilerFiles  []CompilerFile
 }
 
+// PublicConfigPath applies the compiler's filesystem case policy and exposes
+// in-workspace paths relative to the workspace, with outside paths absolute.
+func PublicConfigPath(root, path string) string {
+	return publicIdentityPath(root, path, osvfs.FS().CaseSensitivity())
+}
+
+func publicIdentityPath(root, path string, sensitivity tspath.CaseSensitivity) string {
+	if path == "" {
+		return ""
+	}
+	key := normalizeSlash(sensitivity.PathKey(tspath.RootedPath(path)).AsString())
+	rootKey := normalizeSlash(sensitivity.PathKey(tspath.RootedPath(root)).AsString())
+	if isWithinRoot(rootKey, key) {
+		if relative, err := filepath.Rel(filepath.FromSlash(rootKey), filepath.FromSlash(key)); err == nil {
+			return filepath.ToSlash(relative)
+		}
+	}
+	return key
+}
+
+func (plan *ordinaryPlan) compilerFiles(root string, host compiler.CompilerHost) []CompilerFile {
+	result := make([]CompilerFile, 0, len(plan.files))
+	configPath := func(path string) *string {
+		if path == "" {
+			return nil
+		}
+		value := publicIdentityPath(root, path, host.FS().CaseSensitivity())
+		return &value
+	}
+	for _, file := range plan.files {
+		path, err := filepath.Rel(filepath.FromSlash(root), filepath.FromSlash(file.path))
+		if err != nil {
+			path = file.path
+		}
+		item := CompilerFile{Path: filepath.ToSlash(path), Eligible: file.owner != nil, SelectedConfig: configPath(file.selectedConfig)}
+		if file.owner != nil {
+			kind := "synthetic"
+			if file.owner.group.ConfigPath != "" {
+				kind = "configured"
+				item.OwnerConfig = configPath(file.owner.group.ConfigPath)
+			}
+			item.OwnerKind = &kind
+		}
+		if plan.membershipCollected {
+			item.RootConfigs = make([]string, 0, len(file.rootConfigs))
+			for _, config := range file.rootConfigs {
+				item.RootConfigs = append(item.RootConfigs, *configPath(config))
+			}
+			slices.Sort(item.RootConfigs)
+			item.RootConfigs = slices.Compact(item.RootConfigs)
+		}
+		result = append(result, item)
+	}
+	return result
+}
+
+// ExplainCompilerEligibility uses the same final ordinary plan as extraction.
 func ExplainCompilerEligibility(ctx context.Context, req BuildSnapshotRequest) (CompilerEligibility, error) {
-	root := req.WorkspaceRoot
-	trackedFS := trackResolutionInputs(osvfs.FS(), root)
-	host := compiler.NewCompilerHost(bundled.WrapFS(trackedFS), bundled.LibPath(), nil, nil, nil)
-	configs := newConfigCache(host)
-	groups, err := discoverConfigGroups(root, req.Files, req.ExactFiles, configs)
+	root, err := normalizeAbsPath(req.WorkspaceRoot)
 	if err != nil {
 		return CompilerEligibility{}, err
 	}
-	report := CompilerEligibility{}
-	eligible := make(map[string]struct{})
-	var missingWalkFiles []string
-	for _, group := range groups {
-		if err := ctx.Err(); err != nil {
-			return CompilerEligibility{}, err
-		}
-		configuration := "synthetic"
-		programConfig := group.Config
-		if programConfig == nil {
-			programConfig, err = syntheticConfig(host, root, group.PrimaryFiles)
-			if err != nil {
-				return CompilerEligibility{}, err
-			}
-		} else {
-			configuration = group.ConfigPath
-		}
-		report.Configurations = append(report.Configurations, configuration)
-		program := compiler.NewProgram(compiler.ProgramOptions{
-			ProgramConfig: compiler.ProgramConfig{Config: programConfig, UseSourceOfProjectReference: true},
-			ProgramHosts:  compiler.ProgramHosts{Host: host},
-		})
-		if diagnostics := program.GetConfigFileParsingDiagnostics(); len(diagnostics) > 0 {
-			return CompilerEligibility{}, fmt.Errorf("tsgo config diagnostics: %s", joinDiagnostics(diagnostics))
-		}
-		program.BindSourceFiles()
-		available := make(map[string]struct{}, len(program.SourceFiles()))
-		for _, source := range program.SourceFiles() {
-			available[normalizeSlash(source.FileName().AsString())] = struct{}{}
-		}
-		for _, file := range group.PrimaryFiles {
-			if _, ok := available[normalizeSlash(file)]; ok {
-				eligible[file] = struct{}{}
-			} else if !req.TsconfigFiles {
-				missingWalkFiles = append(missingWalkFiles, file)
-			}
-		}
+	files, err := normalizeFiles(req.Files)
+	if err != nil {
+		return CompilerEligibility{}, err
 	}
-	if len(missingWalkFiles) > 0 {
-		slices.Sort(missingWalkFiles)
-		synthetic, err := syntheticConfig(host, root, missingWalkFiles)
-		if err != nil {
-			return CompilerEligibility{}, err
+	exact, err := normalizeFiles(req.ExactFiles)
+	if err != nil {
+		return CompilerEligibility{}, err
+	}
+	trackedFS := trackResolutionInputs(osvfs.FS(), root)
+	host := compiler.NewCompilerHost(bundled.WrapFS(trackedFS), bundled.LibPath(), nil, nil, nil)
+	plan, err := planOrdinary(ctx, host, root, files, exact, req.TsconfigFiles, true, newConfigCache(host), &extractTiming{})
+	if err != nil {
+		return CompilerEligibility{}, err
+	}
+	report := CompilerEligibility{CompilerFiles: plan.compilerFiles(root, host)}
+	for i, file := range plan.files {
+		if file.owner != nil {
+			report.Files = append(report.Files, file.path)
 		}
-		program := compiler.NewProgram(compiler.ProgramOptions{
-			ProgramConfig: compiler.ProgramConfig{Config: synthetic, UseSourceOfProjectReference: true},
-			ProgramHosts:  compiler.ProgramHosts{Host: host},
-		})
-		if diagnostics := program.GetConfigFileParsingDiagnostics(); len(diagnostics) > 0 {
-			return CompilerEligibility{}, fmt.Errorf("synthetic tsconfig diagnostics: %s", joinDiagnostics(diagnostics))
+		item := report.CompilerFiles[i]
+		if item.SelectedConfig != nil {
+			report.Configurations = append(report.Configurations, *item.SelectedConfig)
 		}
-		program.BindSourceFiles()
-		available := make(map[string]struct{}, len(program.SourceFiles()))
-		for _, source := range program.SourceFiles() {
-			available[normalizeSlash(source.FileName().AsString())] = struct{}{}
+		if item.OwnerConfig != nil {
+			report.Configurations = append(report.Configurations, *item.OwnerConfig)
 		}
-		for _, file := range missingWalkFiles {
-			if _, ok := available[normalizeSlash(file)]; !ok {
-				return CompilerEligibility{}, fmt.Errorf("compiler membership is incomplete for %s", file)
-			}
-			eligible[file] = struct{}{}
-		}
-		report.Configurations = append(report.Configurations, "synthetic")
 	}
 	slices.Sort(report.Configurations)
 	report.Configurations = slices.Compact(report.Configurations)
-	for _, file := range req.Files {
-		if _, ok := eligible[file]; ok {
-			report.Files = append(report.Files, file)
-		}
-	}
 	return report, nil
 }

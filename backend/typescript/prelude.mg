@@ -79,3 +79,8 @@ type_is_promise(T) :- type_named(T, "lib", "Promise"), type_origin_kind(T, /lib)
 Decl signature_returns_awaited(Signature, Type).
 signature_returns_awaited(S, T) :- signature_returns(S, P), type_is_promise(P), type_arg(P, 0, T).
 signature_returns_awaited(S, T) :- signature_returns(S, T), !type_is_promise(T).
+
+Decl module_multi_config(Module).
+module_multi_config(Module) :- module_config(Module, A), module_config(Module, B), A != B.
+Decl fn_signature_unresolved(Fn).
+fn_signature_unresolved(Fn) :- fn_signature(Fn, Signature), signature_incomplete(Signature, _).

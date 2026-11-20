@@ -2,7 +2,6 @@ package lintaiapi
 
 import (
 	"context"
-	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -39,12 +38,13 @@ type auxiliarySourcePrograms struct {
 	configs       *configCache
 	timing        *extractTiming
 	programs      map[string]*auxiliarySourceProgram
+	usedConfigs   map[string]bool
 }
 
 func newAuxiliarySourcePrograms(ctx context.Context, host compiler.CompilerHost, workspaceRoot string, configs *configCache, timing *extractTiming) *auxiliarySourcePrograms {
 	return &auxiliarySourcePrograms{
 		ctx: ctx, host: host, workspaceRoot: workspaceRoot, configs: configs, timing: timing,
-		programs: make(map[string]*auxiliarySourceProgram),
+		programs: make(map[string]*auxiliarySourceProgram), usedConfigs: make(map[string]bool),
 	}
 }
 
@@ -123,6 +123,9 @@ func (a *auxiliarySourcePrograms) forEntry(entry configuredSourceEntry) (*auxili
 		inputExtractor.recordProgramInputs()
 		item.inputs = inputExtractor.inputs
 		a.timing.auxiliaryProgram += time.Since(started)
+	}
+	if configPath != "" {
+		a.usedConfigs[configPath] = true
 	}
 	file := item.program.GetSourceFile(tspath.RootedFilePathFromAbsolute(entry.SourcePath))
 	if file == nil || file.Symbol == nil || !ast.IsExternalOrCommonJSModule(file) {
@@ -243,10 +246,7 @@ func (e *extractor) applyConfiguredSourceEntries(entries []configuredSourceEntry
 		})
 		e.inputs = append(e.inputs, SnapshotInput{Path: entry.CheckedPath, Exists: true}, SnapshotInput{Path: entry.SourcePath, Exists: e.host.FS().FileExists(tspath.RootedFilePathFromAbsolute(entry.SourcePath))})
 		e.recordSourceConfigCandidates(entry.SourcePath)
-		sourceProgram, sourceOutcome := e.sourceViewInProgram(entry), ""
-		if sourceProgram == nil {
-			sourceProgram, sourceOutcome = auxiliary.forEntry(entry)
-		}
+		sourceProgram, sourceOutcome := auxiliary.forEntry(entry)
 		if sourceOutcome == "" {
 			// Auxiliary declaration anchors use the same immutable source-key
 			// cache as the primary context, including on an unchanged check.
@@ -304,20 +304,18 @@ func (e *extractor) applyConfiguredSourceEntries(entries []configuredSourceEntry
 		}
 		if sourceOutcome == "" {
 			sourceProgram.ex.recoverRetainedDeclarationMaps()
-			e.sourceProgramDeclarations = append(e.sourceProgramDeclarations, sourceProgram.ex.sortedDeclarations()...)
+			e.sourceProgramEndpoints = append(e.sourceProgramEndpoints, sourceProgram.ex.sortedSourceEndpoints()...)
 			e.declarationSourceCandidates = append(e.declarationSourceCandidates, sourceProgram.ex.declarationSourceCandidates...)
 			e.declarationSources = append(e.declarationSources, sourceProgram.ex.declarationSources...)
 			e.declarationSourceOutcomes = append(e.declarationSourceOutcomes, sourceProgram.ex.declarationSourceOutcomes...)
 			e.inputs = append(e.inputs, sourceProgram.ex.inputs...)
 			e.trackingKeyBuilds += sourceProgram.ex.trackingKeyBuilds
-			for id, support := range sourceProgram.ex.tracking {
-				if e.tracking == nil {
-					e.tracking = make(map[string]TrackingSupport)
+			for id, support := range sourceProgram.ex.sourceTracking {
+				if e.sourceTracking == nil {
+					e.sourceTracking = make(map[string]TrackingSupport)
 				}
-				if previous, exists := e.tracking[id]; !exists {
-					e.tracking[id] = support
-				} else if !reflect.DeepEqual(previous, support) {
-					e.trackingConflict = id
+				if _, exists := e.sourceTracking[id]; !exists {
+					e.sourceTracking[id] = support
 				}
 			}
 		}
@@ -397,21 +395,6 @@ func bindingDeclarationEndpoints(e *extractor, binding moduleBinding) ([]string,
 	return sortedUnique(ids), sortedUnique(reasons)
 }
 
-// sourceViewInProgram uses the consumer's checker when the configured source
-// entry is already part of the checked program. Only a source entry outside
-// that program needs an auxiliary program.
-func (e *extractor) sourceViewInProgram(entry configuredSourceEntry) *auxiliarySourceView {
-	file := e.program.GetSourceFile(tspath.RootedFilePathFromAbsolute(entry.SourcePath))
-	if file == nil || file.IsDeclarationFile || file.Symbol == nil || !ast.IsExternalOrCommonJSModule(file) {
-		return nil
-	}
-	ex := &extractor{
-		workspaceRoot: e.workspaceRoot, host: e.host, program: e.program, resolver: e.resolver, checker: e.checker,
-		declarations: make(map[string]*DeclarationFact), semanticBindingCache: e.bindingCache(),
-	}
-	return &auxiliarySourceView{file: file, ex: ex}
-}
-
 type moduleBinding struct {
 	name             string
 	space            string
@@ -429,7 +412,7 @@ func (e *extractor) moduleBindings(file *ast.SourceFile) []moduleBinding {
 }
 
 func (e *extractor) addDeclarationEndpoint(node *ast.Node, symbol *ast.Symbol, publicName string) (string, bool) {
-	id, _, supported := e.addDeclarationMetadata(node, symbol, publicName)
+	id, _, supported := e.collectDeclarationMetadata(node, symbol, publicName, true)
 	return id, supported
 }
 

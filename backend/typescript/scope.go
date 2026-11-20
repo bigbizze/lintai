@@ -9,14 +9,15 @@ import (
 )
 
 type ScopeExplanation struct {
-	WorkspaceExclude []string               `json:"exclude"`
-	WorkspaceInclude []string               `json:"include"`
-	ExactSources     []string               `json:"sources"`
-	Selected         []workspace.ScopeMatch `json:"selected"`
-	CompilerEligible []string               `json:"compilerEligible"`
-	CompilerExcluded []string               `json:"compilerExcluded"`
-	Configurations   []string               `json:"configurations"`
-	PrunedBoundaries []string               `json:"prunedBoundaries"`
+	WorkspaceExclude []string                 `json:"exclude"`
+	WorkspaceInclude []string                 `json:"include"`
+	ExactSources     []string                 `json:"sources"`
+	Selected         []workspace.ScopeMatch   `json:"selected"`
+	CompilerEligible []string                 `json:"compilerEligible"`
+	CompilerExcluded []string                 `json:"compilerExcluded"`
+	Configurations   []string                 `json:"configurations"`
+	CompilerFiles    []lintaiapi.CompilerFile `json:"compilerFiles"`
+	PrunedBoundaries []string                 `json:"prunedBoundaries"`
 }
 
 // ExplainScope uses the production selector and compiler grouping without
@@ -50,14 +51,8 @@ func ExplainScope(ctx context.Context, workspaceRoot string, options Options) (S
 	}
 	slices.Sort(report.ExactSources)
 	report.ExactSources = slices.Compact(report.ExactSources)
-	for _, config := range compiler.Configurations {
-		if config != "synthetic" {
-			config = workspace.RelativePath(plan.Root, config)
-		}
-		report.Configurations = append(report.Configurations, config)
-	}
-	slices.Sort(report.Configurations)
-	report.Configurations = slices.Compact(report.Configurations)
+	report.Configurations = slices.Clone(compiler.Configurations)
+	report.CompilerFiles = slices.Clone(compiler.CompilerFiles)
 	eligible := make(map[string]struct{}, len(compiler.Files))
 	for _, file := range compiler.Files {
 		eligible[file] = struct{}{}

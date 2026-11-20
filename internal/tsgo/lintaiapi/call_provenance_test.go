@@ -2,15 +2,18 @@ package lintaiapi
 
 import (
 	"context"
-	"encoding/json"
+	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/bigbizze/lintai/internal/tsgo/internal/ast"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/bundled"
+	"github.com/bigbizze/lintai/internal/tsgo/internal/checker"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/compiler"
+	"github.com/bigbizze/lintai/internal/tsgo/internal/tspath"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/vfs/osvfs"
 )
 
@@ -28,6 +31,7 @@ class NestedGetter {
     return new NestedWriter().write;
   }
 }
+
 interface StringCall { invoke: (value: string) => void }
 interface NumberCall { invoke: (value: number) => void }
 interface Capabilities { store: Reader & Writer }
@@ -90,14 +94,21 @@ function exercise(cap: Capabilities, other: Other, inline: Inline, getter: Gette
 	files := writeWorkspace(t, root, map[string]string{"src/calls.ts": source})
 	host := compiler.NewCompilerHost(bundled.WrapFS(osvfs.FS()), bundled.LibPath(), nil, nil, nil)
 	// Inspect raw per-program observations before merge and retention.
-	group := configGroup{PrimaryFiles: files}
 	timing := &extractTiming{}
-	program, err := prepareGroupProgram(host, root, group, timing)
+	configs := newConfigCache(host)
+	plan, err := planOrdinary(context.Background(), host, root, files, nil, false, false, configs, timing)
 	if err != nil {
 		t.Fatal(err)
 	}
+	owner := plan.programs[0]
+	operations := operationsForRelations(nil)
+	operations.plan, operations.owner = plan, owner
+	operations.moduleFiles = make(map[string]bool)
+	for file := range plan.owners {
+		operations.moduleFiles[file] = true
+	}
 	partial, missing, err := buildSnapshotForGroup(context.Background(), host, root, files,
-		group, program, nil, nil, nil, nil, nil, timing)
+		owner.group, owner.prepared, nil, nil, configs, nil, nil, timing, operations)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,10 +125,10 @@ function exercise(cap: Capabilities, other: Other, inline: Inline, getter: Gette
 	}
 	observations := make(map[string]callDeclarationObservation)
 	for _, observation := range partial.callDeclarationObservations {
-		if _, duplicate := observations[observation.InvocationKey]; duplicate {
+		if _, duplicate := observations[observation.Site]; duplicate {
 			t.Fatalf("duplicate invocation observation: %+v", observation)
 		}
-		observations[observation.InvocationKey] = observation
+		observations[observation.Site] = observation
 	}
 	runtimeLocations := make(map[string]SourceLocation)
 	for _, call := range partial.CallsUnresolved {
@@ -174,14 +185,17 @@ function exercise(cap: Capabilities, other: Other, inline: Inline, getter: Gette
 			if offset < 2 {
 				t.Fatal("fixture call not found")
 			}
-			kind := test.kind
-			if kind == ast.KindUnknown {
-				kind = ast.KindCallExpression
+			line := strings.Count(source[:offset], "\n") + 1
+			column := offset - strings.LastIndex(source[:offset], "\n")
+			var observation callDeclarationObservation
+			for site, location := range runtimeLocations {
+				if location.StartLine == line && location.StartColumn == column {
+					observation = observations[site]
+					break
+				}
 			}
-			key, _ := json.Marshal([]any{"src/calls.ts", offset, offset + len(test.call), kind})
-			observation, ok := observations[string(key)]
-			if !ok {
-				t.Fatalf("missing observation for %s", key)
+			if observation.Site == "" {
+				t.Fatalf("missing observation for %s", test.call)
 			}
 			location, ok := runtimeLocations[observation.Site]
 			if !ok || location.StartLine != strings.Count(source[:offset], "\n")+1 {
@@ -213,7 +227,7 @@ function exercise(cap: Capabilities, other: Other, inline: Inline, getter: Gette
 				shared = append(shared, observation.Declaration)
 			}
 			if test.owner == "Overloaded" {
-				if declaration.Function != "" || len(declaration.FunctionObservations) != 0 {
+				if declaration.Function != "" {
 					t.Fatalf("overload incorrectly linked to implementation function: %+v", declaration)
 				}
 				overloads = append(overloads, observation)
@@ -260,276 +274,165 @@ function exercise(cap: Capabilities, other: Other, inline: Inline, getter: Gette
 	}
 }
 
-// V06, V08, V09, V10, V12: reconcile the same sites across checker contexts.
-func TestCallProvenanceProgramReconciliationAndRetention(t *testing.T) {
+func TestCallProvenanceFollowsPlannedOwner(t *testing.T) {
 	root := t.TempDir()
-	const source = `import { capability, uncertainMember, uncertain, task, callback } from "contract";
+	const source = `import { task } from "contract";
 import { stable } from "./stable";
-capability.write();
-uncertainMember.write();
-uncertain();
 task();
 stable();
-Math.abs(-1);
 declare function make(): () => void;
 declare function fluent(): { next(): void };
-function partition() {
 make()();
 fluent().next();
-}
 const values: number[] = [];
 values.map(task);
-values.map(callback);
-function escaped(first: (n: number) => number, second: (n: number) => number) {
-  values.map(first);
-  values.map(second);
-}
+values.map((value) => value);
 `
-	config := `{"compilerOptions":{"strict":true,"target":"es2022","module":"preserve","moduleResolution":"bundler","baseUrl":".","paths":{"contract":["./contract.ts"]}},"files":["../shared/calls.ts"]}`
-	files := writeWorkspace(t, root, map[string]string{
+	config := `{"compilerOptions":{"strict":true,"module":"preserve","moduleResolution":"bundler","baseUrl":".","paths":{"contract":["./contract.ts"]}},"files":["../shared/calls.ts","../shared/stable.ts"]}`
+	writeWorkspace(t, root, map[string]string{
+		"tsconfig.json":      `{"files":[],"references":[{"path":"./red"},{"path":"./blue"}]}`,
 		"red/tsconfig.json":  config,
 		"blue/tsconfig.json": config,
-		"red/contract.ts": `interface Writer { write(): void }
-export declare const capability: Writer;
-export declare const uncertainMember: Writer;
-export function uncertain(): number { return 1; }
-export function task(): number { return 1; }
-export function callback(value: number): number { return value; }`,
-		"blue/contract.ts": `interface Writer { write(): void }
-export declare const capability: Writer;
-export declare const uncertainMember: any;
-export declare const uncertain: any;
-export function task(): number { return 2; }
-export declare const callback: (value: number) => number;`,
-		"shared/calls.ts":  source,
-		"shared/stable.ts": `export function stable(): number { return 1; }`,
-		"unrelated.ts":     `export const unrelated = 1;`,
+		"red/contract.ts":    `export function task(): number { return 1; }`,
+		"blue/contract.ts":   `export declare const task: any;`,
+		"shared/calls.ts":    source,
+		"shared/stable.ts":   `export function stable(): number { return 1; }`,
 	})
-	host := compiler.NewCompilerHost(bundled.WrapFS(osvfs.FS()), bundled.LibPath(), nil, nil, nil)
-	configs := newConfigCache(host)
-	var partials []*Snapshot
-	// BuildSnapshot normally assigns each primary file to its owning group.
-	// Deliberately analyze the SAME primary file under two real path mappings
-	// here to reach differing observations without widening runtime traversal.
-	for _, group := range []string{"red", "blue"} {
-		configPath := filepath.Join(root, group, "tsconfig.json")
-		parsed, err := configs.program(configPath)
-		if err != nil {
-			t.Fatal(err)
-		}
-		config := configGroup{ConfigPath: configPath, Config: parsed, PrimaryFiles: []string{
-			filepath.Join(root, "shared/calls.ts"), filepath.Join(root, "shared/stable.ts"),
-		}}
-		timing := &extractTiming{}
-		program, err := prepareGroupProgram(host, root, config, timing)
-		if err != nil {
-			t.Fatal(err)
-		}
-		partial, missing, err := buildSnapshotForGroup(context.Background(), host, root, files,
-			config, program, nil, nil, configs, nil, nil, timing)
-		if err != nil || len(missing) != 0 {
-			t.Fatalf("build %s: missing=%v err=%v", group, missing, err)
-		}
-		partials = append(partials, partial)
-	}
-	// This checked program never analyzes the invocations. It must not count
-	// as an empty/incomplete observation of them.
-	unrelated := filepath.Join(root, "unrelated.ts")
-	otherGroup := configGroup{PrimaryFiles: []string{unrelated}}
-	timing := &extractTiming{}
-	program, err := prepareGroupProgram(host, root, otherGroup, timing)
+	req := BuildSnapshotRequest{WorkspaceRoot: root, Files: []string{filepath.Join(root, "shared/calls.ts"), filepath.Join(root, "shared/stable.ts")}, TsconfigFiles: true}
+	first, err := BuildSnapshot(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	absent, _, err := buildSnapshotForGroup(context.Background(), host, root, files,
-		otherGroup, program, nil, nil, configs, nil, nil, timing)
+	if err := os.WriteFile(filepath.Join(root, "blue/contract.ts"), []byte(`export function task(): string { return "changed"; }`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	second, err := BuildSnapshot(context.Background(), req)
 	if err != nil {
 		t.Fatal(err)
 	}
-	observationAt := func(partial *Snapshot, call string) callDeclarationObservation {
-		t.Helper()
-		offset := strings.Index(source, "\n"+call) + 1
-		if offset == 0 {
-			t.Fatalf("fixture call not found: %s", call)
-		}
-		key, _ := json.Marshal([]any{"shared/calls.ts", offset, offset + len(call), ast.KindCallExpression})
-		for _, observation := range partial.callDeclarationObservations {
-			if observation.InvocationKey == string(key) {
-				return observation
-			}
-		}
-		t.Fatalf("missing actual checker observation for %s", call)
-		return callDeclarationObservation{}
+	if !reflect.DeepEqual(first.Functions, second.Functions) || !reflect.DeepEqual(first.CallEdges, second.CallEdges) ||
+		!reflect.DeepEqual(first.CallsUnresolved, second.CallsUnresolved) || !reflect.DeepEqual(first.CallDeclarations, second.CallDeclarations) ||
+		!reflect.DeepEqual(first.ImportsOpaque, second.ImportsOpaque) || !reflect.DeepEqual(first.ImportEdges, second.ImportEdges) ||
+		!reflect.DeepEqual(first.Exports, second.Exports) || !reflect.DeepEqual(first.Sites, second.Sites) {
+		t.Fatal("an alternate non-owner view changed direct observations")
 	}
-	// V09, V10, V12: classification changes keep the syntax identity, and
-	// retracting a conflicting context restores the surviving observation.
-	taskSite := observationAt(partials[0], "task()").Site
-	if taskSite != observationAt(partials[1], "task()").Site {
-		t.Fatal("runtime target changed source identity")
-	}
-	combined := &Snapshot{}
-	mergeSnapshot(combined, partials[0])
-	mergeSnapshot(combined, partials[1])
-	callbackLine := strings.Count(source[:strings.Index(source, "values.map(callback)")], "\n") + 1
-	callbackSite := ""
-	for _, site := range combined.Sites {
-		if site.Range.StartLine == callbackLine && site.Range.StartColumn == len("values.map(")+1 {
-			callbackSite = site.ID
+	line := func(text string) int { return strings.Count(source[:strings.Index(source, text)], "\n") + 1 }
+	var taskSite string
+	for _, call := range first.CallsUnresolved {
+		if call.Range.StartLine == line("task();") {
+			taskSite = call.SemanticKey
 		}
 	}
-	if callbackSite == "" || !slices.ContainsFunc(combined.FunctionEscapes, func(item FunctionEscape) bool {
-		return item.Site == callbackSite && item.Target != "" && !item.Unknown
-	}) || !slices.ContainsFunc(combined.FunctionEscapes, func(item FunctionEscape) bool {
-		return item.Site == callbackSite && item.Target == "" && item.Unknown
-	}) {
-		t.Fatalf("callback contexts did not retain both target and unknown at one site: %q %+v", callbackSite, combined.FunctionEscapes)
+	if taskSite == "" {
+		t.Fatal("excluded implementation was not unresolved at runtime")
 	}
-	finalizeCallTargets(combined)
-	if !slices.Contains(combined.CallTargetConflicts, taskSite) {
-		t.Fatalf("missing target conflict for %s", taskSite)
+	var taskDeclaration string
+	for _, item := range first.CallDeclarations {
+		if item.Site == taskSite {
+			taskDeclaration = item.Declaration
+		}
 	}
-	surviving := &Snapshot{}
-	mergeSnapshot(surviving, partials[0])
-	finalizeCallTargets(surviving)
-	if slices.Contains(surviving.CallTargetConflicts, taskSite) {
-		t.Fatalf("removed context left a conflict for %s", taskSite)
+	if taskDeclaration == "" {
+		t.Fatal("excluded implementation lost independent declaration evidence")
 	}
-
-	merged := &Snapshot{}
-	for _, partial := range []*Snapshot{partials[0], partials[1], absent, partials[0]} {
-		mergeSnapshot(merged, partial)
+	if declaration := semanticDeclaration(t, first, taskDeclaration); declaration.Location.File != "red/contract.ts" || declaration.Function != "" {
+		t.Fatalf("unexpected owner-selected declaration: %+v", declaration)
 	}
-	finalizeSemanticObservations(merged)
-	keepModuleFiles(merged)
-	finalizeCallDeclarationObservations(merged)
-	keepRetainedSemantics(merged)
-	keepReachableTypes(merged)
-	sortSnapshot(merged)
-
-	for _, test := range []struct {
-		call                string
-		conflict, different bool
-		incomplete          bool
-	}{
-		{call: "capability.write()", conflict: true},
-		{call: "uncertainMember.write()", conflict: true, incomplete: true},
-		{call: "uncertain()", conflict: true, incomplete: true},
-		{call: "task()", conflict: true},
-		{call: "stable()"},
-		{call: "Math.abs(-1)"},
-	} {
-		t.Run(test.call, func(t *testing.T) {
-			red := observationAt(partials[0], test.call)
-			blue := observationAt(partials[1], test.call)
-			if (red.Site != blue.Site) != test.different {
-				t.Fatalf("fixture did not reach expected runtime ID partition: red=%+v blue=%+v", red, blue)
-			}
-			if test.incomplete {
-				if red.Declaration == "" || blue.Declaration != "" || !slices.Equal(blue.Incomplete, []string{"unresolved"}) {
-					t.Fatalf("fixture did not reach complete/incomplete partition: red=%+v blue=%+v", red, blue)
-				}
-			} else if red.Declaration == "" || blue.Declaration == "" || len(red.Incomplete)+len(blue.Incomplete) != 0 {
-				t.Fatalf("fixture lacks complete checked evidence: red=%+v blue=%+v", red, blue)
-			}
-			if test.call == "capability.write()" && (red.Member == nil || blue.Member == nil || *red.Member == *blue.Member) {
-				t.Fatal("fixture did not select differing lexical member tuples")
-			}
-			for _, observation := range []callDeclarationObservation{red, blue} {
-				if test.call == "Math.abs(-1)" {
-					if !slices.ContainsFunc(merged.ExternalCalls, func(call ExternalCall) bool {
-						return call.SemanticKey == observation.Site && call.FromModule
-					}) {
-						t.Fatal("lost module-scope external runtime classification")
-					}
-				} else if test.call != "stable()" {
-					if !slices.ContainsFunc(merged.CallsUnresolved, func(call CallUnresolved) bool {
-						return call.SemanticKey == observation.Site && call.FromModule
-					}) {
-						t.Fatal("lost unresolved site when filtering the runtime target")
-					}
-				}
-				if got := slices.Contains(merged.CallDeclarationIncomplete, CallDeclarationIncompleteFact{Site: observation.Site, Reason: "conflict"}); got != test.conflict {
-					t.Fatalf("conflict=%v for %+v", got, observation)
-				}
-				if observation.Declaration != "" {
-					fact := CallDeclarationFact{Site: observation.Site, Declaration: observation.Declaration}
-					if !slices.Contains(merged.CallDeclarations, fact) {
-						t.Fatalf("lost original declaration/site pair: %+v", fact)
-					}
-					declaration := semanticDeclaration(t, merged, observation.Declaration)
-					if test.call == "Math.abs(-1)" && declaration.OriginKind != OriginKindLib {
-						t.Fatalf("lost checked library declaration: %+v", declaration)
-					}
-					if test.call == "task()" && (len(declaration.TypeSubjects) != 0 || len(declaration.Types) != 0 || len(declaration.TypeIncomplete) != 0 || declaration.Function != "") {
-						t.Fatalf("call-only endpoint retained a type or filtered function: %+v", declaration)
-					}
-					if test.call == "stable()" && declaration.Function == "" {
-						t.Fatal("lost surviving direct function association")
-					}
-					if observation.Member != nil {
-						if !slices.Contains(merged.DeclarationMembers, *observation.Member) {
-							t.Fatalf("lost lexical member: %+v", observation.Member)
-						}
-						owner := semanticDeclaration(t, merged, observation.Member.OwnerDeclaration)
-						if test.call == "capability.write()" && owner.Location.File != "red/contract.ts" && owner.Location.File != "blue/contract.ts" {
-							t.Fatalf("wrong lexical owner: %+v", owner)
-						}
-						if len(owner.Types) != 0 {
-							t.Fatalf("metadata-only owner became a type root: %+v", owner)
-						}
-					}
-				}
-				for _, reason := range observation.Incomplete {
-					if !slices.Contains(merged.CallDeclarationIncomplete, CallDeclarationIncompleteFact{Site: observation.Site, Reason: reason}) {
-						t.Fatalf("lost original incomplete reason: %+v", observation)
-					}
-				}
-				other := blue
-				if observation.Site == blue.Site {
-					other = red
-				}
-				if test.different && other.Declaration != "" && slices.Contains(merged.CallDeclarations, CallDeclarationFact{Site: observation.Site, Declaration: other.Declaration}) {
-					t.Fatal("invented cross-program declaration/site pair")
-				}
-			}
-		})
+	if !slices.ContainsFunc(first.CallEdges, func(call CallEdge) bool { return call.ToName == "stable" }) {
+		t.Fatal("call to a retained implementation was lost")
 	}
-	t.Run("nested and fluent invocation partition", func(t *testing.T) {
-		keys := make(map[string]bool)
-		for _, call := range []string{"make()", "make()()", "fluent()", "fluent().next()"} {
-			red := observationAt(partials[0], call)
-			blue := observationAt(partials[1], call)
-			if keys[red.InvocationKey] || red.InvocationKey != blue.InvocationKey {
-				t.Fatalf("invocations collided or lost cross-program correlation: red=%+v blue=%+v", red, blue)
-			}
-			keys[red.InvocationKey] = true
-			for _, observation := range []callDeclarationObservation{red, blue} {
-				if observation.Declaration == "" || !slices.Contains(merged.CallDeclarations, CallDeclarationFact{Site: observation.Site, Declaration: observation.Declaration}) {
-					t.Fatalf("lost invocation's own declaration/site pair: %+v", observation)
-				}
-				if slices.Contains(merged.CallDeclarationIncomplete, CallDeclarationIncompleteFact{Site: observation.Site, Reason: "conflict"}) {
-					t.Fatalf("false nested/fluent invocation conflict: %+v", observation)
-				}
+	for _, text := range []string{"make()();", "fluent().next();"} {
+		ids := map[string]bool{}
+		for _, site := range first.Sites {
+			if site.Range.StartLine == line(text) && slices.ContainsFunc(first.CallDeclarations, func(item CallDeclarationFact) bool { return item.Site == site.ID }) {
+				ids[site.ID] = true
 			}
 		}
-	})
-	// A callback argument is transfer evidence, never an invocation.
-	if len(merged.FunctionEscapes) == 0 {
-		t.Fatal("missing direct callback evidence")
+		if len(ids) != 2 {
+			t.Fatalf("nested invocations lost their separate declaration sites: %s: %v", text, ids)
+		}
 	}
-	for _, escape := range merged.FunctionEscapes {
-		if slices.ContainsFunc(merged.CallsUnresolved, func(call CallUnresolved) bool { return call.SemanticKey == escape.Site }) || slices.ContainsFunc(merged.CallDeclarationIncomplete, func(item CallDeclarationIncompleteFact) bool { return item.Site == escape.Site }) {
+	if len(first.FunctionEscapes) < 2 {
+		t.Fatalf("missing callback evidence: %+v", first.FunctionEscapes)
+	}
+	for _, escape := range first.FunctionEscapes {
+		if slices.ContainsFunc(first.CallDeclarations, func(item CallDeclarationFact) bool { return item.Site == escape.Site }) {
 			t.Fatalf("callback argument became an invocation: %+v", escape)
 		}
 	}
-	for i, fact := range merged.CallDeclarations {
-		semanticDeclaration(t, merged, fact.Declaration)
-		if i > 0 && fact == merged.CallDeclarations[i-1] {
-			t.Fatalf("duplicate public declaration fact: %+v", fact)
+	seen := map[CallDeclarationFact]bool{}
+	for _, fact := range first.CallDeclarations {
+		if seen[fact] {
+			t.Fatalf("duplicate declaration fact: %+v", fact)
 		}
+		seen[fact] = true
+		semanticDeclaration(t, first, fact.Declaration)
 	}
-	for _, member := range merged.DeclarationMembers {
-		semanticDeclaration(t, merged, member.Declaration)
-		semanticDeclaration(t, merged, member.OwnerDeclaration)
+}
+
+func TestObservationOriginValidation(t *testing.T) {
+	root := t.TempDir()
+	files := writeWorkspace(t, root, map[string]string{
+		"a/tsconfig.json": `{"files":["a.ts"]}`,
+		"a/a.ts":          `export function a(): string { return ""; }`,
+		"b/tsconfig.json": `{"files":["b.ts"]}`,
+		"b/b.ts":          `export function b(): number { return 1; }`,
+		"c/tsconfig.json": `{"files":["included.ts"]}`,
+		"c/included.ts":   `export const included = 1;`,
+		"c/fallback.ts":   `export const fallback = 1;`,
+		"free.ts":         `export const free = 1;`,
+	})
+	host := compiler.NewCompilerHost(bundled.WrapFS(osvfs.FS()), bundled.LibPath(), nil, nil, nil)
+	plan, err := planOrdinary(context.Background(), host, root, files, nil, false, false, newConfigCache(host), &extractTiming{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := func(relative string) string { return filepath.ToSlash(filepath.Join(root, relative)) }
+	a, b := plan.owners[path("a/a.ts")], plan.owners[path("b/b.ts")]
+	initial, fallback := plan.owners[path("free.ts")], plan.owners[path("c/fallback.ts")]
+	if a == nil || b == nil || initial == nil || fallback == nil || initial == fallback || initial.group.ConfigPath != "" || fallback.group.ConfigPath != "" {
+		t.Fatalf("fixture did not create distinct configured and synthetic programs: %+v", plan.files)
+	}
+	file := a.prepared.program.GetSourceFile(tspath.RootedFilePathFromAbsolute(path("a/a.ts")))
+	other := b.prepared.program.GetSourceFile(tspath.RootedFilePathFromAbsolute(path("b/b.ts")))
+	typeChecker, done := a.prepared.program.GetTypeChecker(context.Background())
+	defer done()
+	signature := typeChecker.GetSignatureFromDeclaration(file.Statements.Nodes[0])
+	if signature == nil {
+		t.Fatal("fixture has no signature")
+	}
+	typ := typeChecker.GetReturnTypeOfSignature(signature)
+	ex := &extractor{
+		workspaceRoot: root, program: a.prepared.program, checker: typeChecker, plan: plan, owner: a,
+		operations: semanticOperations{typeStructure: true},
+		typeFacts:  make(map[string]*TypeFact), typeIDs: make(map[*checker.Type]string),
+		typeKeys: make(map[typeKeyAt]typeKeyResult), typeFactSeen: make(map[*checker.Type]struct{}),
+		typeShapes: make(map[*checker.Type]*typeShape), typeTruncated: make(map[*checker.Type]struct{}),
+	}
+	valid := observationOrigin{rootFile: path("a/a.ts"), context: a}
+	wrong := observationOrigin{rootFile: valid.rootFile, context: b}
+	if got := ex.emitFunctionType(typ, wrong); got != "" || ex.originError == nil || len(ex.typeFacts) != 0 {
+		t.Fatalf("wrong real context mutated type state: id=%q error=%v", got, ex.originError)
+	}
+	ex.originError = nil
+	if got := ex.emitFunctionType(typ, valid); got == "" || ex.originError != nil {
+		t.Fatalf("valid type contribution failed: id=%q error=%v", got, ex.originError)
+	}
+	before := len(ex.typeFacts)
+	if got := ex.emitFunctionType(typ, wrong); got != "" || ex.originError == nil || len(ex.typeFacts) != before {
+		t.Fatalf("wrong context bypassed a populated type cache: id=%q error=%v", got, ex.originError)
+	}
+	ex.originError = nil
+	if ex.validateOrigin(valid, "function", other.AsNode()) || ex.originError == nil {
+		t.Fatal("wrong direct-root node was accepted")
+	}
+	ex.originError = nil
+	ex.collectAccess(other.AsNode(), nil, valid)
+	if ex.originError == nil || len(ex.accesses) != 0 {
+		t.Fatal("direct source-site collector accepted a foreign node")
+	}
+	synthetic := &extractor{plan: plan, owner: initial, program: initial.prepared.program}
+	if synthetic.validateOrigin(observationOrigin{rootFile: path("free.ts"), context: fallback}, "type", nil) || synthetic.originError == nil {
+		t.Fatal("distinct synthetic contexts were conflated")
 	}
 }
