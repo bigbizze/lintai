@@ -148,6 +148,19 @@ const { build, version: esbuildVersion } = await import(
 const { default: ts } = await import(
 	pathToFileURL(path.join(toolRoot, "typescript/lib/typescript.js"))
 );
+const helper = fileURLToPath(import.meta.url);
+const launcher = path.join(process.argv[3], "scripts", "bundle-rule.mjs");
+const helperOriginalPath = await fs.realpath(originalHelperPath(helper));
+toolSnapshots.push({ absolutePath: helperOriginalPath, bytes: await fs.readFile(helper) });
+if (launcher !== helper) {
+	toolSnapshots.push({
+		absolutePath: await fs.realpath(originalHelperPath(launcher)),
+		bytes: await fs.readFile(launcher),
+	});
+}
+for (const snapshot of toolSnapshots) {
+	snapshot.sha256 = createHash("sha256").update(snapshot.bytes).digest("hex");
+}
 
 function readStdin() {
 	return new Promise((resolve, reject) => {
@@ -310,22 +323,10 @@ function originalHelperPath(staged) {
 }
 
 async function captureTools(inputs, workspaceRoot, repoRoot) {
-	const helper = fileURLToPath(import.meta.url);
-	const launcher = path.join(process.argv[3], "scripts", "bundle-rule.mjs");
-	const snapshots = [...toolSnapshots];
-	snapshots.push({
-		absolutePath: await fs.realpath(originalHelperPath(helper)),
-		bytes: await fs.readFile(helper),
-	});
-	if (launcher !== helper)
-		snapshots.push({
-			absolutePath: await fs.realpath(originalHelperPath(launcher)),
-			bytes: await fs.readFile(launcher),
-		});
-	for (const { absolutePath, bytes } of snapshots) {
+	for (const { absolutePath, sha256 } of toolSnapshots) {
 		const observation = {
 			path: lockPath(absolutePath, workspaceRoot, repoRoot),
-			sha256: createHash("sha256").update(bytes).digest("hex"),
+			sha256,
 			absolutePath,
 		};
 		const previous = inputs.get(absolutePath);
@@ -500,7 +501,6 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 			}
 			if (directory === path.dirname(directory)) break;
 		}
-		await copy(workspaceRoot);
 		// Capture the named package candidates that native resolution can try
 		// outside the workspace, including missing candidates and symlinks.
 		for (const { resolveDir, specifier } of lookups) {
@@ -528,19 +528,10 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 		const configInputs = new Map();
 		const probes = collectConfigInputs(sourceFiles, configInputs, workspaceRoot, repoRoot);
 		for (const file of sourceFiles) {
-			if (file.startsWith(`${workspaceRoot}${path.sep}`)) continue;
-			let directory = path.dirname(file);
-			let packageRoot;
-			for (;;) {
-				if (fsSync.existsSync(path.join(directory, "package.json"))) {
-					packageRoot = directory;
-					break;
-				}
-				if (directory === path.dirname(directory)) break;
-				directory = path.dirname(directory);
-			}
-			if (packageRoot) await copy(packageRoot);
-			else await copy(file);
+			// The lookup candidates and config inputs supply resolution evidence;
+			// a source's containing package tree need not be copied wholesale.
+			await copyAncestorLinks(file);
+			await copy(file);
 		}
 		for (const input of configInputs.values()) {
 			await copyAncestorLinks(input.absolutePath);
@@ -704,8 +695,8 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 		}
 
 		// Package imports and browser mappings can redirect an observed lookup
-		// to a second, otherwise invisible bare-package lookup. Capture those
-		// candidates too, including candidates closer than the selected package.
+		// to otherwise invisible bare or relative candidates. Capture them too,
+		// including candidates closer than the selected package.
 		const processedPackages = new Set();
 		for (;;) {
 			const file = [...jsonBytes.keys()].find(
@@ -719,28 +710,35 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 			).config;
 			if (!metadata || typeof metadata !== "object") continue;
 			const redirected = new Set();
+			const relative = new Set();
 			const collect = (value, pattern) => {
 				if (typeof value === "string") {
 					if (
 						value &&
-						!value.startsWith(".") &&
 						!value.startsWith("#") &&
 						!path.isAbsolute(value) &&
 						!builtinSpecifierSet.has(value)
 					) {
-						if (!value.includes("*")) redirected.add(value);
+						const targets = value.startsWith(".") ? relative : redirected;
+						if (!value.includes("*")) targets.add(value);
 						else if (pattern) {
 							const star = pattern.indexOf("*");
 							const prefix = pattern.slice(0, star);
 							const suffix = pattern.slice(star + 1);
 							for (const { specifier } of lookups) {
+								const request =
+									pattern.startsWith(".") &&
+									typeof metadata.name === "string" &&
+									specifier.startsWith(`${metadata.name}/`)
+										? `.${specifier.slice(metadata.name.length)}`
+										: specifier;
 								if (
-									specifier.startsWith(prefix) &&
-									specifier.endsWith(suffix) &&
-									specifier.length >= prefix.length + suffix.length
+									request.startsWith(prefix) &&
+									request.endsWith(suffix) &&
+									request.length >= prefix.length + suffix.length
 								) {
-									const match = specifier.slice(prefix.length, specifier.length - suffix.length);
-									redirected.add(value.replaceAll("*", match));
+									const match = request.slice(prefix.length, request.length - suffix.length);
+									targets.add(value.replaceAll("*", match));
 								}
 							}
 						}
@@ -754,6 +752,7 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 			collect(metadata.browser);
 			collect(metadata.exports);
 			const packageDir = path.dirname(file);
+			for (const target of relative) await sourceCandidates(path.resolve(packageDir, target));
 			const directories = new Set([packageDir]);
 			for (const { resolveDir } of lookups) {
 				if (!resolveDir) continue;
@@ -914,9 +913,7 @@ async function ruleHash(
 						? 1
 						: 0,
 	);
-	const scriptHash = inputs.get(
-		await fs.realpath(originalHelperPath(fileURLToPath(import.meta.url))),
-	).sha256;
+	const scriptHash = inputs.get(helperOriginalPath).sha256;
 	const hash = createHash("sha256")
 		.update(
 			JSON.stringify({
@@ -1306,7 +1303,6 @@ for (const request of requests) {
 			[discoveryPrepare.metafile, discoveryPure.metafile],
 		);
 
-		const scriptPath = await fs.realpath(originalHelperPath(fileURLToPath(import.meta.url)));
 		results.push({
 			rulePath,
 			prepareBundlePath,
@@ -1321,7 +1317,7 @@ for (const request of requests) {
 					esbuild: esbuildVersion,
 					configResolver: ts.version,
 					binaryOverride,
-					script: inputs.find(({ absolutePath }) => absolutePath === scriptPath).sha256,
+					script: inputs.find(({ absolutePath }) => absolutePath === helperOriginalPath).sha256,
 				},
 			},
 		});

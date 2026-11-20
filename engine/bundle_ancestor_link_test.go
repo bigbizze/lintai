@@ -3,8 +3,10 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/bigbizze/lintai/bundle"
@@ -102,5 +104,81 @@ func TestBundleAncestorPackageLink(t *testing.T) {
 		if got := message(nearer); got != "nearer" || nearer.Hash == outer.Hash {
 			t.Fatalf("%s nearer redirect: message=%q hash changed=%v", test.name, got, nearer.Hash != outer.Hash)
 		}
+	}
+}
+
+func TestBundleRelativeRedirectCandidateDuringCapture(t *testing.T) {
+	repo, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	control := filepath.Join(t.TempDir(), "control")
+	if err := os.WriteFile(control, []byte("disarmed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	asset := bundleEditAsset(t, repo, control)
+	helper := filepath.Join(asset, "scripts", "bundle-rule.mjs")
+	helperCode, err := os.ReadFile(helper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	anchor := "\t\tconst configInputs = new Map();"
+	if strings.Count(string(helperCode), anchor) != 1 {
+		t.Fatal("candidate edit anchor is not unique")
+	}
+	candidate := filepath.Join(workspace, "alternate.ts")
+	edit := fmt.Sprintf(`		if ((await fs.readFile(%q, "utf8")).trim() === "armed") {
+			await fs.writeFile(%q, 'export const message = "new";');
+		}
+`, control, candidate)
+	if err := os.WriteFile(helper, []byte(strings.Replace(string(helperCode), anchor, edit+anchor, 1)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, workspace, "package.json", `{"browser":{"./policy.js":"./alternate"}}`)
+	writeTestFile(t, workspace, "policy.js", `export const message = "node";`)
+	writeTestFile(t, workspace, "alternate.js", `export const message = "old";`)
+	rule := writeTestFile(t, workspace, "rule.ts", `import {dl, rule} from "@lintai/sdk";
+ import {message} from "./policy.js";
+ export default rule("fixture.relative-redirect").version(1).program(dl`+"`"+`Decl violation(Entity).`+"`"+`).report("violation").message(() => message);`)
+	build := func() (map[string]bundle.Artifacts, map[string]error) {
+		t.Helper()
+		artifacts, failures, err := bundle.BuildAll(context.Background(), asset, repo, workspace, t.TempDir(), []string{rule})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return artifacts, failures
+	}
+	stable, failures := build()
+	if failures[rule] != nil || len(stable) != 1 {
+		t.Fatalf("stable redirect: %v", failures[rule])
+	}
+	if err := os.WriteFile(control, []byte("armed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changed, failures := build()
+	if len(changed) != 0 || failures[rule] == nil || !strings.Contains(failures[rule].Error(), "resolution changed") {
+		t.Fatalf("new redirect candidate must reject the discovered view: artifacts=%d failure=%v", len(changed), failures[rule])
+	}
+	if stable[rule].Manifest.Unchanged() {
+		t.Fatal("new redirect candidate did not invalidate the earlier artifact")
+	}
+	if err := os.WriteFile(control, []byte("disarmed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	updated, failures := build()
+	if failures[rule] != nil || len(updated) != 1 || updated[rule].Hash == stable[rule].Hash {
+		t.Fatalf("updated redirect: artifacts=%d failure=%v", len(updated), failures[rule])
+	}
+	code, err := os.ReadFile(updated[rule].PureBundlePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := runtime.LoadPureBundle(string(code))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message, err := loaded.Message(nil, "violation"); err != nil || message != "new" {
+		t.Fatalf("updated redirect message: %q %v", message, err)
 	}
 }

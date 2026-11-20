@@ -71,6 +71,13 @@ func TestBuildAllAndPrepareAllFixtureRules(t *testing.T) {
 	// The repository-root launcher and an output directory inside the workspace
 	// must use the same captured helper view without treating output as input.
 	workspace := t.TempDir()
+	unused := filepath.Join(workspace, "unrelated", "data.json")
+	if err := os.MkdirAll(filepath.Dir(unused), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(unused, []byte(`{"value":"before"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	rule := filepath.Join(workspace, "rule.ts")
 	if err := os.WriteFile(rule, []byte(`import { dl, rule } from "@lintai/sdk";
 export default rule("fixture.root-launcher").version(1).program(dl`+"`"+`Decl violation(Entity).`+"`"+`).report("violation").message(() => "ok");`), 0o600); err != nil {
@@ -80,6 +87,25 @@ export default rule("fixture.root-launcher").version(1).program(dl`+"`"+`Decl vi
 	if err != nil || rootFailures[rule] != nil || len(rootArtifacts) != 1 {
 		t.Fatalf("repository-root launcher: %v %v", err, rootFailures[rule])
 	}
+	assertUnrelatedData := func(artifact Artifacts, file string) {
+		t.Helper()
+		physical, err := filepath.EvalSymlinks(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, input := range artifact.Manifest.Inputs {
+			if input.AbsolutePath == physical {
+				t.Fatalf("unrelated data was captured as a bundle input: %s", file)
+			}
+		}
+		if err := os.WriteFile(file, []byte(`{"value":"after"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if !artifact.Manifest.Unchanged() {
+			t.Fatalf("editing unrelated data invalidated the bundle: %s", file)
+		}
+	}
+	assertUnrelatedData(rootArtifacts[rule], unused)
 	secondRule := filepath.Join(workspace, "second.ts")
 	if err := os.WriteFile(secondRule, []byte(`import { dl, rule } from "@lintai/sdk";
 export default rule("fixture.second").version(1).program(dl`+"`"+`Decl violation(Entity).`+"`"+`).report("violation").message(() => "ok");`), 0o600); err != nil {
@@ -89,6 +115,32 @@ export default rule("fixture.second").version(1).program(dl`+"`"+`Decl violation
 	if err != nil || len(multipleFailures) != 0 || len(multiple) != 2 {
 		t.Fatalf("multiple rules with output inside workspace: artifacts=%d failures=%v error=%v", len(multiple), multipleFailures, err)
 	}
+
+	// A rule can live outside the workspace in a much larger package tree.
+	external := t.TempDir()
+	externalUnused := filepath.Join(external, "unrelated", "data.json")
+	if err := os.MkdirAll(filepath.Dir(externalUnused), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(external, "package.json"), []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(externalUnused, []byte(`{"value":"before"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source, err := os.ReadFile(rule)
+	if err != nil {
+		t.Fatal(err)
+	}
+	externalRule := filepath.Join(external, "rule.ts")
+	if err := os.WriteFile(externalRule, source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	externalArtifacts, externalFailures, err := BuildAll(context.Background(), repoRoot, repoRoot, workspace, filepath.Join(workspace, "external-out"), []string{externalRule})
+	if err != nil || externalFailures[externalRule] != nil || len(externalArtifacts) != 1 {
+		t.Fatalf("external rule: %v %v", err, externalFailures[externalRule])
+	}
+	assertUnrelatedData(externalArtifacts[externalRule], externalUnused)
 }
 
 func TestBuildAllReportsPerRuleErrors(t *testing.T) {
