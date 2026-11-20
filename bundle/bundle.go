@@ -347,10 +347,6 @@ func BuildAll(ctx context.Context, assetRoot, repoRoot, workspaceRoot, outDir st
 			itemErrors[row.RulePath] = fmt.Errorf("invalid bundle input manifest: %w", err)
 			continue
 		}
-		if err := manifest.validate(); err != nil {
-			itemErrors[row.RulePath] = err
-			continue
-		}
 		if err := manifest.currentError(); err != nil {
 			itemErrors[row.RulePath] = fmt.Errorf("bundle inputs changed during compilation: %w", err)
 			continue

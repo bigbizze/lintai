@@ -20,12 +20,12 @@ const esbuildBinary = useBinaryOverride
 	? path.resolve(binaryOverride)
 	: binaryRequire.resolve(binarySpecifier);
 
-// Node resolves helper dependencies through directory links and ancestor
-// node_modules directories. Record those selections as well as file bytes so
-// a later link retarget or a newly available nearer dependency invalidates it.
-const toolSelectionProbes = [];
+// Node tool and esbuild input resolution can traverse symlink chains. Record
+// every hop, in addition to candidate probes and file bytes, so retargeting any
+// link invalidates the artifact.
+const selectionProbes = [];
 const observedLinks = new Set();
-async function observeToolLinks(file) {
+async function observePathLinks(file) {
 	const absolute = path.resolve(file);
 	let current = path.parse(absolute).root;
 	for (const part of absolute.slice(current.length).split(path.sep).filter(Boolean)) {
@@ -48,14 +48,14 @@ async function observeToolLinks(file) {
 		} catch (error) {
 			if (!["ENOENT", "ENOTDIR"].includes(error.code)) throw error;
 		}
-		toolSelectionProbes.push({
+		selectionProbes.push({
 			path: current,
 			directory: targetInfo?.isDirectory() ?? false,
 			exists: targetInfo?.isDirectory() || targetInfo?.isFile() || false,
 			linkTarget,
 			target,
 		});
-		await observeToolLinks(path.resolve(path.dirname(current), linkTarget));
+		await observePathLinks(path.resolve(path.dirname(current), linkTarget));
 	}
 }
 async function observeToolCandidate(file, directory) {
@@ -65,12 +65,12 @@ async function observeToolCandidate(file, directory) {
 	} catch (error) {
 		if (!["ENOENT", "ENOTDIR"].includes(error.code)) throw error;
 	}
-	toolSelectionProbes.push({
+	selectionProbes.push({
 		path: file,
 		directory,
 		exists: directory ? (info?.isDirectory() ?? false) : (info?.isFile() ?? false),
 	});
-	await observeToolLinks(file);
+	await observePathLinks(file);
 	return info;
 }
 const helperOriginal = path.resolve(
@@ -376,7 +376,9 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 		await fs.mkdir(path.dirname(destination), { recursive: true });
 		if (info.isSymbolicLink()) {
 			const linkTarget = await fs.readlink(source);
-			const absoluteTarget = canonical(path.resolve(path.dirname(source), linkTarget));
+			const absoluteLinkTarget = path.resolve(path.dirname(source), linkTarget);
+			const absoluteTarget = canonical(absoluteLinkTarget);
+			await observePathLinks(absoluteLinkTarget);
 			let targetInfo;
 			try {
 				targetInfo = await fs.stat(source);
@@ -1250,7 +1252,7 @@ for (const request of requests) {
 		await captureTools(initialInputs, workspaceRoot, repoRoot);
 		const initialProbes = [
 			...view.probes,
-			...toolSelectionProbes.map(({ target, ...probe }) => ({
+			...selectionProbes.map(({ target, ...probe }) => ({
 				...probe,
 				...(target && { linkIdentity: lockPath(target, workspaceRoot, repoRoot) }),
 			})),

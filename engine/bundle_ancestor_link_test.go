@@ -182,3 +182,83 @@ func TestBundleRelativeRedirectCandidateDuringCapture(t *testing.T) {
 		t.Fatalf("updated redirect message: %q %v", message, err)
 	}
 }
+
+func TestBundleChainedLinkRetargetInvalidatesWarmSession(t *testing.T) {
+	repoRoot, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	control := filepath.Join(t.TempDir(), "edit-control")
+	if err := os.WriteFile(control, []byte("disarmed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	asset := bundleEditAsset(t, repoRoot, control)
+	writeTestFile(t, workspace, "rules-support/a.ts", `export const message = "A";`)
+	writeTestFile(t, workspace, "rules-support/b.ts", `export const message = "B";`)
+	middle := filepath.Join(workspace, "rules-support/middle.ts")
+	helper := filepath.Join(workspace, "rules-support/helper.ts")
+	if err := os.Symlink("a.ts", middle); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("middle.ts", helper); err != nil {
+		t.Fatal(err)
+	}
+	source := parallelRuleSource(
+		"fixture.chained-link",
+		"Decl violation(Entity, Code). violation(Entity, Code) :- catalog.usable(Entity, Code).",
+		"() => message",
+	)
+	source = strings.Replace(
+		source,
+		`import { dl, rule } from "@lintai/sdk";`,
+		`import { dl, rule } from "@lintai/sdk";
+import { message } from "../rules-support/helper.ts";`,
+		1,
+	)
+	writeTestFile(t, workspace, "lintai-rules/chained-link.ts", source)
+	options := parallelFixtureOptions(repoRoot, workspace)
+	options.AssetRoot = asset
+	check := func(session *Session) []string {
+		t.Helper()
+		result, err := session.Check(context.Background(), options)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(result.Diagnostics) != 3 {
+			t.Fatalf("expected three chained-link findings, got %+v", result.Diagnostics)
+		}
+		messages := make([]string, len(result.Diagnostics))
+		for index, diagnostic := range result.Diagnostics {
+			if diagnostic.RuleID != "fixture.chained-link" {
+				t.Fatalf("unexpected chained-link diagnostic: %+v", diagnostic)
+			}
+			messages[index] = diagnostic.Message
+		}
+		return messages
+	}
+	warm := Open(Options{}, newParallelFixtureProducer())
+	defer warm.Close()
+	if got := strings.Join(check(warm), ","); got != "A,A,A" {
+		t.Fatalf("initial chained-link behavior: %q", got)
+	}
+	beforeRetarget := warm.executionObservation().bundleArtifacts
+	if err := os.Remove(middle); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("b.ts", middle); err != nil {
+		t.Fatal(err)
+	}
+	retained := check(warm)
+	retainedBehavior := strings.Join(retained, ",")
+	retainedBuilds := warm.executionObservation().bundleArtifacts
+	fresh := Open(Options{}, newParallelFixtureProducer())
+	defer fresh.Close()
+	freshBehavior := strings.Join(check(fresh), ",")
+	if retainedBehavior != "B,B,B" || freshBehavior != retainedBehavior {
+		t.Fatalf("retained behavior differs from fresh B: retained=%q fresh=%q", retainedBehavior, freshBehavior)
+	}
+	if retainedBuilds != beforeRetarget+1 {
+		t.Fatalf("retargeted intermediate link did not rebuild the retained artifact: before=%d after=%d", beforeRetarget, retainedBuilds)
+	}
+}
