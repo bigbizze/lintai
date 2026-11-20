@@ -317,8 +317,7 @@ func (e *extractor) collectSemanticExports(file *ast.SourceFile, origin observat
 	if !ast.IsExternalOrCommonJSModule(file) || file.Symbol == nil {
 		if commonJSInventoryUnsupported(file) {
 			e.moduleExportObservations = append(e.moduleExportObservations, ModuleExportObservation{
-				Identity: e.canonicalFileIdentity(file.FileName().AsString()), File: e.relativePath(file.FileName().AsString()),
-				Reasons: []string{AssociationUnsupported}, Retained: true,
+				File: e.relativePath(file.FileName().AsString()), Reasons: []string{AssociationUnsupported},
 			})
 		}
 		return
@@ -377,8 +376,7 @@ func (e *extractor) collectSemanticExports(file *ast.SourceFile, origin observat
 	}
 	reasons := sortedUnique(append(inventory.reasons, e.exportInventoryIncomplete(file)...))
 	e.moduleExportObservations = append(e.moduleExportObservations, ModuleExportObservation{
-		Identity: moduleIdentity, File: moduleFile,
-		Reasons: reasons, Retained: true,
+		File: moduleFile, Reasons: reasons,
 	})
 }
 
@@ -1721,15 +1719,8 @@ func stringSetsDisagree(items [][]string) bool {
 func moduleInventoryOutcomes(observations []ModuleExportObservation) []ModuleExportsIncompleteFact {
 	var result []ModuleExportsIncompleteFact
 	for _, observation := range observations {
-		if !observation.Retained {
-			continue
-		}
 		for _, reason := range observation.Reasons {
-			file := observation.File
-			if file == "" {
-				file = observation.Identity
-			}
-			result = append(result, ModuleExportsIncompleteFact{File: file, Reason: reason})
+			result = append(result, ModuleExportsIncompleteFact{File: observation.File, Reason: reason})
 		}
 	}
 	slices.SortFunc(result, func(left, right ModuleExportsIncompleteFact) int {

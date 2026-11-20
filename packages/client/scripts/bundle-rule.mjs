@@ -361,6 +361,17 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 			}
 		}
 	};
+	const recordInput = (file, bytes) => {
+		const observation = {
+			path: lockPath(file, workspaceRoot, repoRoot),
+			sha256: createHash("sha256").update(bytes).digest("hex"),
+			absolutePath: file,
+		};
+		const previous = inputs.get(file);
+		if (previous && previous.sha256 !== observation.sha256)
+			throw new Error(`bundle input changed during compilation: ${file}`);
+		inputs.set(file, observation);
+	};
 	const original = (staged) => {
 		const relative = path.relative(root, staged);
 		if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative))
@@ -412,11 +423,6 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 			const bytes = await fs.readFile(source);
 			await fs.writeFile(destination, bytes);
 			jsonBytes.set(source, bytes);
-			inputs.set(source, {
-				path: lockPath(source, workspaceRoot, repoRoot),
-				sha256: createHash("sha256").update(bytes).digest("hex"),
-				absolutePath: source,
-			});
 		} else {
 			await fs.copyFile(source, destination, fsSync.constants.COPYFILE_FICLONE);
 		}
@@ -466,14 +472,10 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 		if (real !== file) await copy(real);
 		// An extends target need not have a .json suffix. Hash and parse the
 		// bytes from the view just as for a named JSON config.
-		if (config && info.isFile() && !jsonBytes.has(real)) {
-			const bytes = await fs.readFile(mirror(real));
+		if (config && info.isFile()) {
+			const bytes = jsonBytes.get(real) ?? (await fs.readFile(mirror(real)));
 			jsonBytes.set(real, bytes);
-			inputs.set(real, {
-				path: lockPath(real, workspaceRoot, repoRoot),
-				sha256: createHash("sha256").update(bytes).digest("hex"),
-				absolutePath: real,
-			});
+			recordInput(real, bytes);
 		}
 	};
 	const sourceCandidates = async (base) => {
@@ -538,6 +540,12 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 		for (const input of configInputs.values()) {
 			await copyAncestorLinks(input.absolutePath);
 			await copy(input.absolutePath);
+			const real = await fs.realpath(input.absolutePath);
+			await copy(real);
+			const bytes = jsonBytes.get(real) ?? (await fs.readFile(mirror(real)));
+			if (createHash("sha256").update(bytes).digest("hex") !== input.sha256)
+				throw new Error(`bundle input changed during compilation: ${input.absolutePath}`);
+			recordInput(real, bytes);
 		}
 
 		// Metafiles do not report esbuild's internal config reads. Capture all
@@ -565,6 +573,7 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 			pendingConfigs.delete(file);
 			if (processedConfigs.has(file)) continue;
 			processedConfigs.add(file);
+			recordInput(file, jsonBytes.get(file));
 			const parsed = ts.parseConfigFileTextToJson(
 				file,
 				jsonBytes.get(file).toString("utf8"),
@@ -659,11 +668,6 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 							}
 						}
 					}
-					const real = canonical(base);
-					for (const capturedFile of jsonBytes.keys()) {
-						if (capturedFile === real || capturedFile.startsWith(`${real}${path.sep}`))
-							addConfig(capturedFile);
-					}
 				}
 			}
 			const options = parsed.compilerOptions;
@@ -706,6 +710,7 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 			);
 			if (!file) break;
 			processedPackages.add(file);
+			recordInput(file, jsonBytes.get(file));
 			const metadata = ts.parseConfigFileTextToJson(
 				file,
 				jsonBytes.get(file).toString("utf8"),
@@ -835,7 +840,6 @@ async function ruleHash(
 	discovery,
 ) {
 	const inputs = new Map(initialInputs);
-	const sourceFiles = new Set();
 	for (const [index, metafile] of metafiles.entries()) {
 		const actual = [];
 		for (const [key, input] of Object.entries(metafile.inputs)) {
@@ -849,7 +853,6 @@ async function ruleHash(
 			const absolute = view.original(staged);
 			if (!absolute) throw new Error(`bundle resolved outside captured view: ${staged}`);
 			actual.push(absolute);
-			sourceFiles.add(absolute);
 			const bytes = captured.get(absolute);
 			if (!bytes) throw new Error(`bundle did not capture consumed input: ${absolute}`);
 			const observation = {
@@ -890,10 +893,10 @@ async function ruleHash(
 			throw new Error("bundle resolution changed while capturing the input view");
 	}
 	await captureTools(inputs, workspaceRoot, repoRoot);
-	const probes = [
-		...initialProbes,
-		...collectConfigInputs(sourceFiles, inputs, workspaceRoot, repoRoot),
-	].map((probe) => ({ ...probe, logicalPath: lockPath(probe.path, workspaceRoot, repoRoot) }));
+	const probes = initialProbes.map((probe) => ({
+		...probe,
+		logicalPath: lockPath(probe.path, workspaceRoot, repoRoot),
+	}));
 	const logicalPaths = new Map();
 	for (const [logical, absolute] of [
 		...[...inputs.values()].map((input) => [input.path, input.absolutePath]),
@@ -970,29 +973,56 @@ function createInputPlugin(captured, generatedEntry, view) {
 		}[loader];
 		const source = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, kind);
 		const edits = [];
+		let checker;
+		const locallyBound = (identifier) => {
+			if (!checker) {
+				const options = { noLib: true, noResolve: true, allowJs: true, allowNonTsExtensions: true };
+				const host = ts.createCompilerHost(options);
+				host.getSourceFile = (name) => (name === file ? source : undefined);
+				host.fileExists = (name) => name === file;
+				host.readFile = (name) => (name === file ? text : undefined);
+				checker = ts.createProgram([file], options, host).getTypeChecker();
+			}
+			const symbol = checker.getSymbolAtLocation(identifier);
+			return (symbol?.declarations ?? []).some((declaration) => {
+				if (ts.getCombinedModifierFlags(declaration) & ts.ModifierFlags.Ambient) return false;
+				if (ts.isImportSpecifier(declaration))
+					return !declaration.isTypeOnly && !declaration.parent.parent.isTypeOnly;
+				if (ts.isImportClause(declaration) || ts.isImportEqualsDeclaration(declaration))
+					return !declaration.isTypeOnly;
+				if (ts.isNamespaceImport(declaration)) return !declaration.parent.isTypeOnly;
+				return true;
+			});
+		};
 		const visit = (node) => {
 			let literal;
+			let requireIdentifier;
 			if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
 				literal = node.moduleSpecifier;
 			} else if (ts.isExternalModuleReference(node)) {
 				literal = node.expression;
 			} else if (ts.isCallExpression(node)) {
 				const expression = node.expression;
-				if (
-					expression.kind === ts.SyntaxKind.ImportKeyword ||
-					(ts.isIdentifier(expression) && expression.text === "require") ||
-					(ts.isPropertyAccessExpression(expression) &&
-						ts.isIdentifier(expression.expression) &&
-						expression.expression.text === "require" &&
-						expression.name.text === "resolve")
+				if (expression.kind === ts.SyntaxKind.ImportKeyword) {
+					literal = node.arguments[0];
+				} else if (ts.isIdentifier(expression) && expression.text === "require") {
+					literal = node.arguments[0];
+					requireIdentifier = expression;
+				} else if (
+					ts.isPropertyAccessExpression(expression) &&
+					ts.isIdentifier(expression.expression) &&
+					expression.expression.text === "require" &&
+					expression.name.text === "resolve"
 				) {
 					literal = node.arguments[0];
+					requireIdentifier = expression.expression;
 				}
 			}
 			if (
 				literal &&
 				(ts.isStringLiteral(literal) || ts.isNoSubstitutionTemplateLiteral(literal)) &&
-				path.isAbsolute(literal.text)
+				path.isAbsolute(literal.text) &&
+				(!requireIdentifier || !locallyBound(requireIdentifier))
 			) {
 				edits.push([
 					literal.getStart(source),
