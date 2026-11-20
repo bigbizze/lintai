@@ -109,6 +109,8 @@ func TestRelationExamples(t *testing.T) {
 		{
 			name: "a2-imports",
 			want: []string{
+				"arch.core-approved-packages violation src/core/packages.ts:2",
+				"arch.core-no-internal-types violation src/core/dependencies.ts:3",
 				"arch.core-resolved-imports-strict violation src/core/violation.ts:1",
 				"arch.core-no-dynamic-loading-strict dynamic_load src/core/violation.ts:2",
 				"arch.core-no-dynamic-loading-strict opaque_load src/core/violation.ts:3",

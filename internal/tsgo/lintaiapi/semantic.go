@@ -1210,7 +1210,7 @@ func declarationKind(node *ast.Node) (string, bool) {
 		if ast.IsInJSFile(node) && ast.GetAssignmentDeclarationKind(node) == ast.JSDeclarationKindExportsProperty {
 			return "property", true
 		}
-		return node.Kind.String(), false
+		return "unknown", false
 	case ast.KindFunctionDeclaration, ast.KindFunctionExpression, ast.KindArrowFunction:
 		return "function", true
 	case ast.KindVariableDeclaration, ast.KindBindingElement:
@@ -1238,7 +1238,7 @@ func declarationKind(node *ast.Node) (string, bool) {
 	case ast.KindConstructor, ast.KindCallSignature, ast.KindConstructSignature, ast.KindIndexSignature, ast.KindMethodSignature, ast.KindFunctionType, ast.KindConstructorType:
 		return "signature", true
 	default:
-		return node.Kind.String(), false
+		return "unknown", false
 	}
 }
 

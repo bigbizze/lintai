@@ -119,7 +119,7 @@ An error violation gives exit code 1, so the same command can run in CI. A rule 
 To inspect the import facts behind this example:
 
 ```sh
-pnpm exec lintai facts --workspace-root . --relation import_edge --relation import_internal
+pnpm exec lintai facts --workspace-root . --relation ts.import_edge --relation ts.import_internal
 ```
 
 `lintai schema` prints the configured producer catalog under its namespace bindings, along with `lintai` helpers. The [examples](docs/examples.md) cover call chains, public types, suspension syntax, required imports and more.

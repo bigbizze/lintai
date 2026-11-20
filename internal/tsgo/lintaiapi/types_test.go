@@ -61,6 +61,45 @@ func hasStructure(item TypeFact) bool {
 	return len(item.Args) > 0 || len(item.Members) > 0 || len(item.Props) > 0 || len(item.SigParams) > 0 || item.SigReturns != "" || item.Literal != nil
 }
 
+func TestFunctionSignatureExcludesExplicitReceiver(t *testing.T) {
+	snapshot := buildTestSnapshot(t, map[string]string{
+		"src/receiver.ts": `export function f(this: { tag: string }, required: string) { return required; }
+export function marked(this: { tag: string }, required: string, optional?: number, ...rest: boolean[]) { return required; }
+export function unmarked(required: string, optional?: number, ...rest: boolean[]) { return required; }
+export function takes(callback: (this: { tag: string }, required: string) => void) { return callback; }
+`,
+	})
+	x := newTypeIndex(t, snapshot)
+	for _, tc := range []struct {
+		name  string
+		marks []string
+	}{
+		{name: "f", marks: []string{""}},
+		{name: "marked", marks: []string{"", MarkOptional, MarkRest}},
+	} {
+		fn := x.fn(tc.name)
+		if len(fn.SignatureObservations) != 1 {
+			t.Fatalf("%s: expected one signature, got %+v", tc.name, fn.SignatureObservations)
+		}
+		sig := fn.SignatureObservations[0]
+		if !sig.Complete || len(sig.ParameterTypes) != len(tc.marks) || !slices.Equal(sig.ParameterMarks, tc.marks) {
+			t.Fatalf("%s: signature = %+v; want %d callable arguments with marks %q", tc.name, sig, len(tc.marks), tc.marks)
+		}
+		if got := x.get(sig.ParameterTypes[0]).Kind; got != TypeKindString {
+			t.Errorf("%s: required argument kind = %s, want %s", tc.name, got, TypeKindString)
+		}
+	}
+	withReceiver := x.fn("marked").SignatureObservations[0]
+	withoutReceiver := x.fn("unmarked").SignatureObservations[0]
+	if !slices.Equal(withReceiver.ParameterTypes, withoutReceiver.ParameterTypes) || !slices.Equal(withReceiver.ParameterMarks, withoutReceiver.ParameterMarks) {
+		t.Fatalf("receiver changed callable parameters: with=%+v without=%+v", withReceiver, withoutReceiver)
+	}
+	callback := x.param("takes", 0)
+	if len(callback.SigParams) != 1 || len(callback.SigMarks) != 0 || x.get(callback.SigParams[0]).Kind != TypeKindString {
+		t.Fatalf("structural callable signature includes the receiver: %+v", callback)
+	}
+}
+
 // V11: repeated roots share structural observations within one checker, and
 // their display and structure do not depend on the order in which roots occur.
 func TestSharedTypeRootsVisitEachCheckerObservationOnce(t *testing.T) {

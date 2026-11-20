@@ -33,7 +33,7 @@ export default rule("arch.pure-no-effects")
 Caveats:
 
 - Suspension syntax does not prove that the code runs. Use the ambient relations (section 4) for clock and environment reads.
-- `call_edge` contains only calls between collected functions in the workspace. Calls into packages and the default library are in `external_call`. Calls through function values are not followed; see section 12.
+- `call_edge` connects invocation sites, including module-owned sites, to collected functions in the workspace. Calls into packages and the default library are in `external_call`. Calls through function values are not followed; see section 12.
 - the interpolated string becomes an escaped Mangle string constant, so a config value cannot change the program structure
 
 ### Scorecard transformations
@@ -100,7 +100,7 @@ export default rule("arch.pure-no-service-imports")
 	.message((row) => `Pure module ${row.From} must not import ${row.To}`);
 ```
 
-To allow type-only imports, add `ts.import_runtime(Imp)` to the clause. `import_runtime` is false for `import type ...` and for imports whose bindings are all `type` bindings.
+To allow type-only imports, add `ts.import_runtime(Imp)` to the clause. `import_runtime` is false for `import type ...` and ordinarily for imports whose named bindings are all `type` bindings. With `verbatimModuleSyntax`, an all-type named import or re-export can be retained as an empty runtime load, and `import_runtime` is true for that retained statement. Side-effect imports and imports with value bindings are runtime loads.
 
 To reject a reach through other modules, use `imports_reach`:
 
@@ -363,7 +363,7 @@ export default rule("arch.client-and-parsing")
 Caveats:
 
 - `import_edge` includes `export ... from`, `import()` and `require()`; use `import_form` to select one form
-- `external_call` names come from the declaration: a method on a `Set` is `"Set.add"`, and `Date.now()` is `"DateConstructor.now"`. Run `lintai facts --relation external_call` to see the names in your workspace.
+- `external_call` names come from the declaration: a method on a `Set` is `"Set.add"`, and `Date.now()` is `"DateConstructor.now"`. Run `lintai facts --relation ts.external_call` to see the names in your workspace.
 - a module-level call has a module entity as its `ts.site_owner`. Join `ts.module_path(Module, File)` to get the file path.
 
 ## 9. Explanations
@@ -739,18 +739,18 @@ The strict rule checks for signature problems after selecting each exported doma
 
 A rule can make a narrower policy for known opaque leaves. The following helpers accept only the default library `Promise` and `Array` member-omission markers. Every other incompleteness reason remains a seed. Backward propagation still follows `type_child`, including the represented type arguments of those accepted wrappers:
 
-```ts
+```mangle
 Decl permitted_opaque_leaf(Type).
-permitted_opaque_leaf(T) :- type_named(T, "lib", "Promise"), type_origin_kind(T, /lib).
-permitted_opaque_leaf(T) :- type_named(T, "lib", "Array"), type_origin_kind(T, /lib).
+permitted_opaque_leaf(T) :- ts.type_named(T, "lib", "Promise"), ts.type_origin_kind(T, /lib).
+permitted_opaque_leaf(T) :- ts.type_named(T, "lib", "Array"), ts.type_origin_kind(T, /lib).
 
 Decl disallowed_incomplete(Type).
-disallowed_incomplete(T) :- type_incomplete(T, Reason), Reason != /members_omitted.
-disallowed_incomplete(T) :- type_incomplete(T, /members_omitted), !permitted_opaque_leaf(T).
+disallowed_incomplete(T) :- ts.type_incomplete(T, Reason), Reason != /members_omitted.
+disallowed_incomplete(T) :- ts.type_incomplete(T, /members_omitted), !permitted_opaque_leaf(T).
 
 Decl reaches_disallowed_incomplete(Type).
 reaches_disallowed_incomplete(T) :- disallowed_incomplete(T).
-reaches_disallowed_incomplete(T) :- type_child(T, Child), reaches_disallowed_incomplete(Child).
+reaches_disallowed_incomplete(T) :- ts.type_child(T, Child), reaches_disallowed_incomplete(Child).
 ```
 
 Use `reaches_disallowed_incomplete(T)` in the type-graph violation rule in place of `ts.type_reaches_incomplete(T)`. Keep the signature issue rules as well. This ignores only `/members_omitted` on the two named library leaves. If `Promise<Hidden>` reaches an unaccepted opaque `Hidden` type, that marker still propagates through the `Promise` type argument to the signature. The policy does not mark `any`, `unknown`, unconstrained parameters, or unknown runtime values as safe; those need separate rule-specific handling when they matter.
@@ -1127,6 +1127,54 @@ export default rule("arch.core-resolved-imports-strict")
 ```
 
 This strict policy depends on the active compiler context and can report missing or deliberately virtual dependencies. Computed specifiers have separate opaque-load evidence.
+
+### Approved core packages
+
+Restrict physical package imports in core modules to an approved package.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Core modules may import only approved physical packages.
+export default rule("arch.core-approved-packages")
+	.version(1)
+	.program(dl`
+		Decl core_module(File).
+		core_module(File) :- ts.module_path(_, File), lintai.glob(File, "src/core/**").
+		Decl violation(Site, File, Pkg).
+		violation(Site, File, Pkg) :- core_module(File), ts.import_edge(Site, File, _, _),
+			ts.import_package(Site, Pkg), Pkg != "approved-lib".
+	`)
+	.report("violation")
+	.expectNonEmpty("core_module")
+	.message((row) => `Core modules must not import package ${row.Pkg}`);
+```
+
+The fixture reports `forbidden-lib` at `src/core/packages.ts:2`; the physical `approved-lib` import is allowed and the ambient `virtual:env` module has no package row. Unresolved imports are outside this rule and can be checked with the previous strict policy.
+
+### Core type boundaries
+
+Keep core type references from resolving to declarations in the internal directory.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Core type references must not depend on internal declarations.
+export default rule("arch.core-no-internal-types")
+	.version(1)
+	.program(dl`
+		Decl core_module(File).
+		core_module(File) :- ts.module_path(_, File), lintai.glob(File, "src/core/**").
+		Decl violation(Site, File, Target).
+		violation(Site, File, Target) :- core_module(File), ts.site(Site, File),
+			ts.type_ref_target(Site, Target), lintai.glob(Target, "src/internal/**").
+	`)
+	.report("violation")
+	.expectNonEmpty("core_module")
+	.message((row) => `Core types must not depend on ${row.Target}`);
+```
+
+The fixture reports the internal `Secret` reference at `src/core/dependencies.ts:3` and allows the shared `Shared` reference. Unresolved type references have no target and require separate resolution checks.
 
 ## 28. Avoid the broad `Function` type
 

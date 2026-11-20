@@ -178,7 +178,7 @@ The tables below are the Appendix A base contract. `E!` and `E?` are owned entit
 | `ts.import_form/2` | `Site:E!, Form:N` | /static, /reexport, /dynamic, /require, /import_equals or /import_type. |
 | `ts.import_internal/1` | `Site:E!` | Resolves to a workspace file outside node_modules; target need not be a primary module. |
 | `ts.import_unresolved/1` | `Site:E!` | No resolved file or declared module under an observed context; not a missing collection result. |
-| `ts.import_package/2` | `Site:E!, Package:S` | Resolved package name, including workspace packages when applicable. |
+| `ts.import_package/2` | `Site:E!, Package:S` | Package name supported by physical module resolution, including workspace packages when applicable; virtual ambient modules have no package row. |
 | `ts.import_type_only/1` | `Site:E!` | Reference is exclusively type-oriented under the defined syntax classification. |
 | `ts.import_retained/1` | `Site:E!` | All-type named bindings whose statement is retained as a runtime load by verbatimModuleSyntax. |
 | `ts.import_symbol/3` | `Site:E!, Name:S, Kind:N` | Introduced binding; Kind is /default, /namespace or /named. Side-effect imports have no binding rows. |
@@ -450,7 +450,7 @@ lintai [flags]
 lintai check [flags]
 lintai schema [--workspace-root <dir>] [--config <file>] [--asset-root <dir>]
 lintai facts [--workspace-root <dir>] [--config <file>] [--asset-root <dir>] [--exclude <glob>]... [--source <file>]... [--files tsconfig|walk] [--source-links <file>] [--relation <name>]...
-lintai scope --explain [--json] [--workspace-root <dir>] [--config <file>] [--exclude <glob>]... [--source <file>]... [--files tsconfig|walk] [--source-links <file>]
+lintai scope --explain [--json] [--workspace-root <dir>] [--config <file>] [--asset-root <dir>] [--exclude <glob>]... [--source <file>]... [--files tsconfig|walk] [--source-links <file>]
 lintai lock [--workspace-root <dir>] [--repo-root <dir>] [--asset-root <dir>] [--rules <globs>] [--lock-file <path>] [--suppressions-location <path>]
 lintai rules [--workspace-root <dir>] [--repo-root <dir>] [--asset-root <dir>] [--rules <globs>] [--json]
 lintai serve
@@ -519,7 +519,7 @@ pnpm exec lintai \
 pnpm exec lintai facts --workspace-root . --relation ts.ambient_use --relation ts.ambient_key
 ```
 
-`lintai scope --explain` prints the selected paths, compiler eligibility, configurations and pruned boundaries for each producer; `--json` emits the explanation as JSON. It accepts `--source-links` but does not read that file when explaining scope. `lintai serve` uses JSON-RPC initialization rather than analysis CLI flags.
+`lintai scope --explain` prints the selected paths, compiler eligibility, configurations and pruned boundaries for each producer; `--json` emits the explanation as JSON. It accepts and ignores `--asset-root` for launcher compatibility. It accepts `--source-links` but does not read that file when explaining scope. `lintai serve` uses JSON-RPC initialization rather than analysis CLI flags.
 
 ### Snapshot scope
 
