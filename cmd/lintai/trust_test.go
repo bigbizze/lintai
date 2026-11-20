@@ -94,6 +94,33 @@ export default rule("t.no-async").version(1)
 // With the rules lock or the setup sandbox, require() in setup() loads only
 // Node built-ins, so setup() cannot load workspace code that the lock did
 // not hash. The sandbox also stops setup() from starting a process.
+func TestCustomRulesLockIgnoresUnrelatedDirectoryEntries(t *testing.T) {
+	repoRoot, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	writeFiles(t, workspace, map[string]string{
+		"src/a.ts": "export const a = 1;\n",
+		"lintai-rules/rule.ts": `import { dl, rule } from "@lintai/sdk";
+export default rule("t.custom-lock").version(1)
+	.program(dl` + "`" + `Decl v(F). v(F) :- ts.module(F), F = "none".` + "`" + `)
+	.report("v").message(() => "x");`,
+	})
+	if code, items := runCode(t, []string{"lock", "--workspace-root", workspace, "--repo-root", repoRoot, "--lock-file", "custom.lock.json"}); code != exitClean {
+		t.Fatalf("create custom lock: code=%d diagnostics=%+v", code, items)
+	}
+	args := []string{"--json", "--workspace-root", workspace, "--repo-root", repoRoot, "--rules-lock", "custom.lock.json"}
+	if code, items := runCode(t, args); code != exitClean {
+		t.Fatalf("unchanged custom lock: code=%d diagnostics=%+v", code, items)
+	}
+	writeFiles(t, workspace, map[string]string{"lintai-rules/tsconfig.json": `{"compilerOptions":{"useDefineForClassFields":true}}`})
+	code, items := runCode(t, args)
+	if code != exitRuleError || len(items) == 0 || items[0].Phase != "integrity" {
+		t.Fatalf("newly applicable config did not change lock identity: code=%d diagnostics=%+v", code, items)
+	}
+}
+
 func TestSetupRestrictions(t *testing.T) {
 	repoRoot, err := filepath.Abs("../..")
 	if err != nil {

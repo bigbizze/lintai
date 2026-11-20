@@ -14,7 +14,7 @@ Implements `specs/lintai-owner-context-implementation.md`.
 - **Owner plan:** one shared planner assigns each eligible source root one effective owner context, with file-mode fallback. Bounded original-root membership, effective owner and import visibility are kept separate (WP3+4).
 - **Provenance boundary:** a private `ObservationOrigin{RootFile, ContextHandle}` is passed explicitly through declaration and type collection, and validated before store mutation and cache-hit returns. Aggregation (`mergeSnapshot`) accepts only a private `validatedContribution` built after collector validation (integration of WP34 review finding WP34-01).
 - **Correspondence storage:** configured source correspondence is held in its own partition with endpoint metadata, optional anchors and `source_endpoint`/`source_endpoint_incomplete`/`source_config_adjusted` relations. It does not create source-only queryable ranges.
-- **Authoritative input mechanism:** the bundler stages a controlled immutable view of the consumed inputs: discovered sources, resolution and config candidates, and imported JSON. Tool bytes (helper, launcher, TypeScript, esbuild) are captured once per `BuildAll`. Both prepare and pure builds consume that view. The bundler records a `lintai.bundle-inputs/1` manifest, including every traversed symlink hop. Go validates it and checks freshness before publishing or reusing an artifact. Metadata goes through one guarded decoder, and each execution run uses a fresh VM.
+- **Input mechanism:** the bundler stages sources, resolution and config candidates, and imported JSON. Tool bytes (helper, launcher, TypeScript, esbuild) are captured once per `BuildAll`. The manifest records traversed symlink hops; Go validates it and checks freshness before publishing or reusing an artifact. The landing review found native config reads that escaped the staging view, so the original completion claim was premature. The landing corrections rebase absolute metadata paths, reject paths that cannot be bounded, and stop unresolved config packages from falling through the view root. Metadata goes through one guarded decoder, and each execution run uses a fresh VM.
 
 ## 3. Investigated hypotheses
 
@@ -33,14 +33,15 @@ Implements `specs/lintai-owner-context-implementation.md`.
 
 ## 5. Verification
 
-Each unit and fix head passed the 13-step local CI: `pnpm install --frozen-lockfile`, `pnpm build`, `go vet`, `go test -count=1 ./...`, consumer module, host binary, the sdk/client/eslint-plugin/oxlint-plugin tests, the npm and oxlint smokes, and the tsgo sync check. Final integration fix `9078baa`: 13/13.
+The landing and bundle-input corrections are exercised by `TestBuildAllAndPrepareAllFixtureRules` (including its colliding extends marker case), `TestBundleConfigViewAcrossBuilds`, `TestBundleConfigCannotSearchOutsideView`, `TestBundleConsumedInputEdit`, `TestBundleHelperInputEdit`, `TestBundleToolInputEdit`, and `TestBundleChainedLinkRetargetInvalidatesWarmSession`.
 
-Environment: macOS arm64, Go 1.27.3, Node 22.23.4, pnpm 10.9.0, offline.
+Earlier reported environment: macOS arm64, Go 1.27.3, Node 22.23.4, pnpm 10.9.0, offline. The landing corrections were also exercised on macOS arm64 with Node 22.23.4; no Node 24 installation or other operating system was available locally.
 
 Limits:
 
 - Node 24 and other operating systems were not run.
-- Complete capture of every esbuild-internal config and package read outside the workspace is not proven. Esbuild does not expose its read list. Known forms are covered: JSONC/extends, nearer package, exact and wildcard exports, redirects and symlinks. An unrecognized external config could change output without changing identity.
+- A19 was not complete at the reviewed landing head: an absolute package `tsconfig` selector and an ancestor package lookup could read outside the captured view. The corrections cover those observed escapes and reject unbounded paths. Esbuild does not expose its internal read list, so complete cross-platform coverage of every native resolution path remains unproven.
+- Rules locks are platform-specific: the native esbuild binary's bytes remain in approval identity. Use a lock generated on the platform where it is enforced; no cross-platform lock equivalence is claimed.
 - The captured view costs time. Go package times went from bundle 1.2 s to about 9 s, cmd/lintai from 30 s to about 80 s, and engine from 36 s to about 135 s. No speed improvement is claimed.
 - One full Go run during the integration fix failed golden parity with an undiagnosed rule error. It did not reproduce in isolation, in two further full runs, or in CI. It may be a flaky test.
 

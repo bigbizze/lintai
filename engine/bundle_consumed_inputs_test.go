@@ -118,6 +118,11 @@ func TestBundleConsumedInputEdit(t *testing.T) {
 	source := parallelRuleSource("fixture.bundle-input", program, `() => "diagnostic-A"`)
 	source = strings.Replace(source, ".program(", `.setup(() => ({marker: "diagnostic-A"})).program(`, 1)
 	rulePath := writeTestFile(t, workspace, "lintai-rules/input.ts", strings.ReplaceAll(source, "diagnostic-A", "diagnostic-B"))
+	realRulePath, err := filepath.EvalSymlinks(rulePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	changedError := "bundle inputs changed during compilation: content changed: " + realRulePath
 	writeA := func() {
 		t.Helper()
 		if err := os.WriteFile(rulePath, []byte(source), 0o600); err != nil {
@@ -180,10 +185,13 @@ func TestBundleConsumedInputEdit(t *testing.T) {
 	if editErr == nil {
 		got := behavior(edited)
 		t.Logf("A compiled then edited to B: hash=%s behavior=%s B-hash=%s", edited.Hash, got, stable.Hash)
-		if got == "diagnostic-A" && edited.Hash == stable.Hash {
-			t.Errorf("A artifact claimed stable B identity")
+		if got != "diagnostic-B" || edited.Hash != stable.Hash {
+			t.Errorf("edited build did not publish coherent B")
 		}
 	} else {
+		if !strings.Contains(editErr.Error(), changedError) {
+			t.Fatalf("unexpected A-to-B rejection: %v", editErr)
+		}
 		t.Logf("A-to-B build rejected: %v", editErr)
 	}
 	setControl("disarmed")
@@ -196,10 +204,13 @@ func TestBundleConsumedInputEdit(t *testing.T) {
 			t.Fatalf("prepare between-build artifact: %v %+v", err, failures)
 		}
 		setup, ok := prepared[rulePath].Setup.(map[string]any)
-		if !ok || setup["marker"] != behavior(betweenArtifact) {
+		if !ok || setup["marker"] != "diagnostic-B" || behavior(betweenArtifact) != "diagnostic-B" || betweenArtifact.Hash != stable.Hash {
 			t.Errorf("prepare and pure consumed different source bytes: setup=%+v pure=%s", prepared[rulePath].Setup, behavior(betweenArtifact))
 		}
 	} else {
+		if !strings.Contains(betweenErr.Error(), changedError) {
+			t.Fatalf("unexpected between-build rejection: %v", betweenErr)
+		}
 		t.Logf("between-build edit rejected: %v", betweenErr)
 	}
 	setControl("disarmed")
@@ -231,6 +242,20 @@ func TestBundleConsumedInputEdit(t *testing.T) {
 	if !reflect.DeepEqual(second, freshResult) {
 		t.Errorf("unchanged B retained result differs from fresh B")
 	}
+	if len(first.Diagnostics) == 1 && first.Diagnostics[0].Phase == "bundle" {
+		if !strings.Contains(first.Diagnostics[0].Message, changedError) || before != 0 || after != 1 {
+			t.Fatalf("rejected edit did not trigger a new B build: first=%+v builds=%d->%d", first.Diagnostics, before, after)
+		}
+	} else if !reflect.DeepEqual(first, second) || before != 1 || after != 1 {
+		t.Fatalf("coherent edit was not reused as B: first=%+v builds=%d->%d", first.Diagnostics, before, after)
+	}
+	if len(second.Diagnostics) != 3 || second.Diagnostics[0].Message != "diagnostic-B" {
+		t.Fatalf("retained B did not run: %+v", second.Diagnostics)
+	}
+	third, err := warm.Check(context.Background(), options)
+	if err != nil || !reflect.DeepEqual(third, second) || warm.executionObservation().bundleArtifacts != after {
+		t.Fatalf("unchanged B was not reused: %v %+v", err, third.Diagnostics)
+	}
 
 	lock, _, err := BuildRulesLock(context.Background(), options)
 	if err != nil {
@@ -258,15 +283,33 @@ func TestBundleConsumedInputEdit(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("B lock with A-to-B edit: %+v", lockedResult.Diagnostics)
-	for _, diagnostic := range lockedResult.Diagnostics {
-		if diagnostic.Message == "diagnostic-A" {
-			t.Errorf("B lock authorized A behavior")
+	if len(lockedResult.Diagnostics) == 1 && lockedResult.Diagnostics[0].Phase == "bundle" {
+		if !strings.Contains(lockedResult.Diagnostics[0].Message, changedError) {
+			t.Fatalf("unexpected locked build rejection: %+v", lockedResult.Diagnostics)
+		}
+	} else if len(lockedResult.Diagnostics) == 1 && lockedResult.Diagnostics[0].Phase == "integrity" {
+		if !strings.Contains(lockedResult.Diagnostics[0].Message, "bundle changed since the rules lock was written") {
+			t.Fatalf("unexpected lock rejection: %+v", lockedResult.Diagnostics)
+		}
+	} else {
+		if len(lockedResult.Diagnostics) != 3 {
+			t.Fatalf("locked edit did not produce coherent B or an expected rejection: %+v", lockedResult.Diagnostics)
+		}
+		for _, diagnostic := range lockedResult.Diagnostics {
+			if diagnostic.Message != "diagnostic-B" {
+				t.Errorf("B lock authorized different behavior: %+v", diagnostic)
+			}
 		}
 	}
 	writeA()
 	setControl("delete-after")
 	if artifact, err := build(); err == nil {
 		t.Errorf("deleted source published an artifact: %+v", artifact)
+	} else {
+		message := err.Error()
+		if !strings.Contains(message, realRulePath) || !(strings.Contains(message, "bundle inputs changed during compilation: read ") || strings.Contains(message, "ENOENT") && strings.Contains(message, "realpath")) {
+			t.Errorf("unexpected deleted-source rejection: %v", err)
+		}
 	}
 }
 

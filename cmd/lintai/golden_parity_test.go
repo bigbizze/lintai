@@ -40,7 +40,7 @@ func TestGoldenParity(t *testing.T) {
 			var stdout bytes.Buffer
 			err := run(context.Background(), item.args, &stdout)
 			if code := exitCode(err, io.Discard); code != item.want {
-				t.Fatalf("exit code %d, want %d: %v", code, item.want, err)
+				t.Fatalf("exit code %d, want %d: %v\nstdout:\n%s", code, item.want, err, stdout.Bytes())
 			}
 			got := stdout.Bytes()
 			if item.clean != nil {

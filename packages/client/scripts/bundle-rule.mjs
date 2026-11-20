@@ -568,6 +568,7 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 			}
 		}
 		const processedConfigs = new Set();
+		const configPackages = new Set();
 		while (pendingConfigs.size) {
 			const file = pendingConfigs.values().next().value;
 			pendingConfigs.delete(file);
@@ -587,6 +588,7 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 				if (extension.startsWith(".") || path.isAbsolute(extension)) {
 					bases.push(path.resolve(path.dirname(file), extension));
 				} else {
+					configPackages.add(extension);
 					const parts = extension.split("/");
 					const nameLength = extension.startsWith("@") ? 2 : 1;
 					const name = parts.slice(0, nameLength).join("/");
@@ -700,6 +702,44 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 			}
 		}
 
+		// Bare config extends can search past the mirrored filesystem root even
+		// when no ancestor node_modules existed during discovery. Install a
+		// deliberately invalid final candidate so an unresolved lookup fails
+		// inside the view instead of reading a subsequently created ancestor.
+		const boundaryPackages = new Set();
+		const boundaryMarkers = new Set();
+		for (const specifier of configPackages) {
+			const parts = specifier.split("/");
+			const nameLength = specifier.startsWith("@") ? 2 : 1;
+			if (parts.some((part) => part === ".." || part === ""))
+				throw new Error(`invalid bundle config package path: ${specifier}`);
+			const packageRoot = path.join(root, "node_modules", ...parts.slice(0, nameLength));
+			const base = path.join(packageRoot, ...parts.slice(nameLength));
+			if (!viewPathInside(root, base))
+				throw new Error(`bundle config package escapes captured view: ${specifier}`);
+			if (!boundaryPackages.has(packageRoot)) {
+				if (
+					await fs.stat(packageRoot).then(
+						() => true,
+						(error) => {
+							if (error.code === "ENOENT" || error.code === "ENOTDIR") return false;
+							throw error;
+						},
+					)
+				)
+					throw new Error(
+						`bundle config package at filesystem root cannot be constrained: ${specifier}`,
+					);
+				boundaryPackages.add(packageRoot);
+			}
+			const marker =
+				parts.length === nameLength ? path.join(base, "tsconfig.json") : `${base}.json`;
+			if (boundaryMarkers.has(marker)) continue;
+			boundaryMarkers.add(marker);
+			await fs.mkdir(path.dirname(marker), { recursive: true });
+			await fs.writeFile(marker, "{ unresolved config outside captured view", { flag: "wx" });
+		}
+
 		// Package imports and browser mappings can redirect an observed lookup
 		// to otherwise invisible bare or relative candidates. Capture them too,
 		// including candidates closer than the selected package.
@@ -772,26 +812,46 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 			}
 		}
 
-		// Rebase absolute paths in configuration fields; the original bytes stay
-		// in the manifest and are also used if a JSON file is imported as data.
+		// Native esbuild interprets paths in several config and package fields.
+		// Rebase every absolute JSON string, including object keys, rather than
+		// relying on an incomplete list of native path-bearing fields. Imported
+		// JSON data still uses the original captured bytes in onLoad.
 		for (const [file, bytes] of jsonBytes) {
+			if (!processedConfigs.has(file) && !processedPackages.has(file)) continue;
 			const text = bytes.toString("utf8");
 			const tree = ts.parseJsonText(file, text);
+			const parsed = ts.parseConfigFileTextToJson(file, text).config;
+			const baseUrl = parsed?.compilerOptions?.baseUrl;
+			const inheritedPathsBase = parsed?.extends && typeof baseUrl !== "string";
+			const pathsBase =
+				typeof baseUrl === "string"
+					? mirror(canonical(path.resolve(path.dirname(file), baseUrl)))
+					: path.dirname(mirror(file));
 			const edits = [];
-			const visit = (node, pathValue = false) => {
+			const visit = (node, inPaths = false) => {
 				if (ts.isPropertyAssignment(node)) {
-					const name = node.name.text;
-					visit(
-						node.initializer,
-						pathValue || ["extends", "baseUrl", "paths", "rootDirs", "typeRoots"].includes(name),
-					);
+					visit(node.name, inPaths);
+					visit(node.initializer, inPaths || node.name.text === "paths");
 					return;
 				}
-				if (pathValue && ts.isStringLiteral(node) && path.isAbsolute(node.text)) {
-					edits.push([node.getStart(tree), node.end, JSON.stringify(mirror(canonical(node.text)))]);
-					return;
+				if (ts.isStringLiteral(node)) {
+					if (path.isAbsolute(node.text)) {
+						edits.push([
+							node.getStart(tree),
+							node.end,
+							JSON.stringify(mirror(canonical(node.text))),
+						]);
+					} else {
+						if (inPaths && inheritedPathsBase && node.text.split(/[\\/]/).includes(".."))
+							throw new Error(
+								`bundle config paths with an inherited base cannot be constrained: ${file}`,
+							);
+						const base = inPaths ? pathsBase : path.dirname(mirror(file));
+						if (!viewPathInside(root, path.resolve(base, node.text)))
+							throw new Error(`bundle config path escapes captured view: ${file}: ${node.text}`);
+					}
 				}
-				ts.forEachChild(node, (child) => visit(child, pathValue));
+				ts.forEachChild(node, (child) => visit(child, inPaths));
 			};
 			visit(tree);
 			if (edits.length) {
@@ -823,6 +883,11 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 		await fs.rm(root, { recursive: true, force: true });
 		throw error;
 	}
+}
+
+function viewPathInside(root, candidate) {
+	const relative = path.relative(root, candidate);
+	return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 }
 
 // Both bundles share one identity over their inputs and the code that builds
@@ -866,9 +931,10 @@ async function ruleHash(
 			inputs.set(absolute, observation);
 			for (const imported of input.imports) {
 				const targetPath = path.resolve(imported.path);
-				const target = imported.external
-					? imported.path
-					: lockPath(view.original(targetPath) ?? targetPath, workspaceRoot, repoRoot);
+				const target =
+					imported.external && !path.isAbsolute(imported.path)
+						? imported.path
+						: lockPath(view.original(targetPath) ?? targetPath, workspaceRoot, repoRoot);
 				const original = imported.original ?? imported.path;
 				resolutions.push(
 					JSON.stringify([
@@ -926,11 +992,11 @@ async function ruleHash(
 				inputs: sorted.map(({ path: inputPath, sha256 }) => [inputPath, sha256]),
 				resolutions: resolutions.sort(),
 				probes: probes
-					.map(({ logicalPath, directory, exists, digest, linkIdentity }) => [
+					.filter(({ digest }) => !digest)
+					.map(({ logicalPath, directory, exists, linkIdentity }) => [
 						logicalPath,
 						directory,
 						exists,
-						digest ?? "",
 						linkIdentity ?? "",
 					])
 					.sort(),
@@ -997,6 +1063,7 @@ function createInputPlugin(captured, generatedEntry, view) {
 		const visit = (node) => {
 			let literal;
 			let requireIdentifier;
+			let requireResolve = false;
 			if (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) {
 				literal = node.moduleSpecifier;
 			} else if (ts.isExternalModuleReference(node)) {
@@ -1016,12 +1083,14 @@ function createInputPlugin(captured, generatedEntry, view) {
 				) {
 					literal = node.arguments[0];
 					requireIdentifier = expression.expression;
+					requireResolve = true;
 				}
 			}
 			if (
 				literal &&
 				(ts.isStringLiteral(literal) || ts.isNoSubstitutionTemplateLiteral(literal)) &&
 				path.isAbsolute(literal.text) &&
+				!requireResolve &&
 				(!requireIdentifier || !locallyBound(requireIdentifier))
 			) {
 				edits.push([
@@ -1030,6 +1099,15 @@ function createInputPlugin(captured, generatedEntry, view) {
 					JSON.stringify(view.mirror(view.canonical(literal.text))),
 				]);
 			}
+			if (
+				literal &&
+				(ts.isStringLiteral(literal) || ts.isNoSubstitutionTemplateLiteral(literal)) &&
+				!requireResolve &&
+				!path.isAbsolute(literal.text) &&
+				(!requireIdentifier || !locallyBound(requireIdentifier)) &&
+				!viewPathInside(view.root, path.resolve(path.dirname(view.mirror(file)), literal.text))
+			)
+				throw new Error(`bundle import escapes captured view: ${file}: ${literal.text}`);
 			ts.forEachChild(node, visit);
 		};
 		visit(source);
@@ -1042,6 +1120,10 @@ function createInputPlugin(captured, generatedEntry, view) {
 	return {
 		name: "lintai-captured-inputs",
 		setup(buildCtx) {
+			buildCtx.onResolve({ filter: /.*/ }, (args) => {
+				if (args.kind === "require-resolve") return { path: args.path, external: true };
+				return null;
+			});
 			// Native resolution must retain esbuild's per-file tsconfig options.
 			// The view bounds its filesystem; reject any source which escapes it.
 			buildCtx.onLoad({ filter: /.*/, namespace: "file" }, async (args) => {
