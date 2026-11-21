@@ -126,6 +126,14 @@ func TestBundleConfigPathsBase(t *testing.T) {
 			},
 		},
 		{
+			name: "package subpath names the package tsconfig",
+			configs: map[string]string{
+				"node_modules/fixture-config/package.json":  `{"name":"fixture-config"}`,
+				"node_modules/fixture-config/tsconfig.json": `{"compilerOptions":{"baseUrl":"../../rules-support/nested/deeper"}}`,
+				"lintai-rules/tsconfig.json":                `{"extends":"fixture-config/tsconfig.json","compilerOptions":{"paths":{"@fixture/policy":["../../a.ts"]}}}`,
+			},
+		},
+		{
 			name: "near package shadows ancestor config",
 			configs: map[string]string{
 				"node_modules/fixture-config/tsconfig.json": `{"compilerOptions":{"baseUrl":"../../rules-support/nested/deeper"}}`,

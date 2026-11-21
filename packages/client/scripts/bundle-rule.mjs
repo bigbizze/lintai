@@ -692,12 +692,11 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 						const subpath = path.resolve(base, packageSubpath);
 						targets.push(subpath, `${subpath}.json`, path.join(subpath, "tsconfig.json"));
 					}
-					for (const target of targets) {
+					for (const [index, target] of targets.entries()) {
 						await candidate(target, true);
 						// A package subpath cannot select the package root's default
-						// config unless package metadata redirects it there.
-						const eligible =
-							!packageSubpath || packageSubpath === "." || !targets.slice(0, 3).includes(target);
+						// config unless package metadata or the subpath itself names it.
+						const eligible = !packageSubpath || packageSubpath === "." || index >= 3;
 						addConfig(target, eligible && !fallbackCovered ? candidates : undefined);
 					}
 					if (packageSubpath) {
