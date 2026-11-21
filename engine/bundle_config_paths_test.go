@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 
@@ -78,15 +79,15 @@ func TestBundleConfigPathsBase(t *testing.T) {
 		{
 			name: "configDir in inherited base",
 			configs: map[string]string{
-				"config/base.json":           `{"compilerOptions":{"baseUrl":"${configDir}/../rules-support/nested/deeper"}}`,
-				"lintai-rules/tsconfig.json": `{"extends":"../config/base.json","compilerOptions":{"paths":{"@fixture/policy":["../../a.ts"]}}}`,
+				"config/deep/base.json":      `{"compilerOptions":{"baseUrl":"${configDir}/../rules-support/nested/deeper"}}`,
+				"lintai-rules/tsconfig.json": `{"extends":"../config/deep/base.json","compilerOptions":{"paths":{"@fixture/policy":["../../a.ts"]}}}`,
 			},
 		},
 		{
 			name: "configDir in inherited paths",
 			configs: map[string]string{
-				"config/base.json":           `{"compilerOptions":{"paths":{"@fixture/policy":["${configDir}/../rules-support/a.ts"]}}}`,
-				"lintai-rules/tsconfig.json": `{"extends":"../config/base.json"}`,
+				"config/deep/base.json":      `{"compilerOptions":{"paths":{"@fixture/policy":["${configDir}/../rules-support/a.ts"]}}}`,
+				"lintai-rules/tsconfig.json": `{"extends":"../config/deep/base.json"}`,
 			},
 		},
 		{
@@ -243,7 +244,7 @@ func TestBundleConfigPathsEscapeRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, scenario := range []string{"declaring file", "descendant base", "duplicate baseUrl", "duplicate paths key", "configDir substitution", "wildcard substitution", "wildcard dollar substitution"} {
+	for _, scenario := range []string{"declaring file", "descendant base", "duplicate baseUrl", "duplicate paths key", "configDir substitution", "wildcard substitution", "wildcard dollar substitution", "backslash dot specifier"} {
 		t.Run(scenario, func(t *testing.T) {
 			workspace := t.TempDir()
 			support := writeTestFile(t, workspace, "rules-support/a.ts", `export const message = "A";`)
@@ -292,6 +293,13 @@ func TestBundleConfigPathsEscapeRejected(t *testing.T) {
 				base = `{"compilerOptions":{"baseUrl":` + quote(filepath.VolumeName(resolved)+string(filepath.Separator)) + `}}`
 				config = `{"extends":"../config/base.json","compilerOptions":{"paths":{"@fixture/*":["a/b/c/*"]}}}`
 				specifier = "@fixture/$`/" + strings.Repeat("../", 5) + rootRelative
+			case "backslash dot specifier":
+				if goruntime.GOOS == "windows" {
+					t.Skip("a backslash marks a relative specifier on Windows")
+				}
+				base = `{"compilerOptions":{"baseUrl":` + quote(filepath.VolumeName(resolved)+string(filepath.Separator)) + `}}`
+				config = `{"extends":"../config/base.json","compilerOptions":{"paths":{"*":["*"]}}}`
+				specifier = `.\\/../../` + rootRelative
 			}
 			writeTestFile(t, workspace, "config/base.json", base)
 			writeTestFile(t, workspace, "lintai-rules/tsconfig.json", config)
