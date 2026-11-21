@@ -48,7 +48,7 @@ type Options struct {
 	// setup() is then limited to Node built-ins other than module and vm.
 	RulesLock string
 	// SetupSandbox selects whether setup() runs under the Node permission
-	// model. The default is auto.
+	// model. The default is on.
 	SetupSandbox bundle.SetupSandbox
 	// SuppressionsLocation is the path of the suppressions file, relative
 	// to the workspace root when it is not absolute. The default is
@@ -80,8 +80,7 @@ type Result struct {
 	RulesLoaded     int
 	AnalyzedFiles   []string
 	WatchHints      []string
-	// Warnings are messages for the user that are not diagnostics, for
-	// example that setup() ran without a sandbox.
+	// Warnings are messages for the user that are not diagnostics.
 	Warnings []string
 	// Suppressed are the violations that the suppressions file
 	// suppressed. They are not in Diagnostics.
@@ -372,10 +371,11 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options) (Res
 	if err := ctx.Err(); err != nil {
 		return Result{}, run, evidence, err
 	}
-	sandbox, sandboxWarning, err := bundle.ResolveSetupSandbox(options.SetupSandbox)
+	sandboxMode, err := bundle.ParseSetupSandbox(string(options.SetupSandbox))
 	if err != nil {
 		return Result{}, run, evidence, err
 	}
+	sandbox := sandboxMode == bundle.SetupSandboxOn
 	var lock *RulesLock
 	if options.RulesLock != "" {
 		loaded, err := ReadRulesLock(ResolveRulesLockPath(options.WorkspaceRoot, options.RulesLock))
@@ -415,9 +415,6 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options) (Res
 			run.complete = len(result.Diagnostics) == 0
 			sortDiagnostics(result.Diagnostics)
 		}
-		if sandboxWarning != "" {
-			result.Warnings = append(result.Warnings, sandboxWarning)
-		}
 		return result, run, evidence, nil
 	}
 	assembled, err := emptyComposedFacts()
@@ -426,9 +423,6 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options) (Res
 	}
 	allDiagnostics := make([]diagnostics.Diagnostic, 0)
 	result := Result{Diagnostics: allDiagnostics, SnapshotVersion: assembled.snapshotID}
-	if sandboxWarning != "" {
-		result.Warnings = append(result.Warnings, sandboxWarning)
-	}
 	if catalogErr != nil {
 		for _, rulePath := range ruleCatalog.paths {
 			if itemErr, failed := ruleCatalog.bundleFailures[rulePath]; failed {

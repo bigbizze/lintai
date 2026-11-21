@@ -23,15 +23,16 @@ class RuleShapeError extends Error {}
 // built-in.
 class RestrictedRequireError extends Error {}
 
-const trustHelp = "Import workspace code statically so the rule bundle contains it, or run with --setup-sandbox=off (see docs/trust.md)";
+const trustHelp = "Import workspace code statically so the rule bundle contains it, or, when no rules lock is used, run with --setup-sandbox=off (see docs/trust.md)";
 
 function formatError(error) {
 	if (error instanceof RuleShapeError || error instanceof RestrictedRequireError) {
 		return error.message;
 	}
 	if (error?.code === "ERR_ACCESS_DENIED") {
-		const permission = error.permission ?? "unknown";
-		const resource = error.resource ? ` for ${error.resource}` : "";
+		const permission = error.permission ?? error.errno?.permission ?? "unknown";
+		const deniedResource = error.resource ?? error.errno?.resource;
+		const resource = deniedResource ? ` for ${deniedResource}` : "";
 		return `the setup sandbox denied permission ${permission}${resource}; setup() may only read files in the workspace. Run with --setup-sandbox=off to allow it (see docs/trust.md)`;
 	}
 	if (error?.code === "ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING" || error?.code === "ERR_VM_DYNAMIC_IMPORT_CALLBACK_MISSING_FLAG") {
