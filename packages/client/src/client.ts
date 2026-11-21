@@ -40,7 +40,7 @@ export type LintaiOptions = {
 	setupSandbox?: SetupSandbox;
 };
 
-export type SetupSandbox = "auto" | "on" | "off";
+export type SetupSandbox = "on" | "off";
 
 export type ResolvedBridgeOptions = {
 	mode: "serve" | "oneshot";

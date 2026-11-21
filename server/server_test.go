@@ -123,6 +123,9 @@ func TestServerInitializeAndFileDiagnostics(t *testing.T) {
 	if analyzer.calls[0].AssetRoot != "/assets" {
 		t.Fatalf("expected asset root to be propagated, got %q", analyzer.calls[0].AssetRoot)
 	}
+	if analyzer.calls[0].SetupSandbox != "on" {
+		t.Fatalf("default setup sandbox = %q", analyzer.calls[0].SetupSandbox)
+	}
 	if analyzer.calls[0].RuleWorkers != 2 {
 		t.Fatalf("ruleWorkers not forwarded: %+v", analyzer.calls[0])
 	}
@@ -400,5 +403,34 @@ func decodeResult(t *testing.T, value any, target any) {
 	}
 	if err := json.Unmarshal(raw, target); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestInitializeSandboxValidation(t *testing.T) {
+	for _, item := range []struct {
+		value string
+		want  string
+		valid bool
+	}{
+		{"on", "on", true}, {"off", "off", true}, {"auto", "", false},
+	} {
+		t.Run(item.value, func(t *testing.T) {
+			analyzer := &fakeAnalyzer{}
+			server := NewWithFactory(func(InitializeParams) Analyzer { return analyzer })
+			raw, err := json.Marshal(InitializeParams{WorkspaceRoot: "/workspace", SetupSandbox: item.value})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = server.handleInitialize(context.Background(), raw)
+			if !item.valid {
+				if err == nil {
+					t.Fatal("expected invalid sandbox error")
+				}
+				return
+			}
+			if err != nil || len(analyzer.calls) != 1 || string(analyzer.calls[0].SetupSandbox) != item.want {
+				t.Fatalf("calls=%+v error=%v", analyzer.calls, err)
+			}
+		})
 	}
 }

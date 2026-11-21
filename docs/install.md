@@ -8,13 +8,13 @@ For npm consumers:
 
 - Linux or macOS
 - `x64` or `arm64`
-- Node `22+`
+- stable Node `>=26.13.1 <27`
 - a TypeScript repository with a `tsconfig.json` somewhere under the workspace you want to analyze
 
 For source builds:
 
 - Go on your `PATH`
-- Node `22+`
+- stable Node `>=26.13.1 <27`
 - `pnpm`
 
 Current caveats:
@@ -42,9 +42,9 @@ This gives you:
 ### CLI + SDK + ESLint integration
 
 ```sh
-pnpm add -D @lintai/cli @lintai/sdk @lintai/eslint-plugin eslint
+pnpm add -D @lintai/cli @lintai/sdk @lintai/eslint-plugin eslint@^10.15.0 @typescript-eslint/parser@^8.73.0
 # or
-npm install -D @lintai/cli @lintai/sdk @lintai/eslint-plugin eslint
+npm install -D @lintai/cli @lintai/sdk @lintai/eslint-plugin eslint@^10.15.0 @typescript-eslint/parser@^8.73.0
 ```
 
 `@lintai/sdk` does not depend on Zod. If your rules export `config` schemas using Zod, add it yourself:
@@ -136,21 +136,26 @@ Add an ESLint config:
 ```js
 // eslint.config.mjs
 import { createLintaiPlugin } from "@lintai/eslint-plugin";
+import tsParser from "@typescript-eslint/parser";
 
 const lintai = createLintaiPlugin({ rules: ["lintai-rules/**/*.ts"] });
 
 export default [
 	{
 		files: ["src/**/*.ts", "src/**/*.tsx"],
+		languageOptions: { parser: tsParser },
 		...lintai.configs.all,
 	},
 	{
 		files: ["lintai-rules/**/*.ts"],
+		languageOptions: { parser: tsParser },
 		plugins: { lintai },
 		rules: lintai.configs.authoring.rules,
 	},
 ];
 ```
+
+ESLint 10 looks for a flat config starting from each linted file; use `--config` to select one explicitly. Configure your editor to use the supported Node 26 runtime.
 
 Each lintai rule is the ESLint rule `lintai/<rule-id>`. Set its level, a per-file override or a disable comment as for any other rule. See [api.md](api.md#linter-rules).
 
@@ -167,7 +172,7 @@ Options of `createLintaiPlugin`:
 - `factLimit?: number`
 - `ruleWorkers?: number`
 - `rulesLock?: string`
-- `setupSandbox?: "auto" | "on" | "off"`
+- `setupSandbox?: "on" | "off"`
 
 Plugin caveats:
 

@@ -82,7 +82,7 @@ Rule bundles identify their captured source and resolution inputs. If those inpu
 
 ## Try it
 
-The npm packages require Node 22 or later and support Linux and macOS on x64 and arm64. You do not need Go to use them.
+The Node-based packages and rule execution require stable Node 26.13.1 or later in the 26.x LTS line. They support Linux and macOS on x64 and arm64. You do not need Go to use them.
 
 ```sh
 pnpm add -D @lintai/cli @lintai/sdk
@@ -131,7 +131,7 @@ pnpm exec lintai facts --workspace-root . --relation ts.import_edge --relation t
 For ESLint, install the plugin:
 
 ```sh
-pnpm add -D @lintai/eslint-plugin eslint
+pnpm add -D @lintai/eslint-plugin eslint@^10.15.0 @typescript-eslint/parser@^8.73.0
 ```
 
 Then add it to your flat config:
@@ -139,12 +139,14 @@ Then add it to your flat config:
 ```js
 // eslint.config.mjs
 import { createLintaiPlugin } from "@lintai/eslint-plugin";
+import tsParser from "@typescript-eslint/parser";
 
 const lintai = createLintaiPlugin({ rules: ["lintai-rules/**/*.ts"] });
 
 export default [
   {
     files: ["src/**/*.ts", "src/**/*.tsx"],
+    languageOptions: { parser: tsParser },
     ...lintai.configs.all,
   },
 ];
