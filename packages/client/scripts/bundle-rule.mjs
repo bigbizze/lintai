@@ -624,9 +624,11 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 			}
 		};
 		// Esbuild applies only the nearest config of each source, with its
-		// extends chain. Other ancestor configs do not affect resolution.
+		// extends chain. Other ancestor configs do not affect resolution, and
+		// sources inside node_modules use no config.
 		const nearestConfigs = new Set();
 		for (const source of sourceFiles) {
+			if (source.split(path.sep).includes("node_modules")) continue;
 			let nearest;
 			for (let directory = path.dirname(source); ; directory = path.dirname(directory)) {
 				for (const name of ["tsconfig.json", "jsconfig.json"]) {

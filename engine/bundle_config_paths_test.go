@@ -118,6 +118,14 @@ func TestBundleConfigPathsBase(t *testing.T) {
 			links: map[string]string{"node_modules/fixture-config": "../config-package"},
 		},
 		{
+			name: "config of a source inside node_modules is ignored",
+			configs: map[string]string{
+				"node_modules/pkg/tsconfig.json": `{"extends":"../../missing.json","compilerOptions":{"paths":{"@/*":["./src/*"]}}}`,
+				"node_modules/pkg/index.ts":      `export { message } from "../../rules-support/a";`,
+				"lintai-rules/tsconfig.json":     `{"compilerOptions":{"paths":{"@fixture/policy":["../node_modules/pkg/index.ts"]}}}`,
+			},
+		},
+		{
 			name: "near package shadows ancestor config",
 			configs: map[string]string{
 				"node_modules/fixture-config/tsconfig.json": `{"compilerOptions":{"baseUrl":"../../rules-support/nested/deeper"}}`,
