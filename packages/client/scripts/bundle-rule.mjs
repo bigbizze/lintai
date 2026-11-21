@@ -614,17 +614,23 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 			if (jsonBytes.has(selected)) {
 				pendingConfigs.add(selected);
 				candidates?.add(selected);
+				return selected;
 			}
 		};
+		// Esbuild applies only the nearest config of each source, with its
+		// extends chain. Other ancestor configs do not affect resolution.
+		const nearestConfigs = new Set();
 		for (const source of sourceFiles) {
+			let nearest;
 			for (let directory = path.dirname(source); ; directory = path.dirname(directory)) {
 				for (const name of ["tsconfig.json", "jsconfig.json"]) {
 					const file = path.join(directory, name);
 					await candidate(file, true);
-					addConfig(file);
+					nearest ??= addConfig(file);
 				}
 				if (directory === path.dirname(directory)) break;
 			}
+			if (nearest) nearestConfigs.add(nearest);
 		}
 		const processedConfigs = new Set();
 		const configPackages = new Set();
@@ -799,7 +805,12 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 						star < 0 ? "" : specifier.slice(prefix.length, specifier.length - suffix.length);
 					for (const target of Array.isArray(targets) ? targets : []) {
 						if (typeof target === "string")
-							await sourceCandidates(path.resolve(base, target.replace("*", match)));
+							await sourceCandidates(
+								path.resolve(
+									base,
+									target.replace("*", () => match),
+								),
+							);
 					}
 				}
 			}
@@ -965,7 +976,7 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 			if (cycleHits === hitsBefore) stateCache.set(file, result);
 			return result;
 		};
-		for (const config of processedConfigs) {
+		for (const config of nearestConfigs) {
 			for (const [baseFile, pathsFile] of configState(config)) {
 				if (pathsFile === null || pathsFile === unknown) continue;
 				const pathsOptions = configData.get(pathsFile).compilerOptions;
@@ -992,7 +1003,8 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 							throw new Error(`bundle config path escapes captured view: ${pathsFile}: ${target}`);
 						const template = path.isAbsolute(target) ? rebase(target) : target;
 						const check = (substitution) => {
-							const value = substitution === null ? template : template.replace("*", substitution);
+							const value =
+								substitution === null ? template : template.replace("*", () => substitution);
 							const resolved = target.startsWith("${configDir}")
 								? path.resolve(path.dirname(mirror(config)), `./${value.slice(12)}`)
 								: path.isAbsolute(target)
@@ -1002,11 +1014,13 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 								throw new Error(`bundle config path escapes captured view: ${pathsFile}: ${value}`);
 						};
 						check(null);
-						const star = pattern.indexOf("*");
+						// The staged config and staged specifiers carry rebased absolute keys.
+						const key = path.isAbsolute(pattern) ? rebase(pattern) : pattern;
+						const star = key.indexOf("*");
 						if (star >= 0 && target.includes("*"))
 							pathChecks.push({
-								prefix: pattern.slice(0, star),
-								suffix: pattern.slice(star + 1),
+								prefix: key.slice(0, star),
+								suffix: key.slice(star + 1),
 								check,
 							});
 					}

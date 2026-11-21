@@ -59,6 +59,8 @@ On macOS arm64 with Go 1.27.3, Node 22.23.4, esbuild 0.25.12, and TypeScript 5.9
 
 The absolute-selector and inherited-base A→B→A tests assert that their edit hooks ran; the separate unsafe-config tests assert rejection before publication and do not claim an edit-hook run. A19 remains qualified as above: esbuild does not expose all native config reads, and this correction is not a proof of every native path on every platform. This is a post-review correction and does not reset the feature review counts.
 
+Maintainer review fixes followed this receipt. They check every duplicate `paths` entry, check only bare and absolute lookups, check only the nearest config of each source with its extends chain, match rebased absolute wildcard keys, and substitute wildcard text literally. The timings above do not cover those commits. The remote CI matrix ran on them.
+
 ## 6. Held work (not done)
 
 - Broader multi-config experiments (see `multi-config-analysis.md`).

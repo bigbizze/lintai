@@ -45,6 +45,14 @@ func TestBundleConfigPathsBase(t *testing.T) {
 			},
 		},
 		{
+			name: "ancestor config outside the nearest chain is ignored",
+			configs: map[string]string{
+				"tsconfig.json":               `{"extends":"missing-config","compilerOptions":{"paths":{"@/*":["./src/*"]}}}`,
+				"rules-support/tsconfig.json": `{}`,
+				"lintai-rules/tsconfig.json":  `{"compilerOptions":{"paths":{"@fixture/policy":["../rules-support/a.ts"]}}}`,
+			},
+		},
+		{
 			name: "inherited base and ordered extends",
 			configs: map[string]string{
 				"config/first.json":          `{"compilerOptions":{"baseUrl":"../wrong"}}`,
@@ -235,7 +243,7 @@ func TestBundleConfigPathsEscapeRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, scenario := range []string{"declaring file", "descendant base", "duplicate baseUrl", "duplicate paths key", "configDir substitution", "wildcard substitution"} {
+	for _, scenario := range []string{"declaring file", "descendant base", "duplicate baseUrl", "duplicate paths key", "configDir substitution", "wildcard substitution", "wildcard dollar substitution"} {
 		t.Run(scenario, func(t *testing.T) {
 			workspace := t.TempDir()
 			support := writeTestFile(t, workspace, "rules-support/a.ts", `export const message = "A";`)
@@ -280,6 +288,10 @@ func TestBundleConfigPathsEscapeRejected(t *testing.T) {
 				base = `{"compilerOptions":{"baseUrl":` + quote(filepath.VolumeName(resolved)+string(filepath.Separator)) + `}}`
 				config = `{"extends":"../config/base.json","compilerOptions":{"paths":{"@fixture/*":["*"]}}}`
 				specifier = "@fixture/../" + rootRelative
+			case "wildcard dollar substitution":
+				base = `{"compilerOptions":{"baseUrl":` + quote(filepath.VolumeName(resolved)+string(filepath.Separator)) + `}}`
+				config = `{"extends":"../config/base.json","compilerOptions":{"paths":{"@fixture/*":["a/b/c/*"]}}}`
+				specifier = "@fixture/$`/" + strings.Repeat("../", 5) + rootRelative
 			}
 			writeTestFile(t, workspace, "config/base.json", base)
 			writeTestFile(t, workspace, "lintai-rules/tsconfig.json", config)
