@@ -47,6 +47,8 @@ Limits:
 
 ### Post-review captured-path correction receipt
 
+Correction commit: `c9fe5835256207e3e9630c6f382c6e53f0216d0f`. All 13 local CI steps passed on this commit: `pnpm install --frozen-lockfile`, `pnpm build`, `go vet $(go list ./... | grep -v /internal/tsgo/internal/)`, `go test -count=1 ./...`, `go run -mod=readonly .` from `testdata/consumer-module`, `pnpm build:npm-binary:host`, `pnpm --filter @lintai/{sdk,client,eslint-plugin,oxlint-plugin} test` (each package separately), `pnpm smoke:npm`, `pnpm smoke:oxlint`, and the pinned `scripts/sync-tsgo.sh` invocation followed by a clean-tree assertion. Each exited 0. The local environment was macOS arm64, Go 1.27.3, Node 22.23.4, and pnpm 10.9.0. Node 24 and Linux were not exercised locally for this correction; remote matrix results must be checked separately.
+
 On macOS arm64 with Go 1.27.3, Node 22.23.4, esbuild 0.25.12, and TypeScript 5.9.3, the following commands completed against the correction:
 
 - `/usr/bin/time -p go test -count=1 ./engine -run '^TestBundleConfigPaths(Base|CapturedAcrossBuilds|EscapeRejected|UnestablishedBaseRejected|ChangedLookupRejected)$' -v` — exit 0, 22.63 s.
