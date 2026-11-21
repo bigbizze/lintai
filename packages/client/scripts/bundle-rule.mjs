@@ -561,6 +561,9 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 		const pendingConfigs = new Set();
 		const configExtensions = new Map();
 		const configData = new Map();
+		// Esbuild tries the targets of every duplicate paths key in source
+		// order, so the decoded object alone cannot describe its lookups.
+		const pathsEntries = Symbol("paths entries");
 		// Esbuild takes the first occurrence of these fields, whereas the
 		// TypeScript JSON decoder keeps the last duplicate property.
 		const parseFirstProperties = (file, bytes, names, nested = []) => {
@@ -586,6 +589,10 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 					for (const key of nested) {
 						const child = property(node, key);
 						if (child) parsed[name][key] = value(child);
+						if (key === "paths" && child && ts.isObjectLiteralExpression(child))
+							parsed[name][pathsEntries] = child.properties
+								.filter(ts.isPropertyAssignment)
+								.map((item) => [item.name.text, value(item.initializer)]);
 					}
 				}
 			}
@@ -914,6 +921,8 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 		// last inherited option wins, and a local option overrides all of them.
 		const unknown = Symbol("unknown config");
 		const pathChecks = [];
+		const stateCache = new Map();
+		let cycleHits = 0;
 		const uniqueStates = (states) => {
 			const seen = new Map();
 			for (const [base, paths] of states) {
@@ -923,7 +932,10 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 			return [...seen].flatMap(([base, paths]) => [...paths].map((item) => [base, item]));
 		};
 		const configState = (file, stack = new Set()) => {
+			if (stateCache.has(file)) return stateCache.get(file);
+			if (stack.has(file)) cycleHits++;
 			if (stack.has(file) || !configData.has(file)) return [[unknown, unknown]];
+			const hitsBefore = cycleHits;
 			const nextStack = new Set(stack).add(file);
 			let states = [[null, null]];
 			for (const candidates of configExtensions.get(file)) {
@@ -946,16 +958,19 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 			const hasBase = typeof options?.baseUrl === "string";
 			const hasPaths =
 				options?.paths && typeof options.paths === "object" && !Array.isArray(options.paths);
-			return uniqueStates(
+			const result = uniqueStates(
 				states.map(([base, paths]) => [hasBase ? file : base, hasPaths ? file : paths]),
 			);
+			// A result that met a cycle depends on the current extends stack.
+			if (cycleHits === hitsBefore) stateCache.set(file, result);
+			return result;
 		};
 		for (const config of processedConfigs) {
 			for (const [baseFile, pathsFile] of configState(config)) {
 				if (pathsFile === null || pathsFile === unknown) continue;
-				for (const [pattern, targets] of Object.entries(
-					configData.get(pathsFile).compilerOptions.paths,
-				)) {
+				const pathsOptions = configData.get(pathsFile).compilerOptions;
+				for (const [pattern, targets] of pathsOptions[pathsEntries] ??
+					Object.entries(pathsOptions.paths)) {
 					for (const target of Array.isArray(targets) ? targets : []) {
 						if (typeof target !== "string") continue;
 						if (
@@ -999,6 +1014,9 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 			}
 		}
 		const validatePathsLookup = (specifier) => {
+			// Esbuild applies paths to bare and absolute specifiers, never to
+			// relative ones.
+			if (/^\.\.?(?:[\\/]|$)/.test(specifier)) return;
 			for (const { prefix, suffix, check } of pathChecks) {
 				if (
 					specifier.startsWith(prefix) &&
@@ -1008,7 +1026,10 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 					check(specifier.slice(prefix.length, specifier.length - suffix.length));
 			}
 		};
-		for (const { specifier } of lookups) if (specifier) validatePathsLookup(specifier);
+		// Discovery saw original absolute specifiers. The staged build sees them
+		// rebased into the view and validates them in onResolve.
+		for (const { specifier } of lookups)
+			if (specifier && !path.isAbsolute(specifier)) validatePathsLookup(specifier);
 
 		// Native esbuild interprets paths in several config and package fields.
 		// Rebase every absolute JSON string, including object keys, rather than

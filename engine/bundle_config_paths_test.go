@@ -39,6 +39,12 @@ func TestBundleConfigPathsBase(t *testing.T) {
 			},
 		},
 		{
+			name: "catch-all pattern ignores entry and relative specifiers",
+			configs: map[string]string{
+				"lintai-rules/tsconfig.json": `{"compilerOptions":{"baseUrl":".","paths":{"*":["*"],"@fixture/policy":["../rules-support/a.ts"]}}}`,
+			},
+		},
+		{
 			name: "inherited base and ordered extends",
 			configs: map[string]string{
 				"config/first.json":          `{"compilerOptions":{"baseUrl":"../wrong"}}`,
@@ -229,7 +235,7 @@ func TestBundleConfigPathsEscapeRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, scenario := range []string{"declaring file", "descendant base", "duplicate baseUrl", "configDir substitution", "wildcard substitution"} {
+	for _, scenario := range []string{"declaring file", "descendant base", "duplicate baseUrl", "duplicate paths key", "configDir substitution", "wildcard substitution"} {
 		t.Run(scenario, func(t *testing.T) {
 			workspace := t.TempDir()
 			support := writeTestFile(t, workspace, "rules-support/a.ts", `export const message = "A";`)
@@ -259,6 +265,10 @@ func TestBundleConfigPathsEscapeRejected(t *testing.T) {
 			case "duplicate baseUrl":
 				base = `{"compilerOptions":{"baseUrl":` + quote(filepath.VolumeName(resolved)+string(filepath.Separator)) + `,"baseUrl":"../rules-support/nested/deeper"}}`
 				config = `{"extends":"../config/base.json","compilerOptions":{"paths":{"@fixture/policy":[` + quote("../"+rootRelative) + `]}}}`
+				specifier = "@fixture/policy"
+			case "duplicate paths key":
+				base = `{}`
+				config = `{"extends":"../config/base.json","compilerOptions":{"paths":{"@fixture/policy":[` + quote(strings.Repeat("../", 64)+rootRelative) + `],"@fixture/policy":["../rules-support/a.ts"]}}}`
 				specifier = "@fixture/policy"
 			case "configDir substitution":
 				configDir := filepath.Join(filepath.Dir(filepath.Dir(resolved)), "lintai-rules")
