@@ -558,6 +558,12 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 		// nearer packages, and recursively inspect the copied config files. This
 		// makes the staged filesystem, not the TypeScript resolver above, the
 		// authority for the bytes esbuild can consume.
+		// Esbuild treats a non-absolute specifier as relative only when it is
+		// "." or "..", or starts with "./" or "../". Others, such as ".foo",
+		// name packages and receive paths mappings. A backslash also separates
+		// on Windows.
+		const relativePattern = process.platform === "win32" ? /^\.\.?(?:[\\/]|$)/ : /^\.\.?(?:\/|$)/;
+		const relativeSpecifier = (specifier) => relativePattern.test(specifier);
 		const pendingConfigs = new Set();
 		const configExtensions = new Map();
 		const configData = new Map();
@@ -661,7 +667,7 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 				extended.push(candidates);
 				const bases = [];
 				let packageSubpath;
-				if (extension.startsWith(".") || path.isAbsolute(extension)) {
+				if (relativeSpecifier(extension) || path.isAbsolute(extension)) {
 					bases.push(path.resolve(path.dirname(file), extension));
 				} else {
 					configPackages.add(extension);
@@ -837,10 +843,6 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 			if (cycleHits === hitsBefore) stateCache.set(file, result);
 			return result;
 		};
-		// Esbuild applies paths to bare and absolute specifiers, never to
-		// relative ones. A backslash marks a relative specifier only on Windows.
-		const relativePattern = process.platform === "win32" ? /^\.\.?(?:[\\/]|$)/ : /^\.\.?(?:\/|$)/;
-		const relativeSpecifier = (specifier) => relativePattern.test(specifier);
 		const effectiveBase = (config, baseFile) => {
 			const value = configData.get(baseFile).compilerOptions.baseUrl;
 			const base = value.startsWith("${configDir}")
