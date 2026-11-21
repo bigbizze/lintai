@@ -1,5 +1,14 @@
 # API and Caveats
 
+## Owner-context semantic model (0.9.1)
+
+This release implements [the owner-context specification](../specs/lintai-owner-context-implementation.md). It contains breaking changes and no migration path:
+
+- Each selected source file has one effective compiler owner. `ts.module_config` and `ts.module_owner_config` show root config membership and the effective owner. Configured source correspondence has its own `ts.source_endpoint`, `ts.source_endpoint_incomplete` and `ts.source_config_adjusted` relations.
+- `ts.call_target_conflict`, `ts.fn_signature_conflict` and `ts.declaration_fn_incomplete` are removed. `fn_signature_unresolved` is now a helper. `call_declaration_incomplete` no longer has a `/conflict` reason.
+- Rule bundles record their inputs, and lintai checks them before it uses an artifact. Rules locks keep the `lintai.rules-lock/4` format, but their hashes change. Run `lintai lock` again.
+- Each rule execution uses a fresh runtime. `--explain` output is deterministic.
+
 ## Architecture replacement (0.9.0)
 
 This release replaces the analysis architecture defined in [the refactor specification](../specs/lintai-refactor-implementation-r6.md). It contains breaking changes and no migration path:
