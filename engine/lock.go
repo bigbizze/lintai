@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -206,6 +207,9 @@ func WriteRulesLock(ctx context.Context, path string, lock RulesLock) error {
 	}
 	data = append(data, '\n')
 	if _, err := parseRulesLock(path, data); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
 	return atomicfile.Write(ctx, path, lock.targetSnapshot, data, "rules_lock_changed", lock.source, lock.sourceSnapshot, "suppression_changed")
