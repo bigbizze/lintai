@@ -31,22 +31,21 @@ type uncoveredRelation struct {
 	Reason   string `json:"reason"`
 }
 
-// TestRelationCoverageInventory uses the same producer description as schema
-// and the engine's own prelude clause selection. It is intentionally in the
-// engine package so the test can call preludeFor without exporting engine API.
+// TestRelationCoverageInventory uses the assembled producer catalog and the
+// same dependency selection as rule preparation. Dependency coverage does not
+// imply that a fixture positively emits every possible reason.
 func TestRelationCoverageInventory(t *testing.T) {
 	root, err := filepath.Abs("..")
 	if err != nil {
 		t.Fatal(err)
 	}
-	description, err := typescript.New().Describe()
+	session := Open(Options{}, typescript.New())
+	defer session.Close()
+	catalog, err := session.describeProducers()
 	if err != nil {
 		t.Fatal(err)
 	}
-	prelude, err := namespacedUnit(description.Schema.Prelude, description.Namespace)
-	if err != nil {
-		t.Fatal(err)
-	}
+	description := catalog.entries[0].description
 	bases := make(map[ast.PredicateSym]facts.Predicate, len(description.BaseRelations))
 	byName := make(map[string]facts.Predicate, len(description.BaseRelations))
 	for _, relation := range description.BaseRelations {
@@ -99,7 +98,7 @@ func TestRelationCoverageInventory(t *testing.T) {
 			t.Fatal(err)
 		}
 		users := map[facts.Predicate]*relationUsers{}
-		collectRelationUsers(unit, nil, "example.ts", description.Namespace, prelude, bases, byName, helpers, helperByName, users)
+		collectRelationUsers(unit, nil, "example.ts", catalog.sources, bases, byName, helpers, helperByName, users)
 		if got := users[byName["ts.module_path"]]; got == nil || len(got.direct) != 1 || len(got.via) != 0 {
 			t.Fatalf("module_path users: %#v", got)
 		}
@@ -107,6 +106,63 @@ func TestRelationCoverageInventory(t *testing.T) {
 			got := users[byName[name]]
 			if got == nil || len(got.direct) != 0 || len(got.via) != 1 {
 				t.Errorf("%s helper users: %#v", name, got)
+			}
+		}
+	})
+
+	// An explicit helper root must select its dependencies even when no rule
+	// clause references it, and package-local premises use the producer namespace.
+	t.Run("explicit helper root in custom namespace", func(t *testing.T) {
+		custom := Open(Options{}, typescript.New(typescript.Options{Namespace: "custom"}))
+		defer custom.Close()
+		customCatalog, err := custom.describeProducers()
+		if err != nil {
+			t.Fatal(err)
+		}
+		customDescription := customCatalog.entries[0].description
+		customBases := make(map[ast.PredicateSym]facts.Predicate)
+		customByName := make(map[string]facts.Predicate)
+		for _, relation := range customDescription.BaseRelations {
+			predicate := relation.Predicate
+			customBases[ast.PredicateSym{Symbol: predicate.Name, Arity: predicate.Arity}] = predicate
+			customByName[predicate.Name] = predicate
+		}
+		customHelpers := make(map[ast.PredicateSym]struct{})
+		customHelperByName := make(map[string]ast.PredicateSym)
+		for _, relation := range customDescription.Helpers {
+			predicate := ast.PredicateSym{Symbol: relation.Predicate.Name, Arity: relation.Predicate.Arity}
+			customHelpers[predicate] = struct{}{}
+			customHelperByName[predicate.Symbol] = predicate
+		}
+		unit, err := parse.Unit(strings.NewReader(`Decl result(M).`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		users := map[facts.Predicate]*relationUsers{}
+		collectRelationUsers(unit, []string{"custom.imports_reach", "custom.module_multi_config", "custom.fn_signature_unresolved"}, "root.ts", customCatalog.sources,
+			customBases, customByName, customHelpers, customHelperByName, users)
+		for _, name := range []string{"custom.import_edge", "custom.import_type_only", "custom.import_retained"} {
+			got := users[customByName[name]]
+			if got == nil || len(got.direct) != 0 {
+				t.Errorf("%s helper users: %#v", name, got)
+				continue
+			}
+			if _, ok := got.via["`custom.imports_reach` (`root.ts`)"]; !ok || len(got.via) != 1 {
+				t.Errorf("%s helper users: %#v", name, got.via)
+			}
+		}
+		for name, helper := range map[string]string{
+			"custom.module_config":        "custom.module_multi_config",
+			"custom.fn_signature":         "custom.fn_signature_unresolved",
+			"custom.signature_incomplete": "custom.fn_signature_unresolved",
+		} {
+			got := users[customByName[name]]
+			if got == nil || len(got.direct) != 0 {
+				t.Errorf("%s helper users: %#v", name, got)
+				continue
+			}
+			if _, ok := got.via["`"+helper+"` (`root.ts`)"]; !ok || len(got.via) != 1 {
+				t.Errorf("%s helper users: %#v", name, got.via)
 			}
 		}
 	})
@@ -175,7 +231,7 @@ func TestRelationCoverageInventory(t *testing.T) {
 				t.Fatal(err)
 			}
 			roots := append(rule.Report(), rule.ExpectNonEmpty()...)
-			collectRelationUsers(unit, roots, filepath.ToSlash(relative), description.Namespace, prelude, bases, byName, helpers, helperByName, users)
+			collectRelationUsers(unit, roots, filepath.ToSlash(relative), catalog.sources, bases, byName, helpers, helperByName, users)
 		}
 	}
 
@@ -299,7 +355,7 @@ func fixtureRuleGroups(t *testing.T, root string) map[string][]string {
 	return groups
 }
 
-func collectRelationUsers(unit parse.SourceUnit, roots []string, path, namespace string, prelude parse.SourceUnit,
+func collectRelationUsers(unit parse.SourceUnit, roots []string, path string, catalog []parse.SourceUnit,
 	bases map[ast.PredicateSym]facts.Predicate, byName map[string]facts.Predicate,
 	helpers map[ast.PredicateSym]struct{}, helperByName map[string]ast.PredicateSym, users map[facts.Predicate]*relationUsers) {
 	add := func(predicate facts.Predicate, direct bool, user string) {
@@ -314,6 +370,7 @@ func collectRelationUsers(unit parse.SourceUnit, roots []string, path, namespace
 	}
 	usedHelpers := map[ast.PredicateSym]struct{}{}
 	visitClausePredicates(unit.Clauses, func(predicate ast.PredicateSym) {
+		predicate.Symbol = qualifyPredicate(sourcePackageName(unit), predicate.Symbol)
 		if base, ok := bases[predicate]; ok {
 			add(base, true, "`"+path+"`")
 		}
@@ -329,15 +386,17 @@ func collectRelationUsers(unit parse.SourceUnit, roots []string, path, namespace
 			usedHelpers[helper] = struct{}{}
 		}
 	}
+	selected, _ := catalogForRule(catalog, unit, roots)
 	for helper := range usedHelpers {
-		local := strings.TrimPrefix(helper.Symbol, namespace+".")
-		selected := preludeFor(prelude, parse.SourceUnit{}, []string{local})
-		visitClausePredicates(selected.Clauses, func(predicate ast.PredicateSym) {
-			predicate.Symbol = qualifyPredicate(namespace, predicate.Symbol)
-			if base, ok := bases[predicate]; ok {
-				add(base, false, "`"+helper.Symbol+"` (`"+path+"`)")
-			}
-		})
+		helperCatalog, _ := catalogForRule(selected, parse.SourceUnit{}, []string{helper.Symbol})
+		for _, source := range helperCatalog {
+			visitClausePredicates(source.Clauses, func(predicate ast.PredicateSym) {
+				predicate.Symbol = qualifyPredicate(sourcePackageName(source), predicate.Symbol)
+				if base, ok := bases[predicate]; ok {
+					add(base, false, "`"+helper.Symbol+"` (`"+path+"`)")
+				}
+			})
+		}
 	}
 }
 

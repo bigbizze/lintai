@@ -1,1 +1,1 @@
-{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","strict":true},"include":["src"]}
+{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","strict":true,"baseUrl":"."},"include":["src"]}

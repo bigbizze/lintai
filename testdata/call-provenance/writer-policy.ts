@@ -42,7 +42,6 @@ export default rule("arch.no-writer-write")
 		signature_issue(S, "unresolved") :- selected(S), ts.call_declaration_incomplete(S, /unresolved).
 		signature_issue(S, "synthetic") :- selected(S), ts.call_declaration_incomplete(S, /synthetic).
 		signature_issue(S, "unsupported") :- selected(S), ts.call_declaration_incomplete(S, /unsupported).
-		signature_issue(S, "conflict") :- selected(S), ts.call_declaration_incomplete(S, /conflict).
 		signature_issue(S, "missing declaration") :- selected(S), !has_declaration(S), !has_incomplete(S).
 		Decl has_incomplete(Site).
 		has_incomplete(S) :- selected(S), ts.call_declaration_incomplete(S, _).

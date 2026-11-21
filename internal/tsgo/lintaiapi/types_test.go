@@ -49,16 +49,55 @@ func (x typeIndex) fn(name string) Function {
 
 func (x typeIndex) returns(name string) TypeFact {
 	x.t.Helper()
-	return x.get(x.fn(name).ReturnType)
+	return x.get(x.fn(name).Signature.ReturnType)
 }
 
 func (x typeIndex) param(name string, index int) TypeFact {
 	x.t.Helper()
-	return x.get(x.fn(name).ParameterTypes[index])
+	return x.get(x.fn(name).Signature.ParameterTypes[index])
 }
 
 func hasStructure(item TypeFact) bool {
 	return len(item.Args) > 0 || len(item.Members) > 0 || len(item.Props) > 0 || len(item.SigParams) > 0 || item.SigReturns != "" || item.Literal != nil
+}
+
+func TestFunctionSignatureExcludesExplicitReceiver(t *testing.T) {
+	snapshot := buildTestSnapshot(t, map[string]string{
+		"src/receiver.ts": `export function f(this: { tag: string }, required: string) { return required; }
+export function marked(this: { tag: string }, required: string, optional?: number, ...rest: boolean[]) { return required; }
+export function unmarked(required: string, optional?: number, ...rest: boolean[]) { return required; }
+export function takes(callback: (this: { tag: string }, required: string) => void) { return callback; }
+`,
+	})
+	x := newTypeIndex(t, snapshot)
+	for _, tc := range []struct {
+		name  string
+		marks []string
+	}{
+		{name: "f", marks: []string{""}},
+		{name: "marked", marks: []string{"", MarkOptional, MarkRest}},
+	} {
+		fn := x.fn(tc.name)
+		if fn.Signature == nil {
+			t.Fatalf("%s: missing signature", tc.name)
+		}
+		sig := fn.Signature
+		if !sig.Complete || len(sig.ParameterTypes) != len(tc.marks) || !slices.Equal(sig.ParameterMarks, tc.marks) {
+			t.Fatalf("%s: signature = %+v; want %d callable arguments with marks %q", tc.name, sig, len(tc.marks), tc.marks)
+		}
+		if got := x.get(sig.ParameterTypes[0]).Kind; got != TypeKindString {
+			t.Errorf("%s: required argument kind = %s, want %s", tc.name, got, TypeKindString)
+		}
+	}
+	withReceiver := x.fn("marked").Signature
+	withoutReceiver := x.fn("unmarked").Signature
+	if !slices.Equal(withReceiver.ParameterTypes, withoutReceiver.ParameterTypes) || !slices.Equal(withReceiver.ParameterMarks, withoutReceiver.ParameterMarks) {
+		t.Fatalf("receiver changed callable parameters: with=%+v without=%+v", withReceiver, withoutReceiver)
+	}
+	callback := x.param("takes", 0)
+	if len(callback.SigParams) != 1 || len(callback.SigMarks) != 0 || x.get(callback.SigParams[0]).Kind != TypeKindString {
+		t.Fatalf("structural callable signature includes the receiver: %+v", callback)
+	}
 }
 
 // V11: repeated roots share structural observations within one checker, and
@@ -130,7 +169,7 @@ calculate({ value: "ok", nested: { count: 1 } });
 			return strings.HasSuffix(input.Path, "/dist/generated.d.ts.map")
 		})
 	}
-	if !hasMapInput(full) || !hasMapInput(metadata) || hasMapInput(source) {
+	if !hasMapInput(full) || hasMapInput(metadata) || hasMapInput(source) {
 		t.Fatalf("map recovery inputs: full=%t metadata=%t source=%t", hasMapInput(full), hasMapInput(metadata), hasMapInput(source))
 	}
 	t.Logf("structural observations: full=%d metadata=%d source=%d", full.typeStructureVisits, metadata.typeStructureVisits, source.typeStructureVisits)
@@ -208,7 +247,7 @@ export function unwrap<T>(x: Unwrap<T>): T extends string ? 1 : 2 { return 1 as 
 	}
 
 	// 3. Member order does not change the ID.
-	if x.fn("ab").ParameterTypes[0] != x.fn("ba").ParameterTypes[0] {
+	if x.fn("ab").Signature.ParameterTypes[0] != x.fn("ba").Signature.ParameterTypes[0] {
 		t.Fatalf("A | B and B | A differ: %+v %+v", x.param("ab", 0), x.param("ba", 0))
 	}
 
@@ -269,12 +308,12 @@ export function unwrap<T>(x: Unwrap<T>): T extends string ? 1 : 2 { return 1 as 
 		t.Fatalf("enum %+v", color)
 	}
 	param := x.param("identity", 0)
-	if param.Kind != TypeKindTypeParam || param.ParamName != "T" || x.fn("identity").ReturnType != param.ID {
+	if param.Kind != TypeKindTypeParam || param.ParamName != "T" || x.fn("identity").Signature.ReturnType != param.ID {
 		t.Fatalf("type parameter %+v", param)
 	}
 
 	// Anonymous generic functions do not share type parameter entities.
-	if x.fn("first").ParameterTypes[0] == x.fn("second").ParameterTypes[0] {
+	if x.fn("first").Signature.ParameterTypes[0] == x.fn("second").Signature.ParameterTypes[0] {
 		t.Fatalf("the T of two arrow functions is one entity: %+v", x.param("first", 0))
 	}
 
@@ -326,7 +365,7 @@ export function unwrap<T>(x: Unwrap<T>): T extends string ? 1 : 2 { return 1 as 
 
 	// A quoted property name that looks like an optional name is a
 	// different type.
-	if x.fn("quoted").ParameterTypes[0] == x.fn("quoted").ParameterTypes[1] {
+	if x.fn("quoted").Signature.ParameterTypes[0] == x.fn("quoted").Signature.ParameterTypes[1] {
 		t.Fatalf(`{ "a?": string } and { a?: string } are one entity`)
 	}
 
@@ -370,7 +409,12 @@ export function fromSecond(x: Second): void {}
 	for _, deduplicate := range []bool{true, false} {
 		t.Run(fmt.Sprintf("deduplicatePackages=%t", deduplicate), func(t *testing.T) {
 			files["tsconfig.json"] = strings.Replace(strictConfig, `"strict": true,`, fmt.Sprintf(`"strict": true, "deduplicatePackages": %t,`, deduplicate), 1)
-			snap := buildTestSnapshot(t, files)
+			root := t.TempDir()
+			writeWorkspace(t, root, files)
+			snap, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{WorkspaceRoot: root, Files: []string{filepath.Join(root, "src/a.ts")}})
+			if err != nil {
+				t.Fatal(err)
+			}
 			x := newTypeIndex(t, snap)
 			source := x.param("fromSource", 0)
 			dist := x.param("fromDist", 0)
@@ -411,11 +455,11 @@ func TestTypeFactsAcrossConfigGroups(t *testing.T) {
 	x := newTypeIndex(t, before)
 	load := x.fn("load")
 	save := x.fn("save")
-	if x.get(load.ParameterTypes[0]).Name != "Model" || load.ReturnType != save.ParameterTypes[0] {
+	if x.get(load.Signature.ParameterTypes[0]).Name != "Model" || load.Signature.ReturnType != save.Signature.ParameterTypes[0] {
 		t.Fatalf("load %+v save %+v", load, save)
 	}
-	if !strings.HasPrefix(filepath.ToSlash(x.get(load.ParameterTypes[0]).Origin), "shared/") {
-		t.Fatalf("origin %q", x.get(load.ParameterTypes[0]).Origin)
+	if !strings.HasPrefix(filepath.ToSlash(x.get(load.Signature.ParameterTypes[0]).Origin), "shared/") {
+		t.Fatalf("origin %q", x.get(load.Signature.ParameterTypes[0]).Origin)
 	}
 	if !reflect.DeepEqual(before.Types, after.Types) {
 		t.Fatalf("the group order changed the type facts:\n%+v\n%+v", before.Types, after.Types)
@@ -448,7 +492,7 @@ func TestTypeFactsConflictAcrossConfigGroups(t *testing.T) {
 	strictFirst := build("c", "b", true)
 	x := newTypeIndex(t, looseFirst)
 	r := x.param("fa", 0)
-	if r.ID != x.fn("fb").ParameterTypes[0] || r.Name != "R" || len(r.Props) != 0 || !slices.Equal(r.Incomplete, []string{IncompleteConflict}) {
+	if r.ID != x.fn("fb").Signature.ParameterTypes[0] || r.Name != "R" || len(r.Props) != 0 || !slices.Equal(r.Incomplete, []string{IncompleteConflict}) {
 		t.Fatalf("R %+v", r)
 	}
 	y := newTypeIndex(t, strictFirst)
@@ -461,7 +505,7 @@ func TestTypeFactsConflictAcrossConfigGroups(t *testing.T) {
 	}
 }
 
-func TestFunctionSignatureConflictsKeepCompleteObservations(t *testing.T) {
+func TestFunctionSignatureUsesOwnerWithDeclarationTypeConflict(t *testing.T) {
 	root := t.TempDir()
 	files := map[string]string{
 		"shared/api.ts":        `export const parse = (value: string | undefined) => value;`,
@@ -484,19 +528,8 @@ func TestFunctionSignatureConflictsKeepCompleteObservations(t *testing.T) {
 			break
 		}
 	}
-	if parse == nil || !parse.SignatureConflict || len(parse.SignatureObservations) != 2 {
-		t.Fatalf("expected two conflicting complete signatures, got %+v", parse)
-	}
-	for _, observation := range parse.SignatureObservations {
-		if !observation.Complete || len(observation.ParameterTypes) != 1 || observation.ReturnType == "" {
-			t.Fatalf("incomplete signature observation: %+v", observation)
-		}
-	}
-	if len(parse.ParameterTypes) != 0 || parse.ReturnType != "" {
-		t.Fatalf("a conflicting signature exposed a coherent first observation: %+v", parse)
-	}
-	if !slices.Contains(snapshot.FnSignatureConflicts, parse.SemanticKey) {
-		t.Fatalf("missing fn_signature_conflict outcome for %s: %v", parse.SemanticKey, snapshot.FnSignatureConflicts)
+	if parse == nil || parse.Signature == nil || !parse.Signature.Complete || len(parse.Signature.ParameterTypes) != 1 || parse.Signature.ReturnType == "" {
+		t.Fatalf("expected the owner signature, got %+v", parse)
 	}
 	var declaration *DeclarationFact
 	for index := range snapshot.Declarations {
@@ -530,7 +563,7 @@ func TestTypeFactsRecursiveKeysDoNotDependOnFileNames(t *testing.T) {
 		x := newTypeIndex(t, snap)
 		ids := make([]string, 0, 6)
 		for index := range 6 {
-			ids = append(ids, x.fn(fmt.Sprintf("a%d", index)).ReturnType)
+			ids = append(ids, x.fn(fmt.Sprintf("a%d", index)).Signature.ReturnType)
 		}
 		return ids
 	}
@@ -552,7 +585,7 @@ func TestTypeFactsRecursiveKeysDoNotDependOnFileNames(t *testing.T) {
 		x := newTypeIndex(t, snap)
 		ids := make([]string, 0, 6)
 		for index := range 6 {
-			ids = append(ids, x.fn(fmt.Sprintf("a%d", index)).ReturnType)
+			ids = append(ids, x.fn(fmt.Sprintf("a%d", index)).Signature.ReturnType)
 		}
 		return ids
 	}
@@ -604,7 +637,7 @@ export function mutableProp(x: { a: string }): void {}
 			methods = append(methods, item)
 		}
 	}
-	if len(methods) != 2 || methods[0].ParameterTypes[0] == methods[1].ParameterTypes[0] {
+	if len(methods) != 2 || methods[0].Signature.ParameterTypes[0] == methods[1].Signature.ParameterTypes[0] {
 		t.Fatalf("the T of two object literal methods is one entity: %+v", methods)
 	}
 	readonlyTuple, mutableTuple := x.param("readonlyTuple", 0), x.param("mutableTuple", 0)
@@ -750,5 +783,50 @@ export function optionalParam(x: (a: string, b?: number) => void): void {}
 	}
 	if item := x.param("optionalParam", 0); !slices.Equal(item.SigMarks, []string{"", MarkOptional}) {
 		t.Fatalf("(a, b?) => void %+v", item)
+	}
+}
+
+func TestCrossFileCallUsesCallerAndTargetOwners(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspace(t, root, map[string]string{
+		"caller/tsconfig.json": `{"compilerOptions":{"strict":false,"module":"preserve","moduleResolution":"bundler"},"files":["main.ts"]}`,
+		"caller/main.ts":       `import { target } from "../target/api"; export function run() { return target(); }`,
+		"target/tsconfig.json": `{"compilerOptions":{"strict":true,"module":"preserve","moduleResolution":"bundler"},"files":["api.ts"]}`,
+		"target/api.ts":        `export function target(): string | undefined { return undefined; }`,
+	})
+	target := filepath.Join(root, "target/api.ts")
+	build := func(files []string) *Snapshot {
+		t.Helper()
+		snapshot, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{WorkspaceRoot: root, Files: files, TsconfigFiles: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return snapshot
+	}
+	alone := build([]string{target})
+	both := build([]string{filepath.Join(root, "caller/main.ts"), target})
+	find := func(snapshot *Snapshot) Function {
+		t.Helper()
+		for _, fn := range snapshot.Functions {
+			if fn.Name == "target" && fn.FilePath == "target/api.ts" {
+				return fn
+			}
+		}
+		t.Fatal("missing target function")
+		return Function{}
+	}
+	want, got := find(alone), find(both)
+	if !reflect.DeepEqual(want, got) || !reflect.DeepEqual(alone.Tracking[want.SemanticKey], both.Tracking[got.SemanticKey]) {
+		t.Fatalf("foreign indexing changed target semantics or support: alone=%+v both=%+v", want, got)
+	}
+	if !slices.ContainsFunc(both.CallEdges, func(call CallEdge) bool {
+		return call.FromName == "run" && call.ToSemanticKey == got.SemanticKey
+	}) {
+		t.Fatalf("caller did not resolve the target: %+v", both.CallEdges)
+	}
+	if got.Signature == nil || !slices.ContainsFunc(both.Types, func(item TypeFact) bool {
+		return item.ID == got.Signature.ReturnType && item.Kind == TypeKindUnion
+	}) {
+		t.Fatalf("target did not retain its strict owner's signature: %+v", got)
 	}
 }

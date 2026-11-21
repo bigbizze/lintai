@@ -77,7 +77,7 @@ func (b *Backend) Describe() (facts.ProducerDescription, error) {
 		"files":            string(b.settings.Files),
 		"sourceLinks":      b.settings.SourceLinks,
 	}
-	description, err := facts.DescribeSchema(b.namespace, "lintai.typescript", "typescript-producer-semantic-ownership-1", "ts-vocabulary/2", configuration, Schema())
+	description, err := facts.DescribeSchema(b.namespace, "lintai.typescript", "typescript-producer-owner-context-1", "ts-vocabulary/3", configuration, Schema())
 	if err != nil {
 		return facts.ProducerDescription{}, err
 	}
@@ -188,8 +188,8 @@ func (b *Backend) Collect(ctx context.Context, request backend.CollectionRequest
 			} else {
 				description = "signature"
 			}
-			for _, observation := range fn.SignatureObservations {
-				descriptions[lintaiapi.SignatureID(fn.SemanticKey, observation, b.namespace)] = description
+			if fn.Signature != nil {
+				descriptions[lintaiapi.SignatureID(fn.SemanticKey, *fn.Signature, b.namespace)] = description
 			}
 		}
 		for _, item := range snapshot.Types {
@@ -217,6 +217,26 @@ func (b *Backend) Collect(ctx context.Context, request backend.CollectionRequest
 			}
 			anchor := facts.AnchorSupport{
 				Location:    diagnostics.SourceLocation{File: file, StartLine: toInt(item.Values[2]), StartColumn: toInt(item.Values[3]), EndLine: toInt(item.Values[4]), EndColumn: toInt(item.Values[5])},
+				Description: description,
+			}
+			if support.Data != nil {
+				anchor.Tracking = &facts.TrackingKey{Scheme: "lintai.typescript.subject/1", Data: cloneProducerValue(support.Data)}
+			}
+			batch.Anchors[id] = anchor
+		}
+		for _, endpoint := range snapshot.SourceEndpoints {
+			id := producerEntityIDIn(b.namespace, endpoint.ID)
+			location := endpoint.Location
+			if _, exists := batch.Anchors[id]; exists || location.File == "" || strings.HasPrefix(location.File, "bundled://") || location.StartLine <= 0 || location.StartColumn <= 0 || location.EndLine <= 0 || location.EndColumn <= 0 {
+				continue
+			}
+			support := snapshot.SourceTracking[endpoint.ID]
+			description := support.Description
+			if description == "" {
+				description = "TypeScript declaration"
+			}
+			anchor := facts.AnchorSupport{
+				Location:    diagnostics.SourceLocation{File: location.File, StartLine: location.StartLine, StartColumn: location.StartColumn, EndLine: location.EndLine, EndColumn: location.EndColumn},
 				Description: description,
 			}
 			if support.Data != nil {
@@ -267,7 +287,7 @@ func (b *Backend) generation(ctx context.Context, repoRoot, workspaceRoot string
 		return nil, err
 	}
 	snapshot := generation.snapshot
-	adjustments := convertAdjustments(workspaceRoot, snapshot.ConfigAdjustments)
+	adjustments := convertAdjustments(generation.plan.Root, snapshot.ConfigAdjustments)
 	b.reportAdjustments(adjustments)
 	items, err := factsFromSnapshot(snapshot, sources, adjustments, b.namespace)
 	if err != nil {
@@ -308,25 +328,10 @@ func sortedUnique(values []string) []string {
 	return slices.Compact(result)
 }
 
-// moduleFiles returns the walked files that are modules of the snapshot.
-func moduleFiles(workspaceRoot string, walked []string, modules []lintaiapi.Module) []string {
-	paths := make(map[string]struct{}, len(modules))
-	for _, item := range modules {
-		paths[item.Path] = struct{}{}
-	}
-	result := make([]string, 0, len(modules))
-	for _, file := range walked {
-		if _, ok := paths[workspace.RelativePath(workspaceRoot, file)]; ok {
-			result = append(result, file)
-		}
-	}
-	return result
-}
-
 func convertAdjustments(workspaceRoot string, items []lintaiapi.ConfigAdjustment) []lintaiapi.ConfigAdjustment {
 	result := slices.Clone(items)
 	for index := range result {
-		result[index].Config = workspace.RelativePath(workspaceRoot, result[index].Config)
+		result[index].Config = lintaiapi.PublicConfigPath(workspaceRoot, result[index].Config)
 	}
 	return result
 }

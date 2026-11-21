@@ -4,39 +4,11 @@
     "reason": "no realistic rule found: unanchored registry building block"
   },
   {
-    "relation": "ts.call_target_conflict",
-    "reason": "could not build a fixture: normal snapshot traversal assigns each primary file to one compiler context"
-  },
-  {
-    "relation": "ts.config_adjusted",
-    "reason": "no realistic rule found: configuration evidence has no report anchor or module association"
-  },
-  {
-    "relation": "ts.declaration_fn_incomplete",
-    "reason": "could not build a fixture: aliases, overloads and differing compiler contexts retained one function identity per declaration"
-  },
-  {
     "relation": "ts.declaration_metadata_incomplete",
-    "reason": "could not build a fixture: aliases, overloads, namespaces and differing compiler contexts produced complete supported declaration metadata"
-  },
-  {
-    "relation": "ts.fn_signature_unresolved",
-    "reason": "could not build a fixture: missing types resolve to checker any and produce complete signature observations"
-  },
-  {
-    "relation": "ts.import_package",
-    "reason": "disagrees with its description: virtual declared modules can be labeled as packages"
+    "reason": "no rule fixture yet: unsupported metadata has a source witness; conflicting metadata has no established source witness"
   },
   {
     "relation": "ts.location",
     "reason": "reporting support"
-  },
-  {
-    "relation": "ts.signature_incomplete",
-    "reason": "could not build a fixture: missing types resolve to checker any and produce complete signature observations"
-  },
-  {
-    "relation": "ts.type_ref_target",
-    "reason": "disagrees with its description"
   }
 ]

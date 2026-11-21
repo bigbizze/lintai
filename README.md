@@ -78,6 +78,8 @@ For formatting, unused variables, or a simple banned import, an existing linter 
 
 Rules are TypeScript files containing small [Datalog](https://codeberg.org/TauCeti/mangle-go) queries. Datalog lets a rule say which combinations of facts constitute a violation, including recursive relationships such as “calls something that eventually reads the clock.” You will need to learn some of that syntax to write rules; the example below is a starting point.
 
+Rule bundles identify their captured source and resolution inputs. If those inputs change while a bundle is being made, lintai reports the failure instead of using an incomplete artifact. Each rule run gets a fresh pure runtime; its program and messages share that run's state.
+
 ## Try it
 
 The npm packages require Node 22 or later and support Linux and macOS on x64 and arm64. You do not need Go to use them.
@@ -119,7 +121,7 @@ An error violation gives exit code 1, so the same command can run in CI. A rule 
 To inspect the import facts behind this example:
 
 ```sh
-pnpm exec lintai facts --workspace-root . --relation import_edge --relation import_internal
+pnpm exec lintai facts --workspace-root . --relation ts.import_edge --relation ts.import_internal
 ```
 
 `lintai schema` prints the configured producer catalog under its namespace bindings, along with `lintai` helpers. The [examples](docs/examples.md) cover call chains, public types, suspension syntax, required imports and more.
@@ -156,7 +158,15 @@ There is also an [oxlint plugin](docs/api.md#oxlint-plugin-reference-and-caveats
 
 A passing result means the enabled rules found no reportable violations in the evidence they checked. It is not a general proof that the program is correct.
 
-Some calls cannot be resolved. Some type structures are not expanded. Different compiler configurations can disagree. LintAI exposes incomplete, missing or conflicting evidence where supported, and strict rules must explicitly report those cases instead of treating missing facts as approval. The [rule examples](docs/examples.md) show both violations and cases where a policy cannot be established.
+Some calls cannot be resolved. Some type structures are not expanded. Different correctly owned roots can still produce different views of a shared type. LintAI exposes incomplete, missing or conflicting evidence where supported, and strict rules must explicitly report those cases instead of treating missing facts as approval. The [rule examples](docs/examples.md) show both violations and cases where a policy cannot be established.
+
+A selected file has one compiler owner. LintAI starts at its nearest `tsconfig.json` within the workspace, uses that config when the file is an original root, otherwise follows references in order to the first matching root and falls back to the nearest config. Files without a config use a synthetic program. In `tsconfig` mode files missing from the chosen program are excluded; `walk` mode analyzes them with a synthetic fallback. Scope output shows the selected config, effective owner and known root memberships. Overlap is useful evidence for review, but does not by itself mean that configurations disagree.
+
+Calls use the caller's owner, and a function's whole signature comes from its own file's owner. Derived types and declarations use the requesting root's context, so a shared type or declaration can still have conflicting evidence. Source links and declaration maps contribute separate correspondence metadata; they do not replace ordinary facts. See [snapshot scope and source associations](docs/api.md#snapshot-scope) for paths and reporting support.
+
+Original root membership, effective ownership and import visibility are different facts. For eligible modules, `module_config` records original-root membership using the bounded inventory built from the selected files' nearest configs and their reference closures; it does not include files visible only through imports. Public config values share one normalized path format, so owner-to-`config_adjusted` and source-entry-to-`source_config_adjusted` joins use the same value.
+
+Function signatures are whole observations; `fn_signature_unresolved` is a helper derived from `fn_signature` and `signature_incomplete`. `declaration_fn` is a direct optional link to a retained implementation. The removed `call_target_conflict`, `fn_signature_conflict` and `declaration_fn_incomplete` bases have no aliases. Ordinary metadata, call-declaration and source-endpoint uncertainty use separate reason sets; the [API reference](docs/api.md#base-relations-and-caveats) lists the exact values. Source-only endpoints may have optional reporting anchors but no queryable `location` row.
 
 A few boundaries matter when choosing a policy:
 

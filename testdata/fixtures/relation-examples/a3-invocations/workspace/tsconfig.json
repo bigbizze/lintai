@@ -2,7 +2,18 @@
   "compilerOptions": {
     "module": "preserve",
     "moduleResolution": "bundler",
-    "strict": true
+    "strict": true,
+    "baseUrl": "."
   },
-  "include": ["src"]
+  "include": [
+    "src"
+  ],
+  "exclude": [
+    "src/overlap/clean/**"
+  ],
+  "references": [
+    {
+      "path": "./overlap.json"
+    }
+  ]
 }

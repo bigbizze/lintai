@@ -370,6 +370,19 @@ func runScope(ctx context.Context, args []string, stdout io.Writer) error {
 		}
 		fmt.Fprintf(stdout, "compiler eligible: %v\ncompiler excluded: %v\nconfigurations: %v\npruned boundaries: %v\n",
 			report.Scope.CompilerEligible, report.Scope.CompilerExcluded, report.Scope.Configurations, report.Scope.PrunedBoundaries)
+		for _, file := range report.Scope.CompilerFiles {
+			selected, owner, kind := "none", "none", "none"
+			if file.SelectedConfig != nil {
+				selected = *file.SelectedConfig
+			}
+			if file.OwnerConfig != nil {
+				owner = *file.OwnerConfig
+			}
+			if file.OwnerKind != nil {
+				kind = *file.OwnerKind
+			}
+			fmt.Fprintf(stdout, "  %s: eligible=%t selected=%s owner=%s (%s) roots=%v\n", file.Path, file.Eligible, selected, owner, kind, file.RootConfigs)
+		}
 	}
 	return nil
 }
@@ -464,10 +477,10 @@ func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 		RulesLock:     *rulesLock,
 		SetupSandbox:  sandbox,
 
-		SuppressionsLocation:       *suppressionsLocation,
-		SuppressAll:                *suppressAll,
-		SuppressRules:              suppressRules,
-		PruneSuppressions:          *pruneSuppressions,
+		SuppressionsLocation: *suppressionsLocation,
+		SuppressAll:          *suppressAll,
+		SuppressRules:        suppressRules,
+		PruneSuppressions:    *pruneSuppressions,
 	})
 	if err != nil {
 		return err

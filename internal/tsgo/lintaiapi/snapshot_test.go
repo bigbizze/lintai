@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -91,8 +92,8 @@ export const result = [1].map((x) => x);
 				t.Fatal("anonymous function received a key")
 			}
 		}
-		for _, signature := range fn.SignatureObservations {
-			if data(first, SignatureID(fn.SemanticKey, signature)) != "" {
+		if fn.Signature != nil {
+			if data(first, SignatureID(fn.SemanticKey, *fn.Signature)) != "" {
 				t.Fatal("signature received a key")
 			}
 		}
@@ -172,8 +173,12 @@ export const result = [1].map((x) => x);
 			t.Fatalf("missing auxiliary declaration: %+v", cold.SourceBindings)
 		}
 		id := cold.SourceBindings[0].SourceDeclarations[0]
-		if data(cold, id) == "" || data(cold, id) != data(warm, id) || warm.trackingKeyBuilds != 0 {
-			t.Fatalf("auxiliary tracking was not reused: cold=%q warm=%q builds=%d", data(cold, id), data(warm, id), warm.trackingKeyBuilds)
+		sourceData := func(s *Snapshot) string {
+			value, _ := json.Marshal(s.SourceTracking[id].Data)
+			return string(value)
+		}
+		if sourceData(cold) == "null" || sourceData(cold) != sourceData(warm) || warm.trackingKeyBuilds != 0 {
+			t.Fatalf("auxiliary tracking was not reused: cold=%q warm=%q builds=%d", sourceData(cold), sourceData(warm), warm.trackingKeyBuilds)
 		}
 		t.Logf("auxiliary tracking key constructions: cold=%d, no-change=%d", cold.trackingKeyBuilds, warm.trackingKeyBuilds)
 	})
@@ -362,14 +367,14 @@ export function mirror(config: LocalConfig): DbConfig {
 	if !dbFunction.IsExported || !dbFunction.IsAsync {
 		t.Fatalf("expected db function to be exported and async, got %+v", dbFunction)
 	}
-	if dbFunction.ParameterCount != 1 {
+	if dbFunction.Signature == nil || len(dbFunction.Signature.ParameterTypes) != 1 {
 		t.Fatalf("expected db parameter count 1, got %+v", dbFunction)
 	}
-	if display := typeDisplay(snapshot, dbFunction.ReturnType); display != "Promise<number>" {
+	if display := typeDisplay(snapshot, dbFunction.Signature.ReturnType); display != "Promise<number>" {
 		t.Fatalf("expected db return type Promise<number>, got %q", display)
 	}
-	if len(dbFunction.ParameterTypes) != 1 || typeDisplay(snapshot, dbFunction.ParameterTypes[0]) != "string" {
-		t.Fatalf("unexpected db parameter types %+v", dbFunction.ParameterTypes)
+	if len(dbFunction.Signature.ParameterTypes) != 1 || typeDisplay(snapshot, dbFunction.Signature.ParameterTypes[0]) != "string" {
+		t.Fatalf("unexpected db parameter types %+v", dbFunction.Signature.ParameterTypes)
 	}
 
 	var mixedImport *ImportEdge
@@ -464,6 +469,45 @@ export function loadUser(user: Models.User): Models.User {
 	}
 }
 
+func TestNodeNextTypeReferenceAliasTargets(t *testing.T) {
+	root, err := filepath.Abs("../../../testdata/fixtures/relation-examples/disagreements/type-ref-target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var files []string
+	for _, name := range []string{"importer.ts", "valid.ts", "chain.ts", "barrel.ts", "model.ts"} {
+		files = append(files, filepath.Join(root, name))
+	}
+	snapshot, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{WorkspaceRoot: root, Files: files})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(snapshot.ImportEdges, func(edge ImportEdge) bool {
+		return edge.FromPath == "importer.ts" && edge.Specifier == "./model" && edge.Unresolved
+	}) {
+		t.Fatalf("NodeNext extensionless import must remain unresolved: %+v", snapshot.ImportEdges)
+	}
+	for _, tc := range []struct{ file, name, target string }{
+		{"importer.ts", "Model", ""},
+		{"valid.ts", "DirectModel", "model.ts"},
+		{"valid.ts", "ThroughChain", "model.ts"},
+	} {
+		found := false
+		for _, ref := range snapshot.TypeRefs {
+			if ref.FilePath != tc.file || ref.Name != tc.name {
+				continue
+			}
+			found = true
+			if ref.TargetPath != tc.target {
+				t.Errorf("%s %s: target = %q, want %q", tc.file, tc.name, ref.TargetPath, tc.target)
+			}
+		}
+		if !found {
+			t.Errorf("%s %s: expected target %q; refs: %+v", tc.file, tc.name, tc.target, snapshot.TypeRefs)
+		}
+	}
+}
+
 func writeWorkspace(t *testing.T, root string, files map[string]string) []string {
 	t.Helper()
 	paths := make([]string, 0, len(files))
@@ -501,6 +545,7 @@ func TestBuildSnapshotTsconfigFiles(t *testing.T) {
   "include": ["src/**/*.ts"],
   "exclude": ["src/legacy/**"]
 }
+
 `,
 		"app/src/main.ts": `import { shared } from "./legacy/shared";
 export function main() { return shared(); }
@@ -566,6 +611,105 @@ export function main() { return shared(); }
 	}
 	if _, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{WorkspaceRoot: root, Files: files, TsconfigFiles: true}); err == nil {
 		t.Fatal("expected an error for a referenced tsconfig that does not parse")
+	}
+}
+
+func TestCompilerPlanScopeAndMembership(t *testing.T) {
+	root := t.TempDir()
+	files := writeWorkspace(t, root, map[string]string{
+		"tsconfig.json":         `{"files":[],"references":[{"path":"./a.json"},{"path":"./b.json"},{"path":"./missing.json"}]}`,
+		"a.json":                `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler"},"files":["shared.ts","a.ts","nested/independent.ts"]}`,
+		"b.json":                `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler"},"files":["shared.ts","b.ts"]}`,
+		"shared.ts":             `export const shared = 1;`,
+		"a.ts":                  `export const a = 1;`,
+		"b.ts":                  `export const b = 1;`,
+		"loose.ts":              `export const loose = 1;`,
+		"forced.ts":             `export const forced = 1;`,
+		"nested/tsconfig.json":  `{"files":["local.ts"]}`,
+		"nested/local.ts":       `export const local = 1;`,
+		"nested/independent.ts": `export const independent = 1;`,
+	})
+	exact := []string{filepath.Join(root, "forced.ts")}
+	for _, tsconfig := range []bool{true, false} {
+		t.Run(map[bool]string{true: "tsconfig", false: "walk"}[tsconfig], func(t *testing.T) {
+			req := BuildSnapshotRequest{WorkspaceRoot: root, Files: files, ExactFiles: exact, TsconfigFiles: tsconfig}
+			snapshot, err := BuildSnapshot(context.Background(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			scope, err := ExplainCompilerEligibility(context.Background(), req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(snapshot.CompilerFiles, scope.CompilerFiles) {
+				t.Fatalf("snapshot and scope disagree: %+v / %+v", snapshot.CompilerFiles, scope.CompilerFiles)
+			}
+			get := func(path string) CompilerFile {
+				t.Helper()
+				for _, item := range scope.CompilerFiles {
+					if item.Path == path {
+						return item
+					}
+				}
+				t.Fatalf("missing %s in %+v", path, scope.CompilerFiles)
+				return CompilerFile{}
+			}
+			value := func(p *string) string {
+				if p == nil {
+					return ""
+				}
+				return *p
+			}
+			shared := get("shared.ts")
+			if !shared.Eligible || value(shared.SelectedConfig) != "a.json" || value(shared.OwnerConfig) != "a.json" || !slices.Equal(shared.RootConfigs, []string{"a.json", "b.json"}) {
+				t.Fatalf("reference order or overlap: %+v", shared)
+			}
+			if item := get("b.ts"); !item.Eligible || value(item.OwnerConfig) != "b.json" || !slices.Equal(item.RootConfigs, []string{"b.json"}) {
+				t.Fatalf("second reference owner: %+v", item)
+			}
+			if item := get("forced.ts"); !item.Eligible || value(item.SelectedConfig) != "tsconfig.json" || value(item.OwnerConfig) != "tsconfig.json" || len(item.RootConfigs) != 0 {
+				t.Fatalf("exact root: %+v", item)
+			}
+			loose := get("loose.ts")
+			if value(loose.SelectedConfig) != "tsconfig.json" || loose.Eligible == tsconfig || (tsconfig && loose.OwnerKind != nil) || (!tsconfig && value(loose.OwnerKind) != "synthetic") || loose.OwnerConfig != nil {
+				t.Fatalf("fallback: %+v", loose)
+			}
+			independent := get("nested/independent.ts")
+			if value(independent.SelectedConfig) != "nested/tsconfig.json" || independent.Eligible == tsconfig ||
+				(!tsconfig && value(independent.OwnerKind) != "synthetic") || independent.OwnerConfig != nil ||
+				!slices.Equal(independent.RootConfigs, []string{"a.json"}) {
+				t.Fatalf("run-wide membership or fallback: %+v", independent)
+			}
+			if local := get("nested/local.ts"); !local.Eligible || value(local.OwnerConfig) != "nested/tsconfig.json" || !slices.Equal(local.RootConfigs, []string{"nested/tsconfig.json"}) {
+				t.Fatalf("nearest root ownership: %+v", local)
+			}
+			if !slices.ContainsFunc(snapshot.Inputs, func(input SnapshotInput) bool {
+				return input.Path == filepath.ToSlash(filepath.Join(root, "missing.json")) && !input.Exists
+			}) {
+				t.Fatal("missing reference was not tracked")
+			}
+		})
+	}
+}
+
+func TestCompilerMembershipInventoryDemand(t *testing.T) {
+	root := t.TempDir()
+	files := writeWorkspace(t, root, map[string]string{
+		"tsconfig.json": `{"files":["main.ts"],"references":[{"path":"./bad.json"}]}`,
+		"bad.json":      `{ "files": [`,
+		"main.ts":       `export const main = 1;`,
+	})
+	req := BuildSnapshotRequest{WorkspaceRoot: root, Files: files, RequestedRelations: []string{"module_owner_config"}}
+	snapshot, err := BuildSnapshot(context.Background(), req)
+	if err != nil {
+		t.Fatalf("owner-only demand reached unused inventory: %v", err)
+	}
+	if len(snapshot.CompilerFiles) != 1 || snapshot.CompilerFiles[0].RootConfigs != nil {
+		t.Fatalf("uncollected membership was reported as collected: %+v", snapshot.CompilerFiles)
+	}
+	req.RequestedRelations = []string{"module_config"}
+	if _, err := BuildSnapshot(context.Background(), req); err == nil {
+		t.Fatal("membership demand accepted malformed reached inventory")
 	}
 }
 

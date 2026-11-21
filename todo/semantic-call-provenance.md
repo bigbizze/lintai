@@ -1,8 +1,10 @@
 # Declared call provenance implementation
 
-Status: historical 0.8.0 implementation record. The current contracts and relation vocabulary are in [the refactor specification](../specs/lintai-refactor-implementation-r6.md); older requirements and observations below describe that earlier implementation.
+Status: historical 0.8.0 implementation record. The current contracts and relation vocabulary are in [the owner-context implementation specification](../specs/lintai-owner-context-implementation.md). Older requirements and observations below describe that earlier implementation.
 
-This historical specification implements declared call provenance and uses the declaration identity model from the earlier semantic extraction work. It adds evidence about the declaration selected by the checker, not evidence about which runtime implementation executes. The current contracts are in the refactor specification linked above.
+> **Superseded contract.** Sections 2–8 below retain the original relation and collector requirements for historical context. In particular, their `/conflict` call-declaration outcome, shared endpoint population, and multi-context reconciliation expectations are superseded where they differ from the owner-context specification's sections 4, 7.7, and 10.3. Keep this record intact; do not use its old requirements as current acceptance criteria.
+
+This historical specification implements declared call provenance and uses the declaration identity model from the earlier semantic extraction work. It adds evidence about the declaration selected by the checker, not evidence about which runtime implementation executes. The current contracts are in the owner-context implementation specification linked above.
 
 ## 1. Required behavior
 

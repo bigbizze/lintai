@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"cmp"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -858,49 +859,6 @@ func containsMangleKeyword(source, keyword string) bool {
 	return false
 }
 
-// preludeFor keeps the prelude declarations and only the prelude clauses that
-// the rule program depends on, so a rule does not derive prelude relations
-// that it never reads.
-func preludeFor(prelude, unit parse.SourceUnit, roots []string) parse.SourceUnit {
-	clausesByHead := make(map[string][]ast.Clause)
-	for _, clause := range prelude.Clauses {
-		clausesByHead[clause.Head.Predicate.Symbol] = append(clausesByHead[clause.Head.Predicate.Symbol], clause)
-	}
-	needed := make(map[string]struct{})
-	pending := append([]string(nil), roots...)
-	addPremises := func(clause ast.Clause) {
-		for _, premise := range clause.Premises {
-			switch typed := premise.(type) {
-			case ast.Atom:
-				pending = append(pending, typed.Predicate.Symbol)
-			case ast.NegAtom:
-				pending = append(pending, typed.Atom.Predicate.Symbol)
-			}
-		}
-	}
-	for _, clause := range unit.Clauses {
-		addPremises(clause)
-	}
-	for len(pending) > 0 {
-		symbol := pending[len(pending)-1]
-		pending = pending[:len(pending)-1]
-		if _, seen := needed[symbol]; seen {
-			continue
-		}
-		needed[symbol] = struct{}{}
-		for _, clause := range clausesByHead[symbol] {
-			addPremises(clause)
-		}
-	}
-	clauses := make([]ast.Clause, 0, len(prelude.Clauses))
-	for _, clause := range prelude.Clauses {
-		if _, ok := needed[clause.Head.Predicate.Symbol]; ok {
-			clauses = append(clauses, clause)
-		}
-	}
-	return parse.SourceUnit{Decls: prelude.Decls, Clauses: clauses}
-}
-
 // checkReservedPredicates rejects rule declarations and clauses for base and
 // prelude predicates. mangle-go accepts facts for declared extensional
 // predicates, so the check is done here.
@@ -1108,11 +1066,95 @@ func findSym(decls map[ast.PredicateSym]*ast.Decl, name string) (ast.PredicateSy
 	return ast.PredicateSym{}, false
 }
 
-// explain renders the proof of a reported atom as ground atoms in depth-first
-// order. Several proofs are requested and the smallest rendering is kept, so
-// the output does not depend on fact store iteration order.
+// explanationFactStore gives provenance a stable order for each fact query.
+// Provenance chooses the first proof of a nested goal, even when it is asked
+// for several proofs of the reported goal.
+type explanationFactStore struct {
+	factstore.ReadOnlyFactStore
+}
+
+func (store explanationFactStore) GetFacts(query ast.Atom, callback func(ast.Atom) error) error {
+	var matches []ast.Atom
+	if err := store.ReadOnlyFactStore.GetFacts(query, func(atom ast.Atom) error {
+		matches = append(matches, atom)
+		return nil
+	}); err != nil {
+		return err
+	}
+	slices.SortFunc(matches, func(a, b ast.Atom) int {
+		if order := strings.Compare(a.String(), b.String()); order != 0 {
+			return order
+		}
+		// Distinct Mangle values can have the same printed form, such as 0
+		// and 0.0. Break those ties by their actual values.
+		for i := range a.Args {
+			left, leftOK := a.Args[i].(ast.Constant)
+			right, rightOK := b.Args[i].(ast.Constant)
+			if leftOK && rightOK {
+				if order := compareExplanationConstants(left, right); order != 0 {
+					return order
+				}
+			}
+		}
+		return 0
+	})
+	for _, atom := range matches {
+		if err := callback(atom); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func compareExplanationConstants(a, b ast.Constant) int {
+	if order := cmp.Compare(a.Type, b.Type); order != 0 {
+		return order
+	}
+	if order := cmp.Compare(a.Symbol, b.Symbol); order != 0 {
+		return order
+	}
+	if order := cmp.Compare(a.NumValue, b.NumValue); order != 0 {
+		return order
+	}
+	// Composite constants can also contain values with identical renderings
+	// and hashes, so compare their contents when the outer fields tie.
+	switch a.Type {
+	case ast.PairShape:
+		leftFirst, leftSecond, _ := a.PairValue()
+		rightFirst, rightSecond, _ := b.PairValue()
+		if order := compareExplanationConstants(leftFirst, rightFirst); order != 0 {
+			return order
+		}
+		return compareExplanationConstants(leftSecond, rightSecond)
+	case ast.ListShape:
+		left, _ := a.ListSeq()
+		right, _ := b.ListSeq()
+		return slices.CompareFunc(slices.Collect(left), slices.Collect(right), compareExplanationConstants)
+	case ast.MapShape, ast.StructShape:
+		return slices.CompareFunc(explanationEntries(a), explanationEntries(b), compareExplanationConstants)
+	}
+	return 0
+}
+
+func explanationEntries(value ast.Constant) []ast.Constant {
+	var entries []ast.Constant
+	collect := func(key, item ast.Constant) error {
+		entries = append(entries, key, item)
+		return nil
+	}
+	empty := func() error { return nil }
+	if value.Type == ast.MapShape {
+		_, _ = value.MapValues(collect, empty)
+	} else {
+		_, _ = value.StructValues(collect, empty)
+	}
+	return entries
+}
+
+// explain renders a proof as ground atoms in depth-first rule-premise order.
+// Of the proofs provenance returns, the smallest rendering is kept.
 func explain(info *mangleanalysis.ProgramInfo, store factstore.ReadOnlyFactStore, goal ast.Atom) []string {
-	proofs, err := provenance.Explain(info, store, goal, provenance.Options{MaxProofs: 16})
+	proofs, err := provenance.Explain(info, explanationFactStore{store}, goal, provenance.Options{MaxProofs: 16})
 	if err != nil || len(proofs) == 0 {
 		return []string{goal.String()}
 	}

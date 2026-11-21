@@ -2,8 +2,6 @@ package engine
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -62,11 +60,10 @@ type ruleCatalog struct {
 }
 
 type cachedRuleBundle struct {
-	artifact       bundle.Artifacts
-	pureCode       string
-	prepareCode    string
-	context        string
-	resolutionDirs map[string]string
+	artifact    bundle.Artifacts
+	pureCode    string
+	prepareCode string
+	context     string
 }
 
 func openRuleCatalog(ctx context.Context, options Options) (*ruleCatalog, error) {
@@ -107,7 +104,7 @@ func openRuleCatalogWithCache(ctx context.Context, options Options, engine *Sess
 }
 
 func (catalog *ruleCatalog) buildWithEngineCache(ctx context.Context, options Options, engine *Session) {
-	toolContext, cacheable := bundleCacheContext(options)
+	toolContext := assetRootOf(options) + "\x00" + options.RepoRoot + "\x00" + options.WorkspaceRoot
 	engine.bundleMu.Lock()
 	defer engine.bundleMu.Unlock()
 	if engine.bundleCache == nil {
@@ -128,7 +125,7 @@ func (catalog *ruleCatalog) buildWithEngineCache(ctx context.Context, options Op
 	for index, rulePath := range catalog.paths {
 		key := toolContext + "\x00" + rulePath
 		cached, exists := engine.bundleCache[key]
-		if !cacheable || !exists || cached.context != toolContext || !bundleInputsUnchanged(cached, options) {
+		if !exists || cached.context != toolContext || !cached.artifact.Manifest.Unchanged() {
 			delete(engine.bundleCache, key)
 			misses = append(misses, rulePath)
 			continue
@@ -157,23 +154,15 @@ func (catalog *ruleCatalog) buildWithEngineCache(ctx context.Context, options Op
 			continue
 		}
 		catalog.artifacts[rulePath] = artifact
-		if !cacheable {
-			continue
-		}
 		pureCode, pureErr := os.ReadFile(artifact.PureBundlePath)
 		prepareCode, prepareErr := os.ReadFile(artifact.PrepareBundlePath)
 		if pureErr != nil || prepareErr != nil {
 			continue
 		}
-		resolutionDirs, dirsOK := bundleResolutionDirectories(artifact.Inputs, options)
-		if !dirsOK {
-			continue
-		}
 		key := toolContext + "\x00" + rulePath
 		engine.bundleCache[key] = cachedRuleBundle{
-			artifact: bundle.Artifacts{Hash: artifact.Hash, Inputs: cloneBundleInputs(artifact.Inputs), Probes: cloneConfigProbes(artifact.Probes)},
+			artifact: bundle.Artifacts{Hash: artifact.Hash, Manifest: cloneBundleManifest(artifact.Manifest)},
 			pureCode: string(pureCode), prepareCode: string(prepareCode), context: toolContext,
-			resolutionDirs: resolutionDirs,
 		}
 	}
 }
@@ -193,180 +182,18 @@ func (catalog *ruleCatalog) materializeCachedBundle(index int, cached cachedRule
 	}
 	return bundle.Artifacts{
 		PureBundlePath: purePath, PrepareBundlePath: preparePath,
-		Hash: cached.artifact.Hash, Inputs: cloneBundleInputs(cached.artifact.Inputs), Probes: cloneConfigProbes(cached.artifact.Probes),
+		Hash: cached.artifact.Hash, Manifest: cloneBundleManifest(cached.artifact.Manifest),
 	}, nil
 }
 
-func bundleCacheContext(options Options) (string, bool) {
-	assetRoot := assetRootOf(options)
-	script, err := resolveBundleScript(assetRoot)
-	if err != nil {
-		return "", false
+func cloneBundleManifest(manifest bundle.InputManifest) bundle.InputManifest {
+	manifest.Inputs = append([]bundle.Input(nil), manifest.Inputs...)
+	manifest.Probes = append([]bundle.ConfigProbe(nil), manifest.Probes...)
+	for index := range manifest.Probes {
+		manifest.Probes[index].Ignore = append([]string(nil), manifest.Probes[index].Ignore...)
 	}
-	files := []string{script, filepath.Join(assetRoot, "package.json"), filepath.Join(options.RepoRoot, "package.json"), filepath.Join(options.RepoRoot, "pnpm-lock.yaml")}
-	resolvedScript, err := filepath.EvalSymlinks(script)
-	if err != nil {
-		return "", false
-	}
-	for _, dependency := range []string{"esbuild", "typescript"} {
-		found := false
-		for directory := filepath.Dir(resolvedScript); ; directory = filepath.Dir(directory) {
-			candidate := filepath.Join(directory, "node_modules", dependency, "package.json")
-			if _, err := os.Stat(candidate); err == nil {
-				files = append(files, candidate)
-				found = true
-				break
-			}
-			if directory == filepath.Dir(directory) {
-				break
-			}
-		}
-		if !found {
-			return "", false
-		}
-	}
-	var identity strings.Builder
-	identity.WriteString(assetRoot)
-	identity.WriteByte(0)
-	identity.WriteString(options.RepoRoot)
-	identity.WriteByte(0)
-	identity.WriteString(options.WorkspaceRoot)
-	for _, file := range files {
-		contents, err := os.ReadFile(file)
-		if err != nil {
-			if file == script {
-				return "", false
-			}
-			continue
-		}
-		digest := sha256.Sum256(contents)
-		identity.WriteByte(0)
-		identity.WriteString(file)
-		identity.WriteByte(0)
-		identity.WriteString(hex.EncodeToString(digest[:]))
-	}
-	digest := sha256.Sum256([]byte(identity.String()))
-	return hex.EncodeToString(digest[:]), true
-}
-
-func resolveBundleScript(assetRoot string) (string, error) {
-	return filepath.Abs(filepath.Join(assetRoot, "scripts", "bundle-rule.mjs"))
-}
-
-func bundleInputsUnchanged(cached cachedRuleBundle, options Options) bool {
-	for _, probe := range cached.artifact.Probes {
-		info, err := os.Stat(probe.Path)
-		if os.IsNotExist(err) {
-			if probe.Exists {
-				return false
-			}
-			continue
-		}
-		if err != nil {
-			return false
-		}
-		exists := info.Mode().IsRegular()
-		if probe.Directory {
-			exists = info.IsDir()
-		}
-		if exists != probe.Exists {
-			return false
-		}
-	}
-	currentDirs, ok := bundleResolutionDirectories(cached.artifact.Inputs, options)
-	if !ok || len(currentDirs) != len(cached.resolutionDirs) {
-		return false
-	}
-	for directory, digest := range cached.resolutionDirs {
-		if currentDirs[directory] != digest {
-			return false
-		}
-	}
-	return true
-}
-
-func bundleResolutionDirectories(inputs []bundle.Input, options Options) (map[string]string, bool) {
-	directories := make(map[string]string)
-	for _, input := range inputs {
-		if !filepath.IsAbs(input.AbsolutePath) {
-			return nil, false
-		}
-		resolved := filepath.Clean(input.AbsolutePath)
-		contents, err := os.ReadFile(resolved)
-		if err != nil {
-			return nil, false
-		}
-		digest := sha256.Sum256(contents)
-		if hex.EncodeToString(digest[:]) != input.SHA256 {
-			return nil, false
-		}
-		boundary := bundleResolutionBoundary(resolved, options)
-		for directory := filepath.Dir(resolved); ; directory = filepath.Dir(directory) {
-			if _, exists := directories[directory]; exists {
-				break
-			}
-			entries, err := os.ReadDir(directory)
-			if err != nil {
-				return nil, false
-			}
-			var names strings.Builder
-			for _, entry := range entries {
-				kind := "f"
-				if entry.IsDir() {
-					kind = "d"
-				}
-				names.WriteString(kind)
-				names.WriteByte(':')
-				names.WriteString(entry.Name())
-				names.WriteByte(0)
-				if !entry.IsDir() && (entry.Name() == "package.json" || entry.Name() == "jsconfig.json" || strings.HasPrefix(entry.Name(), "tsconfig") && strings.HasSuffix(entry.Name(), ".json")) {
-					contents, err := os.ReadFile(filepath.Join(directory, entry.Name()))
-					if err != nil {
-						return nil, false
-					}
-					digest := sha256.Sum256(contents)
-					names.Write(digest[:])
-					names.WriteByte(0)
-				}
-			}
-			digest := sha256.Sum256([]byte(names.String()))
-			directories[directory] = hex.EncodeToString(digest[:])
-			if directory == boundary || directory == filepath.Dir(directory) {
-				break
-			}
-		}
-	}
-	return directories, true
-}
-
-func bundleResolutionBoundary(file string, options Options) string {
-	roots := []string{options.WorkspaceRoot, options.RepoRoot, assetRootOf(options)}
-	boundary := filepath.Dir(file)
-	for _, root := range roots {
-		if root == "" {
-			continue
-		}
-		absolute, err := filepath.Abs(root)
-		if err != nil {
-			continue
-		}
-		relative, err := filepath.Rel(absolute, file)
-		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
-			continue
-		}
-		if len(absolute) < len(boundary) {
-			boundary = absolute
-		}
-	}
-	return boundary
-}
-
-func cloneBundleInputs(inputs []bundle.Input) []bundle.Input {
-	return append([]bundle.Input(nil), inputs...)
-}
-
-func cloneConfigProbes(probes []bundle.ConfigProbe) []bundle.ConfigProbe {
-	return append([]bundle.ConfigProbe(nil), probes...)
+	manifest.Resolutions = append([]string{}, manifest.Resolutions...)
+	return manifest
 }
 
 func (catalog *ruleCatalog) loadMetadata(skip map[string]struct{}) {
@@ -400,16 +227,6 @@ func (catalog *ruleCatalog) close() {
 		_ = os.RemoveAll(catalog.bundleDir)
 		catalog.bundleDir = ""
 	}
-}
-
-func (catalog *ruleCatalog) rulePathsWithArtifacts() []string {
-	paths := make([]string, 0, len(catalog.artifacts))
-	for _, rulePath := range catalog.paths {
-		if _, exists := catalog.artifacts[rulePath]; exists {
-			paths = append(paths, rulePath)
-		}
-	}
-	return paths
 }
 
 // ListRules bundles the rules that options select and reads validated
@@ -510,53 +327,4 @@ func duplicateIDMessage(id string, paths []string) string {
 	sorted := append([]string(nil), paths...)
 	sort.Strings(sorted)
 	return fmt.Sprintf("rule id %q is used by more than one rule file (%s); each rule needs its own id", id, strings.Join(sorted, ", "))
-}
-
-// preparedRuleFailure is a prepared rule that must not run.
-type preparedRuleFailure struct {
-	ruleID      string
-	phase       string
-	ruleVersion int
-	message     string
-}
-
-// invalidPreparedRules returns the prepared rules whose id does not match
-// runtime.RuleIDPattern (phase setup, as the other rule shape errors) and
-// the prepared rules whose id another rule file has (phase config). Linter
-// rule levels select rules by id, so two rules with one id cannot run. A
-// rule whose setup() failed still has its id, so it counts as a duplicate
-// too, as in lintai rules, which does not run setup().
-func invalidPreparedRules(workspaceRoot string, prepared map[string]bundle.PrepareResult, prepareFailures map[string]bundle.PrepareError) map[string]preparedRuleFailure {
-	failures := make(map[string]preparedRuleFailure)
-	pathsByID := make(map[string][]string)
-	for rulePath, item := range prepared {
-		if err := runtime.ValidateRuleID(item.RuleID); err != nil {
-			failures[rulePath] = preparedRuleFailure{ruleID: item.RuleID, phase: "setup", ruleVersion: item.RuleVersion, message: err.Error()}
-			continue
-		}
-		pathsByID[item.RuleID] = append(pathsByID[item.RuleID], rulePath)
-	}
-	for rulePath, item := range prepareFailures {
-		if item.RuleID != "" {
-			pathsByID[item.RuleID] = append(pathsByID[item.RuleID], rulePath)
-		}
-	}
-	for id, rulePaths := range pathsByID {
-		if len(rulePaths) < 2 {
-			continue
-		}
-		keys := make([]string, 0, len(rulePaths))
-		for _, rulePath := range rulePaths {
-			keys = append(keys, lockKey(workspaceRoot, rulePath))
-		}
-		message := duplicateIDMessage(id, keys)
-		for _, rulePath := range rulePaths {
-			item, ready := prepared[rulePath]
-			if !ready {
-				continue
-			}
-			failures[rulePath] = preparedRuleFailure{ruleID: id, phase: "config", ruleVersion: item.RuleVersion, message: message}
-		}
-	}
-	return failures
 }

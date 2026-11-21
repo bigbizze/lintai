@@ -7,6 +7,8 @@
 **Source baseline:** `f67e67a7d5bfc1ad1dd740b1dad3e006e2e3d0c8`, retained from the reviewed baseline. This document revision does not recheck repository HEAD; R0 verifies the actual implementation starting point.  
 **Development:** A replacement branch in the existing `bigbizze/lintai` repository. No new repository.
 
+**Owner-context amendment:** `lintai-owner-context-implementation.md` amends this revision's TypeScript ownership, populations, correspondence partition, public vocabulary, uncertainty reasons, examples, and consumed-input requirements. Where any remaining text here differs on those subjects, the owner-context specification is controlling.
+
 ## 1. Purpose and authority
 
 Lintai collects evidence, publishes facts with defined meanings, and checks rules against them. The replacement must make those responsibilities clear and remove code whose only purpose is to compensate for them being mixed together.
@@ -19,7 +21,7 @@ The only current consumer is the owner's experimental branch in one repository. 
 
 This specification fixes the configuration, fact inventory, argument roles, callback meaning, analysis identity, result identity, relation coverage, reporting, and execution contracts. Requirements here take precedence over earlier plans and prompts. The Phase A report remains evidence for the diagnosis, not competing implementation authority.
 
-**Owner decision (revision 6, amended):** the suppression design is simplified. Each producer supplies at most one fixed tracking key per anchor; rules cannot choose between syntax and subject forms. The native-AST syntax fingerprint, per-assertion anchor/mode selection, mixed keyed/count recording, recording-mode overrides, saved-form authority, overlap ambiguity and the invalid-entry recovery exception are removed. Findings are grouped by `(file, rule, assertion, namespace, anchor key, optional reasons)` and compared by count. Anchors without a key fall back to a per-assertion count. Counted groups, content validation and mandatory parallel rule evaluation remain in force. Source-based analysis IDs and the base-relation/helper inventory are unchanged from revision 5. There is still no compatibility or migration work.
+**Owner decision (revision 6, amended):** the suppression design is simplified. Each producer supplies at most one fixed tracking key per anchor; rules cannot choose between syntax and subject forms. The native-AST syntax fingerprint, per-assertion anchor/mode selection, mixed keyed/count recording, recording-mode overrides, saved-form authority, overlap ambiguity and the invalid-entry recovery exception are removed. Findings are grouped by `(file, rule, assertion, namespace, anchor key, optional reasons)` and compared by count. Anchors without a key fall back to a per-assertion count. Counted groups, content validation and mandatory parallel rule evaluation remain in force. Source-based analysis IDs remain free of config/context salts. The TypeScript base-relation and helper inventory is amended by the owner-context specification above. There is still no compatibility or migration work.
 
 **MUST** marks a completion requirement. Examples illustrate the specified contract; they are not descriptions of already implemented behavior. This document was produced from source inspection and the earlier review, not from running the replacement.
 
@@ -457,9 +459,11 @@ Prune an ignored subtree only when no higher-priority inclusion or exact source 
 
 ### 6.4 Compiler membership and primary scope
 
-In `tsconfig` mode, use the applicable configured programs, including project references. Lintai's exclusions determine primary targets, not the compiler's permitted reads or its configured global declarations. A `.ts` file containing `declare global` can affect selected code without supplying primary facts.
+Each selected ordinary source file has one effective compiler owner, fixed before semantic collection. Starting at its directory, find the nearest ancestor named exactly `tsconfig.json`, stopping at the workspace root. Choose it immediately if its original parsed root list contains the file. Otherwise traverse its existing project references depth first in resolver order, with cycle protection, and choose the first config whose original root list contains the file. If none matches, use the nearest config anyway; with no nearest config, use the initial synthetic context. Missing references are skipped and tracked. A malformed existing config reached by selection is an error. Do not search above the workspace root, sort references before selection, or substitute another config filename.
 
-In `walk` mode, choose the primary set from eligible walked files and establish applicable configured or synthetic contexts. Both modes use the same semantic domains, reconciliation and publication rules; the mode changes scope, not the meaning of a relation. The synthetic program contains its selected roots plus normal resolved dependencies. It does not invent an independent global-source universe.
+Choose ownership before adding exact `--source` roots; those roots do not change original membership. In `tsconfig` mode, a configured primary absent from its selected program is excluded. In `walk` mode, prepare the existing synthetic fallback for missing primaries before collection. Freeze the eligible set, selected config, effective file-to-context mapping and prepared context handles before collecting any semantic facts. A stable synthetic context that still lacks an assigned file is an incomplete-membership error; input instability uses the existing retry path. The mode changes the selected scope and availability fallback, not the meaning of a relation.
+
+The bounded `module_config` inventory is separate from effective ownership and compiler import visibility. It records original root-list membership in the union of nearest configs and their existing transitive reference closures for all selected candidates. A file seen only through imports, an unrelated config, an `extends` input that is not also a nearest/reference context, or an auxiliary source-correspondence config is not a membership. An eligible module can have memberships but a synthetic owner, or an owner absent from its membership set. Exclusions determine primary facts, not compiler reads or global declarations; a selected program's `.ts` file containing `declare global` can still affect selected code without supplying primary facts.
 
 Excluding an entire nested repository prevents it from independently creating analyzed configuration groups. If an already applicable compiler program includes one of its global declarations, that declaration can still affect types. Do not promise both to preserve compiler membership and to remove those effects.
 
@@ -477,51 +481,48 @@ Changes to configuration contents or presence, lists, exact sources, file mode, 
 
 ### 7.1 One deliberate sequence
 
-Establish the primary scope and contributing compiler contexts. Assign source identities and lexical ownership. Collect typed family observations under those contexts. Reconcile relevant observations. Select the defined public populations. Project facts and reporting support once.
+Use the same ordinary planner for snapshot extraction and scope explanation. Prepare initial programs and determine actual source availability, apply the `tsconfig` exclusion or `walk` synthetic fallback, and freeze the final eligible module set and each file's private immutable context handle before any function, fact, export, or derived-type collection. No collector can change its own file's owner. Scope is a projection of this plan, including selected config, effective owner, eligibility, and complete bounded membership when requested.
 
-These responsibilities may share source traversals. They do not require one full AST walk or one new generic representation per responsibility. Collector outputs belong to that collector/context until reconciliation; collectors do not receive arbitrary mutable access to every output family.
-
-A contribution retains its compiler-context identity and originating source/root information. Reusable contributions contain ordinary values, not checker-owned pointers. Preserve evidence from a relevant context before deciding whether that context itself retains the source as a primary root.
+After the plan is frozen, assign source identities and lexical ownership, collect ordinary observations under each source root's owner, reconcile only the families whose contracts permit aggregation, choose their defined populations, and project facts and reporting support once. These responsibilities may share traversals; they do not require a generic event bus or a new representation for each responsibility. Contributions retain their initiating eligible root and context until validated and reconciled. Reusable contributions contain ordinary values, not checker-owned pointers. Inventory-only config parsing is not an analyzed context.
 
 ### 7.2 Source and function populations
 
-`ts.module` contains the selected primary files. `ts.fn` contains represented function implementations and the ownership-only function records needed to describe supported lexical behavior in those files. Declaration-file signatures are declarations, not fabricated implementations.
+`ts.module` contains eligible retained primary files from the frozen plan. `ts.fn` contains represented function implementations and the ownership-only function records needed to describe supported lexical behavior in those files. Declaration-file signatures are declarations, not fabricated implementations. A visible dependency implementation outside the final function domain remains unresolved for runtime traversal and is not published by indexing alone.
 
 `ts.site` contains primary syntax sites used by the source-evidence families: imports, invocation expressions, function-value references, type references, suspension, ambient/global/meta uses, directives, parse errors, export syntax, and direct callback-argument evidence. It does not enumerate every dependency node or structural type. The source-evidence collector computes this population independently of optional signature/type/map expansion.
 
-Primary code facts originate only from primary files. Dependency declarations and source-association endpoints can appear in the separately defined metadata domains. They do not make dependency functions primary implementations.
+Every ordinary source-site fact and module export observation comes from that file's effective owner. A function's implementation, flags, and one public signature come from the owner of its file. For a call from A to B, resolve the call under A's owner and publish B's own signature only under B's owner. Derived type, declaration-type, and ordinary declaration endpoint views retain the initiating function/export/source root and that root's context through recursive collection; do not reroute them to a declaration file's owner. Distinct correctly owned roots can therefore produce truthful `type_incomplete /conflict` or `declaration_type_incomplete /conflict` for a shared canonical ID.
+
+`module_config` is the bounded original-root membership relation described in section 6.4; `module_owner_config` is the one effective real owner and has no row for synthetic ownership. Neither relation describes import visibility. Primary code facts originate only from eligible primary files. Dependency declarations and source-correspondence endpoints can appear in their separately defined metadata domains; they do not make dependency functions primary implementations.
 
 ### 7.3 Declaration population
 
-The published declaration set is the union of:
+Ordinary `declaration` metadata is collected from ordinary call/declaration provenance and retained primary-module exports under the initiating root's owner. Its population is independent of the source-correspondence endpoint population. In the ordinary domain:
 
-- Concrete selected-signature declarations observed at retained invocation sites.
-- The supported lexical member declarations and owner declarations needed by that provenance.
-- Declaration endpoints of exports of primary modules.
-- Checked and source declaration endpoints of configured binding attempts.
-- Validated declaration-map candidates and precise source endpoints reached from those retained declarations.
+- Concrete selected-signature declarations observed at retained invocation sites and the supported lexical member/owner declarations needed by that evidence.
+- Declaration endpoints of exports of retained primary modules.
+- Ordinary declaration-type subjects only for the retained exported declarations and each applicable type/value space.
 
-Map reachability is evaluated to a deterministic fixed point over observed links. It does not recursively invent new type roots. Collect extra private evidence when reconciliation requires it, but only this union is published as the declaration domain.
+Automatic declaration maps are parser-recovery correspondence evidence. Configured source links use their separately planned correspondence contexts. Their endpoints never seed ordinary declaration retention, type subjects, ordinary uncertainty, or `ts.location`; a source-only endpoint may have independent optional `facts.Batch.Anchors` support for reporting. Do not add a `source_location` relation. The exact endpoint population and projection are defined in section 7.5.
 
-Metadata collection records identity, syntax kind, name and origin. If supported metadata observations disagree, choose one complete metadata record by canonical order and mark metadata conflict; do not assemble a record by independently picking unrelated fields. Unsupported syntax uses kind `/unknown` plus an explicit metadata reason. Exact declaration identity does not imply that every optional property is known.
+Ordinary metadata collection records identity, syntax kind, name and origin. If supported observations within the ordinary domain disagree, choose one complete metadata record by canonical order and mark `/conflict`; do not assemble a record by independently picking unrelated fields. Unsupported syntax uses kind `/unknown` plus `/unsupported`. Ordinary `declaration_metadata_incomplete` reasons are exactly `/unsupported` and `/conflict`; it does not report `/unresolved`. Exact declaration identity does not imply that every optional property is known.
 
 The previous overloaded `declaration_incomplete` relation is not part of the new schema. Use:
 
 ```text
 ts.declaration_metadata_incomplete(Declaration, Reason)
 ts.declaration_type_incomplete(Declaration, Space, Reason)
-ts.declaration_fn_incomplete(Declaration, Reason)
 ```
 
-Reasons are `/unresolved`, `/unsupported`, or `/conflict`. Each concerns only its named claim. Source correspondence continues to use its own outcome relations.
+Declaration-type reasons are `/unresolved`, `/unsupported`, and `/conflict`. Each incomplete relation concerns only its named claim. Source correspondence uses its own outcome and endpoint relations.
 
-`declaration_fn` is a directly observed correspondence to a collected implementation. No row is expected merely because an external declaration has function syntax. Known links may coexist with `declaration_fn_incomplete` when relevant association observations disagree or cannot be resolved. A rule requiring a definite correspondence guards that uncertainty.
+`declaration_fn` is one optional direct syntax-to-implementation link to a retained function. Equal observations deduplicate; different nonempty links for one syntax declaration are an internal invariant error. Filter the link if its implementation is outside the retained function domain. Absence means no direct link to a retained implementation was observed; it does not prove that no implementation exists. There is no `declaration_fn_incomplete` relation.
 
 ### 7.4 Declaration-type and type populations
 
 `ts.declaration_type_subject(Declaration, Space)` defines the attempted declaration-type domain: retained export targets in each type/value space in which the exported binding calls for a declaration type. Metadata-only call or source-association endpoints do not become subjects merely because their identity was discovered.
 
-For every subject, collection attempts the association in all relevant contexts. It publishes the set of known `declaration_type` associations and any subject-specific incomplete reasons. No association with no incomplete reason is allowed for a subject: failed acquisition must be explicit. Different known association sets mark conflict. A partial observation is not erased by a complete one elsewhere.
+For every subject, collection attempts the association under the initiating export/source root's effective owner and carries that provenance through recursive work. It publishes the known `declaration_type` association and any subject-specific incomplete reasons. Failed acquisition must be explicit. Distinct correctly owned roots reaching the same canonical declaration ID may produce different values and truthful `/conflict`; do not silently choose a shape or route all observations through the declaration file's owner.
 
 Type roots are the known parameter/return types of the defined function-signature observations and the known declaration-type associations of those subjects. The type population is their closure over the represented type-child edges: named type arguments, tuple elements, union/intersection members, anonymous properties, and represented function-type parameters/return.
 
@@ -535,30 +536,30 @@ For the same canonical type ID with incompatible structure, preserve only the st
 
 ### 7.5 Exports and source correspondence
 
-Export identity is module/public-name/space, not whichever declaration was visited first. Preserve observed target sets and incompleteness. Known targets survive conflicts with an explicit conflict marker; they are not a claim that all targets belong to one mutually consistent compiler interpretation. Propagate incomplete wildcard-export inventory through re-export dependencies to a fixed point.
+Export identity is module/public-name/space, not whichever declaration was visited first. Each primary module's export bindings and inventory outcome come only from that module's effective owner. Keep legitimate merged declaration targets and same-owner wildcard ambiguity; do not compare alternate owner views or combine foreign inventory failures. Propagate unresolved/unsupported wildcard-export inventory through re-export dependencies within the exporting root's owner context.
 
-A checked declaration and a source declaration remain different entities. Source maps and configured source links add evidence about correspondence; they do not substitute one type for another or prove build freshness.
+A checked declaration and a source declaration remain different entities. Automatic declaration maps use parser recovery and do not adopt a checker/config context. Configured source links have their own planned correspondence contexts, including the explicitly selected source config when present; those contexts never authorize ordinary rows. Source links add correspondence evidence; they do not substitute one type for another or prove build freshness.
 
-For declaration maps, preserve validated candidates. Publish a precise link only when the applicable evidence establishes one nonconflicting source endpoint. Conflicting success/failure observations withhold the precise link and report conflict. A requested map failure uses the documented outcome, not an invented empty success.
+For declaration maps, preserve validated candidates. Publish a precise link only when the applicable evidence establishes one nonconflicting source endpoint. A requested map failure uses the documented outcome, not an invented empty success. The source endpoint domain is the declaration IDs referenced by retained `source_binding_checked_decl` and `source_binding_source_decl` rows, both declaration positions of retained `declaration_source_candidate` and `declaration_source` rows, and checked declaration IDs in retained `declaration_source_outcome` rows. Collect complete correspondence first, determine this domain, then project a requested subset. Publish a deterministic whole metadata tuple and `/unsupported` or `/conflict` when needed. Do not publish private metadata gathered for unrelated discovered endpoints.
 
-Configured bindings retain independent checked and source endpoint sets. They do not form pairwise equalities between those sets. Optional auxiliary contexts contribute correspondence evidence, not primary roots or incidental declaration types.
+Configured bindings retain independent checked and source endpoint sets. They do not form pairwise equalities between those sets. Physical range, description, and tracking support for a source-only endpoint live in an independent optional anchor; no ordinary `ts.location` row is created for it. If an ID occurs in both domains, source-only anchors cannot replace its ordinary support, including an explicit null tracking value. Correspondence collection is complete whenever full collection or any correspondence base is demanded, then projected; ordinary declaration, location, or config demand alone does not trigger it.
 
-`config_adjusted` covers the configured primary contexts and applicable configured auxiliary source contexts identified by scope/source-association planning. Its population is not "every configuration happened to be loaded by this request." Describing a schema needs none of this work. Requesting that global configuration relation can legitimately require the relevant context planning.
+`config_adjusted` covers ordinary planned contexts only. `source_config_adjusted` covers auxiliary correspondence contexts only; the same real config may occur in both. Use one public Config representation everywhere: normalized workspace-relative paths for in-workspace configs and normalized absolute paths outside the workspace, with the existing filesystem case and slash policy. Config strings are data, not entities or program identities. The representation supports real joins such as `module_owner_config → config_adjusted` and `source_entry_tsconfig → source_config_adjusted`; synthetic analysis has no invented config path.
 
 ### 7.6 Reconciliation rules
 
 | Family | Required outcome |
 |---|---|
 | Syntax identity/lexical owner | One source-derived identity/owner under captured source. Contradictory metadata is a producer defect, not a first-writer win. |
-| Runtime call target | Keep observed local/external/unresolved evidence; mark target conflict when relevant observations differ. |
-| Selected call declaration/member | Preserve concrete evidence and explicit unresolved/synthetic/unsupported/conflict outcomes independently of runtime targets. |
-| Function signature | Preserve whole observations; complete disagreements mark function conflict; unresolved evidence remains visible. |
-| Declaration metadata | One canonical whole metadata record with its own uncertainty. |
-| Declaration type/function link | Preserve known associations and their own incomplete/conflict evidence. |
-| Type structure | Canonical merge described above; conflicting non-key structure is withheld. |
-| Export inventory/targets | Retain known positives and propagate the applicable incomplete/conflict information. |
+| Runtime call target | Resolve each retained call under its site's effective owner; publish its owner-context local/external/unresolved classification without cross-context conflict comparison. |
+| Selected call declaration/member | Preserve caller-context evidence and `/unresolved`, `/synthetic`, or `/unsupported` acquisition outcomes independently of runtime implementation resolution. |
+| Function signature | Publish one whole signature from the function file's owner. `signature_incomplete` uses only `/unresolved`; contradictory contributions are an internal invariant error, not a public conflict. |
+| Declaration metadata | One canonical whole ordinary metadata tuple with `/unsupported` or `/conflict`; correspondence endpoint metadata is reduced separately. |
+| Declaration type/direct function link | Root-owned declaration types keep truthful `/unresolved`, `/unsupported`, or `/conflict`; `declaration_fn` is one optional direct link with no incomplete relation. |
+| Type structure | Canonical merge described above; distinct owned roots can produce truthful type conflicts, and private provenance is not part of semantic equality. |
+| Export inventory/targets | Keep each exporting root's owner-local targets and unresolved/unsupported inventory result; preserve legitimate merged bindings and same-owner wildcard ambiguity. |
 | Precise map link | Withhold a definitive link on ambiguity/conflict; preserve candidates and outcomes. |
-| Configured binding | Keep checked/source sets distinct and preserve binding uncertainty. |
+| Configured binding/source endpoints | Keep checked/source sets distinct; preserve binding and endpoint uncertainty in the correspondence partition only. |
 
 No universal "union everything" or "take first" reconciliation rule is permitted. Public grouping protects the associations it explicitly represents; arbitrary cross-family joins are not promised to describe one possible compiler context. Do not add a context column to every public relation to conceal an undefined aggregation policy.
 
@@ -566,7 +567,7 @@ No universal "union everything" or "take first" reconciliation rule is permitted
 
 The engine discovers required base predicates from the prepared rules. TypeScript maps them to a small private set of semantic operations and prerequisites. This mapping is not part of the generic plugin API.
 
-A request for globally enumerable type facts must collect every defined type root. A metadata/provenance-only request must not expand structural types solely because identity registration does so today. A source-only request must not run unrelated map recovery or type rendering. Record actual collector invocation counts in tests for those independence properties.
+A request for globally enumerable type facts must collect every defined ordinary type root. A metadata/provenance-only request must not expand structural types solely because identity registration does so today. Full collection or demand for any relation in the explicit source-correspondence partition runs complete correspondence collection before projection; ordinary declaration/location/config demand alone does not. An explicitly configured source-links document is validated on the first nonempty collection, but auxiliary source configs and bodies are not parsed without correspondence demand. Record actual collector invocation counts in tests for these demand boundaries.
 
 Independent work skipping is an architectural consequence here, not a benchmark-triggered option. Skipping every individual predicate separately is not required. A conservative family can remain combined where its evidence really is inseparable, provided the reason is explicit and unrelated responsibilities are not hidden inside it.
 
@@ -587,11 +588,11 @@ ts.signature_incomplete(Signature, Reason)
 
 A signature observation contains the function ID, ordered parameter slots, known optional/rest marks, known type IDs or unresolved slots, a known return type or unresolved return, and completeness reasons. `Count` includes unresolved parameter slots; missing type information is not a missing parameter.
 
-Exactly one of `signature_complete` or one-or-more `signature_incomplete` reasons holds for an emitted signature. Signature incompleteness uses `/unresolved` or `/unsupported`. A complete signature has one type per slot and one return. This describes successful observation of that signature, not structural completeness of every referenced type.
+Exactly one of `signature_complete` or `signature_incomplete(Signature, /unresolved)` holds for an emitted signature. A complete signature has one type per slot and one return. This describes successful observation of that signature, not structural completeness of every referenced type. The function's own file owner is the only context that may publish its ordinary signature.
 
-If collection is intentionally omitted for an ownership-only anonymous function under the producer's fixed policy, emit `fn_signature_omitted` and no fabricated signature. If collection is attempted but no usable signature record is obtainable, emit `fn_signature_unresolved`. Partial signature observations also imply unresolved function-signature evidence. Omission is not a demand optimization; the policy is the same under selected and full collection.
+If collection is intentionally omitted for an ownership-only anonymous function under the producer's fixed policy, emit `fn_signature_omitted` and no fabricated signature. Partial signature observations carry `signature_incomplete(Signature, /unresolved)`. The helper `fn_signature_unresolved(Fn)` is derived only from `fn_signature(Fn, Signature)` and `signature_incomplete(Signature, _)`; it is not a base relation. Omission is not a demand optimization; the policy is the same under selected and full collection.
 
-Different complete whole observations for one function produce `fn_signature_conflict`. They remain separate IDs. An incomplete observation can coexist with complete observations. Identical whole observations may share an ID, while their internal supporting contributions remain separately removable.
+One whole signature observation carries its ordered parameter types, optional/rest marks, return type, and completeness together. Never combine slots from competing observations. Identical repeated validated contributions may deduplicate; a contradictory second owner signature for one function is an internal invariant error, not a public conflict or winner-selection opportunity. Correctly owned roots may still disagree on shared canonical types or declaration-type associations.
 
 The signature digest record is:
 
@@ -601,7 +602,7 @@ The signature digest record is:
  returnTypeIDOrNull, sortedIncompleteReasons]
 ```
 
-The tuple positions are fixed; unknown marks are not guessed as false. This grouping prevents parameters of one observation being paired with the return of another through a signature join. A strict rule about all function behavior still checks function-level omission, unresolved, and conflict facts.
+The tuple positions are fixed; unknown marks are not guessed as false. This grouping prevents parameters of one observation being paired with the return of another through a signature join. A strict rule about all function behavior checks function-level omission and the `fn_signature_unresolved` helper.
 
 There are no authoritative flat `fn_param` or `fn_returns` relations. A one-layer Promise helper is `ts.signature_returns_awaited(Signature, Type)`, preserving signature identity. It is not TypeScript's recursive `Awaited` operation. Structural `type_sig_*` relations remain about represented function *types*, not these observed declaration signatures.
 
@@ -616,12 +617,11 @@ ts.call_site(Site)                         # call, new, tagged template
 ts.call_edge(Site, CollectedFunction)
 ts.external_call(Site, OriginKind, Origin, Name)
 ts.call_unresolved(Site)
-ts.call_target_conflict(Site)
 ```
 
-Use `ts.site` for its file and `ts.site_owner` for its owner. There is no caller string sentinel. Per relevant compiler observation, a supported invocation has one runtime classification. Across contexts, different classifications or targets can coexist and produce `call_target_conflict`. Do not discard disagreement to enforce a false global exactly-one property.
+Use `ts.site` for its file and `ts.site_owner` for its owner. There is no caller string sentinel. Resolve each retained invocation under the site file's one effective owner and publish that owner's local, external, or unresolved classification. Do not compare alternate ordinary contexts or emit a call-target conflict relation. For a call from A to B, A's owner resolves the call, while B's implementation and signature remain sourced from B's owner.
 
-A selected signature declaration is separate evidence: `call_declaration` and `call_declaration_incomplete` neither guarantee nor replace runtime implementation resolution. External-origin kinds are `/lib`, `/package`, `/ambient_module`, `/declaration_file`, or `/source_file`, so a package or ambient module named `lib` cannot be mistaken for the compiler library.
+A selected signature declaration is separate evidence: `call_declaration` and `call_declaration_incomplete` neither guarantee nor replace runtime implementation resolution. Call-declaration incompleteness is `/unresolved`, `/synthetic`, or `/unsupported`; it has no `/conflict` outcome. External-origin kinds are `/lib`, `/package`, `/ambient_module`, `/declaration_file`, or `/source_file`, so a package or ambient module named `lib` cannot be mistaken for the compiler library.
 
 A call into an excluded workspace implementation is unresolved for collected-implementation traversal, even when its checked declaration is known. Keep the declaration evidence. Do not temporarily publish a local call edge and later reinterpret its identity during cleanup.
 
@@ -637,7 +637,7 @@ ts.fn_value_escape_unknown(Site)
 
 An escape row means: a supported direct argument was established to be function-valued and was supplied to an invocation that the relevant context classified as external or unresolved. It does not prove the function will execute or that the recipient retains it.
 
-A target row means that context established a definite **collected function implementation** for the value. A known declaration outside the collected implementation domain is not such a target. Unknown means at least one context that observed this function-valued transfer could not establish a definite collected implementation. Known target rows and unknown can coexist across contexts; different known targets remain visible without silently selecting one.
+A target row means that the argument's owner context established a definite **collected function implementation** for the value. A known declaration outside the collected implementation domain is not such a target. Unknown means that owner context could not establish a definite collected implementation. Ordinary target indexing under another context cannot add or replace transfer facts for the same source site.
 
 ### 9.3 Supported forms and honest absence
 
@@ -661,7 +661,7 @@ Escape sites receive no `call_declaration_incomplete`: they are not invocations.
 | `unknown(callback)` | Unresolved invocation and a separate function-valued argument event. |
 | `externalApi(valueTypedAsAny)` | No positive callback event merely because the value might be callable. |
 | `externalApi(...callbacks)` | Spread transfer not represented; absence is not safety. |
-| One context resolves a collected callback, another cannot | Keep the target and unknown evidence at the same argument ID. |
+| The site owner's checker cannot establish a collected callback target | Keep the argument event and its unknown-target evidence; do not infer a target from a foreign context. |
 
 ## 10. Rule preparation, execution, and deterministic behavior
 
@@ -669,7 +669,9 @@ Escape sites receive no `call_declaration_incomplete`: they are not invocations.
 
 Rule discovery, listing, checking, and lock creation use one catalog/artifact owner. Listing does not run setup or extract application facts. Verify configured integrity before affected setup or evaluation. Determine identity, shape and duplicate rule IDs through one pure metadata load, not a second execution solely to reread the ID.
 
-Retain verified bundle code, bundle dependencies/resolution state and compiled JavaScript. A top-level source hash alone is insufficient when imports or package resolution change. Rule ID/version remain useful policy metadata; they do not authorize interpreting obsolete schema.
+Retain verified bundle code and bundle dependencies/resolution state. Compiled-JavaScript retention is held work and is not part of metadata consolidation. A top-level source hash alone is insufficient when imports or package resolution change. Rule ID/version remain useful policy metadata; they do not authorize interpreting obsolete schema.
+
+The bundler supplies a `lintai.bundle-inputs/1` manifest for its captured source, configuration, resolution and tool observations. Both bundle outputs use one captured view. Validate the manifest and its current inputs before publishing or reusing the artifact; missing, changed or unestablished evidence is a per-rule bundle failure. The rules-lock format is separate from this manifest.
 
 Disabled rules do not run setup, generate a program, request producer facts, evaluate, or authorize pruning. Metadata/configuration errors remain explicit. No producer work is justified by a disabled or unsuccessfully prepared rule.
 
@@ -795,7 +797,7 @@ No six-stage public preparation API is required. No captured-setup handle is imp
 
 ### 11.2 Retained work
 
-Retain the current verified rule artifacts/compiled code, eligible compiled plans, current producer/context observations, validated fact indexes, and current completed analysis. Keep only the current generation plus in-flight replacement and data still held by readers. The session does not retain a historical list. Memory held because a caller retains old immutable results belongs to that caller, not a hidden session cache. There is no historical LRU or special base-workspace state.
+Retain the current verified rule artifacts, eligible compiled plans, current producer/context observations, validated fact indexes, and current completed analysis. Compiled-JavaScript retention is held work. Keep only the current generation plus in-flight replacement and data still held by readers. The session does not retain a historical list. Memory held because a caller retains old immutable results belongs to that caller, not a hidden session cache. There is no historical LRU or special base-workspace state.
 
 A valid no-change check MUST reuse extraction, fact indexes and unchanged compilation. Rules without setup do not launch a setup process. Rules with arbitrary setup run it again for a fresh check. When code, catalog, explicit environment and newly obtained setup values match the current preparation, the previous generated program/dependency closure can be reused. No historical or per-rule outcome-cache subsystem is needed.
 
@@ -1002,7 +1004,7 @@ Implement `lintai.toml`, exact overrides/errors, one production selector and sco
 
 ### R4 — Rebuild TypeScript semantic ownership
 
-Implement identity-first entities and one site-owner relation; explicit collectors; separated metadata/type/source uncertainty; grouped signatures; direct callback evidence; deterministic whole-observation reconciliation; explicit declaration/type domains; and structural type visits owned by checker observations instead of each root. Implement section 4.7's scope/name keys and null cases from captured source; never derive them from enabled relations. Use Appendix A's unchanged schema, without old aliases or arities.
+Implement identity-first entities and one site-owner relation; explicit collectors; separated ordinary and correspondence metadata; one whole function signature; direct callback evidence; deterministic whole-observation reconciliation where defined; explicit declaration/type domains; and structural type visits owned by checker observations instead of each root. Implement section 4.7's scope/name keys and null cases from captured source; never derive them from enabled relations. Use Appendix A as amended by the owner-context specification, without old aliases or arities.
 
 **Exit:** source sites retain identity across classification changes; invalid signature combinations disappear; callback arguments are not invocations; metadata requests do not force unrelated type expansion; repeated roots avoid repeated structural work; removing conflict support restores the surviving result. Named keys survive body edits; import keys survive binding changes. Static/instance/private/accessor distinctions remain. Anonymous sites, signatures and types return null. No-change checks reuse keys, and key construction counts are recorded. This package cannot be satisfied by renaming the broad extractor.
 
@@ -1052,12 +1054,12 @@ Use small adversarial fixtures and existing meaningful tests. These checks are a
 | V04 | Request subsets and full collection give identical requested rows and complete eligible anchor support: tracking keys, explicit nulls and descriptions; include same-ID enrichment, negation, enumeration and expectation-only dependencies. |
 | V05 | Adding an unrelated rule does not change another rule's fact view, limit accounting, reporting support or pruning authority. Aggregate provenance may change. |
 | V06 | A source invocation has the same ID when compiler contexts resolve it differently. A callback has a separate argument-site identity and never consumes call-classification counters. |
-| V07 | Complete incompatible signatures cannot yield an invented mixed signature through one signature join. Partial slots, zero arity, optional/rest, omitted and unresolved evidence remain distinct. |
-| V08 | Every example and limitation in section 9.3 is tested, including the known external function with no collected implementation and cross-context uncertainty. |
-| V09 | Call-only, export-only, member-owner, map and configured-binding declaration populations match section 7. Metadata-only endpoints do not silently become type subjects. |
-| V10 | Declaration metadata, declared-type and direct-function uncertainty do not change when unrelated families are requested. Source recovery failures remain separate. |
+| V07 | Each function publishes one whole signature from its file's effective owner. Partial slots, zero arity, optional/rest marks, omitted signatures, and `/unresolved` signatures remain distinct; contradictory owner signatures fail as an internal invariant. |
+| V08 | Every example and limitation in section 9.3 is tested, including the known external function with no retained implementation. Callback targets and unknown-target evidence come from the site's owner, not competing ordinary contexts. |
+| V09 | Call-only and export-only ordinary declaration populations, separate source-endpoint population, map candidates/outcomes, and configured-binding endpoints match section 7. Metadata-only ordinary endpoints do not silently become type subjects, and correspondence endpoints do not leak into ordinary declaration/location facts. |
+| V10 | Ordinary declaration metadata, declaration-type, direct-function-link, source-endpoint, and call-declaration uncertainty remain separate and do not change when unrelated families are requested. Source recovery failures stay in the correspondence partition. |
 | V11 | Shared type roots do not repeat structural collection for the same checker observation; distinct observations still conflict correctly. Display results are deterministic under root order. |
-| V12 | Removing one of several supports preserves remaining facts; removing a conflicting context removes the conflict and restores precise structure. |
+| V12 | Removing one of several validated derived-type supports preserves remaining facts; removing a conflicting derived-type context removes that conflict and restores precise structure. Calls, signatures, and export inventories remain those of their frozen owners. |
 | V13 | All configuration defaults, errors, path rules and precedence in section 6 are exercised; schema/list/lock do not perform application extraction. |
 | V14 | Excluded global `.ts` input still affects selected code; generated dependencies/setup reads remain available; exact eligible sources and scope explanation agree with facts/check. |
 | V15 | Scope changes retract primary facts without wrong pruning. A newly eligible file is discovered even if no previously known file changed. |
@@ -1186,6 +1188,8 @@ Each row below supplies the ordered arguments, all entity/report roles, and its 
 |---|---|---|
 | `ts.module/1` | `Module:E!` | One entity per selected primary file. |
 | `ts.module_path/2` | `Module:E!, File:P` | The primary module’s canonical file path. |
+| `ts.module_config/2` | `Module:E!, Config:P` | Original root-file membership in the bounded ordinary config inventory. |
+| `ts.module_owner_config/2` | `Module:E!, Config:P` | Effective real config owner of a retained ordinary module; synthetic owners have no row. |
 | `ts.fn/3` | `Fn:E!, File:P, Name:S` | Collected implementation/ownership function in a primary file; display name is not identity. |
 | `ts.fn_kind/2` | `Fn:E!, Kind:N` | One syntax kind: /function, /function_expression, /arrow_function, /method, /constructor, /get_accessor or /set_accessor. |
 | `ts.fn_container/2` | `Fn:E!, Name:S` | Known containing class/object display name; absent when unnamed. |
@@ -1204,7 +1208,7 @@ Each row below supplies the ordered arguments, all entity/report roles, and its 
 | `ts.global_ref/2` | `Site:E!, Name:S` | Value reference to the resolved global binding; same-spelled local variables do not qualify. |
 | `ts.module_directive/2` | `Site:E!, Text:S` | Directive-prologue string in a primary module; no quotation marks in Text. |
 | `ts.module_parse_error/2` | `Site:E!, Message:S` | First syntax diagnostic for a primary file. Other source facts can be incomplete while it exists. |
-| `ts.config_adjusted/3` | `Config:P, Option:S, Action:N` | Option adaptation in the fixed applicable-context domain; /removed, /rewritten or /replaced. |
+| `ts.config_adjusted/3` | `Config:P, Option:S, Action:N` | Option adaptation for ordinary planned contexts only; /removed, /rewritten or /replaced. |
 
 ### A.2 Imports and source type references
 
@@ -1231,9 +1235,8 @@ Each row below supplies the ordered arguments, all entity/report roles, and its 
 | `ts.call_edge/2` | `Site:E!, Callee:E!` | Observed call to a collected implementation. Caller is site_owner, not part of this row. |
 | `ts.external_call/4` | `Site:E!, OriginKind:N, Origin:S, Name:S` | Observed external declared target; origin kinds are defined in section 9.1. |
 | `ts.call_unresolved/1` | `Site:E!` | An observed invocation cannot be followed to a retained implementation or supported external target. |
-| `ts.call_target_conflict/1` | `Site:E!` | Relevant runtime-classification/target observations disagree; retain their positive evidence. |
 | `ts.call_declaration/2` | `Site:E!, Declaration:E?` | Concrete signature declaration selected by a checked context, independent of runtime implementation resolution. |
-| `ts.call_declaration_incomplete/2` | `Site:E!, Reason:N` | Selected declaration/member evidence is /unresolved, /synthetic, /unsupported or /conflict. |
+| `ts.call_declaration_incomplete/2` | `Site:E!, Reason:N` | Selected declaration/member evidence is /unresolved, /synthetic or /unsupported. |
 | `ts.declaration_member/3` | `Declaration:E?, OwnerDeclaration:E?, Name:S` | Supported lexical named member and declaring owner; not a claim about the receiver’s runtime implementation. |
 | `ts.fn_ref/2` | `Site:E!, Target:E!` | Collected function used as a value. It is not necessarily invoked. Owner comes from site_owner. |
 | `ts.fn_value_escape/2` | `Site:E!, Kind:N` | Supported direct function-valued argument to external/unresolved invocation; only /argument exists. |
@@ -1251,10 +1254,8 @@ Each row below supplies the ordered arguments, all entity/report roles, and its 
 | `ts.signature_param_rest/2` | `Signature:E!, Position:I` | The slot is known to be a rest parameter. |
 | `ts.signature_returns/2` | `Signature:E!, Type:E?` | Known return type of that observation. |
 | `ts.signature_complete/1` | `Signature:E!` | All signature slots, marks and return were established; structural type completeness is separate. |
-| `ts.signature_incomplete/2` | `Signature:E!, Reason:N` | Whole observation is /unresolved or /unsupported; never coexists with signature_complete for the same ID. |
+| `ts.signature_incomplete/2` | `Signature:E!, Reason:N` | Whole observation is /unresolved; never coexists with signature_complete for the same ID. |
 | `ts.fn_signature_omitted/1` | `Fn:E!` | Fixed ownership-only omission policy, not selective-work omission. |
-| `ts.fn_signature_unresolved/1` | `Fn:E!` | At least one attempted observation lacked a complete usable signature. |
-| `ts.fn_signature_conflict/1` | `Fn:E!` | Two complete whole signatures for this function disagree. |
 
 ### A.5 Structural type facts
 
@@ -1284,14 +1285,13 @@ Each row below supplies the ordered arguments, all entity/report roles, and its 
 
 | Predicate | Ordered arguments | Meaning |
 |---|---|---|
-| `ts.declaration/3` | `Declaration:E?, Name:S, Kind:N` | Endpoint union in section 7.3, with one canonical whole metadata observation. |
+| `ts.declaration/3` | `Declaration:E?, Name:S, Kind:N` | Ordinary declaration population in section 7.3, with one canonical whole metadata observation; correspondence endpoints are separate. |
 | `ts.declaration_origin/3` | `Declaration:E?, OriginKind:N, Origin:S` | Descriptive origin; never substitutes an assumed source path for a checked declaration. |
-| `ts.declaration_metadata_incomplete/2` | `Declaration:E?, Reason:N` | Identity-associated metadata is /unresolved, /unsupported or /conflict; no type/map claim. |
+| `ts.declaration_metadata_incomplete/2` | `Declaration:E?, Reason:N` | Identity-associated metadata is /unsupported or /conflict; no type/map claim. |
 | `ts.declaration_type_subject/2` | `Declaration:E?, Space:N` | Attempted exported-declaration type domain; /type or /value. |
 | `ts.declaration_type/3` | `Declaration:E?, Space:N, Type:E?` | Known type association for a declaration-type subject. |
 | `ts.declaration_type_incomplete/3` | `Declaration:E?, Space:N, Reason:N` | Subject-specific /unresolved, /unsupported or /conflict evidence. |
 | `ts.declaration_fn/2` | `Declaration:E?, Fn:E!` | Observed direct correspondence to a collected implementation. |
-| `ts.declaration_fn_incomplete/2` | `Declaration:E?, Reason:N` | Attempted direct function association is /unresolved, /unsupported or /conflict. |
 
 ### A.7 Export evidence
 
@@ -1302,7 +1302,7 @@ Each row below supplies the ordered arguments, all entity/report roles, and its 
 | `ts.export_via/2` | `Export:E!, Site:E?` | Syntax site contributing to the binding; a dependency site can have a physical location without being primary. |
 | `ts.export_reexport/5` | `Export:E!, Site:E?, SourceModule:P, SourceName:S, Space:N` | Immediate binding-specific re-export. SourceModule remains canonical path data; `*` marks star/namespace names. |
 | `ts.export_incomplete/2` | `Export:E!, Reason:N` | Binding target evidence is /unresolved, /unsupported or /conflict; known positives remain. |
-| `ts.module_exports_incomplete/2` | `Module:E!, Reason:N` | Public-name inventory incomplete/conflicted; propagates through wildcard-export dependencies. |
+| `ts.module_exports_incomplete/2` | `Module:E!, Reason:N` | Public-name inventory is /unresolved or /unsupported; propagates through wildcard-export dependencies. |
 
 ### A.8 Source correspondence
 
@@ -1313,20 +1313,23 @@ Each row below supplies the ordered arguments, all entity/report roles, and its 
 | `ts.declaration_source_outcome/2` | `Checked:E?, Outcome:N` | Terminal failed/uncertain requested map attempt; outcome vocabulary follows below. |
 | `ts.source_entry/3` | `Entry:E, CheckedEntry:P, SourceEntry:P` | Validated configured source-links entry. No fabricated source range for this configuration entity. |
 | `ts.source_entry_tsconfig/2` | `Entry:E, Config:P` | Explicit source configuration chosen for the entry. |
+| `ts.source_config_adjusted/3` | `Config:P, Option:S, Action:N` | Option adaptation for a source-correspondence context. |
 | `ts.source_entry_applied/1` | `Entry:E` | The checked entry matched an analyzed compiler input and its binding attempts were considered. |
 | `ts.source_entry_unapplied/1` | `Entry:E` | The valid checked entry matched no analyzed compiler input; exactly one applied/unapplied state after reconciliation. |
-| `ts.source_entry_incomplete/2` | `Entry:E, Reason:N` | Optional source program/inventory is /unresolved, /unsupported or /conflict. |
+| `ts.source_entry_incomplete/2` | `Entry:E, Reason:N` | Optional source program/inventory is /unresolved or /unsupported. |
 | `ts.source_binding_attempt/5` | `Binding:E, Entry:E, CheckedFile:P, Name:S, Space:N` | Attempt to associate a checked public binding, in /type or /value space. |
 | `ts.source_binding/5` | `Binding:E, SourceFile:P, SourceName:S, Space:N, Method:N` | Configured binding correspondence by /source_entry; does not assert declaration identity or build freshness. |
 | `ts.source_binding_checked_decl/2` | `Binding:E, Declaration:E?` | Member of the independently observed checked declaration set. |
 | `ts.source_binding_source_decl/2` | `Binding:E, Declaration:E?` | Member of the independently observed source declaration set. |
 | `ts.source_binding_incomplete/2` | `Binding:E, Reason:N` | Association is /unresolved, /unsupported or /conflict; positives do not erase uncertainty. |
+| `ts.source_endpoint/5` | `Declaration:E?, Name:S, Kind:N, OriginKind:N, Origin:S` | Whole metadata observation for a retained source-correspondence endpoint. |
+| `ts.source_endpoint_incomplete/2` | `Declaration:E?, Reason:N` | Endpoint metadata is /unsupported or /conflict. |
 
 ### A.9 Explicit location queries
 
 | Predicate | Ordered arguments | Meaning |
 |---|---|---|
-| `ts.location/6` | `Entity:E!, File:P, StartLine:I, StartColumn:I, EndLine:I, EndColumn:I` | All physically locatable published entities in the full configured TypeScript domain. No implicit request during reporting. |
+| `ts.location/6` | `Entity:E!, File:P, StartLine:I, StartColumn:I, EndLine:I, EndColumn:I` | Physically locatable ordinary entities in the full configured TypeScript domain. Source-only correspondence endpoints use independent optional reporting anchors, not this relation. No implicit request during reporting. |
 
 ### A.10 Fixed vocabulary and cardinality notes
 
@@ -1336,11 +1339,13 @@ Declaration kinds are `/function`, `/variable`, `/type_alias`, `/interface`, `/c
 
 Map outcomes are `/missing_map`, `/unavailable_map`, `/malformed_map`, `/unavailable_source`, `/unsupported`, `/unresolved`, `/ambiguous`, and `/conflict`. No outcome row means no attempt was required or a unique precise link succeeded; consult the positive link/subject domain before interpreting absence. An explicitly requested attempt that fails cannot disappear silently.
 
+The final uncertainty vocabularies are: `signature_incomplete` `/unresolved`; `declaration_metadata_incomplete` `/unsupported` and `/conflict`; `call_declaration_incomplete` `/unresolved`, `/synthetic`, and `/unsupported`; `module_exports_incomplete` and `source_entry_incomplete` `/unresolved` and `/unsupported`; `declaration_type_incomplete` `/unresolved`, `/unsupported`, and `/conflict`; `type_incomplete` `/truncated`, `/unsupported`, `/signatures`, `/constraint`, `/conflict`, and `/members_omitted`; `export_incomplete` and `source_binding_incomplete` `/unresolved`, `/unsupported`, and `/conflict`; `source_endpoint_incomplete` `/unsupported` and `/conflict`. The listed `declaration_source_outcome` values are its complete vocabulary. The removed bases `call_target_conflict`, `fn_signature_conflict`, and `declaration_fn_incomplete` do not have replacement aliases. `fn_signature_unresolved` is a helper, not a base. Retained defensive conflict paths have focused tests; no positive source/CLI witness was established for every such path, and a reducer-only test is not a source witness.
+
 The ambient source/capability vocabulary is the built-in ambient registry at the source baseline. Keep that one registry authoritative and include its meaning in the producer contract stamp. Unknown names outside that registry are invalid rows. Arbitrary argument-name strings and package labels are not closed enums.
 
 `type_literal` uses a string payload for /string, a canonical decimal string for /bigint, an integer or finite float for /number, and /true or /false for /boolean. Its kind is explicit data; rules never parse a type ID to recover literal meaning. This replaces the previously ambiguous two-column literal projection.
 
-All source-evidence rows use the same site/file/owner records. `site_owner` and unsupported-attribution evidence are exclusive. Call target observations can differ across contexts; `call_target_conflict` records that fact without changing site identity. Source-reference evidence is not execution evidence.
+All source-evidence rows use the same site/file/owner records. `site_owner` and unsupported-attribution evidence are exclusive. Runtime targets represent the retained owner-context result; source-reference evidence is not execution evidence.
 
 Attribute-only requests still receive complete attribute domains and reporting support. `E!` on an attribute row does not require publishing the entity's separate defining relation. It requires its independently defined location to be available in that batch.
 
@@ -1357,6 +1362,8 @@ Helpers are derived within each rule, not producer-materialized facts. They crea
 | `ts.site_attribution_unknown(Site)` | Has a `site_attribution_unsupported` reason. |
 | `ts.fn_awaits(Fn)` | Function owns an ordinary `/await` site. |
 | `ts.fn_suspends(Fn)` | Function owns any supported suspension kind. |
+| `ts.module_multi_config(Module)` | The module is an original root of two distinct configs in the bounded ordinary inventory. This is known overlap, not proof of semantic disagreement; absence does not prove agreement across every possible config. |
+| `ts.fn_signature_unresolved(Fn)` | `fn_signature(Fn, Signature)` and `signature_incomplete(Signature, _)` both hold. |
 | `ts.module_has_suspension(File)` | File contains a suspension site at any ownership scope. |
 | `ts.import_has_symbols(Imp)` | Import has at least one introduced binding. |
 | `ts.import_runtime(Imp)` | Non-type-only side-effect/no-binding load, a value binding, or a retained all-type statement. |
@@ -1388,6 +1395,13 @@ The `owner_*` naming deliberately includes module owners. Do not expose a helper
 Canonical helper definitions include:
 
 ```text
+Decl ts.module_multi_config(Module).
+ts.module_multi_config(M) :- ts.module_config(M, A), ts.module_config(M, B), A != B.
+
+Decl ts.fn_signature_unresolved(Fn).
+ts.fn_signature_unresolved(Fn) :-
+  ts.fn_signature(Fn, Signature), ts.signature_incomplete(Signature, _).
+
 Decl ts.calls(Owner, Callee).
 ts.calls(O, C) :- ts.site_owner(S, O), ts.call_edge(S, C).
 

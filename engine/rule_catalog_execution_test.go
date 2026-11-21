@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/bigbizze/lintai/bundle"
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/runtime"
 )
@@ -64,6 +65,11 @@ func TestRuleBundleInvalidatedByResolutionConfigChange(t *testing.T) {
 		t.Fatal(err)
 	}
 	workspace := t.TempDir()
+	control := filepath.Join(t.TempDir(), "edit-control")
+	if err := os.WriteFile(control, []byte("disarmed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	asset := bundleEditAsset(t, repoRoot, control)
 	writeTestFile(t, workspace, "rules-support/a.ts", `export const message = "from-a";`)
 	writeTestFile(t, workspace, "rules-support/b.ts", `export const message = "from-b";`)
 	source := `import { dl, rule } from "@lintai/sdk";
@@ -75,6 +81,7 @@ export default rule("fixture.alias").version(1)
 	rulePath := writeTestFile(t, workspace, "lintai-rules/alias.ts", source)
 	writeTestFile(t, workspace, "lintai-rules/tsconfig.json", `{"compilerOptions":{"baseUrl":".","paths":{"@fixture/policy":["../rules-support/a.ts"]}}}`)
 	options := parallelFixtureOptions(repoRoot, workspace)
+	options.AssetRoot = asset
 	var evaluations atomic.Int64
 	options.beforeEvaluation = func() { evaluations.Add(1) }
 	warmEngine := Open(Options{}, newParallelFixtureProducer())
@@ -86,7 +93,16 @@ export default rule("fixture.alias").version(1)
 	if len(first.Diagnostics) != 3 || first.Diagnostics[0].Message != "from-a" {
 		t.Fatalf("initial alias did not resolve to a.ts: %+v", first.Diagnostics)
 	}
-	writeTestFile(t, workspace, "lintai-rules/tsconfig.json", `{"compilerOptions":{"baseUrl":".","paths":{"@fixture/policy":["../rules-support/b.ts"]}}}`)
+	if err := os.WriteFile(control, []byte("config-between"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	artifacts, failures, err := bundle.BuildAll(context.Background(), asset, repoRoot, workspace, t.TempDir(), []string{rulePath})
+	if err != nil || len(artifacts) != 0 || failures[rulePath] == nil || !strings.Contains(failures[rulePath].Error(), "changed during compilation") {
+		t.Fatalf("between-build config change must reject incomplete input evidence: artifacts=%+v failures=%+v err=%v", artifacts, failures, err)
+	}
+	if err := os.WriteFile(control, []byte("disarmed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	warm, err := warmEngine.Check(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
@@ -197,6 +213,41 @@ export default rule("fixture.alias").version(1)
 	}
 	if len(nearFresh.Diagnostics) != 3 || nearFresh.Diagnostics[0].Message != "from-a" || !reflect.DeepEqual(nearWarm, nearFresh) {
 		t.Fatalf("nearer extended config change: warm=%+v fresh=%+v", nearWarm.Diagnostics, nearFresh.Diagnostics)
+	}
+
+	// Retargeting an existing package symlink changes resolution without changing
+	// the containing directory's names.
+	for _, name := range []string{"a", "b"} {
+		writeTestFile(t, workspace, "rules-support/package-"+name+"/package.json", `{"main":"index.js"}`)
+		writeTestFile(t, workspace, "rules-support/package-"+name+"/index.js", `export const message = "from-`+name+`";`)
+	}
+	link := filepath.Join(workspace, "lintai-rules/node_modules/@fixture/runtime")
+	if err := os.Symlink(filepath.Join(workspace, "rules-support/package-a"), link); err != nil {
+		t.Fatal(err)
+	}
+	linkedSource := strings.Replace(source, "@fixture/policy", "@fixture/runtime", 1)
+	if err := os.WriteFile(rulePath, []byte(linkedSource), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linkedFirst, err := warmEngine.Check(context.Background(), options)
+	if err != nil || len(linkedFirst.Diagnostics) != 3 || linkedFirst.Diagnostics[0].Message != "from-a" {
+		t.Fatalf("first symlink resolution: %+v %v", linkedFirst.Diagnostics, err)
+	}
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(workspace, "rules-support/package-b"), link); err != nil {
+		t.Fatal(err)
+	}
+	linkedWarm, err := warmEngine.Check(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	linkedFreshEngine := Open(Options{}, newParallelFixtureProducer())
+	defer linkedFreshEngine.Close()
+	linkedFresh, err := linkedFreshEngine.Check(context.Background(), options)
+	if err != nil || len(linkedFresh.Diagnostics) != 3 || linkedFresh.Diagnostics[0].Message != "from-b" || !reflect.DeepEqual(linkedWarm, linkedFresh) {
+		t.Fatalf("retargeted symlink: warm=%+v fresh=%+v err=%v", linkedWarm.Diagnostics, linkedFresh.Diagnostics, err)
 	}
 }
 

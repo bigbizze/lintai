@@ -1122,7 +1122,7 @@ export function mirror(config: LocalConfig): DbConfig {
 		if !fn.IsExported || !fn.IsAsync {
 			t.Fatalf("expected db to be exported async, got %+v", fn)
 		}
-		if fn.ParameterCount != 1 {
+		if fn.Signature == nil || len(fn.Signature.ParameterTypes) != 1 {
 			t.Fatalf("expected db parameter count 1, got %+v", fn)
 		}
 	}
@@ -1325,8 +1325,8 @@ func TestUnreadableOptionalMapKeepsCheckedFactsAndChangesVersionWhenReadable(t *
 	}
 }
 
-// V07: conflicting signatures remain whole; a parameter from one context
-// cannot join to the return of the other through the same signature.
+// A function's owner supplies one whole signature even when other programs
+// can see the same source file.
 func TestWholeSignatureProjection(t *testing.T) {
 	root := t.TempDir()
 	files := map[string]string{
@@ -1369,18 +1369,13 @@ export const mapped = [1].map((n) => n);`,
 			returns[fact.Values[0].String] = fact.Values[1].String
 		}
 	}
-	if function == "" || len(signatures) != 2 {
+	if function == "" || len(signatures) != 1 {
 		t.Fatalf("signature observations: %v", signatures)
 	}
-	seen := make(map[string]bool)
 	for signature := range signatures {
 		if params[signature] == "" || params[signature] != returns[signature] {
-			t.Fatalf("signature mixed observations: %s param=%s return=%s", signature, params[signature], returns[signature])
+			t.Fatalf("owner signature: %s param=%s return=%s", signature, params[signature], returns[signature])
 		}
-		seen[params[signature]] = true
-	}
-	if len(seen) != 2 {
-		t.Fatalf("fixture did not produce differing signatures: %v", seen)
 	}
 	byName := make(map[string]string)
 	for _, fact := range snapshot.items {
@@ -1420,14 +1415,15 @@ export const mapped = [1].map((n) => n);`,
 	partial := lintaiapi.FunctionSignatureObservation{ParameterTypes: []string{"", "type:known"}, ReturnType: "", Complete: false}
 	complete := lintaiapi.FunctionSignatureObservation{ParameterTypes: []string{"type:first", "type:second"}, ReturnType: "type:result", Complete: true}
 	projected, err := factsFromSnapshot(&lintaiapi.Snapshot{Functions: []lintaiapi.Function{{
-		SemanticKey: "fn:partial", Kind: "function", SignatureUnresolved: true,
-		SignatureObservations: []lintaiapi.FunctionSignatureObservation{partial, complete},
+		SemanticKey: "fn:partial", Kind: "function", Signature: &partial,
+	}, {
+		SemanticKey: "fn:complete", Kind: "function", Signature: &complete,
 	}}}, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	partialID := lintaiapi.SignatureID("fn:partial", partial)
-	var partialArity, partialKnown, incomplete, unresolved bool
+	var partialArity, partialKnown, incomplete bool
 	for _, fact := range projected {
 		switch fact.Relation {
 		case "signature_arity":
@@ -1445,12 +1441,10 @@ export const mapped = [1].map((n) => n);`,
 			}
 		case "signature_incomplete":
 			incomplete = incomplete || fact.Values[0].String == partialID && fact.Values[1].String == "unresolved"
-		case "fn_signature_unresolved":
-			unresolved = unresolved || fact.Values[0].String == "fn:partial"
 		}
 	}
-	if !partialArity || !partialKnown || !incomplete || !unresolved {
-		t.Fatalf("partial signature evidence: arity=%t known=%t incomplete=%t unresolved=%t", partialArity, partialKnown, incomplete, unresolved)
+	if !partialArity || !partialKnown || !incomplete {
+		t.Fatalf("partial signature evidence: arity=%t known=%t incomplete=%t", partialArity, partialKnown, incomplete)
 	}
 }
 
@@ -1482,5 +1476,290 @@ func TestGenerationValidatesUnchangedSymlinkMembership(t *testing.T) {
 	snapshot := generation.snapshot
 	if len(snapshot.Modules) != 1 || snapshot.Modules[0].Path != "src/a.ts" {
 		t.Fatalf("unexpected selected modules: %+v", snapshot.Modules)
+	}
+}
+
+func TestSourceLinksValidationAndDemand(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "tsconfig.json", `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler"},"files":["src/app.ts"]}`)
+	writeWorkspaceFile(t, root, "src/app.ts", `import { work } from "../dist/index"; export const result = work();`)
+	writeWorkspaceFile(t, root, "dist/index.d.ts", `export declare function work(): string;`)
+	writeWorkspaceFile(t, root, "source/index.ts", `export function work(): string { return "ok"; }`)
+	writeWorkspaceFile(t, root, "source/tsconfig.json", `{"compilerOptions":{"module":"invalid"},"files":["index.ts"]}`)
+	const valid = `{"version":1,"entries":[{"checkedEntry":"dist/index.d.ts","sourceEntry":"source/index.ts","sourceTsconfig":"source/tsconfig.json"}]}`
+	writeWorkspaceFile(t, root, "source-links.json", `{"version":2,"entries":[]}`)
+	producer := New(Options{Files: FileScopeTsconfig, Sources: []string{"src/app.ts"}, Excludes: []string{"source/**"}, SourceLinks: "source-links.json"})
+	description, err := producer.Describe()
+	if err != nil {
+		t.Fatalf("description read invalid source links: %v", err)
+	}
+	predicates := make(map[string]facts.Predicate)
+	for _, relation := range description.BaseRelations {
+		predicates[relation.Predicate.Name] = relation.Predicate
+	}
+	request := backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: root}
+	if _, err := producer.Collect(context.Background(), request); err != nil || producer.current != nil {
+		t.Fatalf("empty demand collected source links: %v", err)
+	}
+	request.Predicates = []facts.Predicate{predicates["ts.module"], predicates["ts.declaration"], predicates["ts.location"], predicates["ts.config_adjusted"]}
+	if _, err := producer.Collect(context.Background(), request); err == nil || !strings.Contains(err.Error(), "invalid --source-links") || producer.current != nil {
+		t.Fatalf("ordinary demand did not reject invalid source links: %v", err)
+	}
+	writeWorkspaceFile(t, root, "source-links.json", valid)
+	if _, err := producer.Collect(context.Background(), request); err != nil {
+		t.Fatalf("ordinary demand parsed the auxiliary config: %v", err)
+	}
+	generation := producer.current
+	if len(generation.snapshot.SourceEntries) != 0 || len(generation.snapshot.SourceEndpoints) != 0 {
+		t.Fatal("ordinary demand collected correspondence")
+	}
+	if _, err := producer.Collect(context.Background(), request); err != nil || producer.current != generation {
+		t.Fatalf("unchanged ordinary demand did not reuse its generation: %v", err)
+	}
+	writeWorkspaceFile(t, root, "source-links.json", `{"version":2,"entries":[]}`)
+	if _, err := producer.Collect(context.Background(), request); err == nil || (producer.current != nil && producer.current != generation) {
+		t.Fatalf("failed validation published or returned a new generation: %v", err)
+	}
+	writeWorkspaceFile(t, root, "source-links.json", valid)
+	request.Predicates = []facts.Predicate{predicates["ts.source_entry_incomplete"]}
+	batch, err := producer.Collect(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(batch.Relations[request.Predicates[0]], func(row facts.Row) bool { return row[1] == facts.Name("unsupported") }) {
+		t.Fatalf("correspondence demand did not inspect the auxiliary config: %v", batch.Relations[request.Predicates[0]])
+	}
+}
+
+func TestCorrespondenceIsolationAndProjection(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "tsconfig.json", `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","baseUrl":"."},"files":["src/app.ts"]}`)
+	writeWorkspaceFile(t, root, "src/app.ts", `import { work } from "../dist/index"; export function use() { return work(); }`)
+	writeWorkspaceFile(t, root, "dist/index.d.ts", "export declare function work(): string;\n//# sourceMappingURL=index.d.ts.map\n")
+	writeWorkspaceFile(t, root, "source/index.ts", `export function work(): string { return "ok"; }`)
+	writeWorkspaceFile(t, root, "source/tsconfig.json", `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","baseUrl":"."},"files":["index.ts"]}`)
+	writeWorkspaceFile(t, root, "source-links.json", `{"version":1,"entries":[{"checkedEntry":"dist/index.d.ts","sourceEntry":"source/index.ts","sourceTsconfig":"source/tsconfig.json"}]}`)
+	partition := map[string]bool{}
+	for _, name := range []string{
+		"declaration_source_candidate", "declaration_source", "declaration_source_outcome",
+		"source_entry", "source_entry_tsconfig", "source_entry_applied", "source_entry_unapplied", "source_entry_incomplete",
+		"source_binding_attempt", "source_binding", "source_binding_checked_decl", "source_binding_source_decl", "source_binding_incomplete",
+		"source_endpoint", "source_endpoint_incomplete", "source_config_adjusted",
+	} {
+		partition["ts."+name] = true
+	}
+	for _, mode := range []FileScope{FileScopeTsconfig, FileScopeWalk} {
+		t.Run(string(mode), func(t *testing.T) {
+			base := Options{Files: mode, Sources: []string{"src/app.ts"}, Excludes: []string{"source/**"}}
+			off := New(base)
+			base.SourceLinks = "source-links.json"
+			on := New(base)
+			description, err := on.Describe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			all := make([]facts.Predicate, 0, len(description.BaseRelations))
+			byName := make(map[string]facts.RelationDescription)
+			for _, relation := range description.BaseRelations {
+				all = append(all, relation.Predicate)
+				byName[relation.Predicate.Name] = relation
+			}
+			collect := func(producer *Backend, predicates []facts.Predicate) facts.Batch {
+				t.Helper()
+				batch, err := producer.Collect(context.Background(), backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: root, Predicates: predicates})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := facts.ValidateBatch(description, predicates, batch); err != nil {
+					t.Fatal(err)
+				}
+				return batch
+			}
+			rows := func(items []facts.Row) map[string]bool {
+				set := make(map[string]bool)
+				for _, row := range items {
+					set[fmt.Sprintf("%#v", row)] = true
+				}
+				return set
+			}
+			compare := func(left, right facts.Batch, predicates []facts.Predicate) {
+				t.Helper()
+				for _, predicate := range predicates {
+					if !reflect.DeepEqual(rows(left.Relations[predicate]), rows(right.Relations[predicate])) {
+						t.Fatalf("%s differs: %v / %v", predicate, left.Relations[predicate], right.Relations[predicate])
+					}
+					for _, row := range left.Relations[predicate] {
+						for i, arg := range byName[predicate.Name].Arguments {
+							if arg.ReportSupport == facts.ReportNone {
+								continue
+							}
+							id := row[i].String
+							l, lok := left.Anchors[id]
+							r, rok := right.Anchors[id]
+							if lok != rok || !reflect.DeepEqual(l, r) {
+								t.Fatalf("%s support for %s differs: %+v / %+v", predicate, id, l, r)
+							}
+						}
+					}
+				}
+			}
+			var ordinary []facts.Predicate
+			for _, predicate := range all {
+				if !partition[predicate.Name] {
+					ordinary = append(ordinary, predicate)
+				}
+			}
+			collect(on, []facts.Predicate{byName["ts.module_owner_config"].Predicate})
+			membership := collect(on, []facts.Predicate{byName["ts.module_config"].Predicate})
+			offFull, onFull := collect(off, all), collect(on, all)
+			if len(membership.Relations[byName["ts.module_config"].Predicate]) == 0 {
+				t.Fatal("membership demand reused the preceding owner-only generation as empty")
+			}
+			compare(membership, onFull, []facts.Predicate{byName["ts.module_config"].Predicate})
+			compare(offFull, onFull, ordinary)
+			compare(collect(on, ordinary), onFull, ordinary)
+			for _, predicate := range all {
+				if partition[predicate.Name] {
+					compare(collect(on, []facts.Predicate{predicate}), onFull, []facts.Predicate{predicate})
+				}
+			}
+			checked := onFull.Relations[byName["ts.source_binding_checked_decl"].Predicate]
+			endpoints := onFull.Relations[byName["ts.source_endpoint"].Predicate]
+			if len(checked) == 0 || len(endpoints) < 2 || len(onFull.Relations[byName["ts.module_owner_config"].Predicate]) == 0 || len(onFull.Relations[byName["ts.module_config"].Predicate]) == 0 {
+				t.Fatalf("fixture lacks ownership or endpoint evidence: checked=%v endpoints=%v", checked, endpoints)
+			}
+			if !slices.ContainsFunc(onFull.Relations[byName["ts.call_declaration"].Predicate], func(row facts.Row) bool { return row[1] == checked[0][1] }) {
+				t.Fatal("fixture lacks an endpoint shared with ordinary call provenance")
+			}
+			sourceDeclarations := onFull.Relations[byName["ts.source_binding_source_decl"].Predicate]
+			if len(sourceDeclarations) == 0 {
+				t.Fatal("fixture lacks a source-only declaration endpoint")
+			}
+			sourceID := sourceDeclarations[0][1].String
+			support, ok := onFull.Anchors[sourceID]
+			if !ok || support.Location.File != "source/index.ts" || support.Description == "" {
+				t.Fatalf("source-only endpoint lacks reporting support: %+v", support)
+			}
+			if slices.ContainsFunc(onFull.Relations[byName["ts.location"].Predicate], func(row facts.Row) bool { return row[0].String == sourceID }) {
+				t.Fatal("source-only endpoint added an ordinary location row")
+			}
+			entryConfig := onFull.Relations[byName["ts.source_entry_tsconfig"].Predicate]
+			sourceAdjust := onFull.Relations[byName["ts.source_config_adjusted"].Predicate]
+			owner := onFull.Relations[byName["ts.module_owner_config"].Predicate]
+			ordinaryAdjust := onFull.Relations[byName["ts.config_adjusted"].Predicate]
+			if len(entryConfig) != 1 || !slices.ContainsFunc(sourceAdjust, func(row facts.Row) bool { return row[0] == entryConfig[0][1] }) || !slices.ContainsFunc(ordinaryAdjust, func(row facts.Row) bool { return row[0] == owner[0][1] }) {
+				t.Fatalf("config joins failed: entry=%v source=%v owner=%v ordinary=%v", entryConfig, sourceAdjust, owner, ordinaryAdjust)
+			}
+			writeWorkspaceFile(t, root, "source-links.json", `{"version":1,"entries":[]}`)
+			empty := collect(on, all)
+			compare(onFull, empty, ordinary)
+			compare(empty, collect(New(base), all), all)
+			writeWorkspaceFile(t, root, "source-links.json", `{"version":1,"entries":[{"checkedEntry":"dist/index.d.ts","sourceEntry":"source/index.ts","sourceTsconfig":"source/tsconfig.json"}]}`)
+			compare(collect(on, all), onFull, all)
+			mapPath := writeWorkspaceFile(t, root, "dist/index.d.ts.map", `{}`)
+			mapChanged := collect(on, all)
+			compare(onFull, mapChanged, ordinary)
+			compare(mapChanged, collect(New(base), all), all)
+			if reflect.DeepEqual(rows(onFull.Relations[byName["ts.declaration_source_outcome"].Predicate]), rows(mapChanged.Relations[byName["ts.declaration_source_outcome"].Predicate])) {
+				t.Fatal("creating a previously missing map did not update correspondence")
+			}
+			if err := os.Remove(mapPath); err != nil {
+				t.Fatal(err)
+			}
+			writeWorkspaceFile(t, root, "source/tsconfig.json", `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler"},"files":["index.ts"]}`)
+			configChanged := collect(on, all)
+			compare(onFull, configChanged, ordinary)
+			compare(configChanged, collect(New(base), all), all)
+			if reflect.DeepEqual(rows(onFull.Relations[byName["ts.source_config_adjusted"].Predicate]), rows(configChanged.Relations[byName["ts.source_config_adjusted"].Predicate])) {
+				t.Fatal("source-only config edit did not update source adjustments")
+			}
+			writeWorkspaceFile(t, root, "source/tsconfig.json", `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","baseUrl":"."},"files":["index.ts"]}`)
+			writeWorkspaceFile(t, root, "source/index.ts", `export function renamed(): string { return "changed"; }`)
+			changed := collect(on, all)
+			fresh := collect(New(base), all)
+			compare(changed, fresh, all)
+			compare(onFull, changed, ordinary)
+			if reflect.DeepEqual(rows(onFull.Relations[byName["ts.source_binding_incomplete"].Predicate]), rows(changed.Relations[byName["ts.source_binding_incomplete"].Predicate])) {
+				t.Fatal("source-only edit did not update correspondence")
+			}
+			writeWorkspaceFile(t, root, "source/index.ts", `export function work(): string { return "ok"; }`)
+			writeWorkspaceFile(t, root, "src/app.ts", `import { work } from "../dist/index"; import { work as sourceWork } from "../source/index"; export function use() { work(); return sourceWork(); }`)
+			consumed := collect(on, all)
+			writeWorkspaceFile(t, root, "source/index.ts", `export function work(): number { return 1; }`)
+			consumedChanged := collect(on, all)
+			compare(consumedChanged, collect(New(base), all), all)
+			if reflect.DeepEqual(rows(consumed.Relations[byName["ts.fn_signature"].Predicate]), rows(consumedChanged.Relations[byName["ts.fn_signature"].Predicate])) {
+				t.Fatal("ordinary consumer did not reflect its changed source input")
+			}
+			writeWorkspaceFile(t, root, "src/app.ts", `import { work } from "../dist/index"; export function use() { return work(); }`)
+			writeWorkspaceFile(t, root, "source/index.ts", `export function work(): string { return "ok"; }`)
+		})
+	}
+	custom := New(Options{Namespace: "project", Files: FileScopeTsconfig, Sources: []string{"src/app.ts"}, Excludes: []string{"source/**"}, SourceLinks: "source-links.json"})
+	description, err := custom.Describe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := make(map[string]facts.Predicate)
+	for _, relation := range description.BaseRelations {
+		byName[relation.Predicate.Name] = relation.Predicate
+	}
+	predicates := []facts.Predicate{byName["project.module_config"], byName["project.module_owner_config"], byName["project.source_endpoint"]}
+	batch, err := custom.Collect(context.Background(), backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: root, Predicates: predicates})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := facts.ValidateBatch(description, predicates, batch); err != nil {
+		t.Fatal(err)
+	}
+	for _, predicate := range predicates {
+		rows := batch.Relations[predicate]
+		if len(rows) == 0 || !strings.HasPrefix(rows[0][0].String, "project:") {
+			t.Fatalf("custom namespace lost %s: %v", predicate, rows)
+		}
+	}
+}
+
+func TestOutsideOwnerConfigPathJoinsAdjustments(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "workspace")
+	writeWorkspaceFile(t, root, "outside.json", `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler","baseUrl":"."},"files":["workspace/src/app.ts"]}`)
+	writeWorkspaceFile(t, workspace, "tsconfig.json", `{"files":[],"references":[{"path":"../outside.json"}]}`)
+	writeWorkspaceFile(t, workspace, "src/app.ts", `export const value = 1;`)
+	producer := New(Options{Files: FileScopeTsconfig})
+	description, err := producer.Describe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := make(map[string]facts.Predicate)
+	for _, relation := range description.BaseRelations {
+		byName[relation.Predicate.Name] = relation.Predicate
+	}
+	predicates := []facts.Predicate{byName["ts.module_config"], byName["ts.module_owner_config"], byName["ts.config_adjusted"]}
+	batch, err := producer.Collect(context.Background(), backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: workspace, Predicates: predicates})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := facts.ValidateBatch(description, predicates, batch); err != nil {
+		t.Fatal(err)
+	}
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := lintaiapi.PublicConfigPath(filepath.Join(canonicalRoot, "workspace"), filepath.Join(canonicalRoot, "outside.json"))
+	if !filepath.IsAbs(filepath.FromSlash(want)) {
+		t.Fatalf("outside config is not absolute: %q", want)
+	}
+	owners := batch.Relations[byName["ts.module_owner_config"]]
+	memberships := batch.Relations[byName["ts.module_config"]]
+	adjustments := batch.Relations[byName["ts.config_adjusted"]]
+	if len(owners) != 1 || owners[0][1] != facts.String(want) ||
+		!slices.ContainsFunc(memberships, func(row facts.Row) bool { return row[1] == facts.String(want) }) ||
+		!slices.ContainsFunc(adjustments, func(row facts.Row) bool { return row[0] == facts.String(want) }) {
+		t.Fatalf("outside config paths do not join: owner=%v membership=%v adjustments=%v", owners, memberships, adjustments)
+	}
+	if _, ok := batch.Anchors[want]; ok {
+		t.Fatal("config path received entity support")
 	}
 }

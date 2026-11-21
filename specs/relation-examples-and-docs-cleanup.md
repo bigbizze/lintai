@@ -1,5 +1,7 @@
 # lintai: an example for every relation, and a docs cleanup
 
+> **Superseded work order.** This document records the pre-owner-context 0.9.0 inventory and cleanup instructions. Its catalog size, old conflict predicates, and directions not to change relation meanings are historical and are not active requirements. Use [the owner-context implementation specification](lintai-owner-context-implementation.md), especially sections 4 and 10.3, for the current vocabulary, populations, examples, and documentation contract. The original text below is retained as history.
+
 You are working in a clone of `bigbizze/lintai` at 0.9.0 (`4bda7a8`). This document is the full specification for this work. Create a new feature branch from `main` for it. Before writing code, copy this document into the repository as `specs/relation-examples-and-docs-cleanup.md`.
 
 ## 1. Goal
@@ -31,12 +33,14 @@ lintai is a general tool. Judge each example by whether a team in any TypeScript
 - `cmd/lintai/main_test.go`, `TestFixtureRulesReportPlantedViolations`: how fixture rules are run and checked today. It passes `--workspace-root` and a `--rules` glob. It uses no `lintai.toml`.
 - `cmd/lintai/golden_parity_test.go`: the golden files and `LINTAI_UPDATE_GOLDEN=1`.
 - `engine/docs_test.go`: the test that parses every rule program in `README.md`, `docs/api.md` and `docs/examples.md`. Its `docSources` list names the files it reads.
-- `engine/program.go`, `preludeFor`: the existing code that works out which prelude clauses a program depends on.
+- `engine/catalog.go`, `catalogForRule`: the production selection of catalog clauses a program depends on.
 - `testdata/call-provenance`: a recent example of a small, focused fixture.
 
 ## 4. Families and the inventory
 
 **Families.** Appendix A of the r6 spec is the authority for which family a relation belongs to. Use its sections A.1 to A.8 as the families. Do not make up a different grouping. If a catalog relation does not appear in Appendix A, record that in the report and place it by its description.
+
+> **Superseded inventory hint:** the following names describe the earlier 103-base catalog. In particular, the listed conflict relations are no longer active bases; consult the owner-context specification for the final catalog.
 
 A.9 (`ts.location/6`) is reporting support, not a family. Put it in the allowlist with the reason `reporting support`; do not record it as `not in Appendix A`.
 
@@ -46,9 +50,9 @@ A.9 (`ts.location/6`) is reporting support, not a family. Put it in the allowlis
 - works out, for each relation, whether an example rule uses it directly, or uses a prelude helper that depends on it
 - writes or checks `docs/followups/relation-coverage-inventory.md`. With `LINTAI_UPDATE_GOLDEN=1` it rewrites the file. Without it, the test fails when the file is out of date
 
-**Helper dependencies.** Work out which base relations a helper depends on by reusing the parsed-program dependency logic that `preludeFor` already uses. Do not keep a hand-written helper-to-relation map, and do not write a new dependency analyzer.
+**Helper dependencies.** Work out which base relations a helper depends on by reusing the production `catalogForRule` selection on the assembled, package-bearing catalog. Do not keep a hand-written helper-to-relation map, and do not write a new dependency analyzer.
 
-`preludeFor` returns the prelude clauses a program depends on, not relation names. Collecting the base predicates from the bodies of those clauses is expected and is part of reusing it, not a new analyzer.
+`catalogForRule` returns selected source units and the required predicate names. Qualify positive and negative premises using each unit's package before matching the base catalog; count explicit helper roots as well as clause references. This inventory records dependencies, not positive-emission witnesses.
 
 For orientation only, an earlier text search found these relations with no direct use in any example, fixture rule or helper. Treat it as a hint, and expect differences:
 
@@ -67,6 +71,8 @@ Each example has these parts:
 **One test for all families.** Add a single table-driven Go test next to `TestFixtureRulesReportPlantedViolations`. It has one table row per family and reuses that test's harness: `--workspace-root` set to the family's workspace and `--rules` set to the family's rule glob. For each row it runs twice, compares the two outputs byte for byte, and asserts the exact set of reported rule ids, files and lines. Do not write one test function per family.
 
 **Docs.** Add each example to `docs/examples.md` as a numbered section in the existing style: one paragraph saying what the rule is for, the rule source, and one or two sentences on the limits. The rule source in the docs must be the same text as the tested rule file. One test checks this for every example, as part of the same table. Add the new rule files to `docSources` in `engine/docs_test.go`.
+
+> **Superseded instruction:** this gap-relation list includes deleted bases, notably `call_target_conflict` and `declaration_fn_incomplete`. Current strict policies and reason sets are defined by the owner-context implementation specification.
 
 **Relations that record a gap.** For relations that record uncertainty (`signature_incomplete`, `source_binding_incomplete`, `call_target_conflict`, `import_opaque`, `module_parse_error`, `declaration_fn_incomplete` and similar), the realistic rule is usually a strict policy: "in this area, report when the analysis could not be certain." Write those as strict variants and say in the docs what cost they carry.
 

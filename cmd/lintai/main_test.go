@@ -109,6 +109,8 @@ func TestRelationExamples(t *testing.T) {
 		{
 			name: "a2-imports",
 			want: []string{
+				"arch.core-approved-packages violation src/core/packages.ts:2",
+				"arch.core-no-internal-types violation src/core/dependencies.ts:3",
 				"arch.core-resolved-imports-strict violation src/core/violation.ts:1",
 				"arch.core-no-dynamic-loading-strict dynamic_load src/core/violation.ts:2",
 				"arch.core-no-dynamic-loading-strict opaque_load src/core/violation.ts:3",
@@ -119,6 +121,8 @@ func TestRelationExamples(t *testing.T) {
 			name: "a3-invocations",
 			want: []string{
 				"arch.domain-no-library-clock violation src/domain/violation.ts:2",
+				"arch.known-overlap-strict violation src/overlap/shared.ts:1",
+				"arch.owner-adjustment-strict violation src/overlap/shared.ts:1",
 				"arch.query-no-writes-strict forbidden src/queries/violation.ts:6",
 				"arch.query-no-writes-strict indeterminate src/queries/indeterminate.ts:2",
 				"arch.security-callbacks-strict forbidden src/handlers/violation.ts:3",
@@ -133,7 +137,6 @@ func TestRelationExamples(t *testing.T) {
 				"arch.handler-signatures rest_request src/handlers/violation.ts:3",
 				"arch.id-lookup-return violation src/ids/violation.ts:1",
 				"arch.id-lookup-return violation src/ids/lookalike.ts:2",
-				"arch.secure-signature-evidence-strict conflict src/secure/conflict.ts:1",
 				"arch.secure-signature-evidence-strict omitted src/secure/omitted.ts:1",
 			},
 		},
@@ -180,6 +183,8 @@ func TestRelationExamples(t *testing.T) {
 				"arch.declaration-map-boundary-strict uncertain src/app/ambiguous.ts:2",
 				"arch.declaration-map-boundary-strict uncertain src/app/incomplete.ts:2",
 				"arch.declaration-map-boundary-strict precise src/app/violation.ts:2",
+				"arch.configured-source-evidence-strict adjusted_source src/app/incomplete.ts:2",
+				"arch.configured-source-evidence-strict adjusted_source src/app/violation.ts:2",
 				"arch.configured-source-evidence-strict incomplete_binding src/app/incomplete.ts:2",
 				"arch.configured-source-evidence-strict incomplete_entry src/app/incomplete.ts:2",
 				"arch.no-private-configured-calls violation src/app/violation.ts:2",
@@ -483,34 +488,81 @@ files = "tsconfig"
 	write("tsconfig.json", `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler"},"files":["src/main.ts"]}`)
 	write("src/main.ts", "export const main = 1;\n")
 	write("src/extra.ts", "export const extra = 2;\n")
-	var output bytes.Buffer
-	if err := run(context.Background(), []string{"scope", "--asset-root", "x", "--explain", "--json", "--workspace-root", root}, &output); err != nil {
-		t.Fatal(err)
-	}
-	var reports []struct {
-		Producer string `json:"producer"`
-		Scope    struct {
-			ExactSources     []string `json:"sources"`
-			CompilerEligible []string `json:"compilerEligible"`
-			Selected         []struct {
-				Path  string `json:"path"`
-				Exact bool   `json:"exact"`
-			} `json:"selected"`
-		} `json:"scope"`
-	}
-	if err := json.Unmarshal(output.Bytes(), &reports); err != nil {
-		t.Fatal(err)
-	}
-	if len(reports) != 1 || reports[0].Producer != "ts" ||
-		!slices.Equal(reports[0].Scope.ExactSources, []string{"src/extra.ts"}) ||
-		!slices.Equal(reports[0].Scope.CompilerEligible, []string{"src/extra.ts", "src/main.ts"}) ||
-		!slices.ContainsFunc(reports[0].Scope.Selected, func(item struct {
-			Path  string `json:"path"`
-			Exact bool   `json:"exact"`
-		}) bool {
-			return item.Path == "src/extra.ts" && item.Exact
-		}) {
-		t.Fatalf("scope explanation did not match config and exact source selection: %s", output.String())
+	write("src/loose.ts", "export const loose = 3;\n")
+	for _, mode := range []string{"tsconfig", "walk"} {
+		t.Run(mode, func(t *testing.T) {
+			args := []string{"--asset-root", "x", "--explain", "--workspace-root", root, "--files", mode}
+			var output bytes.Buffer
+			if err := run(context.Background(), append([]string{"scope", "--json"}, args...), &output); err != nil {
+				t.Fatal(err)
+			}
+			var reports []struct {
+				Producer string                      `json:"producer"`
+				Scope    typescript.ScopeExplanation `json:"scope"`
+			}
+			if err := json.Unmarshal(output.Bytes(), &reports); err != nil {
+				t.Fatal(err)
+			}
+			if len(reports) != 1 || reports[0].Producer != "ts" {
+				t.Fatalf("unexpected scope reports: %s", output.String())
+			}
+			scope := reports[0].Scope
+			exactSelected := false
+			for _, item := range scope.Selected {
+				if item.Path == "src/extra.ts" && item.Exact {
+					exactSelected = true
+				}
+			}
+			eligible := []string{"src/extra.ts", "src/main.ts"}
+			if mode == "walk" {
+				eligible = []string{"src/extra.ts", "src/loose.ts", "src/main.ts"}
+			}
+			if !exactSelected || !slices.Equal(scope.ExactSources, []string{"src/extra.ts"}) ||
+				!slices.Equal(scope.CompilerEligible, eligible) ||
+				!slices.Equal(scope.Configurations, []string{"tsconfig.json"}) || len(scope.CompilerFiles) != 3 {
+				t.Fatalf("unexpected scope: %s", output.String())
+			}
+			value := func(p *string) string {
+				if p == nil {
+					return ""
+				}
+				return *p
+			}
+			extra, loose, main := scope.CompilerFiles[0], scope.CompilerFiles[1], scope.CompilerFiles[2]
+			if extra.Path != "src/extra.ts" || !extra.Eligible || value(extra.SelectedConfig) != "tsconfig.json" || value(extra.OwnerConfig) != "tsconfig.json" || value(extra.OwnerKind) != "configured" || extra.RootConfigs == nil || len(extra.RootConfigs) != 0 ||
+				main.Path != "src/main.ts" || !main.Eligible || value(main.SelectedConfig) != "tsconfig.json" || value(main.OwnerKind) != "configured" || value(main.OwnerConfig) != "tsconfig.json" || !slices.Equal(main.RootConfigs, []string{"tsconfig.json"}) ||
+				loose.Path != "src/loose.ts" || value(loose.SelectedConfig) != "tsconfig.json" || loose.OwnerConfig != nil || loose.RootConfigs == nil || len(loose.RootConfigs) != 0 || loose.Eligible != (mode == "walk") ||
+				(mode == "walk" && value(loose.OwnerKind) != "synthetic") || (mode == "tsconfig" && loose.OwnerKind != nil) {
+				t.Fatalf("unexpected compiler ownership: %s", output.String())
+			}
+			output.Reset()
+			if err := run(context.Background(), append([]string{"scope"}, args...), &output); err != nil {
+				t.Fatal(err)
+			}
+			looseText := "src/loose.ts: eligible=false selected=tsconfig.json owner=none (none) roots=[]"
+			if mode == "walk" {
+				looseText = "src/loose.ts: eligible=true selected=tsconfig.json owner=none (synthetic) roots=[]"
+			}
+			if !strings.Contains(output.String(), looseText) || !strings.Contains(output.String(), "src/main.ts: eligible=true selected=tsconfig.json owner=tsconfig.json (configured) roots=[tsconfig.json]") {
+				t.Fatalf("text scope does not expose the JSON ownership: %s", output.String())
+			}
+			output.Reset()
+			if err := run(context.Background(), []string{"facts", "--workspace-root", root, "--files", mode, "--relation", "ts.module_config", "--relation", "ts.module_owner_config"}, &output); err != nil {
+				t.Fatal(err)
+			}
+			for _, row := range []string{
+				`ts.module_config("ts:module:src/main.ts","tsconfig.json").`,
+				`ts.module_owner_config("ts:module:src/main.ts","tsconfig.json").`,
+				`ts.module_owner_config("ts:module:src/extra.ts","tsconfig.json").`,
+			} {
+				if !strings.Contains(output.String(), row) {
+					t.Fatalf("scope ownership is missing from facts: %s", output.String())
+				}
+			}
+			if strings.Contains(output.String(), `ts:module:src/loose.ts`) || strings.Contains(output.String(), `ts.module_config("ts:module:src/extra.ts"`) {
+				t.Fatalf("scope facts invented a config membership or synthetic owner: %s", output.String())
+			}
+		})
 	}
 }
 

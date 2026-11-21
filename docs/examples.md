@@ -2,6 +2,12 @@
 
 These examples use the 0.2 rule API. A rule is a Datalog program that LintAI evaluates with mangle-go over the base facts of the workspace. Each row of a reported predicate is one violation. Run `lintai schema` to see configured producer relations and helpers under their namespaces, plus engine helpers.
 
+Each execution creates a fresh pure runtime for the rule. Its program and messages share that runtime for the duration of the execution.
+
+Ownership-sensitive examples use one compiler owner per selected file. The nearest `tsconfig.json` wins when its original roots contain the file; otherwise references are searched depth first in resolver order, then the nearest config is the fallback. `tsconfig` mode excludes an unavailable file, while `walk` mode uses a synthetic fallback; without a nearest config, the initial synthetic program is used. The API reference explains the bounded `module_config` inventory, how it differs from ownership and import visibility, and how root-owned derived type/declaration views can retain real conflicts.
+
+Configured source links and automatic declaration maps are separate correspondence evidence. Their endpoint metadata does not replace ordinary declarations or locations; source-only endpoints can support a diagnostic through optional anchors but have no queryable `location` row. The source-boundary examples show the checked/source joins and the normalized Config values used by both correspondence and owner-adjustment rules.
+
 ## 1. Transitive purity rule
 
 For example, a pure function may call a helper that contains `await`. This rule reports that caller. It also sees `for await` and `await using`:
@@ -33,7 +39,7 @@ export default rule("arch.pure-no-effects")
 Caveats:
 
 - Suspension syntax does not prove that the code runs. Use the ambient relations (section 4) for clock and environment reads.
-- `call_edge` contains only calls between collected functions in the workspace. Calls into packages and the default library are in `external_call`. Calls through function values are not followed; see section 12.
+- `call_edge` connects invocation sites, including module-owned sites, to collected functions in the workspace. Calls into packages and the default library are in `external_call`. Calls through function values are not followed; see section 12.
 - the interpolated string becomes an escaped Mangle string constant, so a config value cannot change the program structure
 
 ### Scorecard transformations
@@ -100,7 +106,7 @@ export default rule("arch.pure-no-service-imports")
 	.message((row) => `Pure module ${row.From} must not import ${row.To}`);
 ```
 
-To allow type-only imports, add `ts.import_runtime(Imp)` to the clause. `import_runtime` is false for `import type ...` and for imports whose bindings are all `type` bindings.
+To allow type-only imports, add `ts.import_runtime(Imp)` to the clause. `import_runtime` is false for `import type ...` and ordinarily for imports whose named bindings are all `type` bindings. With `verbatimModuleSyntax`, an all-type named import or re-export can be retained as an empty runtime load, and `import_runtime` is true for that retained statement. Side-effect imports and imports with value bindings are runtime loads.
 
 To reject a reach through other modules, use `imports_reach`:
 
@@ -363,7 +369,7 @@ export default rule("arch.client-and-parsing")
 Caveats:
 
 - `import_edge` includes `export ... from`, `import()` and `require()`; use `import_form` to select one form
-- `external_call` names come from the declaration: a method on a `Set` is `"Set.add"`, and `Date.now()` is `"DateConstructor.now"`. Run `lintai facts --relation external_call` to see the names in your workspace.
+- `external_call` names come from the declaration: a method on a `Set` is `"Set.add"`, and `Date.now()` is `"DateConstructor.now"`. Run `lintai facts --relation ts.external_call` to see the names in your workspace.
 - a module-level call has a module entity as its `ts.site_owner`. Join `ts.module_path(Module, File)` to get the file path.
 
 ## 9. Explanations
@@ -585,10 +591,9 @@ export default rule("arch.actions-return-action-result")
 		Decl signature_issue(Fn, Reason).
 		signature_issue(Fn, "omitted") :- action(Fn, _), ts.fn_signature_omitted(Fn).
 		signature_issue(Fn, "unresolved") :- action(Fn, _), ts.fn_signature_unresolved(Fn).
-		signature_issue(Fn, "conflict") :- action(Fn, _), ts.fn_signature_conflict(Fn).
 		signature_issue(Fn, "missing") :-
 			action(Fn, _), !has_return(Fn), !ts.fn_signature_omitted(Fn),
-			!ts.fn_signature_unresolved(Fn), !ts.fn_signature_conflict(Fn).
+			!ts.fn_signature_unresolved(Fn).
 		Decl signature_uncertain(Fn).
 		signature_uncertain(Fn) :- signature_issue(Fn, _).
 
@@ -604,9 +609,6 @@ export default rule("arch.actions-return-action-result")
 	`)
 	.report("violation")
 	.message((row) => {
-		if (row.Reason === "conflict") {
-			return `${row.Name} has conflicting checked signatures; cannot determine whether its return type is allowed`;
-		}
 		if (row.Reason === "omitted") {
 			return `${row.Name} has no collected signature; cannot determine whether its return type is allowed`;
 		}
@@ -632,9 +634,9 @@ export async function save(): Promise<ActionResult<number>> {
 
 The rule reports `save`. Its return type is written `Promise<ActionResult<number>>`, but `ActionResult` is declared in `src/legacy/types.ts`, so `type_named` has a different `Origin`. `ts.signature_returns_awaited` removes one level of `Promise` from each observed signature return type. If TypeScript infers the return type, the rule accepts the function only when the returned value already has the type `ActionResult`. An inferred object literal type, such as `Promise<{ ok: boolean; value: number }>`, has no `ActionResult` name, so the rule reports it.
 
-The same function can be checked by more than one TypeScript configuration. `ts.fn_signature` groups each whole observation; a signature conflict preserves the separate observations. Even if one return type matches `ActionResult`, the rule reports that the result is uncertain. A signature conflict can also come from different parameter types, so it does not necessarily mean the return types differ.
+Each function has one whole signature from its file’s effective owner. Other configurations cannot add competing signatures for that function.
 
-The rule also reports a signature that was omitted or could not be fully resolved. An unresolved signature can still have a return row, but that row alone does not establish a complete signature. If there is no return row and no signature marker, the rule reports the missing return type. A conflict and an unresolved signature can occur together, so the rule reports both. These findings mean the rule cannot decide whether the return type is allowed.
+The rule also reports a signature that was omitted or could not be fully resolved. An unresolved signature can still have a return row, but that row alone does not establish a complete signature. `fn_signature_unresolved` is a helper derived from `fn_signature` and `signature_incomplete`, whose only reason is `/unresolved`; omission remains separate. There is no `fn_signature_conflict` base. If there is no return row and no signature marker, the rule reports the missing return type. These findings mean the rule cannot decide whether the return type is allowed.
 
 Caveats:
 
@@ -680,7 +682,7 @@ export function loadUser(input: { db: Db; id: string }): Promise<string> {
 
 The rule reports `loadUser` with `Db` from `src/infra/db.ts`.
 
-`type_contains` does not look into every part of a type. The strict variant also reports a signature that reaches a type with an incomplete marker (`type_incomplete`), or whose signature evidence is incomplete or conflicting. Class, interface and enum members are not expanded, but the named type receives `/members_omitted`, so the strict rule catches a parameter or return type using it. This marker does not claim that a forbidden member exists or expose that member's type.
+`type_contains` does not look into every part of a type. The strict variant also reports a signature that reaches a type with an incomplete marker (`type_incomplete`), or whose signature evidence is incomplete. Class, interface and enum members are not expanded, but the named type receives `/members_omitted`, so the strict rule catches a parameter or return type using it. This marker does not claim that a forbidden member exists or expose that member's type.
 
 Strict completeness also reaches default library interfaces. Ordinary `Promise<T>` and `T[]` use the library interfaces `Promise` and `Array`, which receive `/members_omitted`; a strict rule therefore reports these common wrappers even when `T` is fully represented. The rule below treats every incomplete type as a result, so it is intentionally conservative.
 
@@ -703,10 +705,9 @@ export default rule("arch.domain-signatures-strict")
 		Decl signature_issue(Fn, Reason).
 		signature_issue(Fn, "omitted") :- domain_function(Fn, _), ts.fn_signature_omitted(Fn).
 		signature_issue(Fn, "unresolved") :- domain_function(Fn, _), ts.fn_signature_unresolved(Fn).
-		signature_issue(Fn, "conflict") :- domain_function(Fn, _), ts.fn_signature_conflict(Fn).
 		signature_issue(Fn, "missing") :-
 			domain_function(Fn, _), !has_return(Fn), !ts.fn_signature_omitted(Fn),
-			!ts.fn_signature_unresolved(Fn), !ts.fn_signature_conflict(Fn).
+			!ts.fn_signature_unresolved(Fn).
 
 		Decl violation(Fn, Name, Shown, Reason).
 		violation(Fn, Name, Shown, "type") :-
@@ -720,9 +721,6 @@ export default rule("arch.domain-signatures-strict")
 		if (row.Reason === "type") {
 			return `${row.Name} has a type that lintai cannot inspect: ${row.Shown}`;
 		}
-		if (row.Reason === "conflict") {
-			return `${row.Name} has conflicting checked signatures; cannot determine whether its signature exposes infrastructure types`;
-		}
 		if (row.Reason === "omitted") {
 			return `${row.Name} has no collected signature; cannot determine whether its signature exposes infrastructure types`;
 		}
@@ -735,22 +733,22 @@ export default rule("arch.domain-signatures-strict")
 
 For example, `export function pick<K extends keyof Db>(key: K): Db[K]` is reported: `K` has a constraint and `Db[K]` is an indexed access type, which is `/other`.
 
-The strict rule checks for signature problems after selecting each exported domain function. It reports omitted, unresolved and conflicting signatures, as well as a missing return row when no marker explains it. It can also report an incomplete type from any parameter or return row that is present. These are different gaps: `type_reaches_incomplete` describes a collected type graph, while the signature markers and missing return check describe missing or conflicting signature evidence. No `ts.signature_param` rows alone do not mean a signature is missing; a function can have zero parameters.
+The strict rule checks for signature problems after selecting each exported domain function. It reports omitted and unresolved signatures, as well as a missing return row when no marker explains it. It can also report an incomplete type from any parameter or return row that is present. These are different gaps: `type_reaches_incomplete` describes a collected type graph, while the signature markers and missing return check describe missing signature evidence. No `ts.signature_param` rows alone do not mean a signature is missing; a function can have zero parameters.
 
 A rule can make a narrower policy for known opaque leaves. The following helpers accept only the default library `Promise` and `Array` member-omission markers. Every other incompleteness reason remains a seed. Backward propagation still follows `type_child`, including the represented type arguments of those accepted wrappers:
 
-```ts
+```mangle
 Decl permitted_opaque_leaf(Type).
-permitted_opaque_leaf(T) :- type_named(T, "lib", "Promise"), type_origin_kind(T, /lib).
-permitted_opaque_leaf(T) :- type_named(T, "lib", "Array"), type_origin_kind(T, /lib).
+permitted_opaque_leaf(T) :- ts.type_named(T, "lib", "Promise"), ts.type_origin_kind(T, /lib).
+permitted_opaque_leaf(T) :- ts.type_named(T, "lib", "Array"), ts.type_origin_kind(T, /lib).
 
 Decl disallowed_incomplete(Type).
-disallowed_incomplete(T) :- type_incomplete(T, Reason), Reason != /members_omitted.
-disallowed_incomplete(T) :- type_incomplete(T, /members_omitted), !permitted_opaque_leaf(T).
+disallowed_incomplete(T) :- ts.type_incomplete(T, Reason), Reason != /members_omitted.
+disallowed_incomplete(T) :- ts.type_incomplete(T, /members_omitted), !permitted_opaque_leaf(T).
 
 Decl reaches_disallowed_incomplete(Type).
 reaches_disallowed_incomplete(T) :- disallowed_incomplete(T).
-reaches_disallowed_incomplete(T) :- type_child(T, Child), reaches_disallowed_incomplete(Child).
+reaches_disallowed_incomplete(T) :- ts.type_child(T, Child), reaches_disallowed_incomplete(Child).
 ```
 
 Use `reaches_disallowed_incomplete(T)` in the type-graph violation rule in place of `ts.type_reaches_incomplete(T)`. Keep the signature issue rules as well. This ignores only `/members_omitted` on the two named library leaves. If `Promise<Hidden>` reaches an unaccepted opaque `Hidden` type, that marker still propagates through the `Promise` type argument to the signature. The policy does not mark `any`, `unknown`, unconstrained parameters, or unknown runtime values as safe; those need separate rule-specific handling when they matter.
@@ -906,7 +904,7 @@ The fixture produces these results:
 
 The CLI and serve both report exactly two forbidden diagnostics and three indeterminate diagnostics. The first four capability calls remain runtime-unresolved; the rule does not use that fact as a declaration error. Removing the `PublicWriter` export alias replaces the two forbidden diagnostics with one `missing export` diagnostic at `calls.ts:1`, while keeping the three signature diagnostics. The behavioral test checks the full diagnostic lists, including rule id, assertion, source file, line and message.
 
-The rule checks all four signature reasons, including `/conflict`, and catches missing declaration evidence without treating it as compliance. It also checks export inventory, export target and owner completeness. Owner selection does not require an observed `write` member: a scope containing no forbidden calls produces no false owner uncertainty. A forbidden result still requires the positive member join above. A retained forbidden member and an incomplete signature can produce both outcomes at one site. These calls are all actual invocations. A function-valued argument is a separate `ts.fn_value_escape` site, not a call site; use `ts.fn_value_escape_unknown` when a policy needs to report an unknown transferred implementation.
+The rule checks all three signature reasons and catches missing declaration evidence without treating it as compliance. It also checks export inventory, export target and owner completeness. Owner selection does not require an observed `write` member: a scope containing no forbidden calls produces no false owner uncertainty. A forbidden result still requires the positive member join above. A retained forbidden member and an incomplete signature can produce both outcomes at one site. These calls are all actual invocations. A function-valued argument is a separate `ts.fn_value_escape` site, not a call site; use `ts.fn_value_escape_unknown` when a policy needs to report an unknown transferred implementation.
 
 The test also covers a variant with no forbidden writes. CLI analysis returns exit 1 for the five findings; serve returns the same five diagnostics and shuts down with exit 0.
 
@@ -1128,6 +1126,54 @@ export default rule("arch.core-resolved-imports-strict")
 
 This strict policy depends on the active compiler context and can report missing or deliberately virtual dependencies. Computed specifiers have separate opaque-load evidence.
 
+### Approved core packages
+
+Restrict physical package imports in core modules to an approved package.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Core modules may import only approved physical packages.
+export default rule("arch.core-approved-packages")
+	.version(1)
+	.program(dl`
+		Decl core_module(File).
+		core_module(File) :- ts.module_path(_, File), lintai.glob(File, "src/core/**").
+		Decl violation(Site, File, Pkg).
+		violation(Site, File, Pkg) :- core_module(File), ts.import_edge(Site, File, _, _),
+			ts.import_package(Site, Pkg), Pkg != "approved-lib".
+	`)
+	.report("violation")
+	.expectNonEmpty("core_module")
+	.message((row) => `Core modules must not import package ${row.Pkg}`);
+```
+
+The fixture reports `forbidden-lib` at `src/core/packages.ts:2`; the physical `approved-lib` import is allowed and the ambient `virtual:env` module has no package row. Unresolved imports are outside this rule and can be checked with the previous strict policy.
+
+### Core type boundaries
+
+Keep core type references from resolving to declarations in the internal directory.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Core type references must not depend on internal declarations.
+export default rule("arch.core-no-internal-types")
+	.version(1)
+	.program(dl`
+		Decl core_module(File).
+		core_module(File) :- ts.module_path(_, File), lintai.glob(File, "src/core/**").
+		Decl violation(Site, File, Target).
+		violation(Site, File, Target) :- core_module(File), ts.site(Site, File),
+			ts.type_ref_target(Site, Target), lintai.glob(Target, "src/internal/**").
+	`)
+	.report("violation")
+	.expectNonEmpty("core_module")
+	.message((row) => `Core types must not depend on ${row.Target}`);
+```
+
+The fixture reports the internal `Secret` reference at `src/core/dependencies.ts:3` and allows the shared `Shared` reference. Unresolved type references have no target and require separate resolution checks.
+
 ## 28. Avoid the broad `Function` type
 
 Use a specific callable signature in source annotations instead of TypeScript's broad `Function` type.
@@ -1206,9 +1252,9 @@ export default rule("arch.query-no-writes-strict")
 		: "Cannot determine the declared member for this query call");
 ```
 
-The selected declaration identifies a lexical member, not a runtime implementation; the rule matches the member name on any owner, so unrelated `write` methods are also reported. This strict variant can report unresolved, synthetic, unsupported, or conflicting declaration evidence even for safe calls; a positive forbidden result and an uncertainty result can coexist. A free function named `write` and a function-valued argument are not member calls.
+The selected declaration identifies a lexical member, not a runtime implementation; the rule matches the member name on any owner, so unrelated `write` methods are also reported. This strict variant can report unresolved, synthetic or unsupported declaration evidence even for safe calls; a positive forbidden result and an uncertainty result can coexist. A free function named `write` and a function-valued argument are not member calls.
 
-A separate strict call-graph policy could also report `ts.call_target_conflict` when runtime target observations disagree, but it may block a call that is safe in one compiler context. The current CLI fixture could not produce that marker; the [coverage report](followups/relation-coverage-report.md) records the attempt and its limits.
+Each invocation is resolved in its source file’s owner context.
 
 ## 31. Strict security callback transfers
 
@@ -1273,7 +1319,7 @@ export default rule("arch.handler-signatures")
 	.message(() => "Request handlers must take exactly one required, non-rest argument");
 ```
 
-Only complete observed signatures are checked; omitted, unresolved, and conflicting observations need a separate strict policy. A complete signature does not imply that every referenced type is structurally complete.
+Only complete observed signatures are checked; omitted and unresolved signatures need a separate strict policy. A complete signature does not imply that every referenced type is structurally complete.
 
 ## 33. Strict security signature evidence
 
@@ -1282,7 +1328,7 @@ Require observable, consistent signatures in security-sensitive code.
 ```ts
 import { dl, rule } from "@lintai/sdk";
 
-// Security-sensitive functions must not have omitted or conflicting signatures.
+// Security-sensitive functions must not have omitted or unresolved signatures.
 export default rule("arch.secure-signature-evidence-strict")
 	.version(1)
 	.program(dl`
@@ -1290,15 +1336,15 @@ export default rule("arch.secure-signature-evidence-strict")
 		secure_function(Fn, Name) :- ts.fn(Fn, File, Name), lintai.glob(File, "src/secure/**").
 		Decl omitted(Fn, Name).
 		omitted(Fn, Name) :- secure_function(Fn, Name), ts.fn_signature_omitted(Fn).
-		Decl conflict(Fn, Name).
-		conflict(Fn, Name) :- secure_function(Fn, Name), ts.fn_signature_conflict(Fn).
+		Decl unresolved(Fn, Name).
+		unresolved(Fn, Name) :- secure_function(Fn, Name), ts.fn_signature_unresolved(Fn).
 	`)
-	.report("omitted", "conflict")
+	.report("omitted", "unresolved")
 	.expectNonEmpty("secure_function")
 	.message(() => "Cannot establish an unambiguous signature for this security-sensitive function");
 ```
 
-This strict policy reports ownership-only anonymous callbacks whose signatures the producer intentionally omits, and functions with conflicting compiler-context observations; it can therefore block safe code. It does not handle unresolved or incomplete signature observations; the coverage report records why those variants lack a fixture.
+This strict policy reports ownership-only anonymous callbacks whose signatures the producer intentionally omits and functions with incomplete signatures. The latter helper branch has a focused producer test but no established positive source fixture.
 
 ## 34. Identifier lookup return types
 
@@ -1326,7 +1372,7 @@ export default rule("arch.id-lookup-return")
 	.message((row) => `Identifier lookups must return Promise<string>, but return ${row.Returned}`);
 ```
 
-The rule checks only complete observed signatures and one library Promise layer; conflicting or incomplete observations require separate handling. The display text is used only in the diagnostic, never as the semantic match.
+The rule checks only complete observed signatures and one library Promise layer; omitted or incomplete signatures require separate handling. The display text is used only in the diagnostic, never as the semantic match.
 
 ## 35. Registration role literals
 
@@ -1662,7 +1708,7 @@ export default rule("arch.no-private-configured-calls")
 		violation(Site, Source) :- tracked_call(Site, Binding),
 			ts.source_binding(Binding, _, _, /value, /source_entry),
 			ts.source_binding_source_decl(Binding, SourceDecl),
-			ts.declaration_origin(SourceDecl, /source_file, Source),
+			ts.source_endpoint(SourceDecl, _, _, /source_file, Source),
 			lintai.glob(Source, "packages/contracts/src/private*").
 	`)
 	.report("violation")
@@ -1694,13 +1740,21 @@ export default rule("arch.configured-source-evidence-strict")
 		Decl incomplete_entry(Site, Config, Reason).
 		incomplete_entry(Site, Config, Reason) :- tracked_call(Site, _, Entry),
 			ts.source_entry_tsconfig(Entry, Config), ts.source_entry_incomplete(Entry, Reason).
+		Decl incomplete_endpoint(Site, Reason).
+		incomplete_endpoint(Site, Reason) :- tracked_call(Site, Binding, _),
+			ts.source_binding_checked_decl(Binding, Declaration), ts.source_endpoint_incomplete(Declaration, Reason).
+		incomplete_endpoint(Site, Reason) :- tracked_call(Site, Binding, _),
+			ts.source_binding_source_decl(Binding, Declaration), ts.source_endpoint_incomplete(Declaration, Reason).
+		Decl adjusted_source(Site, Config, Option, Action).
+		adjusted_source(Site, Config, Option, Action) :- tracked_call(Site, _, Entry),
+			ts.source_entry_tsconfig(Entry, Config), ts.source_config_adjusted(Config, Option, Action).
 	`)
-	.report("incomplete_binding", "incomplete_entry")
+	.report("incomplete_binding", "incomplete_entry", "incomplete_endpoint", "adjusted_source")
 	.expectNonEmpty("tracked_call")
 	.message(() => "Configured source association evidence is incomplete");
 ```
 
-This strict variant can block safe calls when the source program or binding cannot be resolved. The entry diagnostic covers entries with an explicit source tsconfig, while binding uncertainty is checked for all tracked calls; unapplied entries have no call anchor.
+This strict variant can block safe calls when the source program or binding cannot be resolved. The entry and source-adjustment diagnostics cover entries with an explicit source tsconfig, while binding and endpoint uncertainty are checked for tracked calls; unapplied entries have no call anchor. The fixture exercises adjusted and unadjusted source configs. Endpoint uncertainty has dependency coverage but no established positive source witness in this fixture.
 
 ## 48. Strict declaration-map boundaries
 
@@ -1719,23 +1773,25 @@ export default rule("arch.declaration-map-boundary-strict")
 		Decl precise(Site, Source).
 		precise(Site, Source) :- application_call(Site, Checked),
 			ts.declaration_source(Checked, Declaration, /declaration_map),
-			ts.declaration_origin(Declaration, /source_file, Source), lintai.glob(Source, "packages/contracts/src/private*").
+			ts.source_endpoint(Declaration, _, _, /source_file, Source), lintai.glob(Source, "packages/contracts/src/private*").
 		Decl has_precise(Checked).
 		has_precise(Checked) :- ts.declaration_source(Checked, _, /declaration_map).
 		Decl candidate(Site, Source).
 		candidate(Site, Source) :- application_call(Site, Checked),
 			ts.declaration_source_candidate(Checked, Declaration, /declaration_map), !has_precise(Checked),
-			ts.declaration_origin(Declaration, /source_file, Source), lintai.glob(Source, "packages/contracts/src/private*").
+			ts.source_endpoint(Declaration, _, _, /source_file, Source), lintai.glob(Source, "packages/contracts/src/private*").
 		Decl uncertain(Site, Outcome).
 		uncertain(Site, Outcome) :- application_call(Site, Checked), ts.declaration_source_outcome(Checked, Outcome).
 	`)
 	.report("precise", "candidate", "uncertain")
 	.expectNonEmpty("application_call")
-	.message((_row, ctx) => ctx.assertion_id === "precise"
-		? "Application call maps to private contract source"
-		: ctx.assertion_id === "candidate"
-			? "An uncertain map candidate points to private contract source"
-			: "Cannot reliably map the checked declaration to source");
+	.message((_row, ctx) =>
+		ctx.assertion_id === "precise"
+			? "Application call maps to private contract source"
+			: ctx.assertion_id === "candidate"
+				? "An uncertain map candidate points to private contract source"
+				: "Cannot reliably map the checked declaration to source",
+	);
 ```
 
 This strict variant can block safe calls when maps are missing, ambiguous or otherwise uncertain. It distinguishes a unique link from a private candidate without a unique link, and checks only calls with checked declaration-file endpoints; source maps do not establish build freshness.
@@ -1763,3 +1819,41 @@ export default rule("arch.selected-source-links-applied-strict")
 ```
 
 This strict variant can block a safe configuration when a checked entry is simply outside the current analysis. It can anchor a diagnostic only when the configured source entry is itself a selected primary module, and it does not validate build freshness.
+
+## 50. Review known configuration overlap
+
+Flag files that are original roots in more than one config in the bounded inventory. The shared-file fixture reports a violation and the single-membership control does not. This is a conservative review policy: overlap alone does not prove that a call or signature is wrong.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Shared roots are a conservative review trigger, not proof of a conflicting call.
+export default rule("arch.known-overlap-strict")
+	.version(1)
+	.program(dl`
+		Decl violation(Module).
+		violation(Module) :- ts.module_path(Module, File), lintai.glob(File, "src/overlap/**"),
+			ts.module_multi_config(Module).
+	`)
+	.report("violation")
+	.message(() => "This module is a root of multiple known configurations");
+```
+
+## 51. Review owner configuration adjustments
+
+Join an eligible module to adjustments of its effective owner. The fixture reports an adjusted owner and includes an unadjusted control. Config values use the same normalized representation as source-entry config values, so these joins do not require path rewriting.
+
+```ts
+import { dl, rule } from "@lintai/sdk";
+
+// Flag adaptations of the effective owner for modules in the reviewed area.
+export default rule("arch.owner-adjustment-strict")
+	.version(1)
+	.program(dl`
+		Decl violation(Module, Option, Action).
+		violation(Module, Option, Action) :- ts.module_path(Module, File), lintai.glob(File, "src/overlap/**"),
+			ts.module_owner_config(Module, Config), ts.config_adjusted(Config, Option, Action).
+	`)
+	.report("violation")
+	.message(() => "This module's owner required a compiler option adaptation");
+```

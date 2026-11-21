@@ -10,20 +10,22 @@ export default rule("arch.declaration-map-boundary-strict")
 		Decl precise(Site, Source).
 		precise(Site, Source) :- application_call(Site, Checked),
 			ts.declaration_source(Checked, Declaration, /declaration_map),
-			ts.declaration_origin(Declaration, /source_file, Source), lintai.glob(Source, "packages/contracts/src/private*").
+			ts.source_endpoint(Declaration, _, _, /source_file, Source), lintai.glob(Source, "packages/contracts/src/private*").
 		Decl has_precise(Checked).
 		has_precise(Checked) :- ts.declaration_source(Checked, _, /declaration_map).
 		Decl candidate(Site, Source).
 		candidate(Site, Source) :- application_call(Site, Checked),
 			ts.declaration_source_candidate(Checked, Declaration, /declaration_map), !has_precise(Checked),
-			ts.declaration_origin(Declaration, /source_file, Source), lintai.glob(Source, "packages/contracts/src/private*").
+			ts.source_endpoint(Declaration, _, _, /source_file, Source), lintai.glob(Source, "packages/contracts/src/private*").
 		Decl uncertain(Site, Outcome).
 		uncertain(Site, Outcome) :- application_call(Site, Checked), ts.declaration_source_outcome(Checked, Outcome).
 	`)
 	.report("precise", "candidate", "uncertain")
 	.expectNonEmpty("application_call")
-	.message((_row, ctx) => ctx.assertion_id === "precise"
-		? "Application call maps to private contract source"
-		: ctx.assertion_id === "candidate"
-			? "An uncertain map candidate points to private contract source"
-			: "Cannot reliably map the checked declaration to source");
+	.message((_row, ctx) =>
+		ctx.assertion_id === "precise"
+			? "Application call maps to private contract source"
+			: ctx.assertion_id === "candidate"
+				? "An uncertain map candidate points to private contract source"
+				: "Cannot reliably map the checked declaration to source",
+	);

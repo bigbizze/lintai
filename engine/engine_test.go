@@ -532,7 +532,7 @@ export default rule("t.awaited").version(1)
 	}
 }
 
-func TestActionReturnRuleReportsConflictingCheckedSignatures(t *testing.T) {
+func TestActionReturnRuleUsesOwnerSignature(t *testing.T) {
 	repoRoot, err := filepath.Abs("..")
 	if err != nil {
 		t.Fatal(err)
@@ -563,8 +563,6 @@ func TestActionReturnRuleReportsConflictingCheckedSignatures(t *testing.T) {
 			rootConfig: `{"compilerOptions":{"strict":false},"files":["src/actions/save.ts","src/core/result.ts"],"references":[{"path":"./loose"},{"path":"./strict"}]}`,
 			groups:     []string{"loose", "strict"},
 			want: []string{
-				"ambiguous has conflicting checked signatures; cannot determine whether its return type is allowed",
-				"mixed has conflicting checked signatures; cannot determine whether its return type is allowed",
 				"wrong must return Promise<ActionResult<T>>, but returns Promise<number>",
 			},
 		},
