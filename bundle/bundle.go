@@ -276,6 +276,10 @@ func BuildAll(ctx context.Context, assetRoot, repoRoot, workspaceRoot, outDir st
 	if len(rulePaths) == 0 {
 		return map[string]Artifacts{}, map[string]error{}, nil
 	}
+	node, err := NodeExecutable(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	requests := make([]buildRequest, 0, len(rulePaths))
 	requested := make(map[string]struct{}, len(rulePaths))
@@ -311,7 +315,7 @@ func BuildAll(ctx context.Context, assetRoot, repoRoot, workspaceRoot, outDir st
 	if err != nil {
 		return nil, itemErrors, err
 	}
-	command := exec.CommandContext(ctx, "node", stagedScript, absoluteAssetRoot, stagedRoot)
+	command := exec.CommandContext(ctx, node, stagedScript, absoluteAssetRoot, stagedRoot)
 	command.Dir = assetRoot
 	command.Stdin = bytes.NewReader(payload)
 	output, err := command.CombinedOutput()
@@ -468,6 +472,10 @@ func PrepareAll(ctx context.Context, assetRoot, repoRoot, workspaceRoot string, 
 	if len(artifacts) == 0 {
 		return map[string]PrepareResult{}, map[string]PrepareError{}, nil
 	}
+	node, err := NodeExecutable(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	requests := make([]prepareRequest, 0, len(artifacts))
 	requested := make(map[string]struct{}, len(artifacts))
@@ -507,7 +515,7 @@ func PrepareAll(ctx context.Context, assetRoot, repoRoot, workspaceRoot string, 
 	if options.Sandbox {
 		args = sandboxArgs(scriptPath, assetRoot, workspaceRoot, artifacts)
 	}
-	command := exec.CommandContext(ctx, "node", args...)
+	command := exec.CommandContext(ctx, node, args...)
 	command.Dir = assetRoot
 	command.Stdin = bytes.NewReader(payload)
 	var stderr bytes.Buffer

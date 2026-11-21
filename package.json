@@ -12,6 +12,9 @@
 	"bugs": {
 		"url": "https://github.com/bigbizze/lintai/issues"
 	},
+	"engines": {
+		"node": ">=26.13.1 <27"
+	},
 	"scripts": {
 		"build": "pnpm -r build && go build ./cmd/lintai",
 		"build:dist": "pnpm build && pnpm build:npm-binaries",
@@ -25,10 +28,10 @@
 		"test": "go test ./..."
 	},
 	"devDependencies": {
-		"@types/node": "^22.15.21",
+		"@types/node": "^26.6.6",
 		"@biomejs/biome": "^1.9.0",
 		"esbuild": "^0.25.2",
-		"eslint": "^9.24.0",
+		"eslint": "^10.15.0",
 		"typescript": "^5.7.0"
 	},
 	"dependencies": {

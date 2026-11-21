@@ -410,12 +410,14 @@ pnpm exec lintai facts --workspace-root testdata/fixtures/workspace --relation t
 
 ```js
 import { createLintaiPlugin } from "@lintai/eslint-plugin";
+import tsParser from "@typescript-eslint/parser";
 
 const lintai = createLintaiPlugin({ rules: ["lintai-rules/**/*.ts"], factLimit: 1000000 });
 
 export default [
 	{
 		files: ["src/**/*.ts", "src/**/*.tsx"],
+		languageOptions: { parser: tsParser },
 		...lintai.configs.all,
 		rules: {
 			...lintai.configs.all.rules,
@@ -428,6 +430,7 @@ export default [
 	},
 	{
 		files: ["lintai-rules/**/*.ts"],
+		languageOptions: { parser: tsParser },
 		plugins: { lintai },
 		rules: lintai.configs.authoring.rules,
 	},

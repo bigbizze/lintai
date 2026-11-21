@@ -20,8 +20,8 @@ execFileSync(
 		"@lintai/cli",
 		"@lintai/sdk",
 		"@lintai/eslint-plugin",
-		"eslint@^9.24.0",
-		"@typescript-eslint/parser@^8.0.0",
+		"eslint@^10.15.0",
+		"@typescript-eslint/parser@^8.73.0",
 		"typescript@^5.7.0",
 	],
 	{
@@ -357,3 +357,29 @@ assert.equal(
 	`expected a misspelled rule to fail eslint, got ${typo.status}\n${typo.stdout}\n${typo.stderr}`,
 );
 assert.match(typo.stdout + typo.stderr, /Could not find "arch\.no-asnyc" in plugin "lintai"/);
+
+// ESLint 10 finds the config from each linted file. A nested config overrides
+// the root config's error level while still loading the packed plugin/parser.
+const nested = path.join(repoDir, "src");
+await fs.writeFile(
+	path.join(nested, "eslint.config.mjs"),
+	`import { createLintaiPlugin } from "@lintai/eslint-plugin";
+import tsParser from "@typescript-eslint/parser";
+const lintai = createLintaiPlugin({ rules: ["lintai-rules/**/*.ts"] });
+export default [{ files: ["**/*.ts"], languageOptions: { parser: tsParser }, ...lintai.configs.all, rules: { ...lintai.configs.all.rules, "lintai/arch.no-async": "warn" } }];
+`,
+);
+function lintNested(extraArgs) {
+	const result = spawnSync("pnpm", ["exec", "eslint", ...extraArgs, "src/example.ts", "-f", "json"], {
+		cwd: repoDir,
+		encoding: "utf8",
+	});
+	assert.ok(result.stdout, result.stderr);
+	return { status: result.status, messages: JSON.parse(result.stdout)[0].messages };
+}
+const discoveredConfig = lintNested([]);
+assert.equal(discoveredConfig.status, 0);
+assert.deepEqual(discoveredConfig.messages.map(({ ruleId, severity }) => [ruleId, severity]), [["lintai/arch.no-async", 1]]);
+const explicitRootConfig = lintNested(["--config", "eslint.config.mjs"]);
+assert.equal(explicitRootConfig.status, 1);
+assert.deepEqual(explicitRootConfig.messages.map(({ ruleId, severity }) => [ruleId, severity]), [["lintai/arch.no-async", 2]]);

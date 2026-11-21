@@ -523,7 +523,7 @@ A rule file that does not bundle or load, has an invalid id, is not a complete r
 - `--suppress-all`, `--suppress-rule <id>`: record all or selected rules' current error findings. Repeat `--suppress-rule` for more rules.
 - `--prune-suppressions`: reduce unused allowances within completed rules' primary coverage.
 - `--suppressions-location <path>`: choose a suppressions file relative to the workspace root.
-- `--setup-sandbox auto|on|off`: run `setup()` under the Node permission model. See "Setup sandbox".
+- `--setup-sandbox on|off`: run `setup()` under the Node permission model. See "Setup sandbox".
 
 Example:
 
@@ -626,11 +626,10 @@ A rule with an integrity error does not run. With `--rules-lock`, `require()` in
 
 Setup sandbox:
 
-- `auto` (default): on Node 22.13 or later (or 23.5 or later), `setup()` runs under the Node permission model. On an older Node it runs as before, and lintai prints one warning on stderr.
-- `on`: the same, but an older Node is a usage error (exit code 2).
-- `off`: `setup()` runs with full Node capabilities.
+- `on` (default): `setup()` runs under the Node permission model.
+- `off`: `setup()` runs with full Node capabilities. A rules lock still restricts runtime module loading.
 
-In the sandbox, `setup()` can read files in the workspace. It cannot write files, start child processes or start workers. `require()` loads only Node built-ins other than `module` and `vm`. A denied operation is a `rule_execution_error` with phase `setup` that names the permission or the specifier. On Node 22.13 to 24 the permission model does not restrict the network. On Node 25 and later the network is denied. See [trust.md](trust.md).
+Rule execution requires stable Node `>=26.13.1 <27`, including when the sandbox is off. In the sandbox, `setup()` can read files in the workspace. It cannot write files, start child processes or workers, or access the network. `require()` loads only Node built-ins other than `module` and `vm`. A denied operation is a `rule_execution_error` with phase `setup` that names the permission or the specifier. See [trust.md](trust.md).
 
 Rule severity:
 
@@ -690,7 +689,7 @@ type LintaiOptions = {
 	ruleWorkers?: number;
 	rulesLock?: string;
 	suppressionsLocation?: string;
-	setupSandbox?: "auto" | "on" | "off";
+	setupSandbox?: "on" | "off";
 };
 ```
 
@@ -720,19 +719,21 @@ Linter rule caveats:
 Install:
 
 ```sh
-pnpm add -D @lintai/cli @lintai/sdk @lintai/eslint-plugin eslint
+pnpm add -D @lintai/cli @lintai/sdk @lintai/eslint-plugin eslint@^10.15.0 @typescript-eslint/parser@^8.73.0
 ```
 
 Example `eslint.config.js`:
 
 ```js
 import { createLintaiPlugin } from "@lintai/eslint-plugin";
+import tsParser from "@typescript-eslint/parser";
 
 const lintai = createLintaiPlugin({ rules: ["lintai-rules/**/*.ts"] });
 
 export default [
 	{
 		files: ["src/**/*.ts", "src/**/*.tsx"],
+		languageOptions: { parser: tsParser },
 		...lintai.configs.all,
 		rules: {
 			...lintai.configs.all.rules,
@@ -745,6 +746,7 @@ export default [
 	},
 	{
 		files: ["lintai-rules/**/*.ts"],
+		languageOptions: { parser: tsParser },
 		plugins: { lintai },
 		rules: lintai.configs.authoring.rules,
 	},
@@ -753,6 +755,7 @@ export default [
 
 Plugin caveats:
 
+- ESLint 10 finds flat config from each linted file; pass `--config` to select one explicitly, and use Node 26 for the editor integration
 - `serve` is the default in editor-like long-lived processes
 - `oneshot` is the default under plain ESLint CLI detection
 - lintai reads the saved files on disk, not the editor buffer. In `serve` mode, when the editor text of a file is different from the saved file, `lintai/analysis` shows one message on line 1 that asks you to save the file, and the other lintai rules report nothing for that file. When the editor lints a file that was saved after the last analysis started, the plugin runs a new analysis first, so the diagnostics of the saved file are current. On a file system that stores modification times in whole seconds, a second save in the same second can show the diagnostics of the first save until the next background refresh.
@@ -829,7 +832,7 @@ Modes:
 Plugin caveats:
 
 - oxlint documents JS plugins as alpha and outside semver. A later oxlint can break the plugin until lintai is updated. The plugin is tested with oxlint 1.90.0, and its peer dependency is `oxlint@^1.90.0`.
-- the plugin needs Node 22 or later
+- the plugin needs stable Node 26.13.1 or later in the 26.x LTS line
 - line and column values are the same as under ESLint. A lintai diagnostic at line 3, column 5 is shown by the oxlint CLI at line 3, column 5
 - the plugin reports only. It gives no fixes and no suggestions
 - oxlint 1.90.0 runs JS plugins on one thread of one Node.js process, in the CLI and in the language server, so one lintai analysis serves all files
