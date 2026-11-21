@@ -45,6 +45,18 @@ Limits:
 - The captured view costs time. Go package times went from bundle 1.2 s to about 9 s, cmd/lintai from 30 s to about 80 s, and engine from 36 s to about 135 s. No speed improvement is claimed.
 - One full Go run during the integration fix failed golden parity with an undiagnosed rule error. It did not reproduce in isolation, in two further full runs, or in CI. It may be a flaky test.
 
+### Post-review captured-path correction receipt
+
+On macOS arm64 with Go 1.27.3, Node 22.23.4, esbuild 0.25.12, and TypeScript 5.9.3, the following commands completed against the correction:
+
+- `/usr/bin/time -p go test -count=1 ./engine -run '^TestBundleConfigPaths(Base|CapturedAcrossBuilds|EscapeRejected|UnestablishedBaseRejected|ChangedLookupRejected)$' -v` — exit 0, 22.63 s.
+- `/usr/bin/time -p go test -count=1 ./engine -run '^(TestBundleConfigViewAcrossBuilds|TestBundleConfigCannotSearchOutsideView|TestRuleBundleInvalidatedByResolutionConfigChange|TestRulesLockIntegrityPrecedesSetupAndCollection|TestBundleChainedLinkRetargetInvalidatesWarmSession|TestBundleConsumedInputEdit|TestBundleHelperInputEdit|TestBundleToolInputEdit)$' -v` — exit 0, 54.98 s.
+- `/usr/bin/time -p go test -count=1 ./bundle -run '^(TestBuildAllAndPrepareAllFixtureRules|TestAbsoluteRequireResolveSetup|TestBuildAllPreservesLocallyBoundRequire)$' -v` — exit 0, 14.99 s.
+- `/usr/bin/time -p go test -count=1 ./cmd/lintai -run '^(TestRulesLockStopsAChangedRuleBeforeSetup|TestCustomRulesLockIgnoresUnrelatedDirectoryEntries)$' -v` — exit 0, 10.18 s.
+- `/usr/bin/time -p go build ./...` — exit 0, 2.59 s; `/usr/bin/time -p pnpm exec biome format packages/client/scripts/bundle-rule.mjs` — exit 0, 0.52 s. `/usr/bin/time -p pnpm exec biome check packages/client/scripts/bundle-rule.mjs` — exit 1, 0.58 s, for two parameter reassignments and import ordering already present at the starting commit.
+
+The absolute-selector and inherited-base A→B→A tests assert that their edit hooks ran; the separate unsafe-config tests assert rejection before publication and do not claim an edit-hook run. A19 remains qualified as above: esbuild does not expose all native config reads, and this correction is not a proof of every native path on every platform. This is a post-review correction and does not reset the feature review counts.
+
 ## 6. Held work (not done)
 
 - Broader multi-config experiments (see `multi-config-analysis.md`).

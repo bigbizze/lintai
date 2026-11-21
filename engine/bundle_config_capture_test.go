@@ -228,10 +228,16 @@ func TestBundleConfigViewAcrossBuilds(t *testing.T) {
 	if got := observe(absoluteStable); got != "absent" {
 		t.Fatalf("absolute selector stable config produced %q", got)
 	}
+	if err := os.Remove(control + ".hook"); err != nil {
+		t.Fatalf("reset absolute selector edit marker: %v", err)
+	}
 	if err := os.WriteFile(control, []byte("config-external-aba:"+packageOptions), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	absoluteBetween := build()
+	if _, err := os.Stat(control + ".hook"); err != nil {
+		t.Fatalf("absolute selector edit hook did not run: %v", err)
+	}
 	if got := observe(absoluteBetween); got != "absent" || absoluteBetween[rule].Hash != absoluteStable[rule].Hash {
 		t.Errorf("absolute selector A-to-B-to-A: message=%q same hash=%v", got, absoluteBetween[rule].Hash == absoluteStable[rule].Hash)
 	}

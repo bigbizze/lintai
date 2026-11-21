@@ -47,6 +47,8 @@ The lock helps only if the author that you do not trust cannot also change the l
 3. If the agent changes a rule or a file that a rule imports, CI fails with phase `integrity`. The agent cannot fix this without a change to the lock, and that change needs a review from the rule owners.
 4. If the agent edits only application code, the rules run as the owners approved them.
 
+Generate the lock on the operating system and architecture where it will be enforced, using the pinned lintai and dependency versions, and review the resulting lock with the rule change. If CI enforces rules on multiple platforms, generate and review a separate lock on each platform, for example with `lintai lock --lock-file locks/rules-linux-arm64.json` and `lintai lock --lock-file locks/rules-macos-arm64.json`. Select the corresponding reviewed file with `--rules-lock` on each platform, and protect those files like the default lock. Generate locks as an approval step; never automatically regenerate a lock immediately before enforcing it, because that would approve the current inputs without review.
+
 ## Setup sandbox
 
 `setup()` is the only part of a rule that runs with Node capabilities. With `--setup-sandbox auto` (the default) or `on`, lintai runs `setup()` under the Node permission model:
