@@ -94,9 +94,9 @@ type sourceLinksDocumentEntry struct {
 	SourceTsconfig json.RawMessage `json:"sourceTsconfig,omitempty"`
 }
 
-func readSourceLinks(workspaceRoot, option string, hostFS vfs.FS) ([]configuredSourceEntry, string, error) {
+func readSourceLinks(workspaceRoot, option string, hostFS vfs.FS) ([]configuredSourceEntry, error) {
 	if option == "" {
-		return nil, "", nil
+		return nil, nil
 	}
 	file := option
 	if !filepath.IsAbs(file) {
@@ -104,61 +104,61 @@ func readSourceLinks(workspaceRoot, option string, hostFS vfs.FS) ([]configuredS
 	}
 	absolute, err := filepath.Abs(file)
 	if err != nil {
-		return nil, "", fmt.Errorf("invalid --source-links: resolve path: %w", err)
+		return nil, fmt.Errorf("invalid --source-links: resolve path: %w", err)
 	}
 	absolute = filepath.Clean(absolute)
 	contents, ok := hostFS.ReadFile(tspath.RootedFilePathFromAbsolute(absolute))
 	if !ok {
-		return nil, "", fmt.Errorf("invalid --source-links: read %s", absolute)
+		return nil, fmt.Errorf("invalid --source-links: read %s", absolute)
 	}
 	decoder := json.NewDecoder(strings.NewReader(contents))
 	decoder.DisallowUnknownFields()
 	var document sourceLinksDocument
 	if err := decoder.Decode(&document); err != nil {
-		return nil, "", fmt.Errorf("invalid --source-links: decode JSON: %w", err)
+		return nil, fmt.Errorf("invalid --source-links: decode JSON: %w", err)
 	}
 	var extra any
 	if err := decoder.Decode(&extra); err != io.EOF {
 		if err == nil {
-			return nil, "", fmt.Errorf("invalid --source-links: expected one JSON object")
+			return nil, fmt.Errorf("invalid --source-links: expected one JSON object")
 		}
-		return nil, "", fmt.Errorf("invalid --source-links: trailing JSON: %w", err)
+		return nil, fmt.Errorf("invalid --source-links: trailing JSON: %w", err)
 	}
 	if document.Version != 1 {
-		return nil, "", fmt.Errorf("invalid --source-links: unsupported version %d", document.Version)
+		return nil, fmt.Errorf("invalid --source-links: unsupported version %d", document.Version)
 	}
 	if document.Entries == nil {
-		return nil, "", fmt.Errorf("invalid --source-links: entries must be an array")
+		return nil, fmt.Errorf("invalid --source-links: entries must be an array")
 	}
 	rootKey := hostFS.CaseSensitivity().PathKey(tspath.RootedPathFromAbsolute(workspaceRoot)).AsString()
 	byChecked := make(map[string]configuredSourceEntry, len(document.Entries))
 	for index, raw := range document.Entries {
 		checked, checkedPath, checkedKey, err := canonicalEntryPath(workspaceRoot, rootKey, raw.CheckedEntry, hostFS.CaseSensitivity())
 		if err != nil {
-			return nil, "", fmt.Errorf("invalid --source-links: entries[%d].checkedEntry: %w", index, err)
+			return nil, fmt.Errorf("invalid --source-links: entries[%d].checkedEntry: %w", index, err)
 		}
 		source, sourcePath, _, err := canonicalEntryPath(workspaceRoot, rootKey, raw.SourceEntry, hostFS.CaseSensitivity())
 		if err != nil {
-			return nil, "", fmt.Errorf("invalid --source-links: entries[%d].sourceEntry: %w", index, err)
+			return nil, fmt.Errorf("invalid --source-links: entries[%d].sourceEntry: %w", index, err)
 		}
 		config, configPath := "", ""
 		if raw.SourceTsconfig != nil {
 			var selector string
 			if bytes.Equal(bytes.TrimSpace(raw.SourceTsconfig), []byte("null")) {
-				return nil, "", fmt.Errorf("invalid --source-links: entries[%d].sourceTsconfig must be a string", index)
+				return nil, fmt.Errorf("invalid --source-links: entries[%d].sourceTsconfig must be a string", index)
 			}
 			if err := json.Unmarshal(raw.SourceTsconfig, &selector); err != nil {
-				return nil, "", fmt.Errorf("invalid --source-links: entries[%d].sourceTsconfig must be a string: %w", index, err)
+				return nil, fmt.Errorf("invalid --source-links: entries[%d].sourceTsconfig must be a string: %w", index, err)
 			}
 			config, configPath, _, err = canonicalEntryPath(workspaceRoot, rootKey, selector, hostFS.CaseSensitivity())
 			if err != nil {
-				return nil, "", fmt.Errorf("invalid --source-links: entries[%d].sourceTsconfig: %w", index, err)
+				return nil, fmt.Errorf("invalid --source-links: entries[%d].sourceTsconfig: %w", index, err)
 			}
 			if !strings.HasSuffix(strings.ToLower(config), ".json") {
-				return nil, "", fmt.Errorf("invalid --source-links: entries[%d].sourceTsconfig must name a JSON config", index)
+				return nil, fmt.Errorf("invalid --source-links: entries[%d].sourceTsconfig must name a JSON config", index)
 			}
 			if !hostFS.FileExists(tspath.RootedFilePathFromAbsolute(configPath)) {
-				return nil, "", fmt.Errorf("invalid --source-links: entries[%d].sourceTsconfig does not exist", index)
+				return nil, fmt.Errorf("invalid --source-links: entries[%d].sourceTsconfig does not exist", index)
 			}
 		}
 		entry := configuredSourceEntry{
@@ -167,7 +167,7 @@ func readSourceLinks(workspaceRoot, option string, hostFS vfs.FS) ([]configuredS
 		}
 		if previous, exists := byChecked[checkedKey]; exists {
 			if previous.SourceEntry != entry.SourceEntry || previous.SourceConfig != entry.SourceConfig {
-				return nil, "", fmt.Errorf("invalid --source-links: contradictory entries for checkedEntry %q", checked)
+				return nil, fmt.Errorf("invalid --source-links: contradictory entries for checkedEntry %q", checked)
 			}
 			continue
 		}
@@ -179,7 +179,7 @@ func readSourceLinks(workspaceRoot, option string, hostFS vfs.FS) ([]configuredS
 		entries = append(entries, entry)
 	}
 	slicesSortSourceEntries(entries)
-	return entries, absolute, nil
+	return entries, nil
 }
 
 func canonicalEntryPath(root, rootKey, value string, caseSensitivity tspath.CaseSensitivity) (relative, absolute, key string, err error) {

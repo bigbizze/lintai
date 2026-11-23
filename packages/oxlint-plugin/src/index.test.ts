@@ -1,3 +1,10 @@
+import {
+	createFramedResponse,
+	createTestDependencies,
+	createTestProcess,
+	getClient,
+	resetClientsForTest,
+} from "../../client/dist/test-support.test.js";
 import { deepEqual } from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -5,16 +12,7 @@ import path from "node:path";
 import { after, describe, it } from "node:test";
 
 import { rules as authoringRules } from "@lintai/authoring-rules";
-import {
-	type Diagnostic,
-	createFramedResponse,
-	createTestDependencies,
-	createTestProcess,
-	getClient,
-	loadRuleIds,
-	resetClientsForTest,
-	resolveBridgeOptions,
-} from "@lintai/client";
+import { type Diagnostic, resolveBridgeOptions } from "@lintai/client";
 import { RuleTester as ESLintRuleTester } from "eslint";
 import { RuleTester } from "oxlint/plugins-dev";
 
@@ -71,8 +69,6 @@ const violation: Diagnostic = {
 };
 const diagnostics = [ruleError, violation];
 const problem = "[lintai] rule arch.broken could not run (phase program_parse): parse error";
-const loadError =
-	"[lintai] rule file lintai-rules/typo.ts could not be loaded: Unexpected end of file";
 const violationError = {
 	message: "[arch.no-async/violation] functions must not be async",
 	line: 3,
@@ -81,7 +77,6 @@ const violationError = {
 	endColumn: 29,
 };
 const problemError = { message: problem, line: 1, column: 1 };
-const loadErrorReport = { message: loadError, line: 1, column: 1 };
 
 const bridge = { binary: "/tmp/lintai", workspaceRoot: workspace, repoRoot: workspace };
 
@@ -109,7 +104,6 @@ it("unused suppressions report through analysis rather than the generated rule",
 			};
 		},
 	});
-	loadRuleIds(resolved, dependencies);
 	getClient(resolved, dependencies);
 	const plugin = createLintaiPlugin(options);
 	const messages: string[] = [];
@@ -154,7 +148,6 @@ it("serve findings with unregistered IDs report through analysis with restart gu
 				}),
 			),
 	});
-	loadRuleIds(resolved, dependencies);
 	getClient(resolved, dependencies);
 	const plugin = createLintaiPlugin(options);
 	const messages: string[] = [];
@@ -225,7 +218,6 @@ function withHost(argv: string[], fresh: boolean) {
 					),
 				log: () => undefined,
 			});
-			loadRuleIds(options, dependencies);
 			getClient(options, dependencies);
 		},
 		after() {
@@ -326,11 +318,11 @@ tester.run("analysis (oxlint CLI, oneshot)", cli.analysis, {
 	valid: [],
 	invalid: [
 		{
-			name: "rule errors and load errors are on line 1 of the first file",
+			name: "current rule errors are on line 1 of the first file",
 			code: savedText,
 			filename: path.join(workspace, "src", "a.ts"),
 			...withHost(cliArgv, false),
-			errors: [problemError, loadErrorReport],
+			errors: [problemError],
 		},
 	],
 });
@@ -357,14 +349,14 @@ tester.run("analysis (oxlint --lsp, serve)", lsp.analysis, {
 			code: savedText,
 			filename: path.join(workspace, "src", "a.ts"),
 			...withHost(lspArgv, false),
-			errors: [problemError, loadErrorReport],
+			errors: [problemError],
 		},
 		{
 			name: "a later lint of another file reports the problems again",
 			code: savedText,
 			filename: path.join(workspace, "src", "b.ts"),
 			...withHost(lspArgv, false),
-			errors: [problemError, loadErrorReport],
+			errors: [problemError],
 		},
 		{
 			name: "unsaved changes give the save message and nothing else",

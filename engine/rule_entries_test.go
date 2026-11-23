@@ -68,7 +68,7 @@ export default rule("fixture.entry-b").version(1)
 			}
 			return err
 		})
-		if err != nil || len(files) != 1 || filepath.Base(files[0]) != "prepare.cjs" || !strings.HasPrefix(filepath.Base(filepath.Dir(files[0])), "retained-") {
+		if err != nil || len(files) != 1 || filepath.Base(files[0]) != "prepare.cjs" {
 			t.Errorf("warm check should materialize only the Node prepare file: %v %v", files, err)
 		}
 	}

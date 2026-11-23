@@ -1,15 +1,18 @@
+import {
+	createFramedResponse,
+	createTestDependencies,
+	createTestProcess,
+	createTestTransport,
+	getClient,
+	resetClientsForTest,
+} from "../../client/dist/test-support.test.js";
 import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test, { afterEach } from "node:test";
 
-import {
-	type Diagnostic,
-	type LintaiOptions,
-	createTestDependencies,
-	getClient,
-	loadRuleIds,
-	resetClientsForTest,
-	resolveBridgeOptions,
-} from "@lintai/client";
+import { type Diagnostic, type LintaiOptions, resolveBridgeOptions } from "@lintai/client";
 import { Linter } from "eslint";
 
 import { createLintaiPlugin, eslintHostDefaults } from "./index.js";
@@ -114,7 +117,6 @@ function stubLintai(
 		},
 		log: () => undefined,
 	});
-	loadRuleIds(resolved, dependencies);
 	getClient(resolved, dependencies);
 	return runs;
 }
@@ -177,19 +179,18 @@ test("each lintai rule is its own ESLint rule with the configured level; analysi
 	});
 	assert.deepEqual(messages, [
 		"lintai/analysis 2 1 [lintai] rule arch.off could not run (phase evaluation): fact limit",
-		"lintai/analysis 2 1 [lintai] rule file lintai-rules/broken.ts could not be loaded: Unexpected end of file",
 		"lintai/analysis 2 3 [lintai] rule arch.renamed has no linter rule lintai/arch.renamed, because the linter read the rule list when it loaded the plugin. Restart the linter or the editor's language server. [arch.renamed/v] renamed",
 		"lintai/arch.hard 2 1 [arch.hard/v] hard",
 		"lintai/arch.soft 1 2 [arch.soft/v] soft",
 	]);
-	// One lintai rules run and one analysis serve every rule, and the plugin
+	// Each construction discovers rules; one analysis serves every rule, and the plugin
 	// does not pass --severity.
 	assert.deepEqual(
 		runs.map((args) => args[0]),
-		["rules", "--json"],
+		["rules", "rules", "--json"],
 	);
 	assert.ok(!runs.some((args) => args.includes("--severity")));
-	assert.equal(runs[1]?.[runs[1].indexOf("--rule-workers") + 1], "2");
+	assert.equal(runs[2]?.[runs[2].indexOf("--rule-workers") + 1], "2");
 });
 
 test("configs.all enables every lintai rule, and a later config overrides one rule or one file", () => {
@@ -334,4 +335,114 @@ test("rules: [] creates only analysis and the authoring rules and starts no lint
 		[],
 	);
 	assert.equal(spawned, 0);
+});
+
+// Exercise ESLint's actual SourceCode lifetime: a reused SourceCode must
+// revalidate, while enabled rules share one response even with analysis off.
+test("plugin discovery and ESLint analysis follow their current lifetimes", () => {
+	const root = mkdtempSync(path.join(os.tmpdir(), "lintai-eslint-lifetime-"));
+	mkdirSync(path.join(root, "src"));
+	const filename = path.join(root, "src/a.js");
+	const code = "export const a = 1;\n";
+	writeFileSync(filename, code);
+	const hostOptions: LintaiOptions = {
+		mode: "serve",
+		binary: "/fixture/lintai",
+		repoRoot: root,
+		workspaceRoot: root,
+	};
+	const resolved = resolveBridgeOptions(hostOptions, process.cwd(), eslintHostDefaults());
+	const child = createTestProcess();
+	let requestID = 0;
+	let fileRequests = 0;
+	let listings = 0;
+	let recovered = false;
+	const stderr: string[] = [];
+	const originalError = console.error;
+	const dependencies = createTestDependencies({
+		spawnSync: () => {
+			listings++;
+			return {
+				status: 0,
+				stderr: "",
+				stdout: JSON.stringify({
+					rules: (recovered ? ["alpha", "gamma"] : ["alpha", "beta"]).map((id) => ({
+						id,
+						path: `${id}.ts`,
+					})),
+					errors: recovered ? [] : [{ path: "broken.ts", message: "syntax error" }],
+				}),
+			};
+		},
+		spawnServe: () =>
+			createTestTransport(child, () => {
+				const id = ++requestID;
+				if (id === 1)
+					return createFramedResponse({ jsonrpc: "2.0", id, result: { protocolVersion: 1 } });
+				fileRequests++;
+				return createFramedResponse({
+					jsonrpc: "2.0",
+					id,
+					result: {
+						snapshotVersion: String(fileRequests),
+						rulesLoaded: 2,
+						diagnostics: ["alpha", "beta"].map((rule_id) => ({
+							...located(rule_id, recovered ? "repaired" : "initial", 1),
+							source_location: {
+								file: "src/a.js",
+								startLine: 1,
+								startColumn: 1,
+								endLine: 1,
+								endColumn: 2,
+							},
+						})),
+						problems: recovered ? [] : ["[lintai] current syntax error"],
+					},
+				});
+			}),
+	});
+	try {
+		getClient(resolved, dependencies);
+		console.error = (message) => {
+			stderr.push(String(message));
+		};
+		const plugin = createLintaiPlugin(hostOptions);
+		assert.deepEqual(stderr, ["[lintai] rule file broken.ts could not be loaded: syntax error"]);
+		const linter = new Linter({ configType: "flat", cwd: root });
+		const verify = () =>
+			linter
+				.verify(code, [plugin.configs.all], filename)
+				.map((item) => item.message)
+				.sort();
+		assert.deepEqual(
+			verify(),
+			["[alpha/v] initial", "[beta/v] initial", "[lintai] current syntax error"].sort(),
+		);
+		assert.equal(fileRequests, 1);
+		const previousSourceCode = linter.getSourceCode();
+		recovered = true;
+		const analysisDisabled: Linter.Config[] = [
+			{
+				...plugin.configs.all,
+				rules: { ...plugin.configs.all.rules, "lintai/analysis": "off" },
+			},
+		];
+		assert.deepEqual(
+			linter
+				.verify(previousSourceCode, analysisDisabled, filename)
+				.map((item) => item.message)
+				.sort(),
+			["[alpha/v] repaired", "[beta/v] repaired"].sort(),
+		);
+		assert.equal(fileRequests, 2);
+		const rebuilt = createLintaiPlugin(hostOptions);
+		assert.ok(rebuilt.rules.alpha && rebuilt.rules.gamma);
+		assert.equal(rebuilt.rules.beta, undefined);
+		assert.equal(listings, 2);
+		assert.equal(stderr.length, 1);
+	} finally {
+		console.error = originalError;
+		resetClientsForTest();
+		rmSync(root, { recursive: true, force: true });
+	}
 });

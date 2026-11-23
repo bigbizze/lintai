@@ -31,7 +31,7 @@ source_links = ""
 		t.Fatal(err)
 	}
 	if len(config.Exclude) != 1 || config.Exclude[0] != "tmp/**" || len(config.Include) != 1 || config.Include[0] != "dist/contracts/**" ||
-		len(config.Sources) != 1 || config.Sources[0] != "generated/contracts.d.ts" || config.Producers["ts"].Files != "walk" || config.Digest == "" {
+		len(config.Sources) != 1 || config.Sources[0] != "generated/contracts.d.ts" || config.Producers["ts"].Files != "walk" || len(config.Observations.Records()) == 0 {
 		t.Fatalf("unexpected effective config: %+v", config)
 	}
 	invocationDir := t.TempDir()

@@ -1,7 +1,6 @@
 import { type SpawnSyncReturns, spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 
 import { FrameDecoder, encodeFrame } from "./frames.js";
@@ -107,7 +106,7 @@ type SpawnSyncLike = (
 	options: { cwd: string; encoding: "utf8" },
 ) => Pick<SpawnSyncReturns<string>, "stdout" | "stderr" | "error" | "status">;
 
-type ClientDependencies = {
+export type ClientDependencies = {
 	spawnServe: SpawnServe;
 	spawnSync: SpawnSyncLike;
 	log: (message: string) => void;
@@ -150,9 +149,7 @@ export class LintAIClient {
 	private transport: ServeTransport | undefined;
 	private nextRequestID = 1;
 	private readonly decoder = new FrameDecoder();
-	private latestProblems: string[] = [];
-	private problemIdentity = "[]";
-	private problemsReported = false;
+	private problemEpisode = { identity: "[]", messages: [] as string[], reported: false };
 	private oneshotCache: IndexedDiagnostics | undefined;
 	private serveFailure: string | undefined;
 	private readonly warned = new Set<string>();
@@ -163,6 +160,11 @@ export class LintAIClient {
 		private readonly dependencies: ClientDependencies = defaultDependencies,
 	) {
 		process.on("exit", this.processExitHandler);
+	}
+
+	// Discover afresh for every plugin construction using this client's transport dependencies.
+	listRuleIds(): RuleIdList {
+		return loadRuleIds(this.options, this.dependencies);
 	}
 
 	getDiagnostics(file: string): Diagnostic[] {
@@ -182,11 +184,22 @@ export class LintAIClient {
 		}
 	}
 
+	// Hold diagnostics and their problem episode together for one host analysis.
+	getFileAnalysis(file: string): { diagnostics: Diagnostic[]; problems(): string[] } {
+		const diagnostics = this.getDiagnostics(file);
+		const episode = this.problemEpisode;
+		return { diagnostics, problems: () => this.reportProblems(episode) };
+	}
+
 	// Reports a changed ordered list once per episode for CLI hosts.
 	problems(): string[] {
-		if (this.options.reportProblemsOnce && this.problemsReported) return [];
-		if (this.latestProblems.length) this.problemsReported = true;
-		return [...this.latestProblems];
+		return this.reportProblems(this.problemEpisode);
+	}
+
+	private reportProblems(episode: typeof this.problemEpisode): string[] {
+		if (this.options.reportProblemsOnce && episode.reported) return [];
+		if (episode.messages.length) episode.reported = true;
+		return [...episode.messages];
 	}
 
 	// Forces preparation even if all recorded inputs appear unchanged.
@@ -214,6 +227,8 @@ export class LintAIClient {
 		const transport = this.transport;
 		this.transport = undefined;
 		this.state = "disposed";
+		const key = JSON.stringify(this.options);
+		if (clientCache.get(key) === this) clientCache.delete(key);
 		if (transport) {
 			try {
 				transport.write(
@@ -320,11 +335,9 @@ export class LintAIClient {
 
 	private setProblems(problems: string[]): void {
 		const identity = JSON.stringify(problems);
-		if (identity !== this.problemIdentity) {
-			this.problemIdentity = identity;
-			this.problemsReported = false;
+		if (identity !== this.problemEpisode.identity) {
+			this.problemEpisode = { identity, messages: [...problems], reported: false };
 		}
-		this.latestProblems = [...problems];
 	}
 
 	private getOneshotDiagnostics(file: string): Diagnostic[] {
@@ -559,37 +572,17 @@ export function getClient(
 	return client;
 }
 
-export function resetClientsForTest(): void {
-	for (const client of clientCache.values()) {
-		client.dispose();
-	}
-	clientCache.clear();
-	ruleIdCache.clear();
-}
-
 export type RuleIdList = {
 	rules: Array<{ id: string; path: string }>;
 	errors: Array<{ path: string; id?: string; message: string }>;
 };
 
-const ruleIdCache = new Map<string, RuleIdList>();
-
-// loadRuleIds runs lintai rules --json and returns the id and path of each
-// rule, and the rule files that did not load. The linter plugins create one
-// rule for each id. The result is cached for each set of resolved options.
-// When lintai rules itself fails, for example because the binary is
-// missing or a glob matches nothing, the failure is one error with an empty
-// path and there are no rules. That result is not cached, so the next load
-// of the linter config tries again.
+// loadRuleIds runs lintai rules --json for the current registration list.
+// A failed listing is reported at plugin construction and retried on reconstruction.
 export function loadRuleIds(
 	options: ResolvedBridgeOptions,
 	dependencies: ClientDependencies = defaultDependencies,
 ): RuleIdList {
-	const key = JSON.stringify(options);
-	const cached = ruleIdCache.get(key);
-	if (cached) {
-		return cached;
-	}
 	const result = dependencies.spawnSync(
 		options.binary,
 		[
@@ -606,11 +599,7 @@ export function loadRuleIds(
 		],
 		{ cwd: options.repoRoot, encoding: "utf8" },
 	);
-	const list = parseRuleIds(result);
-	if (!list.errors.some((item) => item.path === "")) {
-		ruleIdCache.set(key, list);
-	}
-	return list;
+	return parseRuleIds(result);
 }
 
 function parseRuleIds(result: ReturnType<SpawnSyncLike>): RuleIdList {
@@ -640,18 +629,6 @@ function parseRuleIds(result: ReturnType<SpawnSyncLike>): RuleIdList {
 	}
 }
 
-export function createTestDependencies(overrides: Partial<ClientDependencies>): ClientDependencies {
-	return {
-		...defaultDependencies,
-		...overrides,
-	};
-}
-
-export function createFramedResponse(response: JSONRPCResponse): Buffer {
-	const payload = Buffer.from(JSON.stringify(response), "utf8");
-	return Buffer.concat([Buffer.from(`Content-Length: ${payload.length}\r\n\r\n`, "utf8"), payload]);
-}
-
 function indexDiagnostics(diagnostics: Diagnostic[]): IndexedDiagnostics {
 	const byFile = new Map<string, Diagnostic[]>();
 	const unlocated: Diagnostic[] = [];
@@ -677,67 +654,4 @@ function normalizeFile(file: string): string {
 
 function asError(error: unknown): Error {
 	return error instanceof Error ? error : new Error(String(error));
-}
-
-type TestProcess = {
-	stdin: PassThrough;
-	stdout: PassThrough;
-	on(
-		event: "exit",
-		listener: (code: number | null, signal: NodeJS.Signals | null) => void,
-	): TestProcess;
-	kill(signal?: NodeJS.Signals | number): boolean;
-	unref(): void;
-	emitExit(code?: number | null, signal?: NodeJS.Signals | null): void;
-};
-
-export function createTestProcess(): TestProcess {
-	const listeners = new Set<(code: number | null, signal: NodeJS.Signals | null) => void>();
-	const stdin = new PassThrough();
-	const stdout = new PassThrough();
-	stdin.on("finish", () => {
-		stdout.end();
-	});
-	stdin.on("close", () => {
-		stdout.end();
-	});
-	return {
-		stdin,
-		stdout,
-		on(event, listener) {
-			if (event === "exit") {
-				listeners.add(listener);
-			}
-			return this;
-		},
-		kill() {
-			stdout.end();
-			listeners.forEach((listener) => listener(0, null));
-			return true;
-		},
-		unref() {},
-		emitExit(code = 0, signal = null) {
-			listeners.forEach((listener) => listener(code, signal));
-		},
-	};
-}
-
-export function createTestTransport(
-	child: TestProcess,
-	read: (child: TestProcess, timeoutMs: number) => Buffer,
-): ServeTransport {
-	return {
-		write(bytes) {
-			child.stdin.write(bytes);
-		},
-		read(deadline) {
-			return read(child, deadline);
-		},
-		close() {
-			if (!child.stdin.destroyed) child.stdin.end();
-		},
-		failure() {
-			return undefined;
-		},
-	};
 }

@@ -157,15 +157,11 @@ func (e *extractor) declarationMap(generatedPath tspath.RootedFilePath) *declara
 		index.generatedUnreadable = true
 		return index
 	}
-	mapPath, discovered, candidates, earlyOutcome := e.findDeclarationMap(generatedPath, generated.text)
+	mapPath, discovered, earlyOutcome := e.findDeclarationMap(generatedPath, generated.text)
 	index.mapPath, index.discovered, index.outcome = mapPath, discovered, earlyOutcome
-	for _, candidate := range candidates {
-		e.inputs = append(e.inputs, SnapshotInput{Path: candidate, Exists: e.host.FS().FileExists(tspath.RootedFilePathFromAbsolute(candidate))})
-	}
 	if earlyOutcome != "" || mapPath == "" {
 		return index
 	}
-	e.inputs = append(e.inputs, SnapshotInput{Path: normalizeSlash(mapPath), Exists: true, OptionalMap: true})
 	mapFile := e.mapFile(tspath.RootedFilePathFromAbsolute(mapPath))
 	if !mapFile.exists {
 		index.outcome = "unavailable_map"
@@ -261,7 +257,6 @@ func (e *extractor) recoverDeclarationMap(checked *ast.Node, requested bool, pub
 			return
 		}
 		source := e.mapFile(tspath.RootedFilePathFromAbsolute(sourcePath))
-		e.inputs = append(e.inputs, SnapshotInput{Path: normalizeSlash(sourcePath), Exists: source.exists})
 		sourceFile := source.sourceFile()
 		if sourceFile == nil || len(sourceFile.Diagnostics()) > 0 {
 			e.addMapOutcome(checkedID, "unavailable_source")
@@ -349,7 +344,7 @@ func (e *extractor) recoverDeclarationMap(checked *ast.Node, requested bool, pub
 	e.declarationSources = append(e.declarationSources, DeclarationSourceFact{CheckedDecl: checkedID, SourceDecl: candidateIDs[0], Method: "declaration_map"})
 }
 
-func (e *extractor) findDeclarationMap(generated tspath.RootedFilePath, generatedText string) (string, bool, []string, string) {
+func (e *extractor) findDeclarationMap(generated tspath.RootedFilePath, generatedText string) (string, bool, string) {
 	var url string
 	for _, line := range strings.Split(generatedText, "\n") {
 		if index := strings.LastIndex(line, "sourceMappingURL="); index >= 0 {
@@ -357,14 +352,14 @@ func (e *extractor) findDeclarationMap(generated tspath.RootedFilePath, generate
 		}
 	}
 	if strings.HasPrefix(url, "data:") || tspath.IsUrl(url) {
-		return "", true, nil, "unsupported"
+		return "", true, "unsupported"
 	}
 	var candidates []string
 	if url != "" {
 		if tspath.PathIsAbsolute(url) {
 			absolute, ok := tspath.TryRootedFilePathFromAbsolute(url)
 			if !ok {
-				return "", true, nil, "unsupported"
+				return "", true, "unsupported"
 			}
 			candidates = append(candidates, normalizeSlash(absolute.AsString()))
 		} else {
@@ -372,16 +367,24 @@ func (e *extractor) findDeclarationMap(generated tspath.RootedFilePath, generate
 		}
 	}
 	candidates = append(candidates, normalizeSlash(generated.AppendSuffix(".map").AsString()))
+	// All candidate probes affect freshness even when an earlier map is found.
+	defer func() {
+		for _, candidate := range candidates {
+			if rooted, ok := tspath.TryRootedFilePathFromAbsolute(candidate); ok {
+				e.host.FS().FileExists(rooted)
+			}
+		}
+	}()
 	for _, candidate := range candidates {
 		rooted, ok := tspath.TryRootedFilePathFromAbsolute(candidate)
 		if !ok {
-			return "", url != "", candidates, "unsupported"
+			return "", url != "", "unsupported"
 		}
 		if e.host.FS().FileExists(rooted) {
-			return candidate, true, candidates, ""
+			return candidate, true, ""
 		}
 	}
-	return "", url != "", candidates, ""
+	return "", url != "", ""
 }
 
 func declarationMapSourcePath(mapPath string, sourceRoot *string, source string) (string, bool) {

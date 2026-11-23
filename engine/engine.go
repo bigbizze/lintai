@@ -91,21 +91,20 @@ type Result struct {
 }
 
 type Session struct {
-	defaults       Options
-	producers      []backend.Producer
-	checkMu        sync.Mutex
-	mu             sync.Mutex
-	ruleEntries    map[string]*ruleEntry
-	closed         bool
-	nextCheck      uint64
-	checks         map[uint64]context.CancelFunc
-	checksWG       sync.WaitGroup
-	closeOnce      sync.Once
-	closeErr       error
-	stats          executionStats
-	currentFacts   *composedFacts
-	currentCatalog string
-	currentResult  *publishedResult
+	defaults      Options
+	producers     []backend.Producer
+	checkMu       sync.Mutex
+	mu            sync.Mutex
+	ruleEntries   map[string]*ruleEntry
+	closed        bool
+	nextCheck     uint64
+	checks        map[uint64]context.CancelFunc
+	checksWG      sync.WaitGroup
+	closeOnce     sync.Once
+	closeErr      error
+	stats         executionStats
+	currentFacts  *composedFacts
+	currentResult *publishedResult
 }
 
 type executionStats struct {
@@ -292,7 +291,6 @@ func (e *Session) clearPublished() {
 func (e *Session) clearCurrent() {
 	e.clearPublished()
 	e.currentFacts = nil
-	e.currentCatalog = ""
 }
 
 // runAndPublish is called with checkMu held and a registered active context.
@@ -435,7 +433,6 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options, mode
 	e.stats.bundleArtifacts.Add(int64(ruleCatalog.bundleBuilds))
 	if len(ruleCatalog.rules) == 0 {
 		e.currentFacts = nil
-		e.currentCatalog = ""
 		catalog, err := e.describeProducers()
 		if err != nil {
 			return Result{}, run, evidence, err
@@ -497,23 +494,17 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options, mode
 	e.prepareRulePlans(ruleCatalog, producerCatalog, assembled.snapshotID)
 	jobs, requested := ruleRelationDemand(ruleCatalog, producerCatalog)
 	if len(jobs) > 0 {
-		var current *composedFacts
-		if e.currentCatalog == producerCatalog.identity {
-			current = e.currentFacts
-		}
-		assembled, err = producerCatalog.collect(ctx, options, requested, current, mode)
+		assembled, err = producerCatalog.collect(ctx, options, requested, e.currentFacts, mode)
 		if err != nil {
 			return Result{}, run, evidence, err
 		}
 		e.currentFacts = &assembled
-		e.currentCatalog = producerCatalog.identity
 	} else {
 		assembled, err = producerCatalog.collect(ctx, options, nil, nil, mode)
 		if err != nil {
 			return Result{}, run, evidence, err
 		}
 		e.currentFacts = nil
-		e.currentCatalog = ""
 	}
 	evidence.observations = observe.Union(evidence.observations, assembled.observations)
 	evidence.reusable = evidence.reusable && assembled.reusableFromObservations

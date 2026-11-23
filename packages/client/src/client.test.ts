@@ -1,19 +1,17 @@
-import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import test, { afterEach } from "node:test";
 import {
-	LintAIClient,
 	createFramedResponse,
 	createTestDependencies,
 	createTestProcess,
 	createTestTransport,
 	getClient,
-	loadRuleIds,
 	resetClientsForTest,
-	resolveBridgeOptions,
-} from "./client.js";
+} from "./test-support.test.js";
+import assert from "node:assert/strict";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import test, { afterEach } from "node:test";
+import { LintAIClient, loadRuleIds, resolveBridgeOptions } from "./client.js";
 import { hasUnsavedChanges, toReports } from "./index.js";
 import { Spawner } from "./spawner.js";
 import { SpawnerServeTransport } from "./transport.js";
@@ -67,12 +65,16 @@ test("file requests recover on the same connection and report distinct problem e
 		assert.match(client.problems()[0], /invalid config/);
 		assert.deepEqual(client.getDiagnostics("src/a.ts"), []);
 		assert.match(client.problems()[0], /invalid request parameters/);
-		assert.deepEqual(client.getDiagnostics("src/a.ts"), [diagnostic]);
-		assert.deepEqual(client.problems(), [problem]);
-		assert.deepEqual(client.getDiagnostics("src/a.ts"), [diagnostic]);
-		assert.deepEqual(client.problems(), []);
-		assert.deepEqual(client.getDiagnostics("src/a.ts"), []);
-		assert.deepEqual(client.problems(), []);
+		const first = client.getFileAnalysis("src/a.ts");
+		const sameEpisode = client.getFileAnalysis("src/a.ts");
+		const recovered = client.getFileAnalysis("src/a.ts");
+		assert.deepEqual(first.diagnostics, [diagnostic]);
+		assert.deepEqual(sameEpisode.diagnostics, [diagnostic]);
+		assert.deepEqual(recovered.diagnostics, []);
+		// Later responses must not replace the problems attached to an earlier analysis.
+		assert.deepEqual(first.problems(), [problem]);
+		assert.deepEqual(sameEpisode.problems(), []);
+		assert.deepEqual(recovered.problems(), []);
 		client.reanalyze();
 		assert.deepEqual(client.problems(), [problem]);
 		assert.deepEqual(client.getDiagnostics("src/a.ts"), [diagnostic]);
@@ -309,7 +311,7 @@ test("hasUnsavedChanges compares the editor text with the saved file and ignores
 	}
 });
 
-test("loadRuleIds runs lintai rules once for each set of resolved options, keeps the load errors and does not cache a failure", () => {
+test("loadRuleIds discovers the current list on each request and reports failures", () => {
 	const calls: string[][] = [];
 	const deps = createTestDependencies({
 		spawnSync: (_command, args) => {
@@ -335,11 +337,11 @@ test("loadRuleIds runs lintai rules once for each set of resolved options, keeps
 		rules: [{ id: "arch.a", path: "lintai-rules/a.ts" }],
 		errors: [{ path: "lintai-rules/broken.ts", message: "Unexpected end of file" }],
 	});
-	assert.equal(loadRuleIds({ ...options }, deps), first);
-	assert.equal(calls.length, 1);
+	assert.deepEqual(loadRuleIds({ ...options }, deps), first);
+	assert.equal(calls.length, 2);
 	assert.deepEqual(calls[0]?.slice(0, 2), ["rules", "--json"]);
 	loadRuleIds({ ...options, ruleGlobs: ["/workspace/other/*.ts"] }, deps);
-	assert.equal(calls.length, 2);
+	assert.equal(calls.length, 3);
 
 	let failures = 0;
 	const failing = createTestDependencies({

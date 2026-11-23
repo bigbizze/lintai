@@ -275,14 +275,14 @@ func TestBuildSnapshotTracksMissingNearestTsconfigForCreation(t *testing.T) {
 			before := build()
 			for _, path := range []string{"src/core/tsconfig.json", "src/tsconfig.json"} {
 				candidate := filepath.Join(root, path)
-				if !slices.ContainsFunc(before.Inputs, func(input SnapshotInput) bool { return input.Path == candidate && !input.Exists }) {
-					t.Fatalf("missing nearest-config candidate %s was not tracked: %+v", candidate, before.Inputs)
+				if !slices.ContainsFunc(before.CompilerInputs, func(input CompilerObservation) bool { return input.Path == candidate && observationMissing(input) }) {
+					t.Fatalf("missing nearest-config candidate %s was not tracked: %+v", candidate, before.CompilerInputs)
 				}
 			}
-			if !existingConfig && !slices.ContainsFunc(before.Inputs, func(input SnapshotInput) bool {
-				return input.Path == filepath.Join(root, "tsconfig.json") && !input.Exists
+			if !existingConfig && !slices.ContainsFunc(before.CompilerInputs, func(input CompilerObservation) bool {
+				return input.Path == filepath.Join(root, "tsconfig.json") && observationMissing(input)
 			}) {
-				t.Fatalf("missing root config was not tracked for the synthetic program: %+v", before.Inputs)
+				t.Fatalf("missing root config was not tracked for the synthetic program: %+v", before.CompilerInputs)
 			}
 			if !slices.ContainsFunc(before.ImportEdges, func(edge ImportEdge) bool {
 				return edge.Specifier == "choice" && (existingConfig && edge.ToPath == "targets/old.ts" || !existingConfig && edge.Unresolved)
@@ -295,9 +295,9 @@ func TestBuildSnapshotTracksMissingNearestTsconfigForCreation(t *testing.T) {
 				t.Fatal(err)
 			}
 			after := build()
-			if !slices.ContainsFunc(after.Inputs, func(input SnapshotInput) bool { return input.Path == candidate && input.Exists }) ||
+			if !slices.ContainsFunc(after.CompilerInputs, func(input CompilerObservation) bool { return input.Path == candidate && observationExists(input) }) ||
 				!slices.ContainsFunc(after.ImportEdges, func(edge ImportEdge) bool { return edge.Specifier == "choice" && edge.ToPath == "targets/new.ts" }) {
-				t.Fatalf("created nearer config did not change the program resolution: inputs=%+v imports=%+v", after.Inputs, after.ImportEdges)
+				t.Fatalf("created nearer config did not change the program resolution: inputs=%+v imports=%+v", after.CompilerInputs, after.ImportEdges)
 			}
 		})
 	}
@@ -683,8 +683,8 @@ func TestCompilerPlanScopeAndMembership(t *testing.T) {
 			if local := get("nested/local.ts"); !local.Eligible || value(local.OwnerConfig) != "nested/tsconfig.json" || !slices.Equal(local.RootConfigs, []string{"nested/tsconfig.json"}) {
 				t.Fatalf("nearest root ownership: %+v", local)
 			}
-			if !slices.ContainsFunc(snapshot.Inputs, func(input SnapshotInput) bool {
-				return input.Path == filepath.ToSlash(filepath.Join(root, "missing.json")) && !input.Exists
+			if !slices.ContainsFunc(snapshot.CompilerInputs, func(input CompilerObservation) bool {
+				return input.Path == filepath.ToSlash(filepath.Join(root, "missing.json")) && observationMissing(input)
 			}) {
 				t.Fatal("missing reference was not tracked")
 			}
@@ -765,4 +765,12 @@ func typeDisplay(snapshot *Snapshot, id string) string {
 		}
 	}
 	return ""
+}
+
+// Compiler input observations are the evidence used to invalidate generations.
+func observationExists(input CompilerObservation) bool {
+	return input.Kind == "content" || input.Kind == "listing" || (input.Kind == "state" && (input.Value == "true" || input.Value == "file" || input.Value == "directory"))
+}
+func observationMissing(input CompilerObservation) bool {
+	return input.Kind == "state" && (input.Value == "false" || input.Value == "missing")
 }

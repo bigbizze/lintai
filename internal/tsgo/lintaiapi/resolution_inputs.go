@@ -301,37 +301,6 @@ func fileKind(info vfs.FileInfo) string {
 	return "file"
 }
 
-func (fsys *resolutionInputFS) inputs() []SnapshotInput {
-	fsys.mu.Lock()
-	defer fsys.mu.Unlock()
-	byPath := make(map[string]bool)
-	for path, input := range fsys.reads {
-		byPath[path] = input.exists
-	}
-	for path, exists := range fsys.fileProbes {
-		byPath[path] = byPath[path] || exists
-	}
-	for path, exists := range fsys.dirProbes {
-		byPath[path] = byPath[path] || exists
-	}
-	for path := range fsys.directories {
-		byPath[path] = true
-	}
-	for path := range fsys.missingDirectories {
-		if _, observed := byPath[path]; !observed {
-			byPath[path] = false
-		}
-	}
-	for path, kind := range fsys.stats {
-		byPath[path] = byPath[path] || kind != "missing"
-	}
-	result := make([]SnapshotInput, 0, len(byPath))
-	for path, exists := range byPath {
-		result = append(result, SnapshotInput{Path: path, Exists: exists})
-	}
-	return uniqueSnapshotInputs(result)
-}
-
 // observations detaches compiler-owned records without retaining source text.
 func (fsys *resolutionInputFS) observations() []CompilerObservation {
 	fsys.mu.Lock()

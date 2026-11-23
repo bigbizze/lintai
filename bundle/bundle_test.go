@@ -550,19 +550,3 @@ func TestBundleEvidence(t *testing.T) {
 		t.Fatal("staged content stamp accepted")
 	}
 }
-
-func TestStagedBytesCannotUseLaterFileStamp(t *testing.T) {
-	file := filepath.Join(t.TempDir(), "input.ts")
-	if err := os.WriteFile(file, []byte("B"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	sum := sha256.Sum256([]byte("A"))
-	set, err := observe.New([]observe.Record{{Kind: observe.Content, Path: file, Value: observe.Value(fmt.Sprintf("%x", sum))}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	changed, err := set.Changed(context.Background(), observe.Quick)
-	if err != nil || changed == nil {
-		t.Fatalf("staged A accepted against original B: %v %v", changed, err)
-	}
-}

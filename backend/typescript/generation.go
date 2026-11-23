@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/bigbizze/lintai/facts"
 	"github.com/bigbizze/lintai/internal/ambient"
 	"github.com/bigbizze/lintai/internal/canonical"
 	"github.com/bigbizze/lintai/internal/tsgo/lintaiapi"
@@ -22,7 +23,7 @@ func (b *Backend) validateGeneration(ctx context.Context, generation *producerGe
 	return changed == nil && err == nil, err
 }
 
-func (b *Backend) extractSnapshot(ctx context.Context, workspaceRoot string, relations []string, previous *lintaiapi.Snapshot) (*producerGeneration, []ambient.Source, error) {
+func (b *Backend) extractSnapshot(ctx context.Context, workspaceRoot string, relations []string, description facts.ProducerDescription, previous *lintaiapi.Snapshot) (*producerGeneration, []ambient.Source, error) {
 	scope, err := ParseFileScope(string(b.settings.Files))
 	if err != nil {
 		return nil, nil, err
@@ -52,8 +53,8 @@ func (b *Backend) extractSnapshot(ctx context.Context, workspaceRoot string, rel
 	if err != nil {
 		return nil, nil, err
 	}
-	generation := &producerGeneration{snapshot: snapshot, plan: plan}
-	if err := b.finishGeneration(generation, workspaceRoot, scope == FileScopeTsconfig); err != nil {
+	generation := &producerGeneration{snapshot: snapshot, adjustments: convertAdjustments(plan.Root, snapshot.ConfigAdjustments)}
+	if err := b.finishGeneration(generation, plan, description, workspaceRoot, scope == FileScopeTsconfig); err != nil {
 		return nil, nil, err
 	}
 	return generation, sources, nil
@@ -71,8 +72,8 @@ func compilerObservations(inputs []lintaiapi.CompilerObservation) (observe.Set, 
 	return observe.New(records)
 }
 
-func (b *Backend) finishGeneration(generation *producerGeneration, workspaceRoot string, tsconfigFiles bool) error {
-	snapshot, plan := generation.snapshot, generation.plan
+func (b *Backend) finishGeneration(generation *producerGeneration, plan *workspace.ScopePlan, description facts.ProducerDescription, workspaceRoot string, tsconfigFiles bool) error {
+	snapshot := generation.snapshot
 	compilerSet, err := compilerObservations(snapshot.CompilerInputs)
 	if err != nil {
 		return fmt.Errorf("compiler observations: %w", err)
@@ -86,41 +87,10 @@ func (b *Backend) finishGeneration(generation *producerGeneration, workspaceRoot
 	if err != nil {
 		return fmt.Errorf("input revision: %w", err)
 	}
-	// Compiler observations use the resolved plan root. Keep in-workspace
-	// input paths in the spelling supplied by the caller, including symlinked
-	// workspace roots.
-	for i := range snapshot.Inputs {
-		relative := relativeScopePath(plan.Root, snapshot.Inputs[i].Path)
-		if !filepath.IsAbs(filepath.FromSlash(relative)) {
-			snapshot.Inputs[i].Path = filepath.ToSlash(filepath.Join(requestedRoot, filepath.FromSlash(relative)))
-		}
-	}
-	snapshot.Inputs = uniqueSnapshotInputs(snapshot.Inputs)
-	description, err := b.Describe()
-	if err != nil {
-		return err
-	}
 	revision = combineInputRevisions(revision, plan.Revision, description.EffectiveConfiguration)
 	generation.scope = scopeIdentity(plan, snapshot, tsconfigFiles)
 	generation.inputRevision = revision
 	return nil
-}
-
-func uniqueSnapshotInputs(items []lintaiapi.SnapshotInput) []lintaiapi.SnapshotInput {
-	byPath := make(map[string]lintaiapi.SnapshotInput, len(items))
-	for _, item := range items {
-		current := byPath[item.Path]
-		current.Path = item.Path
-		current.Exists = current.Exists || item.Exists
-		current.OptionalMap = current.OptionalMap || item.OptionalMap
-		byPath[item.Path] = current
-	}
-	result := make([]lintaiapi.SnapshotInput, 0, len(byPath))
-	for _, item := range byPath {
-		result = append(result, item)
-	}
-	slices.SortFunc(result, func(left, right lintaiapi.SnapshotInput) int { return strings.Compare(left.Path, right.Path) })
-	return result
 }
 
 func combineInputRevisions(values ...any) string {
