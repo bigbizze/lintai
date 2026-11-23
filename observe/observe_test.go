@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -301,5 +302,35 @@ func TestConcurrentHintRenewal(t *testing.T) {
 	after, _ := set.Digest(filepath.Dir(file))
 	if before != after {
 		t.Fatal("hint renewal changed identity")
+	}
+}
+
+func TestListingErrorsAndToleratedUnreadableDirectory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "private")
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(path, 0o700)
+	if _, err := os.ReadDir(path); !os.IsPermission(err) {
+		t.Skip("the current user can enumerate a mode-000 directory")
+	}
+	for _, operation := range []Operation{Physical, CompilerAccessible} {
+		set := mustSet(t, Record{Kind: Listing, Path: path, Op: operation})
+		if _, err := set.Changed(context.Background(), Full); !errors.Is(err, os.ErrPermission) {
+			t.Fatalf("%s enumeration error: %v", operation, err)
+		}
+	}
+	set := mustSet(t, Record{Kind: State, Path: path, Op: ReadDirectory, Value: Unreadable})
+	if changed(t, set, Full) {
+		t.Fatal("tolerated unreadable result did not match")
+	}
+	if err := os.Chmod(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if !changed(t, set, Full) {
+		t.Fatal("accessible directory did not invalidate unreadable result")
 	}
 }
