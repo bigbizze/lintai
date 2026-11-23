@@ -4,13 +4,89 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/bigbizze/lintai/internal/tsgo/lintaiapi"
 	"github.com/bigbizze/lintai/internal/workspace"
+	"github.com/bigbizze/lintai/observe"
 )
+
+func TestGenerationInvalidatesCapturedContentAndScope(t *testing.T) {
+	root := t.TempDir()
+	file := writeWorkspaceFile(t, root, "src/main.ts", "export const value = 1;")
+	producer := New(Options{Files: FileScopeWalk})
+	first, err := producer.buildTestGeneration(context.Background(), root, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := producer.buildTestGeneration(context.Background(), root, root)
+	if err != nil || again != first {
+		t.Fatalf("unchanged generation not reused: %v", err)
+	}
+	info, err := os.Stat(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(file, []byte("export const value = 2;"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(file, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := first.observations.Changed(context.Background(), observe.Full); err != nil || changed == nil {
+		t.Fatalf("content change: %v %v", changed, err)
+	}
+	second, err := producer.buildTestGeneration(context.Background(), root, root)
+	if err != nil || second == first || second.inputRevision == first.inputRevision {
+		t.Fatalf("changed generation: %v", err)
+	}
+	late := writeWorkspaceFile(t, root, "src/late.ts", "export const late = 1;")
+	if changed, err := second.observations.Changed(context.Background(), observe.Full); err != nil || changed == nil {
+		t.Fatalf("new source: %v %v", changed, err)
+	}
+	third, err := producer.buildTestGeneration(context.Background(), root, root)
+	if err != nil || third == second {
+		t.Fatalf("new source did not invalidate generation: %v", err)
+	}
+	if err := os.Remove(late); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := third.observations.Changed(context.Background(), observe.Full); err != nil || changed == nil {
+		t.Fatalf("deleted source: %v %v", changed, err)
+	}
+}
+
+func TestCompilerObservationValidatesRawBytes(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(root, "source.ts")
+	raw := []byte{0xef, 0xbb, 0xbf, 'e', 'x', 'p', 'o', 'r', 't', ' ', '{', '}', ';'}
+	if err := os.WriteFile(file, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := lintaiapi.BuildSnapshot(context.Background(), lintaiapi.BuildSnapshotRequest{WorkspaceRoot: root, Files: []string{file}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	set, err := compilerObservations(snapshot.CompilerInputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := set.Changed(context.Background(), observe.Full); err != nil || changed != nil {
+		t.Fatalf("unchanged raw bytes: %v %v", changed, err)
+	}
+	if err := os.WriteFile(file, raw[3:], 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := set.Changed(context.Background(), observe.Full); err != nil || changed == nil {
+		t.Fatalf("changed raw encoding was not detected: %v %v", changed, err)
+	}
+}
 
 // V18, V20, V42: publication and reuse share content and scope validity. A
 // changing capture is retried once, with no metadata shortcut.
@@ -97,13 +173,17 @@ func TestGenerationRetriesControlledInputChangesBeforePublication(t *testing.T) 
 			t.Fatal(err)
 		}
 		newFile := writeWorkspaceFile(t, root, "src/late.ts", "export const value = 1;")
-		compilerStable, _, err := compiler.CompilerInputs.Validate(context.Background())
-		if err != nil || !compilerStable {
-			t.Fatalf("compiler inputs changed during scope-only edit: stable=%t err=%v", compilerStable, err)
+		compilerSet, err := compilerObservations(compiler.CompilerInputs)
+		if err != nil {
+			t.Fatal(err)
 		}
-		scopeStable, err := workspace.ValidateScope(plan)
-		if err != nil || scopeStable {
-			t.Fatalf("scope-only edit did not invalidate the plan: stable=%t err=%v", scopeStable, err)
+		compilerMismatch, err := compilerSet.Changed(context.Background(), observe.Full)
+		if err != nil || compilerMismatch != nil {
+			t.Fatalf("compiler inputs changed during scope-only edit: mismatch=%v err=%v", compilerMismatch, err)
+		}
+		scopeMismatch, err := plan.Observations.Changed(context.Background(), observe.Full)
+		if err != nil || scopeMismatch == nil {
+			t.Fatalf("scope-only edit did not invalidate the plan: mismatch=%v err=%v", scopeMismatch, err)
 		}
 		if err := os.Remove(newFile); err != nil {
 			t.Fatal(err)

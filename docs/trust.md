@@ -17,7 +17,7 @@ What the lock covers:
 - the rule file
 - every file that the rule imports, directly or through other files, in the workspace and in `node_modules`
 - the `@lintai/sdk` files that the rule imports, including its suppression policy. Review and regenerate the lock when those inputs change.
-- the client bundling scripts, captured resolver/configuration inputs, and the bundler tools, including the platform-specific esbuild binary. Locks therefore need to be generated for the platform where they are enforced. The Node 26 migration changes the bundling helper identity; review and regenerate existing locks after upgrading, even if the rule source is unchanged. The lock format and platform policy are unchanged.
+- the client bundling scripts, captured resolver/configuration inputs, and the bundler tools, including the platform-specific esbuild binary. Locks therefore need to be generated for the platform where they are enforced. Changes to the observation format also change the approved bundling helper; review and regenerate existing locks after upgrading, even if the rule source is unchanged. The lock format and platform policy are unchanged.
 
 What the lock does not cover:
 

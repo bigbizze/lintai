@@ -114,7 +114,7 @@ func TestBundleConfigViewAcrossBuilds(t *testing.T) {
 	if err := os.WriteFile(options, []byte(`{"compilerOptions":{"useDefineForClassFields":true}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if before[rule].Manifest.Unchanged() {
+	if bundleUnchanged(before[rule].Observations) {
 		t.Fatal("external inherited config edit was not detected")
 	}
 	after := build()
@@ -150,7 +150,7 @@ func TestBundleConfigViewAcrossBuilds(t *testing.T) {
 	if err := os.WriteFile(packageOptions, []byte(`{"compilerOptions":{"useDefineForClassFields":true}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if packageBefore[rule].Manifest.Unchanged() {
+	if bundleUnchanged(packageBefore[rule].Observations) {
 		t.Error("extensionless exported config did not track its inherited options")
 	}
 	packageAfter := build()
@@ -176,7 +176,7 @@ func TestBundleConfigViewAcrossBuilds(t *testing.T) {
 	if err := os.WriteFile(packageOptions, []byte(`{"compilerOptions":{"useDefineForClassFields":true}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if wildcard[rule].Manifest.Unchanged() {
+	if bundleUnchanged(wildcard[rule].Observations) {
 		t.Error("linked wildcard config did not track its inherited options")
 	}
 
@@ -195,7 +195,7 @@ func TestBundleConfigViewAcrossBuilds(t *testing.T) {
 	if err := os.WriteFile(packageOptions, []byte(`{"compilerOptions":{"useDefineForClassFields":true}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if wildcardLink[rule].Manifest.Unchanged() {
+	if bundleUnchanged(wildcardLink[rule].Observations) {
 		t.Error("wildcard-selected linked config did not track its inherited options")
 	}
 
@@ -212,7 +212,7 @@ func TestBundleConfigViewAcrossBuilds(t *testing.T) {
 	if err := os.WriteFile(packageOptions, []byte(`{"compilerOptions":{"useDefineForClassFields":true}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if subpath[rule].Manifest.Unchanged() {
+	if bundleUnchanged(subpath[rule].Observations) {
 		t.Error("extensionless package subpath did not track its inherited options")
 	}
 

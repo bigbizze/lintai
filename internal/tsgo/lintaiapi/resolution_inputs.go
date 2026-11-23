@@ -2,15 +2,21 @@ package lintaiapi
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
+	"time"
+	"unicode/utf16"
 
 	"github.com/bigbizze/lintai/internal/tsgo/internal/bundled"
+	"github.com/bigbizze/lintai/internal/tsgo/internal/nativepath"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/tspath"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/vfs"
 )
@@ -19,17 +25,14 @@ type capturedFile struct {
 	contents string
 	exists   bool
 	failure  string
+	digest   string
+	stamp    *CompilerStamp
 }
 
 type capturedDirectory struct {
 	files       []string
 	directories []string
 	symlinks    []string
-}
-
-type validationStats struct {
-	files int
-	bytes int64
 }
 
 // resolutionInputFS captures the values the compiler actually reads and
@@ -46,18 +49,17 @@ type resolutionInputFS struct {
 // compilerInputObservations is the one captured-input model, transferred
 // from the compiler filesystem to detached validity evidence after extraction.
 type compilerInputObservations struct {
-	workspaceRoot string
-	reads         map[string]capturedFile
-	fileProbes    map[string]bool
-	dirProbes     map[string]bool
-	stats         map[string]string
-	directories   map[string]capturedDirectory
-	realpaths     map[string]string
+	reads       map[string]capturedFile
+	fileProbes  map[string]bool
+	dirProbes   map[string]bool
+	stats       map[string]string
+	directories map[string]capturedDirectory
+	realpaths   map[string]string
 }
 
-func trackResolutionInputs(fs vfs.FS, workspaceRoot string) *resolutionInputFS {
+func trackResolutionInputs(fs vfs.FS) *resolutionInputFS {
 	return &resolutionInputFS{
-		FS: fs, statInfo: make(map[string]vfs.FileInfo), compilerInputObservations: &compilerInputObservations{workspaceRoot: normalizeSlash(workspaceRoot),
+		FS: fs, statInfo: make(map[string]vfs.FileInfo), compilerInputObservations: &compilerInputObservations{
 			reads: make(map[string]capturedFile), fileProbes: make(map[string]bool),
 			dirProbes: make(map[string]bool), stats: make(map[string]string),
 			directories: make(map[string]capturedDirectory), realpaths: make(map[string]string),
@@ -76,6 +78,9 @@ func (fsys *resolutionInputFS) FileExists(path tspath.RootedFilePath) bool {
 		return exists
 	}
 	exists := fsys.FS.FileExists(path)
+	if !exists {
+		fsys.checkProbeError(key)
+	}
 	fsys.fileProbes[key] = exists
 	return exists
 }
@@ -90,38 +95,58 @@ func (fsys *resolutionInputFS) ReadFile(path tspath.RootedFilePath) (string, boo
 	if captured, ok := fsys.reads[key]; ok {
 		return captured.contents, captured.exists
 	}
-	contents, exists := fsys.FS.ReadFile(path)
-	captured := capturedFile{contents: contents, exists: exists}
-	_, fileProbed := fsys.fileProbes[key]
-	if !fileProbed {
-		fsys.fileProbes[key] = exists
-	}
-	if !exists {
-		if _, err := os.Stat(filepath.FromSlash(key)); err != nil && !os.IsNotExist(err) {
+	file := filepath.FromSlash(key)
+	before, statErr := os.Stat(file)
+	observed := time.Now()
+	raw, err := os.ReadFile(file)
+	captured := capturedFile{}
+	if err != nil {
+		switch {
+		case isMissing(err):
+			captured.failure = "missing"
+		case os.IsPermission(err) && strings.HasSuffix(strings.ToLower(key), ".map"):
+			captured.failure = "unreadable"
+		default:
 			fsys.captureErr = fmt.Errorf("read required input %s: %w", key, err)
-		} else if err == nil {
-			if !fileProbed {
-				fsys.fileProbes[key] = true
+		}
+	} else {
+		sum := sha256.Sum256(raw)
+		captured.digest = hex.EncodeToString(sum[:])
+		captured.contents = decodeCompilerBytes(raw)
+		captured.exists = true
+		if statErr == nil && before.Mode().IsRegular() && int64(len(raw)) == before.Size() && observed.UnixNano() >= 0 {
+			if after, err := os.Stat(file); err == nil && after.Mode().IsRegular() && before.Size() == after.Size() && before.ModTime().Equal(after.ModTime()) {
+				captured.stamp = &CompilerStamp{Size: before.Size(), MtimeNs: before.ModTime().UnixNano(), ObservedAtNs: observed.UnixNano()}
 			}
-			if _, readErr := os.ReadFile(filepath.FromSlash(key)); readErr != nil {
-				switch {
-				case os.IsPermission(readErr):
-					captured.failure = "permission"
-					if !strings.HasSuffix(strings.ToLower(key), ".map") {
-						fsys.captureErr = fmt.Errorf("read required input %s: %w", key, readErr)
-					}
-				case os.IsNotExist(readErr):
-					captured.failure = "missing"
-				default:
-					fsys.captureErr = fmt.Errorf("read required input %s: %w", key, readErr)
-				}
-			}
-		} else if !fileProbed {
-			fsys.fileProbes[key] = false
 		}
 	}
 	fsys.reads[key] = captured
-	return contents, exists
+	return captured.contents, captured.exists
+}
+
+func isMissing(err error) bool {
+	return errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
+}
+
+// Match the compiler's UTF-8 and BOM-selected UTF-16 decoding without a
+// second filesystem read or changing the bytes used for observation identity.
+func decodeCompilerBytes(raw []byte) string {
+	if len(raw) >= 2 && (raw[0] == 0xff && raw[1] == 0xfe || raw[0] == 0xfe && raw[1] == 0xff) {
+		order := binary.LittleEndian
+		values := make([]uint16, (len(raw)-2)/2)
+		for i := range values {
+			if raw[0] == 0xff {
+				values[i] = order.Uint16(raw[2+i*2:])
+			} else {
+				values[i] = binary.BigEndian.Uint16(raw[2+i*2:])
+			}
+		}
+		return string(utf16.Decode(values))
+	}
+	if len(raw) >= 3 && raw[0] == 0xef && raw[1] == 0xbb && raw[2] == 0xbf {
+		raw = raw[3:]
+	}
+	return string(raw)
 }
 
 func (fsys *resolutionInputFS) DirectoryExists(path tspath.RootedDirectoryPath) bool {
@@ -135,6 +160,9 @@ func (fsys *resolutionInputFS) DirectoryExists(path tspath.RootedDirectoryPath) 
 		return exists
 	}
 	exists := fsys.FS.DirectoryExists(path)
+	if !exists {
+		fsys.checkProbeError(key)
+	}
 	fsys.dirProbes[key] = exists
 	return exists
 }
@@ -149,13 +177,34 @@ func (fsys *resolutionInputFS) GetAccessibleEntries(path tspath.RootedDirectoryP
 	if captured, ok := fsys.directories[key]; ok {
 		return captured.entries()
 	}
-	entries := fsys.FS.GetAccessibleEntries(path)
-	captured := capturedDirectory{
-		files: slices.Clone(entries.Files), directories: slices.Clone(entries.Directories),
-		symlinks: mapKeys(entries.Symlinks),
+	entries, err := os.ReadDir(filepath.FromSlash(key))
+	if err != nil {
+		fsys.captureErr = fmt.Errorf("read compiler directory %s: %w", key, err)
+		return vfs.Entries{Symlinks: map[string]struct{}{}}
 	}
-	slices.Sort(captured.files)
-	slices.Sort(captured.directories)
+	captured := capturedDirectory{}
+	for _, entry := range entries {
+		mode := entry.Type()
+		link := mode&os.ModeSymlink != 0 || mode&os.ModeIrregular != 0 && nativepath.IsSymlinkOrReparsePoint(filepath.Join(filepath.FromSlash(key), entry.Name()))
+		if link {
+			info, err := os.Stat(filepath.Join(filepath.FromSlash(key), entry.Name()))
+			if err != nil {
+				continue
+			}
+			mode = info.Mode()
+		}
+		switch {
+		case mode.IsDir():
+			captured.directories = append(captured.directories, entry.Name())
+		case mode.IsRegular():
+			captured.files = append(captured.files, entry.Name())
+		default:
+			continue
+		}
+		if link {
+			captured.symlinks = append(captured.symlinks, entry.Name())
+		}
+	}
 	fsys.directories[key] = captured
 	return captured.entries()
 }
@@ -171,6 +220,9 @@ func (fsys *resolutionInputFS) Stat(path tspath.RootedPath) vfs.FileInfo {
 		return captured
 	}
 	info := fsys.FS.Stat(path)
+	if info == nil {
+		fsys.checkProbeError(key)
+	}
 	if _, observed := fsys.stats[key]; !observed {
 		fsys.stats[key] = fileKind(info)
 	}
@@ -191,7 +243,7 @@ func (fsys *resolutionInputFS) Realpath(path tspath.RootedPath) tspath.RootedPat
 	resolved := fsys.FS.Realpath(path)
 	if actual, err := filepath.EvalSymlinks(filepath.FromSlash(key)); err == nil {
 		fsys.realpaths[key] = normalizeSlash(actual)
-	} else if !os.IsNotExist(err) {
+	} else if !isMissing(err) {
 		fsys.captureErr = fmt.Errorf("resolve input %s: %w", key, err)
 	}
 	return resolved
@@ -199,8 +251,14 @@ func (fsys *resolutionInputFS) Realpath(path tspath.RootedPath) tspath.RootedPat
 
 func (fsys *resolutionInputFS) inputPath(path string) string { return normalizeSlash(path) }
 
+func (fsys *resolutionInputFS) checkProbeError(path string) {
+	if _, err := os.Stat(filepath.FromSlash(path)); err != nil && !isMissing(err) {
+		fsys.captureErr = fmt.Errorf("stat compiler input %s: %w", path, err)
+	}
+}
+
 func (fsys *resolutionInputFS) skipInput(path string) bool {
-	if bundled.IsBundled(path) || tspath.IsUrl(path) || strings.HasPrefix(path, "^/") {
+	if bundled.IsBundled(path) || tspath.IsUrl(path) || strings.HasPrefix(path, "^/") || nativepath.IsNetworkPath(path) {
 		return true
 	}
 	libRoot := normalizeSlash(bundled.LibPath().AsString())
@@ -215,15 +273,6 @@ func (directory capturedDirectory) entries() vfs.Entries {
 	return vfs.Entries{Files: slices.Clone(directory.files), Directories: slices.Clone(directory.directories), Symlinks: symlinks}
 }
 
-func mapKeys(values map[string]struct{}) []string {
-	result := make([]string, 0, len(values))
-	for value := range values {
-		result = append(result, value)
-	}
-	slices.Sort(result)
-	return result
-}
-
 func fileKind(info vfs.FileInfo) string {
 	if info == nil {
 		return "missing"
@@ -232,148 +281,6 @@ func fileKind(info vfs.FileInfo) string {
 		return "directory"
 	}
 	return "file"
-}
-
-func (fsys *resolutionInputFS) validate() (bool, validationStats, error) {
-	fsys.mu.Lock()
-	reads := cloneCapturedFiles(fsys.reads)
-	fileProbes := cloneBoolMap(fsys.fileProbes)
-	dirProbes := cloneBoolMap(fsys.dirProbes)
-	stats := mapsCloneString(fsys.stats)
-	directories := cloneCapturedDirectories(fsys.directories)
-	realpaths := mapsCloneString(fsys.realpaths)
-	fsys.mu.Unlock()
-	trace := validationStats{}
-	paths := make([]string, 0, len(reads))
-	for path := range reads {
-		paths = append(paths, path)
-	}
-	slices.Sort(paths)
-	valid := true
-	for _, path := range paths {
-		captured := reads[path]
-		if !captured.exists {
-			if captured.failure == "permission" {
-				if _, err := os.ReadFile(filepath.FromSlash(path)); err == nil {
-					valid = false
-				} else if os.IsPermission(err) {
-					continue
-				} else if os.IsNotExist(err) {
-					valid = false
-				} else {
-					return false, trace, fmt.Errorf("validate input %s: %w", path, err)
-				}
-			}
-			continue
-		}
-		current, err := os.ReadFile(filepath.FromSlash(path))
-		trace.files++
-		if err != nil {
-			if os.IsNotExist(err) {
-				valid = false
-				continue
-			}
-			return false, trace, fmt.Errorf("validate input %s: %w", path, err)
-		}
-		trace.bytes += int64(len(current))
-		if string(current) != captured.contents {
-			valid = false
-		}
-	}
-	for path, expected := range fileProbes {
-		actual, err := existsKind(path, false)
-		if err != nil {
-			return false, trace, err
-		}
-		if actual != expected {
-			valid = false
-		}
-	}
-	for path, expected := range dirProbes {
-		actual, err := existsKind(path, true)
-		if err != nil {
-			return false, trace, err
-		}
-		if actual != expected {
-			valid = false
-		}
-	}
-	for path, expected := range stats {
-		info, err := os.Stat(filepath.FromSlash(path))
-		actual := "missing"
-		if err == nil {
-			if info.IsDir() {
-				actual = "directory"
-			} else {
-				actual = "file"
-			}
-		} else if !os.IsNotExist(err) {
-			return false, trace, fmt.Errorf("validate stat probe %s: %w", path, err)
-		}
-		if actual != expected {
-			valid = false
-		}
-	}
-	for path, expected := range directories {
-		actual, err := fsys.readDirectory(path)
-		if err != nil {
-			if os.IsNotExist(err) {
-				valid = false
-				continue
-			}
-			return false, trace, fmt.Errorf("validate directory membership %s: %w", path, err)
-		}
-		if !sameCapturedDirectory(actual, expected) {
-			valid = false
-		}
-	}
-	for path, expected := range realpaths {
-		actual, err := filepath.EvalSymlinks(filepath.FromSlash(path))
-		if err != nil {
-			if os.IsNotExist(err) {
-				valid = false
-				continue
-			}
-			return false, trace, fmt.Errorf("validate resolved input %s: %w", path, err)
-		}
-		if normalizeSlash(actual) != expected {
-			valid = false
-		}
-	}
-	return valid, trace, nil
-}
-
-func existsKind(path string, directory bool) (bool, error) {
-	info, err := os.Stat(filepath.FromSlash(path))
-	if err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, fmt.Errorf("validate input probe %s: %w", path, err)
-	}
-	if directory {
-		return info.IsDir(), nil
-	}
-	return !info.IsDir(), nil
-}
-
-func (fsys *resolutionInputFS) readDirectory(path string) (capturedDirectory, error) {
-	// GetAccessibleEntries treats unreadable directories as empty, so check for errors first.
-	if _, err := os.ReadDir(filepath.FromSlash(path)); err != nil {
-		return capturedDirectory{}, err
-	}
-	entries := fsys.FS.GetAccessibleEntries(tspath.RootedDirectoryPathFromAbsolute(path))
-	result := capturedDirectory{
-		files: slices.Clone(entries.Files), directories: slices.Clone(entries.Directories),
-		symlinks: mapKeys(entries.Symlinks),
-	}
-	slices.Sort(result.files)
-	slices.Sort(result.directories)
-	return result, nil
-}
-
-func sameCapturedDirectory(left, right capturedDirectory) bool {
-	return slices.Equal(left.files, right.files) && slices.Equal(left.directories, right.directories) && slices.Equal(left.symlinks, right.symlinks)
 }
 
 func (fsys *resolutionInputFS) inputs() []SnapshotInput {
@@ -402,131 +309,42 @@ func (fsys *resolutionInputFS) inputs() []SnapshotInput {
 	return uniqueSnapshotInputs(result)
 }
 
-func (fsys *resolutionInputFS) readPaths() []string {
+// observations detaches compiler-owned records without retaining source text.
+func (fsys *resolutionInputFS) observations() []CompilerObservation {
 	fsys.mu.Lock()
 	defer fsys.mu.Unlock()
-	result := make([]string, 0, len(fsys.reads))
-	for path, captured := range fsys.reads {
-		if captured.exists {
-			result = append(result, path)
-		}
-	}
-	slices.Sort(result)
-	return result
-}
-
-func (fsys *resolutionInputFS) identityRecords() []any {
-	fsys.mu.Lock()
-	defer fsys.mu.Unlock()
-	paths := make([]string, 0, len(fsys.reads))
-	for path := range fsys.reads {
-		paths = append(paths, path)
-	}
-	slices.Sort(paths)
-	records := make([]any, 0, len(paths)+len(fsys.fileProbes)+len(fsys.dirProbes)+len(fsys.directories)+len(fsys.stats))
-	for _, path := range paths {
-		input := fsys.reads[path]
-		contentDigest := ""
+	var records []CompilerObservation
+	for path, input := range fsys.reads {
 		if input.exists {
-			digest := sha256.Sum256([]byte(input.contents))
-			contentDigest = hex.EncodeToString(digest[:])
-		}
-		records = append(records, []any{"read", fsys.relativeInput(path), input.exists, input.failure, contentDigest})
-	}
-	appendProbes := func(kind string, values map[string]bool) {
-		paths := make([]string, 0, len(values))
-		for path := range values {
-			paths = append(paths, path)
-		}
-		slices.Sort(paths)
-		for _, path := range paths {
-			records = append(records, []any{kind, fsys.relativeInput(path), values[path]})
+			records = append(records, CompilerObservation{Kind: "content", Path: filepath.FromSlash(path), Value: input.digest, Stamp: input.stamp})
+		} else if input.failure != "" {
+			records = append(records, CompilerObservation{Kind: "state", Path: filepath.FromSlash(path), Op: "read-file", Value: input.failure})
 		}
 	}
-	appendProbes("file", fsys.fileProbes)
-	appendProbes("directory", fsys.dirProbes)
-	statPaths := make([]string, 0, len(fsys.stats))
-	for path := range fsys.stats {
-		statPaths = append(statPaths, path)
+	for path, exists := range fsys.fileProbes {
+		records = append(records, CompilerObservation{Kind: "state", Path: filepath.FromSlash(path), Op: "compiler-file", Value: fmt.Sprint(exists)})
 	}
-	slices.Sort(statPaths)
-	for _, path := range statPaths {
-		records = append(records, []any{"stat", fsys.relativeInput(path), fsys.stats[path]})
+	for path, exists := range fsys.dirProbes {
+		records = append(records, CompilerObservation{Kind: "state", Path: filepath.FromSlash(path), Op: "directory", Value: fmt.Sprint(exists)})
 	}
-	directoryPaths := make([]string, 0, len(fsys.directories))
-	for path := range fsys.directories {
-		directoryPaths = append(directoryPaths, path)
+	for path, kind := range fsys.stats {
+		records = append(records, CompilerObservation{Kind: "state", Path: filepath.FromSlash(path), Op: "stat", Value: kind})
 	}
-	slices.Sort(directoryPaths)
-	for _, path := range directoryPaths {
-		directory := fsys.directories[path]
-		records = append(records, []any{"membership", fsys.relativeInput(path), stringValues(directory.files), stringValues(directory.directories), stringValues(directory.symlinks)})
+	for path, dir := range fsys.directories {
+		entries := make([][2]string, 0, len(dir.files)+len(dir.directories)+len(dir.symlinks))
+		for _, name := range dir.files {
+			entries = append(entries, [2]string{name, "file"})
+		}
+		for _, name := range dir.directories {
+			entries = append(entries, [2]string{name, "directory"})
+		}
+		for _, name := range dir.symlinks {
+			entries = append(entries, [2]string{name, "symlink"})
+		}
+		records = append(records, CompilerObservation{Kind: "listing", Path: filepath.FromSlash(path), Op: "compiler-accessible", Entries: entries})
 	}
-	realpaths := make([]string, 0, len(fsys.realpaths))
-	for path := range fsys.realpaths {
-		realpaths = append(realpaths, path)
-	}
-	slices.Sort(realpaths)
-	for _, path := range realpaths {
-		records = append(records, []any{"realpath", fsys.relativeInput(path), fsys.relativeInput(fsys.realpaths[path])})
+	for path, value := range fsys.realpaths {
+		records = append(records, CompilerObservation{Kind: "resolved", Path: filepath.FromSlash(path), Value: filepath.FromSlash(value)})
 	}
 	return records
-}
-
-func (fsys *resolutionInputFS) relativeInput(path string) string {
-	path = normalizeSlash(path)
-	root := strings.TrimSuffix(fsys.workspaceRoot, "/")
-	if path == root {
-		return "."
-	}
-	if strings.HasPrefix(path, root+"/") {
-		return strings.TrimPrefix(path, root+"/")
-	}
-	relative, err := filepath.Rel(filepath.FromSlash(root), filepath.FromSlash(path))
-	if err == nil {
-		return filepath.ToSlash(relative)
-	}
-	return path
-}
-
-func stringValues(values []string) []any {
-	result := make([]any, len(values))
-	for i, value := range values {
-		result[i] = value
-	}
-	return result
-}
-
-func cloneCapturedFiles(input map[string]capturedFile) map[string]capturedFile {
-	result := make(map[string]capturedFile, len(input))
-	for key, value := range input {
-		result[key] = value
-	}
-	return result
-}
-
-func cloneBoolMap(input map[string]bool) map[string]bool {
-	result := make(map[string]bool, len(input))
-	for key, value := range input {
-		result[key] = value
-	}
-	return result
-}
-
-func mapsCloneString(input map[string]string) map[string]string {
-	result := make(map[string]string, len(input))
-	for key, value := range input {
-		result[key] = value
-	}
-	return result
-}
-
-func cloneCapturedDirectories(input map[string]capturedDirectory) map[string]capturedDirectory {
-	result := make(map[string]capturedDirectory, len(input))
-	for key, value := range input {
-		result[key] = capturedDirectory{
-			files: slices.Clone(value.files), directories: slices.Clone(value.directories), symlinks: slices.Clone(value.symlinks),
-		}
-	}
-	return result
 }

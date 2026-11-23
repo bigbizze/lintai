@@ -194,14 +194,9 @@ func TestBundleConsumedInputEdit(t *testing.T) {
 	if stable.Hash != stableAgain.Hash || behavior(stable) != "diagnostic-B" || behavior(stableAgain) != "diagnostic-B" {
 		t.Fatalf("stable B must reproduce identity and behavior: %s %s", stable.Hash, stableAgain.Hash)
 	}
-	for _, input := range stable.Manifest.Inputs {
-		if input.AbsolutePath == control {
+	for _, input := range stable.Observations.Records() {
+		if input.Path == control {
 			t.Fatal("control file appeared in bundle inputs")
-		}
-	}
-	for _, probe := range stable.Manifest.Probes {
-		if probe.Path == control {
-			t.Fatal("control file appeared in bundle probes")
 		}
 	}
 	t.Logf("stable B: hash=%s behavior=diagnostic-B; different output directories agree", stable.Hash)
@@ -437,7 +432,7 @@ func TestBundleHelperInputEdit(t *testing.T) {
 	if err := os.Symlink(newHelper, helper); err != nil {
 		t.Fatal(err)
 	}
-	if linked[rule].Manifest.Unchanged() {
+	if bundleUnchanged(linked[rule].Observations) {
 		t.Error("retargeting the helper link did not invalidate the artifact")
 	}
 	rebuilt, failures := build()
@@ -595,7 +590,7 @@ func TestBundleToolInputEdit(t *testing.T) {
 	if err := os.Symlink(newDir, toolDir); err != nil {
 		t.Fatal(err)
 	}
-	if selected[rule].Manifest.Unchanged() {
+	if bundleUnchanged(selected[rule].Observations) {
 		t.Error("retargeting the esbuild dependency link did not invalidate the artifact")
 	}
 	rebuilt, failures := build()

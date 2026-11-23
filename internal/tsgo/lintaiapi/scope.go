@@ -98,7 +98,7 @@ func ExplainCompilerEligibility(ctx context.Context, req BuildSnapshotRequest) (
 	if err != nil {
 		return CompilerEligibility{}, err
 	}
-	trackedFS := trackResolutionInputs(osvfs.FS(), root)
+	trackedFS := trackResolutionInputs(osvfs.FS())
 	host := compiler.NewCompilerHost(bundled.WrapFS(trackedFS), bundled.LibPath(), nil, nil, nil)
 	plan, err := planOrdinary(ctx, host, root, files, exact, req.TsconfigFiles, true, newConfigCache(host), &extractTiming{})
 	if err != nil {

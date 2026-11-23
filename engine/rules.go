@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/bigbizze/lintai/bundle"
+	"github.com/bigbizze/lintai/observe"
 	"github.com/bigbizze/lintai/runtime"
 )
 
@@ -50,6 +51,7 @@ type catalogRule struct {
 // lock creation and execution. It never runs setup or producer collection.
 type ruleCatalog struct {
 	paths          []string
+	observations   observe.Set
 	entries        map[string]catalogRule
 	artifacts      map[string]bundle.Artifacts
 	bundleFailures map[string]error
@@ -74,12 +76,12 @@ func openRuleCatalogWithCache(ctx context.Context, options Options, engine *Sess
 	if _, err := bundle.NodeExecutable(ctx); err != nil {
 		return nil, err
 	}
-	paths, err := discoverRulePaths(options.WorkspaceRoot, options.RuleGlobs, lock != nil && len(lock.Rules) > 0)
+	paths, observations, err := discoverRulePaths(options.WorkspaceRoot, options.RuleGlobs, lock != nil && len(lock.Rules) > 0)
 	if err != nil {
 		return nil, err
 	}
 	catalog := &ruleCatalog{
-		paths: paths, entries: make(map[string]catalogRule), artifacts: make(map[string]bundle.Artifacts),
+		paths: paths, observations: observations, entries: make(map[string]catalogRule), artifacts: make(map[string]bundle.Artifacts),
 		bundleFailures: make(map[string]error),
 	}
 	if len(paths) == 0 {
@@ -128,7 +130,17 @@ func (catalog *ruleCatalog) buildWithEngineCache(ctx context.Context, options Op
 	for index, rulePath := range catalog.paths {
 		key := toolContext + "\x00" + rulePath
 		cached, exists := engine.bundleCache[key]
-		if !exists || cached.context != toolContext || !cached.artifact.Manifest.Unchanged() {
+		if exists && cached.context == toolContext {
+			changed, err := cached.artifact.Observations.Changed(ctx, observe.Full)
+			if err != nil {
+				catalog.bundleError = err
+				return
+			}
+			if changed != nil {
+				exists = false
+			}
+		}
+		if !exists || cached.context != toolContext {
 			delete(engine.bundleCache, key)
 			misses = append(misses, rulePath)
 			continue
@@ -164,7 +176,7 @@ func (catalog *ruleCatalog) buildWithEngineCache(ctx context.Context, options Op
 		}
 		key := toolContext + "\x00" + rulePath
 		engine.bundleCache[key] = cachedRuleBundle{
-			artifact: bundle.Artifacts{Hash: artifact.Hash, Manifest: cloneBundleManifest(artifact.Manifest)},
+			artifact: bundle.Artifacts{Hash: artifact.Hash, Observations: artifact.Observations},
 			pureCode: string(pureCode), prepareCode: string(prepareCode), context: toolContext,
 		}
 	}
@@ -185,18 +197,8 @@ func (catalog *ruleCatalog) materializeCachedBundle(index int, cached cachedRule
 	}
 	return bundle.Artifacts{
 		PureBundlePath: purePath, PrepareBundlePath: preparePath,
-		Hash: cached.artifact.Hash, Manifest: cloneBundleManifest(cached.artifact.Manifest),
+		Hash: cached.artifact.Hash, Observations: cached.artifact.Observations,
 	}, nil
-}
-
-func cloneBundleManifest(manifest bundle.InputManifest) bundle.InputManifest {
-	manifest.Inputs = append([]bundle.Input(nil), manifest.Inputs...)
-	manifest.Probes = append([]bundle.ConfigProbe(nil), manifest.Probes...)
-	for index := range manifest.Probes {
-		manifest.Probes[index].Ignore = append([]string(nil), manifest.Probes[index].Ignore...)
-	}
-	manifest.Resolutions = append([]string{}, manifest.Resolutions...)
-	return manifest
 }
 
 func (catalog *ruleCatalog) loadMetadata(skip map[string]struct{}) {

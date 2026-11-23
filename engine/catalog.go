@@ -256,7 +256,7 @@ func (catalog producerCatalog) collect(ctx context.Context, options Options, req
 		})
 		collectedBatches = append(collectedBatches, collected{description, requested, validated})
 	}
-	encoded, err := canonical.Marshal([]any{"lintai-facts-v1", producerRecords})
+	encoded, err := canonical.MarshalStructured([]any{"lintai-facts-v2", producerRecords})
 	if err != nil {
 		return composedFacts{}, fmt.Errorf("snapshot identity: %w", err)
 	}
@@ -334,7 +334,7 @@ func emptyComposedFacts() (composedFacts, error) {
 	if err != nil {
 		return composedFacts{}, err
 	}
-	encoded, err := canonical.Marshal([]any{"lintai-facts-v1", []any{}})
+	encoded, err := canonical.MarshalStructured([]any{"lintai-facts-v2", []any{}})
 	if err != nil {
 		return composedFacts{}, err
 	}

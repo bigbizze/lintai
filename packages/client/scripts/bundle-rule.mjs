@@ -7,10 +7,11 @@ import os from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 // Capture the tool code before Node loads it or esbuild starts its binary.
-// The original paths are retained only for the manifest's freshness check.
+// The original paths are retained only for the observations' freshness check.
 const toolRequire = createRequire(import.meta.url);
 const esbuildEntry = toolRequire.resolve("esbuild");
 const typescriptEntry = toolRequire.resolve("typescript");
+const binaryOverridePresent = Object.hasOwn(process.env, "ESBUILD_BINARY_PATH");
 const binaryOverride = process.env.ESBUILD_BINARY_PATH ?? "";
 const binarySpecifier = `@esbuild/${process.platform}-${process.arch}/${process.platform === "win32" ? "esbuild.exe" : "bin/esbuild"}`;
 const useBinaryOverride =
@@ -54,6 +55,7 @@ async function observePathLinks(file) {
 			exists: targetInfo?.isDirectory() || targetInfo?.isFile() || false,
 			linkTarget,
 			target,
+			resolved: targetInfo ? target : undefined,
 		});
 		await observePathLinks(path.resolve(path.dirname(current), linkTarget));
 	}
@@ -407,6 +409,7 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 				exists: targetInfo?.isDirectory() || targetInfo?.isFile() || false,
 				linkTarget,
 				linkIdentity: lockPath(absoluteTarget, workspaceRoot, repoRoot),
+				resolved: targetInfo ? await fs.realpath(source) : undefined,
 			});
 			const target = path.relative(path.dirname(destination), mirror(absoluteTarget));
 			await fs.symlink(target, destination);
@@ -419,8 +422,8 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 			const ignore = entries
 				.filter((entry) => path.join(source, entry.name) === outputRoot)
 				.map((entry) => entry.name);
-			const digest = await resolutionDirectoryDigest(source, entries, ignore);
-			viewProbes.push({ path: source, directory: true, exists: true, digest, ignore });
+			const snapshot = await resolutionDirectorySnapshot(source, entries, ignore);
+			viewProbes.push({ path: source, directory: true, exists: true, ...snapshot });
 			return;
 		}
 		if (!info.isFile()) throw new Error(`unsupported bundle input in captured view: ${source}`);
@@ -1212,11 +1215,11 @@ async function ruleHash(
 	const hash = createHash("sha256")
 		.update(
 			JSON.stringify({
-				format: "lintai.bundle-inputs/1",
+				format: "lintai.bundle-identity/2",
 				inputs: sorted.map(({ path: inputPath, sha256 }) => [inputPath, sha256]),
 				resolutions: resolutions.sort(),
 				probes: probes
-					.filter(({ digest }) => !digest)
+					.filter(({ entries }) => !entries)
 					.map(({ logicalPath, directory, exists, linkIdentity }) => [
 						logicalPath,
 						directory,
@@ -1401,35 +1404,27 @@ async function collectResolutionDirectories(inputs, workspaceRoot, repoRoot, out
 			path: directory,
 			directory: true,
 			exists: true,
-			digest: await resolutionDirectoryDigest(directory, entries, ignore),
-			ignore,
+			...(await resolutionDirectorySnapshot(directory, entries, ignore)),
 		});
 	}
 	return probes;
 }
 
-async function resolutionDirectoryDigest(directory, entries, ignore) {
-	entries.sort((a, b) => Buffer.compare(Buffer.from(a.name), Buffer.from(b.name)));
-	const hash = createHash("sha256");
+async function resolutionDirectorySnapshot(directory, entries, ignore) {
+	// Keep freshness-only config bytes separate from approval identity.
+	ignore = [...ignore, "lintai-rules.lock.json"];
+	const listing = [];
+	const contents = [];
 	for (const entry of entries) {
-		// The rules lock and the build's own output directory are not resolution inputs.
-		if (entry.name === "lintai-rules.lock.json" || ignore.includes(entry.name)) continue;
-		hash.update(`${entry.isDirectory() ? "d" : "f"}:${entry.name}\0`);
-		if (
-			!entry.isDirectory() &&
-			(entry.name === "package.json" ||
-				entry.name === "jsconfig.json" ||
-				(entry.name.startsWith("tsconfig") && entry.name.endsWith(".json")))
-		) {
-			hash.update(
-				createHash("sha256")
-					.update(await fs.readFile(path.join(directory, entry.name)))
-					.digest(),
-			);
-			hash.update("\0");
+		if (ignore.includes(entry.name)) continue;
+		const kind = entry.isSymbolicLink() ? "symlink" : entry.isDirectory() ? "directory" : entry.isFile() ? "file" : "other";
+		listing.push([entry.name, kind]);
+		if (!entry.isDirectory() && (entry.name === "package.json" || entry.name === "jsconfig.json" || (entry.name.startsWith("tsconfig") && entry.name.endsWith(".json")))) {
+			const file = path.join(directory, entry.name);
+			contents.push({kind: "content", path: file, value: createHash("sha256").update(await fs.readFile(file)).digest("hex")});
 		}
 	}
-	return hash.digest("hex");
+	return {entries: listing, ignore, contents};
 }
 
 function createAliasPlugin(mode, sdkEntry = createRequire(import.meta.url).resolve("@lintai/sdk")) {
@@ -1647,17 +1642,20 @@ for (const request of requests) {
 			prepareBundlePath,
 			pureBundlePath,
 			hash,
-			manifest: {
-				format: "lintai.bundle-inputs/1",
-				inputs,
-				probes,
-				resolutions,
-				tool: {
-					esbuild: esbuildVersion,
-					configResolver: ts.version,
-					binaryOverride,
-					script: inputs.find(({ absolutePath }) => absolutePath === helperOriginalPath).sha256,
-				},
+			sourcePath: view.original(stagedRule),
+			helperPath: helperOriginalPath,
+			observations: {
+				format: "lintai.observations/1",
+				observations: [
+					...inputs.map(({absolutePath, sha256}) => ({kind: "content", path: absolutePath, value: sha256})),
+					...probes.flatMap((probe) => [
+						{kind: "state", path: probe.path, op: probe.directory ? "directory" : "regular-file", value: String(probe.exists)},
+						...(probe.linkTarget ? [{kind: "link", path: probe.path, value: probe.linkTarget}] : []),
+						...(probe.resolved ? [{kind: "resolved", path: probe.path, value: probe.resolved}] : []),
+						...(probe.entries ? [{kind: "listing", path: probe.path, op: "physical", entries: probe.entries, ignore: probe.ignore}, ...probe.contents] : []),
+					]),
+					{kind: "env", path: "ESBUILD_BINARY_PATH", present: binaryOverridePresent, value: binaryOverride},
+				],
 			},
 		});
 	} catch (error) {

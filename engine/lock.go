@@ -14,6 +14,7 @@ import (
 
 	"github.com/bigbizze/lintai/bundle"
 	"github.com/bigbizze/lintai/internal/atomicfile"
+	"github.com/bigbizze/lintai/observe"
 	"github.com/bigbizze/lintai/suppressions"
 )
 
@@ -27,6 +28,7 @@ type RulesLock struct {
 	targetSnapshot atomicfile.Snapshot
 	source         string
 	sourceSnapshot atomicfile.Snapshot
+	observations   observe.Set
 }
 type RulesLockRule struct {
 	ID      string
@@ -111,6 +113,10 @@ func ReadRulesLock(path string) (RulesLock, error) {
 		return RulesLock{}, err
 	}
 	lock.target, lock.targetSnapshot = path, state
+	lock.observations, err = policyObservations(path, state)
+	if err != nil {
+		return RulesLock{}, err
+	}
 	return lock, nil
 }
 func BuildRulesLock(ctx context.Context, options Options) (RulesLock, []LockedRule, error) {
