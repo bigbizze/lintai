@@ -9,9 +9,12 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/bigbizze/lintai/backend"
 	"github.com/bigbizze/lintai/backend/typescript"
 	"github.com/bigbizze/lintai/bundle"
 	"github.com/bigbizze/lintai/diagnostics"
+	"github.com/bigbizze/lintai/facts"
+	"github.com/bigbizze/lintai/observe"
 )
 
 // V15, V16, V18, V20, V23, V26 and V31: one retained TypeScript
@@ -205,5 +208,60 @@ export default rule("fixture.setup-refresh").version(1)
 	result, err := session.Check(context.Background())
 	if err != nil || len(result.Diagnostics) != 3 || session.currentFacts.base != index {
 		t.Fatalf("changed setup did not re-execute on the retained facts: %+v %v", result, err)
+	}
+}
+
+func TestComposedFactsCaptureCurrentEligibilityWithoutReemission(t *testing.T) {
+	producer := newParallelFixtureProducer()
+	session := Open(Options{}, producer)
+	defer session.Close()
+	catalog, err := session.describeProducers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	empty, err := catalog.collect(context.Background(), Options{}, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if producer.prepareCalls.Load() != 0 || producer.emitCalls.Load() != 0 {
+		t.Fatal("empty demand invoked the producer")
+	}
+	predicate := facts.Predicate{Name: "catalog.item", Arity: 2}
+	demand := map[string]map[facts.Predicate]struct{}{"catalog": {predicate: {}}}
+	first, err := catalog.collect(context.Background(), Options{}, demand, &empty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.reusableFromObservations || producer.prepareCalls.Load() != 1 || producer.emitCalls.Load() != 1 || producer.metadataCalls.Load() != 1 {
+		t.Fatal("invalid initial capture")
+	}
+	set, err := observe.New([]observe.Record{{Kind: observe.Env, Path: "LINTAI_FIXTURE", Present: true, Value: "changed evidence"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	producer.observations, producer.reusable = set, true
+	next, err := catalog.collect(context.Background(), Options{}, demand, &first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.snapshotID != first.snapshotID || next.base != first.base || !next.reusableFromObservations || len(next.observations.Records()) != 1 || len(first.observations.Records()) != 0 || producer.prepareCalls.Load() != 2 || producer.metadataCalls.Load() != 2 || producer.emitCalls.Load() != 1 {
+		t.Fatal("equal identity failed to reuse facts with freshly captured eligibility")
+	}
+	producer.observations = observe.Set{}
+	immutable, err := catalog.collect(context.Background(), Options{}, demand, &next)
+	if err != nil || !immutable.reusableFromObservations || len(immutable.observations.Records()) != 0 {
+		t.Fatalf("immutable empty observation promise: %v", err)
+	}
+	if _, err := captureGenerationMetadata(backend.GenerationMetadata{}); err == nil {
+		t.Fatal("empty revision accepted")
+	}
+	scope := map[string]any{"items": []any{"original"}}
+	metadata, err := captureGenerationMetadata(backend.GenerationMetadata{InputRevision: "opaque", Scope: scope, AnalyzedFiles: []string{"src/./a.ts", "src/a.ts"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scope["items"].([]any)[0] = "changed"
+	if metadata.Scope.(map[string]any)["items"].([]any)[0] != "original" || !slices.Equal(metadata.AnalyzedFiles, []string{"src/a.ts"}) {
+		t.Fatal("metadata was not normalized and detached")
 	}
 }

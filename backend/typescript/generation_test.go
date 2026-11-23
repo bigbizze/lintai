@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bigbizze/lintai/backend"
+	"github.com/bigbizze/lintai/facts"
 	"github.com/bigbizze/lintai/internal/tsgo/lintaiapi"
 	"github.com/bigbizze/lintai/internal/workspace"
 	"github.com/bigbizze/lintai/observe"
@@ -233,4 +235,72 @@ func TestGenerationRetriesControlledInputChangesBeforePublication(t *testing.T) 
 			t.Fatalf("published generation missed resolved input: err=%v", err)
 		}
 	})
+}
+
+// Demand changes require extraction, and every returned handle keeps its own snapshot.
+func TestGenerationDemandAndFrozenEmission(t *testing.T) {
+	root := t.TempDir()
+	file := writeWorkspaceFile(t, root, "src/main.ts", "export function before() {}")
+	producer := New(Options{Files: FileScopeWalk})
+	description, err := producer.Describe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptor, err := facts.ValidateDescription(description)
+	if err != nil {
+		t.Fatal(err)
+	}
+	module := facts.Predicate{Name: "ts.module", Arity: 1}
+	fn := facts.Predicate{Name: "ts.fn", Arity: 3}
+	request := backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: root, Predicates: []facts.Predicate{module}}
+	first, err := producer.Prepare(context.Background(), request, observe.Full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Predicates = []facts.Predicate{module, fn}
+	second, err := producer.Prepare(context.Background(), request, observe.Full)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first == second {
+		t.Fatal("changed demand reused the prior extraction")
+	}
+	request.Predicates = []facts.Predicate{fn, module}
+	same, err := producer.Prepare(context.Background(), request, observe.Full)
+	if err != nil || same != second {
+		t.Fatalf("order changed generation: %v", err)
+	}
+	emit := func(g backend.Generation) string {
+		t.Helper()
+		builder, err := facts.NewBuilder(descriptor, []facts.Predicate{fn, module})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := g.Emit(context.Background(), builder); err != nil {
+			t.Fatal(err)
+		}
+		output, err := builder.Finish()
+		if err != nil {
+			t.Fatal(err)
+		}
+		atoms := output.Atoms(fn)
+		if len(atoms) != 1 {
+			t.Fatalf("expected one function: %v", atoms)
+		}
+		return atoms[0].String()
+	}
+	before := emit(second)
+	if err := os.WriteFile(file, []byte("export function after() {}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	third, err := producer.Prepare(context.Background(), request, observe.Full)
+	if err != nil || third == second {
+		t.Fatalf("changed input did not produce a generation: %v", err)
+	}
+	if got := emit(second); got != before {
+		t.Fatalf("previous generation changed: %s != %s", got, before)
+	}
+	if got := emit(third); got == before || !strings.Contains(got, "after") {
+		t.Fatalf("new generation did not expose changed function: %s", got)
+	}
 }

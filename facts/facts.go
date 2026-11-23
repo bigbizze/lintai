@@ -5,6 +5,7 @@ package facts
 import (
 	"fmt"
 	"math"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -40,38 +41,16 @@ func Float(value float64) Value { return Value{Kind: FloatKind, Float: value} }
 // leading slash, for example Name("clock") represents /clock.
 func Name(value string) Value { return Value{Kind: NameKind, String: value} }
 
-type Fact struct {
-	Relation string
-	Values   []Value
-}
-
 // Schema contains a producer's base relation declarations and derived-fact prelude.
 type Schema struct {
 	Declarations string
 	Prelude      string
 }
 
-// Store converts generic facts to the Mangle store consumed by the engine.
-func Store(items []Fact) (factstore.ReadOnlyFactStore, error) {
-	store := factstore.NewMultiIndexedArrayInMemoryStore()
-	for _, item := range items {
-		args := make([]ast.BaseTerm, 0, len(item.Values))
-		for _, value := range item.Values {
-			constant, err := value.constant()
-			if err != nil {
-				return nil, fmt.Errorf("%s: %w", item.Relation, err)
-			}
-			args = append(args, constant)
-		}
-		store.Add(ast.NewAtom(item.Relation, args...))
-	}
-	return store, nil
-}
-
 // FormatFacts renders already validated, qualified facts. allowedRelations is
 // the exact public catalog view accepted by the caller, so unqualified names
 // cannot act as aliases for a producer namespace.
-func FormatFacts(items []Fact, allowedRelations, relations []string) (string, error) {
+func FormatFacts(store factstore.ReadOnlyFactStore, allowedRelations, relations []string) (string, error) {
 	allowed := make(map[string]struct{}, len(allowedRelations))
 	for _, relation := range allowedRelations {
 		if _, duplicate := allowed[relation]; duplicate {
@@ -92,10 +71,6 @@ func FormatFacts(items []Fact, allowedRelations, relations []string) (string, er
 			wanted[relation] = struct{}{}
 		}
 	}
-	store, err := Store(items)
-	if err != nil {
-		return "", err
-	}
 	lines := make([]string, 0, store.EstimateFactCount())
 	for _, predicate := range store.ListPredicates() {
 		if _, ok := wanted[predicate.Symbol]; !ok {
@@ -112,6 +87,8 @@ func FormatFacts(items []Fact, allowedRelations, relations []string) (string, er
 	return strings.Join(lines, "\n"), nil
 }
 
+var namePattern = regexp.MustCompile(`^[A-Za-z0-9._~%\-]+(/[A-Za-z0-9._~%\-]+)*$`)
+
 func (value Value) constant() (ast.Constant, error) {
 	switch value.Kind {
 	case StringKind:
@@ -119,6 +96,9 @@ func (value Value) constant() (ast.Constant, error) {
 	case NumberKind:
 		return ast.Number(value.Number), nil
 	case NameKind:
+		if !namePattern.MatchString(value.String) {
+			return ast.Constant{}, fmt.Errorf("invalid name %q", value.String)
+		}
 		return ast.Name("/" + value.String)
 	case FloatKind:
 		if math.IsNaN(value.Float) || math.IsInf(value.Float, 0) {

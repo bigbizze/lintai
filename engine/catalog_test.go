@@ -48,7 +48,7 @@ func typeScriptCatalogForTest(t *testing.T) ([]parse.SourceUnit, map[ast.Predica
 	return units, decls
 }
 
-func qualifyTestFacts(t *testing.T, items []facts.Fact) ([]facts.Fact, map[string]facts.AnchorSupport, map[facts.Predicate]map[string]struct{}) {
+func qualifyTestFacts(t *testing.T, items []testFact) ([]testFact, map[string]facts.AnchorSupport, map[facts.Predicate]map[string]struct{}) {
 	t.Helper()
 	description, err := typescript.New().Describe()
 	if err != nil {
@@ -58,7 +58,7 @@ func qualifyTestFacts(t *testing.T, items []facts.Fact) ([]facts.Fact, map[strin
 	for _, relation := range description.BaseRelations {
 		metadata[relation.Predicate.Name] = relation
 	}
-	qualified := make([]facts.Fact, len(items))
+	qualified := make([]testFact, len(items))
 	anchors := make(map[string]facts.AnchorSupport)
 	for i, item := range items {
 		name := "ts." + item.Relation
@@ -72,7 +72,7 @@ func qualifyTestFacts(t *testing.T, items []facts.Fact) ([]facts.Fact, map[strin
 				}
 			}
 		}
-		qualified[i] = facts.Fact{Relation: name, Values: row}
+		qualified[i] = testFact{Relation: name, Values: row}
 		if item.Relation == "location" && len(row) == 6 {
 			id := row[0].String
 			anchors[id] = facts.AnchorSupport{
@@ -128,17 +128,28 @@ func TestProducerAnchorTrackingIsExplicitAndConflictsAreRejected(t *testing.T) {
 		Tracking: &facts.TrackingKey{Scheme: "catalog.object/1", Data: map[string]any{"name": "users"}},
 	}
 	nullTracking := facts.AnchorSupport{Location: location, Description: "catalog object without a stable key"}
-	batchFor := func(id string, support facts.AnchorSupport) facts.Batch {
-		return facts.Batch{
-			Relations: map[facts.Predicate][]facts.Row{requested[0]: {{facts.String(id)}}},
-			Anchors:   map[string]facts.AnchorSupport{id: support},
-		}
-	}
-	keyedFacts, err := facts.ValidateBatch(description, requested, batchFor("catalog:users", keyed))
+	descriptor, err := facts.ValidateDescription(description)
 	if err != nil {
 		t.Fatal(err)
 	}
-	nullFacts, err := facts.ValidateBatch(description, requested, batchFor("catalog:unstable", nullTracking))
+	build := func(id string, support facts.AnchorSupport) (facts.ValidatedFacts, error) {
+		builder, err := facts.NewBuilder(descriptor, requested)
+		if err != nil {
+			return facts.ValidatedFacts{}, err
+		}
+		relation, err := builder.Relation("item", 1)
+		if err != nil {
+			return facts.ValidatedFacts{}, err
+		}
+		builder.Add(relation, facts.String(id))
+		builder.Anchor(id, support)
+		return builder.Finish()
+	}
+	keyedFacts, err := build("users", keyed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nullFacts, err := build("unstable", nullTracking)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +171,7 @@ func TestProducerAnchorTrackingIsExplicitAndConflictsAreRejected(t *testing.T) {
 	}
 	for _, item := range invalidSupports {
 		t.Run(item.name, func(t *testing.T) {
-			if _, err := facts.ValidateBatch(description, requested, batchFor("catalog:invalid", item.support)); err == nil || !strings.Contains(err.Error(), item.message) {
+			if _, err := build("invalid", item.support); err == nil || !strings.Contains(err.Error(), item.message) {
 				t.Fatalf("expected anchor validation failure containing %q, got %v", item.message, err)
 			}
 		})

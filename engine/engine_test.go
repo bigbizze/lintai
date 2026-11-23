@@ -787,7 +787,7 @@ export function choose(flag: boolean) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var snapshotFacts []facts.Fact
+	var snapshotFacts []testFact
 	for predicate := range requested["ts"] {
 		sym := ast.PredicateSym{Symbol: predicate.Name, Arity: predicate.Arity}
 		err := assembled.base.GetFacts(ast.NewQuery(sym), func(atom ast.Atom) error {
@@ -799,7 +799,7 @@ export function choose(flag: boolean) {
 				}
 				values[index] = value
 			}
-			snapshotFacts = append(snapshotFacts, facts.Fact{Relation: strings.TrimPrefix(predicate.Name, "ts."), Values: values})
+			snapshotFacts = append(snapshotFacts, testFact{Relation: strings.TrimPrefix(predicate.Name, "ts."), Values: values})
 			return nil
 		})
 		if err != nil {
@@ -812,8 +812,8 @@ export function choose(flag: boolean) {
 			lines[fact.Values[0].String] = int(fact.Values[2].Number)
 		}
 	}
-	find := func(relation string, line int) []facts.Fact {
-		var result []facts.Fact
+	find := func(relation string, line int) []testFact {
+		var result []testFact
 		for _, fact := range snapshotFacts {
 			if fact.Relation == relation && lines[fact.Values[0].String] == line {
 				result = append(result, fact)
@@ -927,7 +927,7 @@ export function choose(flag: boolean) {
 		{31, "call_edge", fnIDs[fmt.Sprintf("<anonymous@%d>", strings.Index(source, "() => known()) as"))]},
 		{33, "call_edge", fnIDs[fmt.Sprintf("<anonymous@%d>", strings.Index(source, "() => known()) satisfies"))]},
 	} {
-		var outcomes []facts.Fact
+		var outcomes []testFact
 		for _, relation := range []string{"call_edge", "external_call", "call_unresolved"} {
 			for _, row := range find(relation, check.line) {
 				if owner(row.Values[0].String) == choose {

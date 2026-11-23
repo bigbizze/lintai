@@ -14,6 +14,7 @@ import (
 	"github.com/bigbizze/lintai/backend/typescript"
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/facts"
+	"github.com/bigbizze/lintai/observe"
 	"github.com/bigbizze/lintai/suppressions"
 )
 
@@ -23,18 +24,15 @@ type coverageProducer struct {
 	revision string
 }
 
-func (p *coverageProducer) Collect(ctx context.Context, request backend.CollectionRequest) (facts.Batch, error) {
-	if p.description.Namespace == "other" {
-		rows := map[facts.Predicate][]facts.Row{}
-		for _, pred := range request.Predicates {
-			rows[pred] = p.rows
-		}
-		return facts.Batch{Relations: rows, Anchors: p.anchors, AnalyzedFiles: append([]string(nil), p.files...), InputRevision: p.revision}, nil
+func (p *coverageProducer) Prepare(ctx context.Context, request backend.CollectionRequest, mode observe.Mode) (backend.Generation, error) {
+	generation, err := p.parallelFixtureProducer.Prepare(ctx, request, mode)
+	if err != nil {
+		return nil, err
 	}
-	batch, err := p.parallelFixtureProducer.Collect(ctx, request)
-	batch.AnalyzedFiles = append([]string(nil), p.files...)
-	batch.InputRevision = p.revision
-	return batch, err
+	g := generation.(*parallelGeneration)
+	g.metadata.AnalyzedFiles = append([]string(nil), p.files...)
+	g.metadata.InputRevision = p.revision
+	return g, nil
 }
 func secondCoverageProducer() *coverageProducer {
 	p := newParallelFixtureProducer()

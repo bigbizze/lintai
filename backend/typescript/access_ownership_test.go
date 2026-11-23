@@ -3,8 +3,6 @@ package typescript
 import (
 	"context"
 	"testing"
-
-	"github.com/bigbizze/lintai/facts"
 )
 
 func TestImportMetaSyntaxAndOwnership(t *testing.T) {
@@ -42,14 +40,15 @@ func TestImportMetaSyntaxAndOwnership(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	items, err := factsFromSnapshot(snapshot, sources, convertAdjustments(root, snapshot.ConfigAdjustments))
+	description, err := New().Describe()
 	if err != nil {
 		t.Fatal(err)
 	}
-	rows := make(map[string]map[string]facts.Fact)
+	items := inspectLocalSnapshot(t, snapshot, sources, convertAdjustments(root, snapshot.ConfigAdjustments), description, nil, false)
+	rows := make(map[string]map[string]testFact)
 	for _, item := range items {
 		if rows[item.Relation] == nil {
-			rows[item.Relation] = make(map[string]facts.Fact)
+			rows[item.Relation] = make(map[string]testFact)
 		}
 		if item.Relation == "meta_access" {
 			if _, exists := rows[item.Relation][item.Values[0].String]; exists {

@@ -15,6 +15,7 @@ import (
 	"github.com/bigbizze/lintai/backend"
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/facts"
+	"github.com/bigbizze/lintai/observe"
 )
 
 // This one fixture covers V28-V30: it runs the production rule path over
@@ -312,11 +313,15 @@ export default rule("` + id + `").version(1)
 }
 
 type parallelFixtureProducer struct {
-	description  facts.ProducerDescription
-	rows         []facts.Row
-	anchors      map[string]facts.AnchorSupport
-	collectCalls atomic.Int64
-	closed       atomic.Bool
+	description   facts.ProducerDescription
+	rows          [][]facts.Value
+	anchors       map[string]facts.AnchorSupport
+	prepareCalls  atomic.Int64
+	emitCalls     atomic.Int64
+	metadataCalls atomic.Int64
+	observations  observe.Set
+	reusable      bool
+	closed        atomic.Bool
 }
 
 func newParallelFixtureProducer() *parallelFixtureProducer {
@@ -343,11 +348,11 @@ func newParallelFixtureProducer() *parallelFixtureProducer {
 			},
 		}},
 	}
-	rows := make([]facts.Row, 3)
+	rows := make([][]facts.Value, 3)
 	anchors := make(map[string]facts.AnchorSupport, len(rows))
 	for index, code := range []string{"a", "b", "c"} {
 		entity := "catalog:item-" + code
-		rows[index] = facts.Row{facts.String(entity), facts.String(code)}
+		rows[index] = []facts.Value{facts.String(entity), facts.String(code)}
 		anchors[entity] = facts.AnchorSupport{
 			Location:    diagnostics.SourceLocation{File: "catalog/items.sql", StartLine: index + 1, StartColumn: 1, EndLine: index + 1, EndColumn: 5},
 			Description: "catalog item " + code,
@@ -361,22 +366,46 @@ func (producer *parallelFixtureProducer) Describe() (facts.ProducerDescription, 
 	return producer.description, nil
 }
 
-func (producer *parallelFixtureProducer) Collect(_ context.Context, request backend.CollectionRequest) (facts.Batch, error) {
-	producer.collectCalls.Add(1)
+func (producer *parallelFixtureProducer) Prepare(_ context.Context, request backend.CollectionRequest, _ observe.Mode) (backend.Generation, error) {
+	producer.prepareCalls.Add(1)
 	if producer.closed.Load() {
-		return facts.Batch{}, fmt.Errorf("producer was closed before collection")
+		return nil, fmt.Errorf("producer was closed before preparation")
 	}
-	rows := make(map[facts.Predicate][]facts.Row, 1)
 	for _, predicate := range request.Predicates {
-		if predicate.Name != "catalog.item" {
-			return facts.Batch{}, fmt.Errorf("unexpected relation %s", predicate.Name)
+		if predicate.Name != producer.description.Namespace+".item" {
+			return nil, fmt.Errorf("unexpected relation %s", predicate.Name)
 		}
-		rows[predicate] = producer.rows
 	}
-	return facts.Batch{
-		Relations: rows, Anchors: producer.anchors,
-		InputRevision: "fixture:parallel-v1", AnalyzedFiles: []string{"catalog/items.sql"},
-	}, nil
+	return &parallelGeneration{producer: producer, request: request, metadata: backend.GenerationMetadata{InputRevision: "fixture:parallel-v1", AnalyzedFiles: []string{"catalog/items.sql"}, Observations: producer.observations, ReusableFromObservations: producer.reusable}}, nil
+}
+
+type parallelGeneration struct {
+	producer *parallelFixtureProducer
+	request  backend.CollectionRequest
+	metadata backend.GenerationMetadata
+}
+
+func (g *parallelGeneration) Metadata() backend.GenerationMetadata {
+	g.producer.metadataCalls.Add(1)
+	return g.metadata
+}
+func (g *parallelGeneration) Emit(ctx context.Context, builder *facts.Builder) error {
+	g.producer.emitCalls.Add(1)
+	for _, predicate := range g.request.Predicates {
+		relation, err := builder.Relation("item", predicate.Arity)
+		if err != nil {
+			return err
+		}
+		for _, original := range g.producer.rows {
+			row := append([]facts.Value(nil), original...)
+			row[0].String = strings.TrimPrefix(row[0].String, g.producer.description.Namespace+":")
+			builder.Add(relation, row...)
+		}
+	}
+	for id, support := range g.producer.anchors {
+		builder.Anchor(strings.TrimPrefix(id, g.producer.description.Namespace+":"), support)
+	}
+	return ctx.Err()
 }
 
 func (producer *parallelFixtureProducer) Close() error {

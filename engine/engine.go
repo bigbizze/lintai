@@ -397,10 +397,11 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options) (Res
 	if len(ruleCatalog.paths) == 0 {
 		e.currentFacts = nil
 		e.currentCatalog = ""
-		if _, err := e.describeProducers(); err != nil {
+		catalog, err := e.describeProducers()
+		if err != nil {
 			return Result{}, run, evidence, err
 		}
-		assembled, emptyErr := emptyComposedFacts()
+		assembled, emptyErr := catalog.collect(ctx, options, nil, nil)
 		if emptyErr != nil {
 			return Result{}, run, evidence, emptyErr
 		}
@@ -613,12 +614,9 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options) (Res
 		})
 	}
 
-	var producerCatalog producerCatalog
-	if len(generated) > 0 {
-		producerCatalog, err = e.describeProducers()
-		if err != nil {
-			return Result{}, run, evidence, err
-		}
+	producerCatalog, err := e.describeProducers()
+	if err != nil {
+		return Result{}, run, evidence, err
 	}
 	planKeys := make(map[string]string, len(generated))
 	generationRecords := make([]any, 0, len(generated))
@@ -696,6 +694,10 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options) (Res
 		e.currentFacts = &assembled
 		e.currentCatalog = producerCatalog.identity
 	} else {
+		assembled, err = producerCatalog.collect(ctx, options, nil, nil)
+		if err != nil {
+			return Result{}, run, evidence, err
+		}
 		e.currentFacts = nil
 		e.currentCatalog = ""
 	}
