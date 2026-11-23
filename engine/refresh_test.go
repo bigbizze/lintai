@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -281,6 +282,40 @@ func TestEffectiveRequestIdentity(t *testing.T) {
 	base.Env["nested"].(map[string]any)["x"] = "changed"
 	if detached.Env["nested"].(map[string]any)["x"] != "y" {
 		t.Fatal("effective environment was not detached")
+	}
+	shapeCases := []struct {
+		name  string
+		value any
+		want  string
+	}{
+		{name: "nil slice is null", value: []any(nil), want: `{"value":null}`},
+		{name: "nil map is null", value: map[string]any(nil), want: `{"value":null}`},
+		{name: "empty array stays empty array", value: []any{}, want: `{"value":[]}`},
+		{name: "empty object stays empty object", value: map[string]any{}, want: `{"value":{}}`},
+	}
+	keysByJSON := make(map[string]string)
+	for _, tc := range shapeCases {
+		t.Run(tc.name, func(t *testing.T) {
+			candidate := base
+			candidate.Env = map[string]any{"value": tc.value}
+			got, key, err := effectiveOptions(candidate)
+			if err != nil {
+				t.Fatal(err)
+			}
+			encoded, err := json.Marshal(got.Env)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(encoded) != tc.want {
+				t.Fatalf("environment JSON = %s, want %s", encoded, tc.want)
+			}
+			keysByJSON[tc.want] = key
+		})
+	}
+	if keysByJSON[`{"value":null}`] == keysByJSON[`{"value":[]}`] ||
+		keysByJSON[`{"value":null}`] == keysByJSON[`{"value":{}}`] ||
+		keysByJSON[`{"value":[]}`] == keysByJSON[`{"value":{}}`] {
+		t.Fatal("environment identity collapsed null, array, and object values")
 	}
 	base.Env["nested"].(map[string]any)["x"] = "y"
 	changes := []func(*Options){

@@ -1,11 +1,12 @@
-import { type SpawnSyncReturns, spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, readSync } from "node:fs";
+import { type SpawnSyncReturns, spawnSync } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { PassThrough, type Readable, type Writable } from "node:stream";
+import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 
 import { FrameDecoder, encodeFrame } from "./frames.js";
-import { type SpawnedProcess, activeSpawner, spawnerFor } from "./spawner.js";
+import { activeSpawner } from "./spawner.js";
+import { type ServeTransport, SpawnerServeTransport, spawnNativeServe } from "./transport.js";
 
 export type Diagnostic = {
 	rule_id: string;
@@ -99,19 +100,7 @@ type IndexedDiagnostics = {
 
 type ClientState = "idle" | "starting" | "ready" | "fallback" | "disposed";
 
-type ClientProcess = {
-	stdin: Writable;
-	stdout: Readable;
-	stderr?: Readable;
-	on(
-		event: "exit",
-		listener: (code: number | null, signal: NodeJS.Signals | null) => void,
-	): ClientProcess;
-	kill(signal?: NodeJS.Signals | number): boolean;
-	unref?(): void;
-};
-
-type SpawnServe = (binary: string, args: string[], cwd: string) => ClientProcess;
+type SpawnServe = (binary: string, args: string[], cwd: string) => ServeTransport;
 type SpawnSyncLike = (
 	command: string,
 	args: string[],
@@ -121,27 +110,19 @@ type SpawnSyncLike = (
 type ClientDependencies = {
 	spawnServe: SpawnServe;
 	spawnSync: SpawnSyncLike;
-	readServeSync: (child: ClientProcess, timeoutMs: number) => Buffer;
 	log: (message: string) => void;
 };
 
 const clientCache = new Map<string, LintAIClient>();
 const initializeTimeoutMs = 60_000;
-const syncSleep = new Int32Array(new SharedArrayBuffer(4));
 
 const defaultDependencies: ClientDependencies = {
 	spawnServe(binary, args, cwd) {
 		const spawner = activeSpawner();
 		if (spawner) {
-			return spawner.spawn(binary, args, cwd) as unknown as ClientProcess;
+			return new SpawnerServeTransport(spawner, spawner.spawn(binary, args, cwd));
 		}
-		const child = spawn(binary, args, {
-			cwd,
-			stdio: ["pipe", "pipe", "inherit"],
-		});
-		(child.stdin as unknown as { unref?: () => void }).unref?.();
-		(child.stdout as unknown as { unref?: () => void }).unref?.();
-		return child as unknown as ClientProcess;
+		return spawnNativeServe(binary, args, cwd);
 	},
 	spawnSync(command, args, options) {
 		const spawner = activeSpawner();
@@ -149,37 +130,6 @@ const defaultDependencies: ClientDependencies = {
 			return spawner.spawnSync(command, args, options.cwd);
 		}
 		return spawnSync(command, args, options);
-	},
-	readServeSync(child, timeoutMs) {
-		const spawner = spawnerFor(child);
-		if (spawner) {
-			return spawner.readSync(child as unknown as SpawnedProcess, timeoutMs);
-		}
-		const fd = getReadableFD(child.stdout);
-		if (fd == null) {
-			throw new Error("lintai serve stdout fd is unavailable for synchronous initialization");
-		}
-		const deadline = Date.now() + timeoutMs;
-		while (true) {
-			const remaining = deadline - Date.now();
-			if (remaining <= 0) {
-				throw new Error("lintai serve initialization timed out");
-			}
-			const buffer = Buffer.allocUnsafe(64 * 1024);
-			try {
-				const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
-				if (bytesRead === 0) {
-					throw new Error("lintai serve closed stdout during initialization");
-				}
-				return buffer.subarray(0, bytesRead);
-			} catch (error) {
-				const value = error as NodeJS.ErrnoException;
-				if (value?.code !== "EAGAIN" && value?.code !== "EWOULDBLOCK") {
-					throw asError(error);
-				}
-				Atomics.wait(syncSleep, 0, 0, Math.min(10, remaining));
-			}
-		}
 	},
 	log(message) {
 		console.warn(message);
@@ -197,7 +147,7 @@ class RPCError extends Error {
 
 export class LintAIClient {
 	private state: ClientState = "idle";
-	private child: ClientProcess | undefined;
+	private transport: ServeTransport | undefined;
 	private nextRequestID = 1;
 	private readonly decoder = new FrameDecoder();
 	private latestProblems: string[] = [];
@@ -261,18 +211,18 @@ export class LintAIClient {
 	dispose(): void {
 		if (this.state === "disposed") return;
 		process.off("exit", this.processExitHandler);
-		const child = this.child;
-		this.child = undefined;
+		const transport = this.transport;
+		this.transport = undefined;
 		this.state = "disposed";
-		if (child && !child.stdin.destroyed) {
+		if (transport) {
 			try {
-				child.stdin.write(
+				transport.write(
 					encodeFrame({ jsonrpc: "2.0", id: this.nextRequestID++, method: "shutdown", params: {} }),
 				);
 			} catch {
 				/* best effort */
 			}
-			child.stdin.end();
+			transport.close();
 		}
 	}
 
@@ -284,26 +234,12 @@ export class LintAIClient {
 		}
 		this.state = "starting";
 		try {
-			const child = this.dependencies.spawnServe(
+			const transport = this.dependencies.spawnServe(
 				this.options.binary,
 				["serve"],
 				this.options.repoRoot,
 			);
-			this.child = child;
-			child.unref?.();
-			child.on("exit", (code, signal) =>
-				this.handleServeFailure(
-					new Error(
-						`lintai serve exited unexpectedly (code=${code ?? "null"}, signal=${signal ?? "null"})`,
-					),
-				),
-			);
-			(child as unknown as { on(event: "error", listener: (error: Error) => void): void }).on(
-				"error",
-				(error) => this.handleServeFailure(error),
-			);
-			child.stdin.on("error", (error) => this.handleServeFailure(error));
-			child.stdout.on("error", (error) => this.handleServeFailure(error));
+			this.transport = transport;
 			const result = this.requestSync<{ protocolVersion: number }>("initialize", {
 				repoRoot: this.options.repoRoot,
 				assetRoot: this.options.assetRoot,
@@ -328,19 +264,21 @@ export class LintAIClient {
 	}
 
 	private requestSync<T>(method: string, params: unknown): T {
-		if (!this.child) throw new Error("lintai serve is not running");
+		const transport = this.transport;
+		if (!transport) throw new Error("lintai serve is not running");
 		const id = this.nextRequestID++;
 		const request: JSONRPCRequest = { jsonrpc: "2.0", id, method, params };
-		let writeError: Error | undefined;
-		this.child.stdin.write(encodeFrame(request), (error) => {
-			if (error) writeError = error;
-		});
+		transport.write(encodeFrame(request));
 		const deadline = Date.now() + initializeTimeoutMs;
 		while (true) {
-			if (writeError) throw writeError;
-			const remaining = deadline - Date.now();
-			if (remaining <= 0) throw new Error(`lintai serve ${method} timed out`);
-			const messages = this.decoder.push(this.dependencies.readServeSync(this.child, remaining));
+			if (deadline - Date.now() <= 0) throw new Error(`lintai serve ${method} timed out`);
+			let bytes: Buffer;
+			try {
+				bytes = transport.read(deadline);
+			} catch (error) {
+				throw transport.failure() ?? error;
+			}
+			const messages = this.decoder.push(bytes);
 			if (messages.length === 0) continue;
 			if (messages.length !== 1) throw new Error("unexpected lintai serve response count");
 			const response = messages[0] as JSONRPCResponse<T>;
@@ -374,10 +312,10 @@ export class LintAIClient {
 		if (this.state === "disposed" || this.state === "fallback") return;
 		this.warnOnce(`lintai serve unavailable, falling back to oneshot mode: ${error.message}`);
 		this.serveFailure = error.message;
-		const child = this.child;
-		this.child = undefined;
+		const transport = this.transport;
+		this.transport = undefined;
 		this.state = "fallback";
-		if (child && !child.stdin.destroyed) child.stdin.end();
+		transport?.close();
 	}
 
 	private setProblems(problems: string[]): void {
@@ -741,16 +679,19 @@ function asError(error: unknown): Error {
 	return error instanceof Error ? error : new Error(String(error));
 }
 
-function getReadableFD(stream: Readable): number | undefined {
-	const handle = (stream as Readable & { _handle?: { fd?: number } })._handle;
-	return typeof handle?.fd === "number" ? handle.fd : undefined;
-}
-
-export function createTestProcess(): ClientProcess & {
+type TestProcess = {
 	stdin: PassThrough;
 	stdout: PassThrough;
+	on(
+		event: "exit",
+		listener: (code: number | null, signal: NodeJS.Signals | null) => void,
+	): TestProcess;
+	kill(signal?: NodeJS.Signals | number): boolean;
+	unref(): void;
 	emitExit(code?: number | null, signal?: NodeJS.Signals | null): void;
-} {
+};
+
+export function createTestProcess(): TestProcess {
 	const listeners = new Set<(code: number | null, signal: NodeJS.Signals | null) => void>();
 	const stdin = new PassThrough();
 	const stdout = new PassThrough();
@@ -777,6 +718,26 @@ export function createTestProcess(): ClientProcess & {
 		unref() {},
 		emitExit(code = 0, signal = null) {
 			listeners.forEach((listener) => listener(code, signal));
+		},
+	};
+}
+
+export function createTestTransport(
+	child: TestProcess,
+	read: (child: TestProcess, timeoutMs: number) => Buffer,
+): ServeTransport {
+	return {
+		write(bytes) {
+			child.stdin.write(bytes);
+		},
+		read(deadline) {
+			return read(child, deadline);
+		},
+		close() {
+			if (!child.stdin.destroyed) child.stdin.end();
+		},
+		failure() {
+			return undefined;
 		},
 	};
 }

@@ -153,13 +153,14 @@ func (b *Builder) Anchor(localKey string, support AnchorSupport) {
 		return
 	}
 	key := b.descriptor.description.Namespace + ":" + localKey
+	detached := cloneAnchor(support)
 	if old, ok := b.anchors[key]; ok {
-		if !reflect.DeepEqual(old, support) {
+		if !reflect.DeepEqual(old, detached) {
 			b.fail(fmt.Errorf("producer %q supplied conflicting anchor support for %q", b.descriptor.description.Namespace, key))
 		}
 		return
 	}
-	b.anchors[key] = cloneAnchor(support)
+	b.anchors[key] = detached
 }
 
 // ValidatedFacts contains immutable, already-converted atoms and reporting support.

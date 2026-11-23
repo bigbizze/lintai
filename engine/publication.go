@@ -68,11 +68,10 @@ func effectiveOptions(options Options) (Options, string, error) {
 	if options.Env == nil {
 		options.Env = map[string]any{}
 	}
-	normalized, err := canonical.Normalize(options.Env)
-	if err != nil {
+	if _, err = canonical.Normalize(options.Env); err != nil {
 		return Options{}, "", fmt.Errorf("environment: %w", err)
 	}
-	options.Env = normalized.(map[string]any)
+	options.Env = cloneEnvironment(options.Env)
 	if options.Severity == "" {
 		options.Severity = diagnostics.SeverityError
 	}
@@ -90,7 +89,7 @@ func effectiveOptions(options Options) (Options, string, error) {
 		copiedSeverity[id] = value
 	}
 	options.RuleSeverity = copiedSeverity
-	identity, err := canonical.MarshalStructured([]any{
+	identity, err := canonical.MarshalStructuredPreservingNull([]any{
 		"lintai-request-v1", options.RepoRoot, options.AssetRoot, options.WorkspaceRoot,
 		options.RuleGlobs, options.Env, string(options.Severity), severity, options.FactLimit,
 		options.Explain, options.RulesLock, string(options.SetupSandbox), options.SuppressionsLocation,
@@ -100,6 +99,38 @@ func effectiveOptions(options Options) (Options, string, error) {
 		return Options{}, "", fmt.Errorf("request: %w", err)
 	}
 	return options, string(identity), nil
+}
+
+func cloneEnvironment(environment map[string]any) map[string]any {
+	cloned, _ := cloneEnvironmentValue(environment).(map[string]any)
+	return cloned
+}
+
+func cloneEnvironmentValue(value any) any {
+	switch typed := value.(type) {
+	case []any:
+		if typed == nil {
+			return []any(nil)
+		}
+		items := make([]any, len(typed))
+		for index, item := range typed {
+			items[index] = cloneEnvironmentValue(item)
+		}
+		return items
+	case []string:
+		return slices.Clone(typed)
+	case map[string]any:
+		if typed == nil {
+			return map[string]any(nil)
+		}
+		result := make(map[string]any, len(typed))
+		for key, item := range typed {
+			result[key] = cloneEnvironmentValue(item)
+		}
+		return result
+	default:
+		return value
+	}
 }
 
 func newPublishedResult(result Result, request Options, key string, observations observe.Set, reusable bool) *publishedResult {

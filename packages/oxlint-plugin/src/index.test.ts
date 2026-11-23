@@ -38,6 +38,23 @@ after(() => {
 	rmSync(workspace, { recursive: true, force: true });
 });
 
+function testServeTransport(child: ReturnType<typeof createTestProcess>, read: () => Buffer) {
+	return {
+		write(bytes: Buffer) {
+			child.stdin.write(bytes);
+		},
+		read(_deadline: number) {
+			return read();
+		},
+		close() {
+			if (!child.stdin.destroyed) child.stdin.end();
+		},
+		failure() {
+			return undefined;
+		},
+	};
+}
+
 const ruleError: Diagnostic = {
 	rule_id: "arch.broken",
 	assertion_id: "default",
@@ -120,21 +137,22 @@ it("serve findings with unregistered IDs report through analysis with restart gu
 			stderr: "",
 			stdout: JSON.stringify({ rules: [{ id: "arch.no-async", path: "rule.ts" }], errors: [] }),
 		}),
-		spawnServe: () => child,
-		readServeSync: () =>
-			createFramedResponse({
-				jsonrpc: "2.0",
-				id: ++id,
-				result:
-					id === 1
-						? { protocolVersion: 1 }
-						: {
-								snapshotVersion: "snap",
-								rulesLoaded: 2,
-								diagnostics: [{ ...violation, rule_id: "arch.new" }],
-								problems: [],
-							},
-			}),
+		spawnServe: () =>
+			testServeTransport(child, () =>
+				createFramedResponse({
+					jsonrpc: "2.0",
+					id: ++id,
+					result:
+						id === 1
+							? { protocolVersion: 1 }
+							: {
+									snapshotVersion: "snap",
+									rulesLoaded: 2,
+									diagnostics: [{ ...violation, rule_id: "arch.new" }],
+									problems: [],
+								},
+				}),
+			),
 	});
 	loadRuleIds(resolved, dependencies);
 	getClient(resolved, dependencies);
@@ -167,6 +185,7 @@ function withHost(argv: string[], fresh: boolean) {
 				resetClientsForTest();
 			}
 			const options = resolveBridgeOptions(bridge, process.cwd(), oxlintHostDefaults(argv));
+			const child = createTestProcess();
 			const dependencies = createTestDependencies({
 				spawnSync: (_binary, args) =>
 					args[0] === "rules"
@@ -183,24 +202,27 @@ function withHost(argv: string[], fresh: boolean) {
 								status: 0,
 							}
 						: { stdout: JSON.stringify(diagnostics), stderr: "", error: undefined, status: 3 },
-				spawnServe: () => createTestProcess(),
-				readServeSync: (() => {
-					let id = 0;
-					return () =>
-						createFramedResponse({
-							jsonrpc: "2.0",
-							id: ++id,
-							result:
-								id === 1
-									? { protocolVersion: 1 }
-									: {
-											rulesLoaded: 2,
-											snapshotVersion: "snap",
-											diagnostics: [violation],
-											problems: [problem],
-										},
-						});
-				})(),
+				spawnServe: () =>
+					testServeTransport(
+						child,
+						(() => {
+							let id = 0;
+							return () =>
+								createFramedResponse({
+									jsonrpc: "2.0",
+									id: ++id,
+									result:
+										id === 1
+											? { protocolVersion: 1 }
+											: {
+													rulesLoaded: 2,
+													snapshotVersion: "snap",
+													diagnostics: [violation],
+													problems: [problem],
+												},
+								});
+						})(),
+					),
 				log: () => undefined,
 			});
 			loadRuleIds(options, dependencies);
