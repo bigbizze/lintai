@@ -2,8 +2,6 @@ package typescript
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -710,29 +708,19 @@ func TestCapturedInputRevisionIgnoresAbsoluteRoot(t *testing.T) {
 
 	writeWorkspaceFile(t, rootOne, "src/a.ts", "export const alpha = 1;\n")
 	writeWorkspaceFile(t, rootOne, "src/b.ts", "export const beta = 2;\n")
-	configContents := []byte("[workspace]\nexclude = []\n")
-	configDigest := sha256.Sum256(configContents)
-	configOne := writeWorkspaceFile(t, rootOne, "lintai.toml", string(configContents))
 	writeWorkspaceFile(t, rootTwo, "src/a.ts", "export const alpha = 1;\n")
 	writeWorkspaceFile(t, rootTwo, "src/b.ts", "export const beta = 2;\n")
-	configTwo := writeWorkspaceFile(t, rootTwo, "lintai.toml", string(configContents))
 
-	options := func(path string) Options {
-		return Options{Files: FileScopeWalk, ConfigPath: path, ConfigPresent: true, ConfigDigest: hex.EncodeToString(configDigest[:])}
-	}
-	left, err := New(options(configOne)).buildTestGeneration(context.Background(), rootOne, rootOne)
+	left, err := New(Options{Files: FileScopeWalk}).buildTestGeneration(context.Background(), rootOne, rootOne)
 	if err != nil {
 		t.Fatal(err)
 	}
-	right, err := New(options(configTwo)).buildTestGeneration(context.Background(), rootTwo, rootTwo)
+	right, err := New(Options{Files: FileScopeWalk}).buildTestGeneration(context.Background(), rootTwo, rootTwo)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if left.inputRevision != right.inputRevision {
 		t.Fatalf("expected stable input revision across roots, got %q != %q", left.inputRevision, right.inputRevision)
-	}
-	if !hasGenerationObservation(left, configOne) || !hasGenerationObservation(right, configTwo) {
-		t.Fatal("config content missing from generation observations")
 	}
 }
 

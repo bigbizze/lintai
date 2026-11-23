@@ -77,7 +77,6 @@ type Result struct {
 	SnapshotVersion string
 	RulesLoaded     int
 	AnalyzedFiles   []string
-	WatchHints      []string
 	// Warnings are messages for the user that are not diagnostics.
 	Warnings []string
 	// Suppressed are the violations that the suppressions file
@@ -386,7 +385,6 @@ func cloneResult(result Result) Result {
 	result.Diagnostics = cloneDiagnostics(result.Diagnostics)
 	result.Suppressed = cloneDiagnostics(result.Suppressed)
 	result.AnalyzedFiles = append([]string(nil), result.AnalyzedFiles...)
-	result.WatchHints = append([]string(nil), result.WatchHints...)
 	result.Warnings = append([]string(nil), result.Warnings...)
 	result.UnusedSuppressions = append([]suppressions.Unused(nil), result.UnusedSuppressions...)
 	return result
@@ -750,7 +748,6 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options, mode
 	run.snapshotVersion = assembled.snapshotID
 	result.SnapshotVersion = assembled.snapshotID
 	result.AnalyzedFiles = sortedSet(assembled.analyzedFiles)
-	result.WatchHints = append([]string(nil), assembled.watchHints...)
 	run.known = knownRules
 	if run.complete {
 		allDiagnostics = append(allDiagnostics, unknownSeverityRules(options, knownRules, assembled.snapshotID, producerNames)...)

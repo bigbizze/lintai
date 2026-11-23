@@ -5,9 +5,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"reflect"
-	"strconv"
 	"testing"
 
 	"github.com/bigbizze/lintai/diagnostics"
@@ -16,421 +17,140 @@ import (
 )
 
 type fakeAnalyzer struct {
-	results []engine.Result
-	err     error
-	errors  []error
-	calls   []engine.Options
+	refreshCalls []engine.Options
+	checkCalls   []engine.Options
+	closed       int
+	fail         bool
 }
 
-func (f *fakeAnalyzer) Check(_ context.Context, requests ...engine.Options) (engine.Result, error) {
-	options := requests[0]
-	f.calls = append(f.calls, options)
-	if len(f.errors) > 0 {
-		err := f.errors[0]
-		f.errors = f.errors[1:]
+func (f *fakeAnalyzer) Refresh(_ context.Context, options engine.Options, file string) (engine.FileResult, error) {
+	f.refreshCalls = append(f.refreshCalls, options)
+	if f.fail {
+		f.fail = false
+		return engine.FileResult{}, errors.New("broken input")
+	}
+	return engine.FileResult{SnapshotVersion: "snap", RulesLoaded: 1, Diagnostics: []diagnostics.Diagnostic{{RuleID: "located", Message: file}}, WorkspaceProblems: []diagnostics.Diagnostic{{RuleID: "bad", DiagnosticKind: diagnostics.KindRuleExecutionError, Phase: "setup", Message: "failed"}}, Warnings: []string{"warning"}}, nil
+}
+func (f *fakeAnalyzer) Check(_ context.Context, options ...engine.Options) (engine.Result, error) {
+	f.checkCalls = append(f.checkCalls, options[0])
+	return engine.Result{SnapshotVersion: "forced", RulesLoaded: 1, Diagnostics: []diagnostics.Diagnostic{{RuleID: "bad", DiagnosticKind: diagnostics.KindRuleExecutionError, Message: "failed"}}, Warnings: []string{"warning"}}, nil
+}
+func (f *fakeAnalyzer) Close() error { f.closed++; return nil }
+
+func TestProtocolHandshakeRecoveryAndForcedReanalysis(t *testing.T) {
+	first, second := &fakeAnalyzer{fail: true}, &fakeAnalyzer{}
+	var analyzers []*fakeAnalyzer
+	instance := NewWithFactory(func(InitializeParams) Analyzer {
+		if len(analyzers) == 0 {
+			analyzers = append(analyzers, first)
+			return first
+		}
+		analyzers = append(analyzers, second)
+		return second
+	})
+	var warnings bytes.Buffer
+	instance.Log = &warnings
+	call := func(id int, method string, params any) jsonrpc.Response {
+		t.Helper()
+		raw, err := json.Marshal(params)
 		if err != nil {
-			return engine.Result{}, err
+			t.Fatal(err)
+		}
+		idRaw := json.RawMessage(fmt.Sprint(id))
+		response, _ := instance.handleRequest(context.Background(), jsonrpc.Request{JSONRPC: "2.0", ID: &idRaw, Method: method, Params: raw})
+		return response
+	}
+	if response := call(1, "diagnostics/file", FileDiagnosticsParams{File: "a.ts"}); response.Error == nil || response.Error.Code != errCodeNotInitialized {
+		t.Fatalf("not initialized: %+v", response)
+	}
+	params := InitializeParams{WorkspaceRoot: "/workspace", RuleWorkers: 2, SourceLinks: "links.json", SetupSandbox: "off"}
+	response := call(2, "initialize", params)
+	if response.Error != nil || !reflect.DeepEqual(response.Result, InitializeResult{ProtocolVersion: 1}) || len(first.refreshCalls) != 0 || len(first.checkCalls) != 0 {
+		t.Fatalf("handshake: %+v %+v", response, first)
+	}
+	failed := call(3, "diagnostics/file", FileDiagnosticsParams{File: "src/a.ts"})
+	if failed.Error == nil || failed.Error.Code != errCodeAnalysis || failed.Error.Message != "broken input" {
+		t.Fatalf("analysis error: %+v", failed)
+	}
+	ok := call(4, "diagnostics/file", FileDiagnosticsParams{File: "src/a.ts"})
+	file := ok.Result.(FileDiagnosticsResult)
+	if ok.Error != nil || file.SnapshotVersion != "snap" || len(file.Diagnostics) != 1 || !reflect.DeepEqual(file.Problems, []string{"[lintai] rule bad could not run (phase setup): failed"}) {
+		t.Fatalf("file: %+v", ok)
+	}
+	one := 1
+	forced := call(5, "reanalyze", ReanalyzeParams{Reason: "test", RuleWorkers: &one})
+	summary := forced.Result.(AnalysisResult)
+	if forced.Error != nil || summary.SnapshotVersion != "forced" || summary.DiagnosticCount != 1 || !reflect.DeepEqual(summary.Problems, []string{"[lintai] rule bad could not run: failed"}) {
+		t.Fatalf("summary: %+v", forced)
+	}
+	call(6, "diagnostics/file", FileDiagnosticsParams{File: "src/b.ts"})
+	if len(first.checkCalls) != 1 || first.checkCalls[0].RuleWorkers != 1 || first.refreshCalls[2].RuleWorkers != 2 || first.refreshCalls[2].SetupSandbox != "off" {
+		t.Fatalf("worker override: %+v %+v", first.checkCalls, first.refreshCalls)
+	}
+	if warnings.String() != "warning\n" {
+		t.Fatalf("warnings: %q", warnings.String())
+	}
+	call(7, "initialize", params)
+	if first.closed != 1 || len(second.refreshCalls) != 0 || len(second.checkCalls) != 0 {
+		t.Fatalf("replacement: first=%+v second=%+v", first, second)
+	}
+	for _, params := range []InitializeParams{
+		{RuleWorkers: -1},
+		{SetupSandbox: "auto"},
+		{Files: "invalid"},
+		{Severity: map[string]string{"rule": "invalid"}},
+	} {
+		invalid := call(8, "initialize", params)
+		if invalid.Error == nil || invalid.Error.Code != errCodeInvalidParams || second.closed != 0 {
+			t.Fatalf("invalid replacement %+v: %+v", params, invalid)
 		}
 	}
-	if f.err != nil {
-		return engine.Result{}, f.err
+	if got := call(9, "diagnostics/file", FileDiagnosticsParams{}); got.Error == nil || got.Error.Code != errCodeInvalidParams {
+		t.Fatalf("missing file: %+v", got)
 	}
-	if len(f.results) == 0 {
-		return engine.Result{}, nil
-	}
-	result := f.results[0]
-	if len(f.results) > 1 {
-		f.results = f.results[1:]
-	}
-	return result, nil
 }
 
-func (f *fakeAnalyzer) Close() error { return nil }
-
-func TestServerInitializeAndFileDiagnostics(t *testing.T) {
-	analyzer := &fakeAnalyzer{
-		results: []engine.Result{
-			{
-				RulesLoaded:     2,
-				SnapshotVersion: "snap-1",
-				Diagnostics: []diagnostics.Diagnostic{
-					{
-						RuleID:      "arch.example",
-						AssertionID: "default",
-						Message:     "bad import",
-						SourceLocation: &diagnostics.SourceLocation{
-							File:        "src/example.ts",
-							StartLine:   1,
-							StartColumn: 1,
-							EndLine:     1,
-							EndColumn:   10,
-						},
-					},
-				},
-			},
-		},
-	}
-
+func TestFramedEmptyArraysAndShutdown(t *testing.T) {
+	analyzer := &emptyAnalyzer{}
 	input := &bytes.Buffer{}
-	writeRequest(t, input, 1, "initialize", InitializeParams{
-		RepoRoot:      "/repo",
-		AssetRoot:     "/assets",
-		WorkspaceRoot: "/workspace",
-		RuleGlobs:     []string{"lintai-rules/**/*.ts"},
-		SourceLinks:   "source-links.json",
-		Env:           map[string]any{"mode": "test"},
-		RuleWorkers:   2,
-	})
-	writeRequest(t, input, 2, "diagnostics/file", FileDiagnosticsParams{File: "/src/example.ts"})
+	writeRequest(t, input, 1, "initialize", InitializeParams{})
+	writeRequest(t, input, 2, "diagnostics/file", FileDiagnosticsParams{File: "a.ts"})
+	writeRequest(t, input, 3, "reanalyze", ReanalyzeParams{})
+	writeRequest(t, input, 4, "shutdown", map[string]any{})
 	output := &bytes.Buffer{}
-
-	var factoryParams InitializeParams
-	server := NewWithFactory(func(params InitializeParams) Analyzer {
-		factoryParams = params
-		return analyzer
-	})
-	if err := server.Serve(context.Background(), input, output); err != nil {
+	if err := NewWithFactory(func(InitializeParams) Analyzer { return analyzer }).Serve(context.Background(), input, output); err != nil {
 		t.Fatal(err)
 	}
-
+	wire := append([]byte(nil), output.Bytes()...)
 	reader := bufio.NewReader(output)
-	initializeResponse := readResponse(t, reader)
-	if initializeResponse.Error != nil {
-		t.Fatalf("initialize failed: %+v", initializeResponse.Error)
+	for i := 0; i < 4; i++ {
+		response, err := jsonrpc.ReadResponse(reader)
+		if err != nil || response.Error != nil {
+			t.Fatalf("response %d: %+v %v", i, response, err)
+		}
 	}
-	var initializeResult AnalysisResult
-	decodeResult(t, initializeResponse.Result, &initializeResult)
-	if initializeResult.RulesLoaded != 2 || initializeResult.DiagnosticCount != 1 || initializeResult.SnapshotVersion != "snap-1" {
-		t.Fatalf("unexpected initialize result %+v", initializeResult)
+	if !bytes.Contains(wire, []byte(`"diagnostics":[]`)) || bytes.Count(wire, []byte(`"problems":[]`)) != 2 || bytes.Contains(wire, []byte(`"watchHints"`)) {
+		t.Fatalf("wire: %s", wire)
 	}
-
-	fileResponse := readResponse(t, reader)
-	if fileResponse.Error != nil {
-		t.Fatalf("diagnostics/file failed: %+v", fileResponse.Error)
-	}
-	var fileResult FileDiagnosticsResult
-	decodeResult(t, fileResponse.Result, &fileResult)
-	if len(fileResult.Diagnostics) != 1 {
-		t.Fatalf("expected one diagnostic, got %+v", fileResult.Diagnostics)
-	}
-	if got := fileResult.Diagnostics[0].SourceLocation.File; got != "src/example.ts" {
-		t.Fatalf("expected normalized file path, got %q", got)
-	}
-
-	if len(analyzer.calls) != 1 {
-		t.Fatalf("expected one analyze call, got %d", len(analyzer.calls))
-	}
-	if analyzer.calls[0].AssetRoot != "/assets" {
-		t.Fatalf("expected asset root to be propagated, got %q", analyzer.calls[0].AssetRoot)
-	}
-	if analyzer.calls[0].SetupSandbox != "on" {
-		t.Fatalf("default setup sandbox = %q", analyzer.calls[0].SetupSandbox)
-	}
-	if analyzer.calls[0].RuleWorkers != 2 {
-		t.Fatalf("ruleWorkers not forwarded: %+v", analyzer.calls[0])
-	}
-	if factoryParams.SourceLinks != "source-links.json" {
-		t.Fatalf("expected producer settings to reach construction, got %q", factoryParams.SourceLinks)
+	if !analyzer.closed {
+		t.Fatal("shutdown did not close analyzer")
 	}
 }
 
-func TestServerReanalyzeSwapsCachedState(t *testing.T) {
-	analyzer := &fakeAnalyzer{
-		results: []engine.Result{
-			{
-				RulesLoaded:     1,
-				SnapshotVersion: "snap-1",
-				Diagnostics: []diagnostics.Diagnostic{
-					{
-						RuleID:      "arch.first",
-						AssertionID: "default",
-						Message:     "old",
-						SourceLocation: &diagnostics.SourceLocation{
-							File:        "src/example.ts",
-							StartLine:   1,
-							StartColumn: 1,
-							EndLine:     1,
-							EndColumn:   10,
-						},
-					},
-				},
-			},
-			{
-				RulesLoaded:     1,
-				SnapshotVersion: "snap-2",
-				Diagnostics: []diagnostics.Diagnostic{
-					{
-						RuleID:      "arch.second",
-						AssertionID: "default",
-						Message:     "new",
-						SourceLocation: &diagnostics.SourceLocation{
-							File:        "src/example.ts",
-							StartLine:   2,
-							StartColumn: 1,
-							EndLine:     2,
-							EndColumn:   12,
-						},
-					},
-				},
-			},
-		},
-	}
+type emptyAnalyzer struct{ closed bool }
 
-	input := &bytes.Buffer{}
-	writeRequest(t, input, 1, "initialize", InitializeParams{
-		RepoRoot:      "/repo",
-		AssetRoot:     "/assets",
-		WorkspaceRoot: "/workspace",
-		RuleGlobs:     []string{"lintai-rules/**/*.ts"},
-		Env:           map[string]any{},
-		RuleWorkers:   2,
-	})
-	one := 1
-	writeRequest(t, input, 2, "reanalyze", ReanalyzeParams{Reason: "test", RuleWorkers: &one})
-	writeRequest(t, input, 3, "reanalyze", ReanalyzeParams{Reason: "default again"})
-	writeRequest(t, input, 4, "diagnostics/file", FileDiagnosticsParams{File: "src/example.ts"})
-	output := &bytes.Buffer{}
-
-	if err := New(analyzer).Serve(context.Background(), input, output); err != nil {
-		t.Fatal(err)
-	}
-
-	reader := bufio.NewReader(output)
-	_ = readResponse(t, reader)
-
-	reanalyzeResponse := readResponse(t, reader)
-	if reanalyzeResponse.Error != nil {
-		t.Fatalf("reanalyze failed: %+v", reanalyzeResponse.Error)
-	}
-	var reanalyzeResult AnalysisResult
-	decodeResult(t, reanalyzeResponse.Result, &reanalyzeResult)
-	if reanalyzeResult.SnapshotVersion != "snap-2" {
-		t.Fatalf("expected snapshot swap, got %+v", reanalyzeResult)
-	}
-	if response := readResponse(t, reader); response.Error != nil {
-		t.Fatalf("default reanalyze failed: %+v", response.Error)
-	}
-	if len(analyzer.calls) != 3 || analyzer.calls[0].RuleWorkers != 2 || analyzer.calls[1].RuleWorkers != 1 || analyzer.calls[2].RuleWorkers != 2 {
-		t.Fatalf("worker request override did not preserve session default: %+v", analyzer.calls)
-	}
-
-	fileResponse := readResponse(t, reader)
-	var fileResult FileDiagnosticsResult
-	decodeResult(t, fileResponse.Result, &fileResult)
-	if len(fileResult.Diagnostics) != 1 || fileResult.Diagnostics[0].RuleID != "arch.second" {
-		t.Fatalf("expected refreshed diagnostics, got %+v", fileResult.Diagnostics)
-	}
+func (*emptyAnalyzer) Refresh(context.Context, engine.Options, string) (engine.FileResult, error) {
+	return engine.FileResult{}, nil
 }
-
-func TestServerFailedRefreshInvalidatesDiagnosticsUntilRetry(t *testing.T) {
-	analyzer := &fakeAnalyzer{
-		errors: []error{nil, io.ErrUnexpectedEOF, nil},
-		results: []engine.Result{
-			{
-				SnapshotVersion: "snap-1",
-				Diagnostics: []diagnostics.Diagnostic{{
-					RuleID:  "arch.initial",
-					Message: "initial",
-					SourceLocation: &diagnostics.SourceLocation{
-						File: "src/example.ts",
-					},
-				}},
-			},
-			{
-				SnapshotVersion: "snap-2",
-				Diagnostics: []diagnostics.Diagnostic{{
-					RuleID:  "arch.retried",
-					Message: "retried",
-					SourceLocation: &diagnostics.SourceLocation{
-						File: "src/example.ts",
-					},
-				}},
-			},
-		},
-	}
-	input := &bytes.Buffer{}
-	writeRequest(t, input, 1, "initialize", InitializeParams{
-		RepoRoot:      "/repo",
-		AssetRoot:     "/assets",
-		WorkspaceRoot: "/workspace",
-		RuleGlobs:     []string{"lintai-rules/**/*.ts"},
-		Env:           map[string]any{"mode": "test"},
-	})
-	writeRequest(t, input, 2, "diagnostics/file", FileDiagnosticsParams{File: "src/example.ts"})
-	writeRequest(t, input, 3, "reanalyze", ReanalyzeParams{Reason: "transient failure"})
-	writeRequest(t, input, 4, "diagnostics/file", FileDiagnosticsParams{File: "src/example.ts"})
-	writeRequest(t, input, 5, "reanalyze", ReanalyzeParams{Reason: "retry"})
-	writeRequest(t, input, 6, "diagnostics/file", FileDiagnosticsParams{File: "src/example.ts"})
-	output := &bytes.Buffer{}
-	if err := New(analyzer).Serve(context.Background(), input, output); err != nil {
-		t.Fatal(err)
-	}
-
-	reader := bufio.NewReader(output)
-	if response := readResponse(t, reader); response.Error != nil {
-		t.Fatalf("initialize failed: %+v", response.Error)
-	}
-	initialResponse := readResponse(t, reader)
-	if initialResponse.Error != nil {
-		t.Fatalf("initial diagnostics/file failed: %+v", initialResponse.Error)
-	}
-	var initialResult FileDiagnosticsResult
-	decodeResult(t, initialResponse.Result, &initialResult)
-	if len(initialResult.Diagnostics) != 1 || initialResult.Diagnostics[0].RuleID != "arch.initial" {
-		t.Fatalf("expected initial clean diagnostics, got %+v", initialResult.Diagnostics)
-	}
-	failedRefresh := readResponse(t, reader)
-	if failedRefresh.Error == nil || failedRefresh.Error.Message != io.ErrUnexpectedEOF.Error() {
-		t.Fatalf("expected backend refresh error to be returned, got %+v", failedRefresh.Error)
-	}
-	invalidatedResponse := readResponse(t, reader)
-	if invalidatedResponse.Error == nil || invalidatedResponse.Error.Message != "analysis results unavailable" {
-		t.Fatalf("expected diagnostics/file to fail while analysis is invalid, got %+v", invalidatedResponse.Error)
-	}
-	retryResponse := readResponse(t, reader)
-	if retryResponse.Error != nil {
-		t.Fatalf("reanalyze retry failed: %+v", retryResponse.Error)
-	}
-	fileResponse := readResponse(t, reader)
-	if fileResponse.Error != nil {
-		t.Fatalf("diagnostics/file after retry failed: %+v", fileResponse.Error)
-	}
-	var fileResult FileDiagnosticsResult
-	decodeResult(t, fileResponse.Result, &fileResult)
-	if len(fileResult.Diagnostics) != 1 || fileResult.Diagnostics[0].RuleID != "arch.retried" {
-		t.Fatalf("expected retried diagnostics, got %+v", fileResult.Diagnostics)
-	}
-	if len(analyzer.calls) != 3 || !reflect.DeepEqual(analyzer.calls[0], analyzer.calls[1]) || !reflect.DeepEqual(analyzer.calls[0], analyzer.calls[2]) {
-		t.Fatalf("expected configured options to survive failed refresh, got %+v", analyzer.calls)
-	}
+func (*emptyAnalyzer) Check(context.Context, ...engine.Options) (engine.Result, error) {
+	return engine.Result{}, nil
 }
-
-func TestServerShutdownRespondsAndExits(t *testing.T) {
-	output := &bytes.Buffer{}
-	input := &bytes.Buffer{}
-	writeRequest(t, input, 1, "shutdown", map[string]any{})
-
-	if err := New(&fakeAnalyzer{}).Serve(context.Background(), input, output); err != nil {
-		t.Fatal(err)
-	}
-
-	response := readResponse(t, bufio.NewReader(output))
-	if response.Error != nil {
-		t.Fatalf("shutdown returned error %+v", response.Error)
-	}
-}
-
-func TestServerInitializeFailureReturnsJSONRPCError(t *testing.T) {
-	analyzer := &fakeAnalyzer{err: io.ErrUnexpectedEOF}
-	input := &bytes.Buffer{}
-	writeRequest(t, input, 1, "initialize", InitializeParams{
-		RepoRoot:      "/repo",
-		AssetRoot:     "/assets",
-		WorkspaceRoot: "/workspace",
-		RuleGlobs:     []string{"lintai-rules/**/*.ts"},
-		Env:           map[string]any{},
-	})
-	output := &bytes.Buffer{}
-
-	if err := New(analyzer).Serve(context.Background(), input, output); err != nil {
-		t.Fatal(err)
-	}
-
-	response := readResponse(t, bufio.NewReader(output))
-	if response.Error == nil {
-		t.Fatal("expected jsonrpc error")
-	}
-	if response.Error.Code != errCodeInternal {
-		t.Fatalf("expected internal error code, got %+v", response.Error)
-	}
-}
-
-func writeRequest(t *testing.T, buffer *bytes.Buffer, id any, method string, params any) {
+func (a *emptyAnalyzer) Close() error { a.closed = true; return nil }
+func writeRequest(t *testing.T, w io.Writer, id int, method string, params any) {
 	t.Helper()
-
-	payload, err := json.Marshal(map[string]any{
-		"jsonrpc": "2.0",
-		"id":      id,
-		"method":  method,
-		"params":  params,
-	})
+	raw, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := buffer.WriteString("Content-Length: " + strconv.Itoa(len(payload)) + "\r\n\r\n"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := buffer.Write(payload); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// A clean workspace must return an empty diagnostics array, not null. The
-// ESLint plugin iterates the array and a null value made it leave serve mode.
-func TestServerCleanWorkspaceReturnsEmptyDiagnosticArrays(t *testing.T) {
-	input := &bytes.Buffer{}
-	writeRequest(t, input, 1, "initialize", InitializeParams{WorkspaceRoot: "/workspace", Env: map[string]any{}})
-	writeRequest(t, input, 2, "reanalyze", ReanalyzeParams{})
-	writeRequest(t, input, 3, "diagnostics/file", FileDiagnosticsParams{File: "src/clean.ts"})
-	output := &bytes.Buffer{}
-	if err := New(&fakeAnalyzer{}).Serve(context.Background(), input, output); err != nil {
-		t.Fatal(err)
-	}
-	if count := bytes.Count(output.Bytes(), []byte(`"diagnostics":[]`)); count != 3 {
-		t.Fatalf("expected 3 empty diagnostics arrays, got %d in %s", count, output.String())
-	}
-	if bytes.Contains(output.Bytes(), []byte(`null`)) {
-		t.Fatalf("response contains null: %s", output.String())
-	}
-}
-
-func readResponse(t *testing.T, reader *bufio.Reader) jsonrpc.Response {
-	t.Helper()
-
-	response, err := jsonrpc.ReadResponse(reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return response
-}
-
-func decodeResult(t *testing.T, value any, target any) {
-	t.Helper()
-
-	raw, err := json.Marshal(value)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(raw, target); err != nil {
-		t.Fatal(err)
-	}
-}
-
-func TestInitializeSandboxValidation(t *testing.T) {
-	for _, item := range []struct {
-		value string
-		want  string
-		valid bool
-	}{
-		{"on", "on", true}, {"off", "off", true}, {"auto", "", false},
-	} {
-		t.Run(item.value, func(t *testing.T) {
-			analyzer := &fakeAnalyzer{}
-			server := NewWithFactory(func(InitializeParams) Analyzer { return analyzer })
-			raw, err := json.Marshal(InitializeParams{WorkspaceRoot: "/workspace", SetupSandbox: item.value})
-			if err != nil {
-				t.Fatal(err)
-			}
-			_, err = server.handleInitialize(context.Background(), raw)
-			if !item.valid {
-				if err == nil {
-					t.Fatal("expected invalid sandbox error")
-				}
-				return
-			}
-			if err != nil || len(analyzer.calls) != 1 || string(analyzer.calls[0].SetupSandbox) != item.want {
-				t.Fatalf("calls=%+v error=%v", analyzer.calls, err)
-			}
-		})
-	}
+	fmt.Fprintf(w, "Content-Length: %d\r\n\r\n%s", len(raw), raw)
 }

@@ -6,10 +6,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"path/filepath"
 	"strings"
-	"sync"
 
+	"github.com/bigbizze/lintai/backend/typescript"
 	"github.com/bigbizze/lintai/bundle"
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/engine"
@@ -20,90 +19,69 @@ const (
 	errCodeInvalidRequest = -32600
 	errCodeMethodNotFound = -32601
 	errCodeInvalidParams  = -32602
-	errCodeInternal       = -32603
 	errCodeNotInitialized = -32002
+	errCodeAnalysis       = -32010
 )
 
 type Analyzer interface {
 	Check(ctx context.Context, options ...engine.Options) (engine.Result, error)
+	Refresh(ctx context.Context, options engine.Options, file string) (engine.FileResult, error)
 	Close() error
 }
 
 type AnalyzerFactory func(InitializeParams) Analyzer
 
 type Server struct {
-	engine  Analyzer
-	factory AnalyzerFactory
-
-	mu                sync.RWMutex
-	diagnostics       []diagnostics.Diagnostic
-	diagnosticsByFile map[string][]diagnostics.Diagnostic
-	options           engine.Options
-	snapshotVersion   string
-	rulesLoaded       int
-	initialized       bool
-	analysisValid     bool
+	engine      Analyzer
+	factory     AnalyzerFactory
+	options     engine.Options
+	initialized bool
 	// Log receives each analysis warning once. Nil discards them.
 	Log    io.Writer
 	warned map[string]struct{}
 }
 
 type InitializeParams struct {
-	RepoRoot      string         `json:"repoRoot"`
-	AssetRoot     string         `json:"assetRoot"`
-	WorkspaceRoot string         `json:"workspaceRoot"`
-	RuleGlobs     []string       `json:"ruleGlobs"`
-	Excludes      []string       `json:"excludes,omitempty"`
-	Files         string         `json:"files,omitempty"`
-	SourceLinks   string         `json:"sourceLinks,omitempty"`
-	Env           map[string]any `json:"env"`
-	FactLimit     int            `json:"factLimit,omitempty"`
-	RuleWorkers   int            `json:"ruleWorkers,omitempty"`
-	// Severity maps a rule id to "error", "warning" or "off".
-	Severity map[string]string `json:"severity,omitempty"`
-	// RulesLock is the path of a rules lock file to enforce.
-	RulesLock string `json:"rulesLock,omitempty"`
-	// SetupSandbox is "on" or "off". The default is on.
-	SetupSandbox string `json:"setupSandbox,omitempty"`
-	// SuppressionsLocation is the path of the suppressions file. The
-	// default is lintai-suppressions.json at the workspace root.
-	SuppressionsLocation string `json:"suppressionsLocation,omitempty"`
+	RepoRoot             string            `json:"repoRoot"`
+	AssetRoot            string            `json:"assetRoot"`
+	WorkspaceRoot        string            `json:"workspaceRoot"`
+	RuleGlobs            []string          `json:"ruleGlobs"`
+	Excludes             []string          `json:"excludes,omitempty"`
+	Files                string            `json:"files,omitempty"`
+	SourceLinks          string            `json:"sourceLinks,omitempty"`
+	Env                  map[string]any    `json:"env"`
+	FactLimit            int               `json:"factLimit,omitempty"`
+	RuleWorkers          int               `json:"ruleWorkers,omitempty"`
+	Severity             map[string]string `json:"severity,omitempty"`
+	RulesLock            string            `json:"rulesLock,omitempty"`
+	SetupSandbox         string            `json:"setupSandbox,omitempty"`
+	SuppressionsLocation string            `json:"suppressionsLocation,omitempty"`
 }
 
 type FileDiagnosticsParams struct {
 	File string `json:"file"`
 }
-
 type ReanalyzeParams struct {
 	Reason      string `json:"reason,omitempty"`
 	RuleWorkers *int   `json:"ruleWorkers,omitempty"`
 }
-
+type InitializeResult struct {
+	ProtocolVersion int `json:"protocolVersion"`
+}
 type AnalysisResult struct {
-	RulesLoaded     int                      `json:"rulesLoaded"`
-	DiagnosticCount int                      `json:"diagnosticCount"`
-	SnapshotVersion string                   `json:"snapshotVersion"`
-	Diagnostics     []diagnostics.Diagnostic `json:"diagnostics"`
-	WatchHints      []string                 `json:"watchHints,omitempty"`
+	SnapshotVersion string   `json:"snapshotVersion"`
+	RulesLoaded     int      `json:"rulesLoaded"`
+	DiagnosticCount int      `json:"diagnosticCount"`
+	Problems        []string `json:"problems"`
 }
-
 type FileDiagnosticsResult struct {
-	Diagnostics []diagnostics.Diagnostic `json:"diagnostics"`
+	SnapshotVersion string                   `json:"snapshotVersion"`
+	RulesLoaded     int                      `json:"rulesLoaded"`
+	Diagnostics     []diagnostics.Diagnostic `json:"diagnostics"`
+	Problems        []string                 `json:"problems"`
 }
 
-func New(selectedEngine Analyzer) *Server {
-	return &Server{
-		engine:            selectedEngine,
-		diagnosticsByFile: make(map[string][]diagnostics.Diagnostic),
-	}
-}
-
-func NewWithFactory(factory AnalyzerFactory) *Server {
-	return &Server{
-		factory:           factory,
-		diagnosticsByFile: make(map[string][]diagnostics.Diagnostic),
-	}
-}
+func NewWithFactory(factory AnalyzerFactory) *Server { return &Server{factory: factory} }
 
 func (s *Server) Serve(ctx context.Context, input io.Reader, output io.Writer) (serveErr error) {
 	defer func() {
@@ -113,9 +91,7 @@ func (s *Server) Serve(ctx context.Context, input io.Reader, output io.Writer) (
 			}
 		}
 	}()
-	reader := bufio.NewReader(input)
-	writer := bufio.NewWriter(output)
-
+	reader, writer := bufio.NewReader(input), bufio.NewWriter(output)
 	for {
 		request, err := jsonrpc.ReadRequest(reader)
 		if err != nil {
@@ -124,7 +100,6 @@ func (s *Server) Serve(ctx context.Context, input io.Reader, output io.Writer) (
 			}
 			return err
 		}
-
 		response, shutdown := s.handleRequest(ctx, request)
 		if request.ID != nil {
 			if err := jsonrpc.WriteResponse(writer, response); err != nil {
@@ -141,40 +116,19 @@ func (s *Server) Serve(ctx context.Context, input io.Reader, output io.Writer) (
 }
 
 func (s *Server) handleRequest(ctx context.Context, request jsonrpc.Request) (jsonrpc.Response, bool) {
-	response := jsonrpc.Response{
-		JSONRPC: "2.0",
-		ID:      request.ID,
-	}
+	response := jsonrpc.Response{JSONRPC: "2.0", ID: request.ID}
 	if request.JSONRPC != "2.0" {
 		response.Error = &jsonrpc.ResponseError{Code: errCodeInvalidRequest, Message: "jsonrpc must be 2.0"}
 		return response, false
 	}
-
+	var err error
 	switch request.Method {
 	case "initialize":
-		result, err := s.handleInitialize(ctx, request.Params)
-		if err != nil {
-			response.Error = classifyError(err)
-			return response, false
-		}
-		response.Result = result
-		return response, false
+		response.Result, err = s.handleInitialize(request.Params)
 	case "diagnostics/file":
-		result, err := s.handleFileDiagnostics(request.Params)
-		if err != nil {
-			response.Error = classifyError(err)
-			return response, false
-		}
-		response.Result = result
-		return response, false
+		response.Result, err = s.handleFileDiagnostics(ctx, request.Params)
 	case "reanalyze":
-		result, err := s.handleReanalyze(ctx, request.Params)
-		if err != nil {
-			response.Error = classifyError(err)
-			return response, false
-		}
-		response.Result = result
-		return response, false
+		response.Result, err = s.handleReanalyze(ctx, request.Params)
 	case "shutdown":
 		response.Result = map[string]any{}
 		return response, true
@@ -182,12 +136,23 @@ func (s *Server) handleRequest(ctx context.Context, request jsonrpc.Request) (js
 		response.Error = &jsonrpc.ResponseError{Code: errCodeMethodNotFound, Message: fmt.Sprintf("unknown method %q", request.Method)}
 		return response, false
 	}
+	if err != nil {
+		response.Result = nil
+		response.Error = classifyError(err)
+	}
+	return response, false
 }
 
-func (s *Server) handleInitialize(ctx context.Context, rawParams json.RawMessage) (AnalysisResult, error) {
+func (s *Server) handleInitialize(rawParams json.RawMessage) (InitializeResult, error) {
 	var params InitializeParams
 	if err := decodeParams(rawParams, &params); err != nil {
-		return AnalysisResult{}, err
+		return InitializeResult{}, err
+	}
+	if params.RuleWorkers < 0 {
+		return InitializeResult{}, invalidParams("rule workers must be zero or a positive integer")
+	}
+	if _, err := typescript.ParseFileScope(params.Files); err != nil {
+		return InitializeResult{}, invalidParams(err.Error())
 	}
 	if params.Env == nil {
 		params.Env = map[string]any{}
@@ -196,113 +161,93 @@ func (s *Server) handleInitialize(ctx context.Context, rawParams json.RawMessage
 	for ruleID, level := range params.Severity {
 		severity, err := diagnostics.ParseSeverity(level)
 		if err != nil {
-			return AnalysisResult{}, fmt.Errorf("severity of rule %q: %w", ruleID, err)
+			return InitializeResult{}, invalidParams(fmt.Sprintf("severity of rule %q: %v", ruleID, err))
 		}
 		ruleSeverity[ruleID] = severity
 	}
 	sandbox, err := bundle.ParseSetupSandbox(params.SetupSandbox)
 	if err != nil {
-		return AnalysisResult{}, err
+		return InitializeResult{}, invalidParams(err.Error())
 	}
 	options := engine.Options{
-		RepoRoot:      params.RepoRoot,
-		AssetRoot:     params.AssetRoot,
-		WorkspaceRoot: params.WorkspaceRoot,
-		RuleGlobs:     append([]string(nil), params.RuleGlobs...),
-		Env:           params.Env,
-		Severity:      diagnostics.SeverityError,
-		RuleSeverity:  ruleSeverity,
-		FactLimit:     params.FactLimit,
-		RuleWorkers:   params.RuleWorkers,
-		RulesLock:     params.RulesLock,
-		SetupSandbox:  sandbox,
-
+		RepoRoot: params.RepoRoot, AssetRoot: params.AssetRoot, WorkspaceRoot: params.WorkspaceRoot,
+		RuleGlobs: append([]string(nil), params.RuleGlobs...), Env: params.Env,
+		Severity: diagnostics.SeverityError, RuleSeverity: ruleSeverity, FactLimit: params.FactLimit,
+		RuleWorkers: params.RuleWorkers, RulesLock: params.RulesLock, SetupSandbox: sandbox,
 		SuppressionsLocation: params.SuppressionsLocation,
 	}
-	s.mu.Lock()
-	s.options = options
 	if s.factory != nil {
 		if s.engine != nil {
 			_ = s.engine.Close()
 		}
 		s.engine = s.factory(params)
 	}
-	s.initialized = true
-	s.analysisValid = false
-	s.diagnostics = nil
-	s.diagnosticsByFile = make(map[string][]diagnostics.Diagnostic)
-	s.snapshotVersion = ""
-	s.rulesLoaded = 0
-	s.mu.Unlock()
-	result, err := s.engine.Check(ctx, options)
-	if err != nil {
-		return AnalysisResult{}, err
-	}
-	s.applyAnalysis(options, result)
-	return analysisResult(result), nil
+	s.options, s.initialized = options, true
+	return InitializeResult{ProtocolVersion: 1}, nil
 }
 
-func (s *Server) handleFileDiagnostics(rawParams json.RawMessage) (FileDiagnosticsResult, error) {
+func (s *Server) handleFileDiagnostics(ctx context.Context, rawParams json.RawMessage) (FileDiagnosticsResult, error) {
+	if !s.initialized {
+		return FileDiagnosticsResult{}, fmt.Errorf("server not initialized")
+	}
 	var params FileDiagnosticsParams
 	if err := decodeParams(rawParams, &params); err != nil {
 		return FileDiagnosticsResult{}, err
 	}
-	key := normalizeWorkspacePath(params.File)
-
-	s.mu.RLock()
-	if !s.initialized {
-		s.mu.RUnlock()
-		return FileDiagnosticsResult{}, fmt.Errorf("server not initialized")
+	if strings.TrimSpace(params.File) == "" {
+		return FileDiagnosticsResult{}, invalidParams("file is required")
 	}
-	if !s.analysisValid {
-		s.mu.RUnlock()
-		return FileDiagnosticsResult{}, fmt.Errorf("analysis results unavailable")
+	result, err := s.engine.Refresh(ctx, s.options, params.File)
+	if err != nil {
+		return FileDiagnosticsResult{}, err
 	}
-	items := append([]diagnostics.Diagnostic{}, s.diagnosticsByFile[key]...)
-	s.mu.RUnlock()
-
-	return FileDiagnosticsResult{Diagnostics: items}, nil
+	s.logWarnings(result.Warnings)
+	items := append([]diagnostics.Diagnostic{}, result.Diagnostics...)
+	return FileDiagnosticsResult{SnapshotVersion: result.SnapshotVersion, RulesLoaded: result.RulesLoaded, Diagnostics: items, Problems: problemStrings(result.WorkspaceProblems)}, nil
 }
 
 func (s *Server) handleReanalyze(ctx context.Context, rawParams json.RawMessage) (AnalysisResult, error) {
-	s.mu.RLock()
 	if !s.initialized {
-		s.mu.RUnlock()
 		return AnalysisResult{}, fmt.Errorf("server not initialized")
 	}
-	options := s.options
-	s.mu.RUnlock()
+	var params ReanalyzeParams
 	if len(rawParams) > 0 {
-		var params ReanalyzeParams
-		if err := json.Unmarshal(rawParams, &params); err != nil {
-			return AnalysisResult{}, fmt.Errorf("invalid params: %w", err)
-		}
-		if params.RuleWorkers != nil {
-			options.RuleWorkers = *params.RuleWorkers
+		if err := decodeParams(rawParams, &params); err != nil {
+			return AnalysisResult{}, err
 		}
 	}
-
+	options := s.options
+	if params.RuleWorkers != nil {
+		if *params.RuleWorkers < 0 {
+			return AnalysisResult{}, invalidParams("rule workers must be zero or a positive integer")
+		}
+		options.RuleWorkers = *params.RuleWorkers
+	}
 	result, err := s.engine.Check(ctx, options)
 	if err != nil {
-		s.invalidateAnalysis()
 		return AnalysisResult{}, err
 	}
-	s.applyAnalysis(options, result)
-	return analysisResult(result), nil
+	s.logWarnings(result.Warnings)
+	return AnalysisResult{SnapshotVersion: result.SnapshotVersion, RulesLoaded: result.RulesLoaded, DiagnosticCount: len(result.Diagnostics), Problems: problemStrings(result.Diagnostics)}, nil
 }
 
-func (s *Server) applyAnalysis(options engine.Options, result engine.Result) {
-	byFile := make(map[string][]diagnostics.Diagnostic)
-	for _, item := range result.Diagnostics {
-		if item.SourceLocation == nil {
+func problemStrings(items []diagnostics.Diagnostic) []string {
+	problems := []string{}
+	for _, item := range items {
+		if item.SourceLocation != nil || item.DiagnosticKind != diagnostics.KindRuleExecutionError {
 			continue
 		}
-		key := normalizeWorkspacePath(item.SourceLocation.File)
-		byFile[key] = append(byFile[key], item)
+		phase := ""
+		if item.Phase != "" {
+			phase = fmt.Sprintf(" (phase %s)", item.Phase)
+		}
+		problems = append(problems, fmt.Sprintf("[lintai] rule %s could not run%s: %s", item.RuleID, phase, item.Message))
 	}
+	return problems
+}
 
-	s.mu.Lock()
-	for _, warning := range result.Warnings {
+func (s *Server) logWarnings(warnings []string) {
+	for _, warning := range warnings {
 		if _, seen := s.warned[warning]; seen || s.Log == nil {
 			continue
 		}
@@ -312,63 +257,26 @@ func (s *Server) applyAnalysis(options engine.Options, result engine.Result) {
 		s.warned[warning] = struct{}{}
 		fmt.Fprintln(s.Log, warning)
 	}
-	s.diagnostics = append([]diagnostics.Diagnostic(nil), result.Diagnostics...)
-	s.diagnosticsByFile = byFile
-	s.snapshotVersion = result.SnapshotVersion
-	s.rulesLoaded = result.RulesLoaded
-	s.initialized = true
-	s.analysisValid = true
-	s.mu.Unlock()
 }
 
-func (s *Server) invalidateAnalysis() {
-	s.mu.Lock()
-	s.analysisValid = false
-	s.diagnostics = nil
-	s.diagnosticsByFile = make(map[string][]diagnostics.Diagnostic)
-	s.snapshotVersion = ""
-	s.rulesLoaded = 0
-	s.mu.Unlock()
-}
-
-func analysisResult(result engine.Result) AnalysisResult {
-	items := make([]diagnostics.Diagnostic, len(result.Diagnostics))
-	copy(items, result.Diagnostics)
-	return AnalysisResult{
-		RulesLoaded:     result.RulesLoaded,
-		DiagnosticCount: len(result.Diagnostics),
-		SnapshotVersion: result.SnapshotVersion,
-		Diagnostics:     items,
-		WatchHints:      append([]string(nil), result.WatchHints...),
-	}
-}
-
+func invalidParams(message string) error { return fmt.Errorf("invalid params: %s", message) }
 func decodeParams(raw json.RawMessage, target any) error {
-	if len(raw) == 0 {
-		return fmt.Errorf("invalid params: params are required")
+	if len(raw) == 0 || string(raw) == "null" {
+		return invalidParams("params are required")
 	}
 	if err := json.Unmarshal(raw, target); err != nil {
-		return fmt.Errorf("invalid params: %w", err)
+		return invalidParams(err.Error())
 	}
 	return nil
 }
-
 func classifyError(err error) *jsonrpc.ResponseError {
 	message := err.Error()
 	switch {
 	case strings.HasPrefix(message, "invalid params:"):
 		return &jsonrpc.ResponseError{Code: errCodeInvalidParams, Message: message}
-	case strings.HasPrefix(message, "invalid --source-links:"):
-		return &jsonrpc.ResponseError{Code: errCodeInvalidParams, Message: "invalid params: " + message}
 	case message == "server not initialized":
 		return &jsonrpc.ResponseError{Code: errCodeNotInitialized, Message: message}
 	default:
-		return &jsonrpc.ResponseError{Code: errCodeInternal, Message: message}
+		return &jsonrpc.ResponseError{Code: errCodeAnalysis, Message: message}
 	}
-}
-
-// normalizeWorkspacePath uses a workspace-relative key for diagnostics and
-// file requests, including requests with a leading slash.
-func normalizeWorkspacePath(path string) string {
-	return strings.TrimPrefix(filepath.ToSlash(path), "/")
 }
