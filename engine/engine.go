@@ -15,7 +15,6 @@ import (
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/facts"
 	"github.com/bigbizze/lintai/observe"
-	"github.com/bigbizze/lintai/runtime"
 	"github.com/bigbizze/lintai/suppressions"
 	"github.com/bmatcuk/doublestar/v4"
 )
@@ -532,7 +531,7 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options, mode
 		return Result{}, run, evidence, dispatchErr
 	}
 	for index, outcome := range outcomes {
-		rule := jobs[index].record
+		rule := jobs[index]
 		rule.diagnostics = append(rule.diagnostics, outcome.diagnostics...)
 		evidence.findings = append(evidence.findings, outcome.findings...)
 		evidence.createdFactCounts[outcome.ruleID] = outcome.createdFacts
@@ -580,15 +579,6 @@ func (e *Session) analyze(ctx context.Context, options Options) (Result, runInfo
 	return result, run, err
 }
 
-type preparedRuleJob struct {
-	record   *ruleRecord
-	ruleID   string
-	version  int
-	severity diagnostics.Severity
-	loaded   *runtime.LoadedRule
-	plan     *rulePlan
-}
-
 type ruleOutcome struct {
 	ruleID       string
 	completed    bool
@@ -608,12 +598,12 @@ type executionEvidence struct {
 	reusable          bool
 }
 
-func (job *preparedRuleJob) release() {
-	job.loaded = nil
-	job.plan = nil
+func (rule *ruleRecord) release() {
+	rule.loaded = nil
+	rule.plan = nil
 }
 
-func dispatchRuleJobs(ctx context.Context, jobs []*preparedRuleJob, assembled composedFacts, options Options, stats *executionStats) ([]ruleOutcome, error) {
+func dispatchRuleJobs(ctx context.Context, jobs []*ruleRecord, assembled composedFacts, options Options, stats *executionStats) ([]ruleOutcome, error) {
 	if len(jobs) == 0 {
 		return nil, ctx.Err()
 	}
@@ -635,10 +625,10 @@ func dispatchRuleJobs(ctx context.Context, jobs []*preparedRuleJob, assembled co
 		go func() {
 			defer group.Done()
 			for index := range jobIndexes {
-				job := jobs[index]
+				rule := jobs[index]
 				leave := stats.enterJob()
-				outcomes[index] = runPreparedRule(job, assembled, options)
-				job.release()
+				outcomes[index] = runPreparedRule(rule, assembled, options)
+				rule.release()
 				leave()
 			}
 		}()
@@ -660,44 +650,44 @@ dispatch:
 	}
 	group.Wait()
 	if err := ctx.Err(); err != nil {
-		for _, job := range jobs {
-			job.release()
+		for _, rule := range jobs {
+			rule.release()
 		}
 		return nil, err
 	}
 	return outcomes, nil
 }
 
-func runPreparedRule(job *preparedRuleJob, assembled composedFacts, options Options) ruleOutcome {
-	outcome := ruleOutcome{ruleID: job.ruleID}
+func runPreparedRule(rule *ruleRecord, assembled composedFacts, options Options) ruleOutcome {
+	outcome := ruleOutcome{ruleID: rule.metadata.ID}
 	var createdFacts int64
-	violations, perr := job.plan.evaluate(assembled.base, assembled.factCounts, assembled.anchors, assembled.reportable, evalOptions{
+	violations, perr := rule.plan.evaluate(assembled.base, assembled.factCounts, assembled.anchors, assembled.reportable, evalOptions{
 		factLimit: options.FactLimit, explain: options.Explain, createdFacts: &createdFacts,
 		beforeEvaluation: options.beforeEvaluation, onDerivedFact: options.onDerivedFact,
 	})
 	outcome.createdFacts = createdFacts
 	if perr != nil {
-		outcome.diagnostics = []diagnostics.Diagnostic{errorDiagnostic(job.ruleID, perr.phase, job.version, assembled.snapshotID, assembled.namespaces, perr.Error())}
+		outcome.diagnostics = []diagnostics.Diagnostic{errorDiagnostic(rule.metadata.ID, perr.phase, rule.metadata.Version, assembled.snapshotID, assembled.namespaces, perr.Error())}
 		return outcome
 	}
 	for index := range violations {
-		violations[index].ruleID = job.ruleID
+		violations[index].ruleID = rule.metadata.ID
 	}
 	provisional := make([]diagnostics.Diagnostic, 0, len(violations))
 	for index, item := range violations {
-		message, err := job.loaded.Message(item.row, item.predicate)
+		message, err := rule.loaded.Message(item.row, item.predicate)
 		if err != nil {
-			outcome.diagnostics = []diagnostics.Diagnostic{errorDiagnostic(job.ruleID, "message", job.version, assembled.snapshotID, assembled.namespaces, err.Error())}
+			outcome.diagnostics = []diagnostics.Diagnostic{errorDiagnostic(rule.metadata.ID, "message", rule.metadata.Version, assembled.snapshotID, assembled.namespaces, err.Error())}
 			return outcome
 		}
 		location := item.location
 		provisional = append(provisional, diagnostics.Diagnostic{
-			RuleID: job.ruleID, AssertionID: item.predicate,
-			DiagnosticKind: diagnostics.KindArchitectureViolation, Severity: job.severity,
+			RuleID: rule.metadata.ID, AssertionID: item.predicate,
+			DiagnosticKind: diagnostics.KindArchitectureViolation, Severity: rule.severity,
 			Message: message, SourceLocation: &location,
 			EntityIdentity: &diagnostics.EntityIdentity{SemanticKey: item.anchor},
 			Provenance: diagnostics.Provenance{
-				SnapshotVersion: assembled.snapshotID, RuleVersion: job.version,
+				SnapshotVersion: assembled.snapshotID, RuleVersion: rule.metadata.Version,
 				ProducerNamespaces: append([]string(nil), assembled.namespaces...),
 			},
 			Explanation: append([]string(nil), item.explanation...),
@@ -705,14 +695,14 @@ func runPreparedRule(job *preparedRuleJob, assembled composedFacts, options Opti
 		violations[index].diagnostic = provisional[len(provisional)-1]
 	}
 	outcome.coverage = make(map[string]struct{})
-	for pred := range job.plan.basePredicates {
+	for pred := range rule.plan.basePredicates {
 		namespace, _, _ := strings.Cut(pred.Symbol, ".")
 		for file := range assembled.producerFiles[namespace] {
 			outcome.coverage[file] = struct{}{}
 		}
 	}
 	outcome.assertions = make(map[string]assertionSchema)
-	for _, decl := range job.plan.reportDecls {
+	for _, decl := range rule.plan.reportDecls {
 		sym := decl.DeclaredAtom.Predicate
 		columns := make([]string, len(decl.DeclaredAtom.Args))
 		for i, arg := range decl.DeclaredAtom.Args {

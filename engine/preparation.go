@@ -261,8 +261,8 @@ func (e *Session) prepareRulePlans(catalog *ruleCatalog, producers producerCatal
 	}
 }
 
-func ruleRelationDemand(catalog *ruleCatalog, producers producerCatalog) ([]*preparedRuleJob, map[string]map[facts.Predicate]struct{}) {
-	var jobs []*preparedRuleJob
+func ruleRelationDemand(catalog *ruleCatalog, producers producerCatalog) ([]*ruleRecord, map[string]map[facts.Predicate]struct{}) {
+	var jobs []*ruleRecord
 	requested := make(map[string]map[facts.Predicate]struct{})
 	for _, rule := range catalog.rules {
 		if rule.disposition != rulePlanned {
@@ -279,8 +279,7 @@ func ruleRelationDemand(catalog *ruleCatalog, producers producerCatalog) ([]*pre
 				requested[entry.description.Namespace][relation.Predicate] = struct{}{}
 			}
 		}
-		jobs = append(jobs, &preparedRuleJob{record: rule, ruleID: rule.metadata.ID, version: rule.metadata.Version,
-			severity: rule.severity, loaded: rule.loaded, plan: rule.plan})
+		jobs = append(jobs, rule)
 	}
 	return jobs, requested
 }
