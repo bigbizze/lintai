@@ -246,7 +246,7 @@ export default rule("fixture.paths-snapshot").version(1).setup(() => ({marker: m
 	if err := os.WriteFile(base, []byte(strings.Replace(baseA, "rules-support/a/nested", "rules-support/b/nested", 1)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if between[rule].Manifest.Unchanged() {
+	if bundleUnchanged(between[rule].Observations) {
 		t.Fatal("inherited base edit did not invalidate the captured manifest")
 	}
 	changed := build()

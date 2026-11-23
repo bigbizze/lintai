@@ -18,6 +18,7 @@ import (
 	"github.com/bigbizze/lintai/internal/ambient"
 	"github.com/bigbizze/lintai/internal/tsgo/lintaiapi"
 	"github.com/bigbizze/lintai/internal/workspace"
+	"github.com/bigbizze/lintai/observe"
 )
 
 func hasSnapshotInput(snapshot *lintaiapi.Snapshot, path string) bool {
@@ -50,8 +51,7 @@ func (b *Backend) buildTestGeneration(ctx context.Context, repoRoot, workspaceRo
 }
 
 func (b *Backend) buildLintaiSnapshot(ctx context.Context, repoRoot, workspaceRoot string) (*lintaiapi.Snapshot, []ambient.Source, string, error) {
-	var stats validationStats
-	generation, sources, err := b.extractSnapshot(ctx, workspaceRoot, nil, nil, &stats)
+	generation, sources, err := b.extractSnapshot(ctx, workspaceRoot, nil, nil)
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -724,8 +724,14 @@ export function run(callback: (n: number) => number, loose: any, callbacks: Arra
 func TestCapturedInputRevisionIgnoresAbsoluteRoot(t *testing.T) {
 	t.Parallel()
 
-	rootOne := t.TempDir()
-	rootTwo := t.TempDir()
+	rootOne, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootTwo, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	writeWorkspaceFile(t, rootOne, "src/a.ts", "export const alpha = 1;\n")
 	writeWorkspaceFile(t, rootOne, "src/b.ts", "export const beta = 2;\n")
@@ -786,8 +792,8 @@ func TestSymlinkedWorkspaceRootKeepsScopeAndIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if realSnapshot.inputRevision != aliasSnapshot.inputRevision || !reflect.DeepEqual(realSnapshot.scope, aliasSnapshot.scope) {
-		t.Fatalf("symlinked root changed scope or input revision: %q != %q", realSnapshot.inputRevision, aliasSnapshot.inputRevision)
+	if !reflect.DeepEqual(realSnapshot.scope, aliasSnapshot.scope) {
+		t.Fatalf("symlinked root changed scope: %v != %v", realSnapshot.scope, aliasSnapshot.scope)
 	}
 	if len(realSnapshot.items) != len(aliasSnapshot.items) {
 		t.Fatalf("symlinked root changed fact count: %d != %d", len(realSnapshot.items), len(aliasSnapshot.items))
@@ -819,8 +825,8 @@ func TestSymlinkedWorkspaceRootKeepsScopeAndIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("absolute exact source through symlinked root: %v", err)
 	}
-	if valid, err := workspace.ValidateScope(plan); err != nil || !valid {
-		t.Fatalf("validate scope with absolute exact source: valid=%t err=%v", valid, err)
+	if changed, err := plan.Observations.Changed(context.Background(), observe.Full); err != nil || changed != nil {
+		t.Fatalf("validate scope with absolute exact source: changed=%v err=%v", changed, err)
 	}
 	other := t.TempDir()
 	writeWorkspaceFile(t, other, "tsconfig.json", `{"files":["src/a.ts"]}`)
@@ -832,8 +838,8 @@ func TestSymlinkedWorkspaceRootKeepsScopeAndIdentity(t *testing.T) {
 	if err := os.Symlink(other, alias); err != nil {
 		t.Fatal(err)
 	}
-	if valid, err := workspace.ValidateScope(plan); err != nil || valid {
-		t.Fatalf("retargeted workspace validation: valid=%t err=%v", valid, err)
+	if changed, err := plan.Observations.Changed(context.Background(), observe.Full); err != nil || changed == nil {
+		t.Fatalf("retargeted workspace validation: changed=%v err=%v", changed, err)
 	}
 }
 

@@ -36,6 +36,9 @@ jobs:
       - name: Go tests
         run: go test ./...
 
+      - name: Go race tests
+        run: go test -race -count=1 ./engine/... ./backend/... ./server/...
+
       - name: TypeScript compiler copy matches sync script
         if: matrix.os == 'ubicloud-standard-2-ubuntu-2404'
         run: |

@@ -155,14 +155,14 @@ func TestOpaqueProducerScopeContributesToResultIdentity(t *testing.T) {
 		RuleGlobs: []string{"lintai-rules/**/*.ts"}, Env: map[string]any{},
 	}
 	left := fakeProducer("catalog", "item")
-	left.scope = "partition-a"
+	left.scope = map[string]any{"partition": "a"}
 	left.analyzed = []string{"catalog/objects.sql"}
 	leftResult, err := engine.Open(engine.Options{}, left).Check(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
 	right := fakeProducer("catalog", "item")
-	right.scope = "partition-b"
+	right.scope = []any{[]any{"partition", "a"}}
 	right.analyzed = []string{"catalog/objects.sql"}
 	rightResult, err := engine.Open(engine.Options{}, right).Check(context.Background(), options)
 	if err != nil {

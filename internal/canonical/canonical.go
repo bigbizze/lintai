@@ -49,18 +49,28 @@ func Normalize(value any) (any, error) {
 }
 
 func Marshal(value any) ([]byte, error) {
+	return marshal(value, false)
+}
+
+// MarshalStructured preserves the distinction between JSON objects and arrays
+// for identities that include arbitrary JSON-shaped values.
+func MarshalStructured(value any) ([]byte, error) {
+	return marshal(value, true)
+}
+
+func marshal(value any, structured bool) ([]byte, error) {
 	normalized, err := Normalize(value)
 	if err != nil {
 		return nil, err
 	}
 	buffer := &bytes.Buffer{}
-	if err := writeCanonicalJSON(buffer, normalized); err != nil {
+	if err := writeCanonicalJSON(buffer, normalized, structured); err != nil {
 		return nil, err
 	}
 	return buffer.Bytes(), nil
 }
 
-func writeCanonicalJSON(buffer *bytes.Buffer, value any) error {
+func writeCanonicalJSON(buffer *bytes.Buffer, value any, structured bool) error {
 	switch typed := value.(type) {
 	case nil:
 		buffer.WriteString("null")
@@ -86,7 +96,7 @@ func writeCanonicalJSON(buffer *bytes.Buffer, value any) error {
 			if index > 0 {
 				buffer.WriteByte(',')
 			}
-			if err := writeCanonicalJSON(buffer, item); err != nil {
+			if err := writeCanonicalJSON(buffer, item, structured); err != nil {
 				return err
 			}
 		}
@@ -105,20 +115,36 @@ func writeCanonicalJSON(buffer *bytes.Buffer, value any) error {
 			keys = append(keys, encodedKey{key: key, encoded: encoded.String()})
 		}
 		sort.Slice(keys, func(i, j int) bool { return keys[i].encoded < keys[j].encoded })
-		buffer.WriteByte('[')
+		if structured {
+			buffer.WriteByte('{')
+		} else {
+			buffer.WriteByte('[')
+		}
 		for index, key := range keys {
 			if index > 0 {
 				buffer.WriteByte(',')
 			}
-			buffer.WriteByte('[')
+			if !structured {
+				buffer.WriteByte('[')
+			}
 			buffer.WriteString(key.encoded)
-			buffer.WriteByte(',')
-			if err := writeCanonicalJSON(buffer, typed[key.key]); err != nil {
+			if structured {
+				buffer.WriteByte(':')
+			} else {
+				buffer.WriteByte(',')
+			}
+			if err := writeCanonicalJSON(buffer, typed[key.key], structured); err != nil {
 				return err
 			}
+			if !structured {
+				buffer.WriteByte(']')
+			}
+		}
+		if structured {
+			buffer.WriteByte('}')
+		} else {
 			buffer.WriteByte(']')
 		}
-		buffer.WriteByte(']')
 	default:
 		return errors.New("encountered unsupported canonical value")
 	}

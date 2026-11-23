@@ -97,7 +97,7 @@ func TestBundleAncestorPackageLink(t *testing.T) {
 		}
 		writeTestFile(t, parent, test.name+"/middle/node_modules/@fixture/policy/package.json", `{"main":"index.js"}`)
 		writeTestFile(t, parent, test.name+"/middle/node_modules/@fixture/policy/index.js", `export const message = "nearer";`)
-		if outer.Manifest.Unchanged() {
+		if bundleUnchanged(outer.Observations) {
 			t.Fatalf("%s nearer redirected package did not invalidate the manifest", test.name)
 		}
 		nearer := buildRedirect()
@@ -160,7 +160,7 @@ func TestBundleRelativeRedirectCandidateDuringCapture(t *testing.T) {
 	if len(changed) != 0 || failures[rule] == nil || !strings.Contains(failures[rule].Error(), "resolution changed") {
 		t.Fatalf("new redirect candidate must reject the discovered view: artifacts=%d failure=%v", len(changed), failures[rule])
 	}
-	if stable[rule].Manifest.Unchanged() {
+	if bundleUnchanged(stable[rule].Observations) {
 		t.Fatal("new redirect candidate did not invalidate the earlier artifact")
 	}
 	if err := os.WriteFile(control, []byte("disarmed"), 0o600); err != nil {

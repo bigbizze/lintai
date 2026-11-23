@@ -3,10 +3,8 @@ package bundle
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -14,208 +12,24 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
+
+	"github.com/bigbizze/lintai/observe"
 )
 
-const InputManifestFormat = "lintai.bundle-inputs/1"
-
 type Artifacts struct {
-	PureBundlePath    string `json:"pureBundlePath"`
-	PrepareBundlePath string `json:"prepareBundlePath"`
+	PureBundlePath    string
+	PrepareBundlePath string
 	// Hash covers the bundle inputs and the bundler and entry-generation identity.
-	Hash     string        `json:"hash"`
-	Manifest InputManifest `json:"manifest"`
-}
-
-// InputManifest is owned by the bundler and validated before an artifact is
-// published or reused. Absolute paths are used only to check freshness.
-type InputManifest struct {
-	Format      string        `json:"format"`
-	Inputs      []Input       `json:"inputs"`
-	Probes      []ConfigProbe `json:"probes"`
-	Resolutions []string      `json:"resolutions"`
-	Tool        ToolIdentity  `json:"tool"`
-}
-
-type ToolIdentity struct {
-	Esbuild        string `json:"esbuild"`
-	ConfigResolver string `json:"configResolver"`
-	Script         string `json:"script"`
-	BinaryOverride string `json:"binaryOverride"`
-}
-
-// Input is a file consumed by a rule bundle or its config resolver. Path is
-// workspace-relative, repo: or asset: relative, or external: workspace-relative.
-type Input struct {
-	Path         string `json:"path"`
-	SHA256       string `json:"sha256"`
-	AbsolutePath string `json:"absolutePath"`
-}
-
-// ConfigProbe is a resolver observation used to validate bundle reuse.
-type ConfigProbe struct {
-	Path         string   `json:"path"`
-	LogicalPath  string   `json:"logicalPath"`
-	Directory    bool     `json:"directory"`
-	Exists       bool     `json:"exists"`
-	Digest       string   `json:"digest,omitempty"`
-	Ignore       []string `json:"ignore,omitempty"`
-	LinkTarget   string   `json:"linkTarget,omitempty"`
-	LinkIdentity string   `json:"linkIdentity,omitempty"`
-}
-
-func (p *ConfigProbe) UnmarshalJSON(data []byte) error {
-	var value struct {
-		Path         string   `json:"path"`
-		LogicalPath  string   `json:"logicalPath"`
-		Directory    *bool    `json:"directory"`
-		Exists       *bool    `json:"exists"`
-		Digest       string   `json:"digest"`
-		Ignore       []string `json:"ignore"`
-		LinkTarget   string   `json:"linkTarget"`
-		LinkIdentity string   `json:"linkIdentity"`
-	}
-	if err := json.Unmarshal(data, &value); err != nil {
-		return err
-	}
-	if value.Directory == nil || value.Exists == nil {
-		return fmt.Errorf("bundle probe is missing its type or existence observation")
-	}
-	*p = ConfigProbe{Path: value.Path, LogicalPath: value.LogicalPath, Directory: *value.Directory, Exists: *value.Exists, Digest: value.Digest, Ignore: value.Ignore, LinkTarget: value.LinkTarget, LinkIdentity: value.LinkIdentity}
-	return nil
-}
-
-func (m InputManifest) validate() error {
-	if m.Format != InputManifestFormat || len(m.Inputs) == 0 || m.Probes == nil || m.Resolutions == nil || m.Tool.Esbuild == "" || m.Tool.ConfigResolver == "" || !validDigest(m.Tool.Script) {
-		return fmt.Errorf("invalid or unsupported bundle input manifest %q", m.Format)
-	}
-	paths := make(map[string]string)
-	checkPath := func(logical, absolute string) error {
-		if previous, ok := paths[logical]; ok && previous != absolute {
-			return fmt.Errorf("bundle input paths collide at %q", logical)
-		}
-		paths[logical] = absolute
-		return nil
-	}
-	for _, input := range m.Inputs {
-		if input.Path == "" || !filepath.IsAbs(input.AbsolutePath) || !validDigest(input.SHA256) {
-			return fmt.Errorf("invalid bundle input %q", input.Path)
-		}
-		if err := checkPath(input.Path, input.AbsolutePath); err != nil {
-			return err
-		}
-	}
-	for _, probe := range m.Probes {
-		if probe.LogicalPath == "" || !filepath.IsAbs(probe.Path) || (probe.Digest != "" && (!probe.Directory || !probe.Exists || !validDigest(probe.Digest))) || (probe.LinkTarget != "" && probe.LinkIdentity == "") {
-			return fmt.Errorf("invalid bundle input probe %q", probe.Path)
-		}
-		if err := checkPath(probe.LogicalPath, probe.Path); err != nil {
-			return err
-		}
-	}
-	return nil
+	Hash         string
+	Observations observe.Set
 }
 
 func validDigest(value string) bool {
-	if len(value) != 64 {
+	if len(value) != 64 || value != strings.ToLower(value) {
 		return false
 	}
 	_, err := hex.DecodeString(value)
 	return err == nil
-}
-
-// Unchanged checks exactly the input files and observations supplied by the
-// bundler. It does not discover additional inputs.
-func (m InputManifest) Unchanged() bool {
-	return m.currentError() == nil
-}
-
-func (m InputManifest) currentError() error {
-	if err := m.validate(); err != nil {
-		return err
-	}
-	if os.Getenv("ESBUILD_BINARY_PATH") != m.Tool.BinaryOverride {
-		return fmt.Errorf("esbuild binary selection changed")
-	}
-	for _, input := range m.Inputs {
-		contents, err := os.ReadFile(input.AbsolutePath)
-		if err != nil {
-			return fmt.Errorf("read %s: %w", input.AbsolutePath, err)
-		}
-		digest := sha256.Sum256(contents)
-		if hex.EncodeToString(digest[:]) != input.SHA256 {
-			return fmt.Errorf("content changed: %s", input.AbsolutePath)
-		}
-	}
-	for _, probe := range m.Probes {
-		if probe.LinkTarget != "" {
-			target, err := os.Readlink(probe.Path)
-			if err != nil || target != probe.LinkTarget {
-				return fmt.Errorf("link changed: %s", probe.Path)
-			}
-		}
-		info, err := os.Stat(probe.Path)
-		if errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
-			if probe.Exists {
-				return fmt.Errorf("input disappeared: %s", probe.Path)
-			}
-			continue
-		}
-		if err != nil {
-			return fmt.Errorf("stat %s: %w", probe.Path, err)
-		}
-		exists := info.Mode().IsRegular()
-		if probe.Directory {
-			exists = info.IsDir()
-		}
-		if exists != probe.Exists {
-			return fmt.Errorf("input presence changed: %s", probe.Path)
-		}
-		if probe.Digest != "" {
-			digest, err := directoryDigest(probe.Path, probe.Ignore)
-			if err != nil || digest != probe.Digest {
-				return fmt.Errorf("directory changed: %s", probe.Path)
-			}
-		}
-	}
-	return nil
-}
-
-func directoryDigest(directory string, ignore []string) (string, error) {
-	entries, err := os.ReadDir(directory)
-	if err != nil {
-		return "", err
-	}
-	hash := sha256.New()
-	for _, entry := range entries {
-		if entry.Name() == "lintai-rules.lock.json" || contains(ignore, entry.Name()) {
-			continue
-		}
-		kind := "f"
-		if entry.IsDir() {
-			kind = "d"
-		}
-		fmt.Fprintf(hash, "%s:%s\x00", kind, entry.Name())
-		if !entry.IsDir() && (entry.Name() == "package.json" || entry.Name() == "jsconfig.json" || strings.HasPrefix(entry.Name(), "tsconfig") && strings.HasSuffix(entry.Name(), ".json")) {
-			contents, err := os.ReadFile(filepath.Join(directory, entry.Name()))
-			if err != nil {
-				return "", err
-			}
-			digest := sha256.Sum256(contents)
-			hash.Write(digest[:])
-			hash.Write([]byte{0})
-		}
-	}
-	return hex.EncodeToString(hash.Sum(nil)), nil
-}
-
-func contains(items []string, value string) bool {
-	for _, item := range items {
-		if item == value {
-			return true
-		}
-	}
-	return false
 }
 
 type PrepareResult struct {
@@ -244,7 +58,9 @@ type buildResponse struct {
 	PrepareBundlePath string          `json:"prepareBundlePath,omitempty"`
 	PureBundlePath    string          `json:"pureBundlePath,omitempty"`
 	Hash              string          `json:"hash,omitempty"`
-	Manifest          json.RawMessage `json:"manifest"`
+	Observations      json.RawMessage `json:"observations"`
+	SourcePath        string          `json:"sourcePath"`
+	HelperPath        string          `json:"helperPath"`
 	Error             string          `json:"error,omitempty"`
 }
 
@@ -346,20 +162,31 @@ func BuildAll(ctx context.Context, assetRoot, repoRoot, workspaceRoot, outDir st
 			itemErrors[row.RulePath] = fmt.Errorf("invalid bundle artifact hash")
 			continue
 		}
-		var manifest InputManifest
-		if err := json.Unmarshal(row.Manifest, &manifest); err != nil {
-			itemErrors[row.RulePath] = fmt.Errorf("invalid bundle input manifest: %w", err)
+		observations, err := observe.Decode(row.Observations)
+		if err != nil {
+			itemErrors[row.RulePath] = fmt.Errorf("invalid bundle observations: %w", err)
 			continue
 		}
-		if err := manifest.currentError(); err != nil {
+		if err := validateBundleEvidence(observations, row.SourcePath, row.HelperPath); err != nil {
+			itemErrors[row.RulePath] = err
+			continue
+		}
+		changed, err := observations.Changed(ctx, observe.Full)
+		if err != nil {
 			itemErrors[row.RulePath] = fmt.Errorf("bundle inputs changed during compilation: %w", err)
 			continue
 		}
+		if changed != nil {
+			if changed.Kind == observe.Content {
+				itemErrors[row.RulePath] = fmt.Errorf("bundle inputs changed during compilation: content changed: %s", changed.Path)
+			} else {
+				itemErrors[row.RulePath] = fmt.Errorf("bundle inputs changed during compilation: %s %s changed", changed.Kind, changed.Path)
+			}
+			continue
+		}
 		results[row.RulePath] = Artifacts{
-			PureBundlePath:    row.PureBundlePath,
-			PrepareBundlePath: row.PrepareBundlePath,
-			Hash:              row.Hash,
-			Manifest:          manifest,
+			PureBundlePath: row.PureBundlePath, PrepareBundlePath: row.PrepareBundlePath,
+			Hash: row.Hash, Observations: observations,
 		}
 	}
 
@@ -369,6 +196,30 @@ func BuildAll(ctx context.Context, assetRoot, repoRoot, workspaceRoot, outDir st
 		}
 	}
 	return results, itemErrors, nil
+}
+
+// Successful bundles must identify the captured source and helper bytes.
+func validateBundleEvidence(set observe.Set, source, helper string) error {
+	if !filepath.IsAbs(source) || filepath.Clean(source) != source || !filepath.IsAbs(helper) || filepath.Clean(helper) != helper {
+		return fmt.Errorf("invalid bundle source or helper path")
+	}
+	found := map[string]bool{source: false, helper: false}
+	for _, record := range set.Records() {
+		if record.Kind == observe.Content {
+			if _, ok := found[record.Path]; ok {
+				found[record.Path] = true
+			}
+			if record.Stamp != nil {
+				return fmt.Errorf("bundle content has a staged stamp")
+			}
+		}
+	}
+	for path, ok := range found {
+		if !ok {
+			return fmt.Errorf("missing bundle content evidence for %s", path)
+		}
+	}
+	return nil
 }
 
 // stageBundleHelper gives Node the same helper bytes that the manifest later

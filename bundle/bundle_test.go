@@ -3,8 +3,9 @@ package bundle
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"github.com/bigbizze/lintai/observe"
 	"os"
 	"path/filepath"
 	"strings"
@@ -95,15 +96,15 @@ export default rule("fixture.root-launcher").version(1).program(dl`+"`"+`Decl vi
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, input := range artifact.Manifest.Inputs {
-			if input.AbsolutePath == physical {
+		for _, input := range artifact.Observations.Records() {
+			if input.Kind == observe.Content && input.Path == physical {
 				t.Fatalf("unrelated data was captured as a bundle input: %s", file)
 			}
 		}
 		if err := os.WriteFile(file, []byte(`{"value":"after"}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if !artifact.Manifest.Unchanged() {
+		if !bundleUnchanged(artifact.Observations) {
 			t.Fatalf("editing unrelated data invalidated the bundle: %s", file)
 		}
 	}
@@ -198,8 +199,8 @@ export default rule("fixture.directory-json").version(1).program(dl`+"`"+`Decl v
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, input := range before.Manifest.Inputs {
-				if input.AbsolutePath == physicalNotes {
+			for _, input := range before.Observations.Records() {
+				if input.Kind == observe.Content && input.Path == physicalNotes {
 					t.Errorf("unrelated JSON was captured as an input: %s", notes)
 				}
 			}
@@ -207,7 +208,7 @@ export default rule("fixture.directory-json").version(1).program(dl`+"`"+`Decl v
 				t.Fatal(err)
 			}
 		}
-		if !before.Manifest.Unchanged() {
+		if !bundleUnchanged(before.Observations) {
 			t.Error("editing unrelated JSON invalidated the manifest")
 		}
 		after := build()
@@ -217,7 +218,7 @@ export default rule("fixture.directory-json").version(1).program(dl`+"`"+`Decl v
 		if err := os.Mkdir(filepath.Join(helpers, "unrelated"), 0o755); err != nil {
 			t.Fatal(err)
 		}
-		if after.Manifest.Unchanged() {
+		if bundleUnchanged(after.Observations) {
 			t.Error("a changed directory listing did not invalidate freshness")
 		}
 		afterDirectory := build()
@@ -227,14 +228,14 @@ export default rule("fixture.directory-json").version(1).program(dl`+"`"+`Decl v
 		if err := os.WriteFile(filepath.Join(helpers, "data.json"), []byte(`{"message":"changed"}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if afterDirectory.Manifest.Unchanged() {
+		if bundleUnchanged(afterDirectory.Observations) {
 			t.Error("editing imported JSON did not invalidate the manifest")
 		}
 		afterData := build()
 		if err := os.WriteFile(filepath.Join(configPackage, "options.json"), []byte(`{"compilerOptions":{"useDefineForClassFields":true}}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if afterData.Manifest.Unchanged() {
+		if bundleUnchanged(afterData.Observations) {
 			t.Error("editing the extended config did not invalidate the manifest")
 		}
 	})
@@ -297,11 +298,6 @@ export default rule("fixture.resolve").version(1).setup(() => ({resolved: requir
 	first, second := build(), build()
 	if first[rule].Hash != second[rule].Hash {
 		t.Errorf("unchanged absolute require.resolve changed identity: %s != %s", first[rule].Hash, second[rule].Hash)
-	}
-	for _, resolution := range first[rule].Manifest.Resolutions {
-		if strings.Contains(resolution, "lintai-input-view-") || strings.Contains(resolution, "lintai-bundle-helper-") || strings.Contains(resolution, target) {
-			t.Errorf("resolution identity contains a staging or absolute path: %s", resolution)
-		}
 	}
 	prepared, failures, err := PrepareAll(context.Background(), assetRoot, repoRoot, workspace, first, nil, PrepareOptions{})
 	if err != nil || len(failures) != 0 {
@@ -537,44 +533,36 @@ func writeRuleFile(t *testing.T, name, contents string) string {
 	return path
 }
 
-func TestInputManifestValidation(t *testing.T) {
+func TestBundleEvidence(t *testing.T) {
 	file := filepath.Join(t.TempDir(), "rule.ts")
-	if err := os.WriteFile(file, []byte("rule"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	helper := filepath.Join(filepath.Dir(file), "helper.mjs")
 	digest := sha256.Sum256([]byte("rule"))
-	valid := InputManifest{
-		Format:      InputManifestFormat,
-		Inputs:      []Input{{Path: "rule.ts", AbsolutePath: file, SHA256: hex.EncodeToString(digest[:])}},
-		Probes:      []ConfigProbe{},
-		Resolutions: []string{},
-		Tool:        ToolIdentity{Esbuild: "test", ConfigResolver: "test", Script: hex.EncodeToString(digest[:])},
+	value := observe.Value(fmt.Sprintf("%x", digest))
+	set, err := observe.New([]observe.Record{{Kind: observe.Content, Path: file, Value: value}, {Kind: observe.Content, Path: helper, Value: value}})
+	if err != nil || validateBundleEvidence(set, file, helper) != nil {
+		t.Fatalf("valid evidence: %v", err)
 	}
-	if err := valid.validate(); err != nil || !valid.Unchanged() {
-		t.Fatalf("valid manifest: %v", err)
+	if validateBundleEvidence(observe.Set{}, file, helper) == nil {
+		t.Fatal("empty bundle evidence accepted")
 	}
-	for _, format := range []string{"", "lintai.bundle-inputs/0", "lintai.bundle-inputs/2"} {
-		invalid := valid
-		invalid.Format = format
-		if err := invalid.validate(); err == nil || invalid.Unchanged() {
-			t.Fatalf("accepted unsupported format %q", format)
-		}
+	staged, err := observe.New([]observe.Record{{Kind: observe.Content, Path: file, Value: value, Stamp: &observe.Stamp{Size: "4", MtimeNs: "1", ObservedAtNs: "3"}}, {Kind: observe.Content, Path: helper, Value: value}})
+	if err != nil || validateBundleEvidence(staged, file, helper) == nil {
+		t.Fatal("staged content stamp accepted")
 	}
-	collision := valid
-	collision.Inputs = append(append([]Input(nil), valid.Inputs...), Input{
-		Path: "rule.ts", AbsolutePath: filepath.Join(filepath.Dir(file), "other.ts"), SHA256: hex.EncodeToString(digest[:]),
-	})
-	if err := collision.validate(); err == nil {
-		t.Fatal("accepted different physical inputs with the same logical path")
-	}
-	var incomplete ConfigProbe
-	if err := json.Unmarshal([]byte(`{"path":"/missing"}`), &incomplete); err == nil {
-		t.Fatal("accepted a probe without its required observations")
-	}
-	if err := os.Remove(file); err != nil {
+}
+
+func TestStagedBytesCannotUseLaterFileStamp(t *testing.T) {
+	file := filepath.Join(t.TempDir(), "input.ts")
+	if err := os.WriteFile(file, []byte("B"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if valid.Unchanged() {
-		t.Fatal("deleted input was accepted as unchanged")
+	sum := sha256.Sum256([]byte("A"))
+	set, err := observe.New([]observe.Record{{Kind: observe.Content, Path: file, Value: observe.Value(fmt.Sprintf("%x", sum))}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	changed, err := set.Changed(context.Background(), observe.Quick)
+	if err != nil || changed == nil {
+		t.Fatalf("staged A accepted against original B: %v %v", changed, err)
 	}
 }

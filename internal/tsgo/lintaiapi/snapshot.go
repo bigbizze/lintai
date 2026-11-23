@@ -2,7 +2,6 @@ package lintaiapi
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -24,9 +23,6 @@ import (
 	"github.com/bigbizze/lintai/internal/tsgo/internal/vfs"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/vfs/osvfs"
 )
-
-// ErrCompilerInputsChanged asks the producer to retry an unstable plan.
-var ErrCompilerInputsChanged = errors.New("compiler inputs changed during planning")
 
 const (
 	ImportFormStatic       = "static"
@@ -399,7 +395,7 @@ type Snapshot struct {
 	ContextPaths            []string
 	CompilerFiles           []CompilerFile
 	// CompilerInputs is detached evidence for compiler-input validation.
-	CompilerInputs      *CompilerInputValidity
+	CompilerInputs      []CompilerObservation
 	capture             *resolutionInputFS
 	typeStructureVisits int
 	trackingKeyBuilds   int
@@ -623,7 +619,7 @@ func BuildSnapshot(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, er
 		return nil, snapshot.capture.captureErr
 	}
 	snapshot.Inputs = uniqueSnapshotInputs(append(snapshot.Inputs, snapshot.capture.inputs()...))
-	snapshot.CompilerInputs = retainCompilerInputValidity(snapshot.capture)
+	snapshot.CompilerInputs = snapshot.capture.observations()
 	snapshot.capture = nil
 	return snapshot, nil
 }
@@ -639,7 +635,7 @@ func buildSnapshotAttempt(ctx context.Context, req BuildSnapshotRequest) (*Snaps
 	if err != nil {
 		return nil, err
 	}
-	trackedFS := trackResolutionInputs(osvfs.FS(), workspaceRoot)
+	trackedFS := trackResolutionInputs(osvfs.FS())
 	host := compiler.NewCompilerHost(
 		bundled.WrapFS(trackedFS),
 		bundled.LibPath(),
@@ -668,16 +664,6 @@ func buildSnapshotAttempt(ctx context.Context, req BuildSnapshotRequest) (*Snaps
 	membership := req.RequestedRelations == nil || slices.Contains(req.RequestedRelations, "module_config")
 	plan, err := planOrdinary(ctx, host, workspaceRoot, files, exactFiles, req.TsconfigFiles, membership, configs, timing)
 	if err != nil {
-		var incomplete *incompleteCompilerMembership
-		if errors.As(err, &incomplete) {
-			stable, _, validationErr := trackedFS.validate()
-			if validationErr != nil {
-				return nil, validationErr
-			}
-			if !stable {
-				return nil, fmt.Errorf("%w: %v", ErrCompilerInputsChanged, err)
-			}
-		}
 		return nil, err
 	}
 	timing.config = time.Since(configStarted)

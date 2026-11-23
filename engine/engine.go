@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"os"
 	"path/filepath"
 	goruntime "runtime"
 	"sort"
@@ -19,6 +18,7 @@ import (
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/facts"
 	"github.com/bigbizze/lintai/internal/canonical"
+	"github.com/bigbizze/lintai/observe"
 	"github.com/bigbizze/lintai/runtime"
 	"github.com/bigbizze/lintai/suppressions"
 	"github.com/bmatcuk/doublestar/v4"
@@ -1028,11 +1028,12 @@ func errorDiagnostic(ruleID, phase string, ruleVersion int, snapshotVersion stri
 	}
 }
 
-func discoverRulePaths(root string, patterns []string, allowEmptyForLock bool) ([]string, error) {
+func discoverRulePaths(root string, patterns []string, allowEmptyForLock bool) ([]string, observe.Set, error) {
 	discovered := make(map[string]struct{})
 	// Defer an unmatched-glob error only to compare a wholly empty inventory
 	// with the existing lock; mixed matching and unmatched globs still fail.
 	var unmatched error
+	var records []observe.Record
 	for _, pattern := range patterns {
 		pattern = strings.TrimSpace(pattern)
 		if pattern == "" {
@@ -1044,19 +1045,20 @@ func discoverRulePaths(root string, patterns []string, allowEmptyForLock bool) (
 			prefix = "/"
 			glob = strings.TrimPrefix(filepath.ToSlash(pattern), "/")
 		}
-		matches, err := doublestar.Glob(os.DirFS(prefix), glob)
+		capture := &discoveryFS{root: prefix, records: &records}
+		matches, err := doublestar.Glob(capture, glob, doublestar.WithFailOnIOErrors())
 		if err != nil {
 			if unmatched != nil {
-				return nil, unmatched
+				return nil, observe.Set{}, unmatched
 			}
-			return nil, err
+			return nil, observe.Set{}, err
 		}
 		if len(matches) == 0 {
 			if unmatched == nil {
 				unmatched = fmt.Errorf("rule glob %q matched no files (relative globs resolve from the workspace root %s)", pattern, root)
 			}
 			if !allowEmptyForLock {
-				return nil, unmatched
+				return nil, observe.Set{}, unmatched
 			}
 			continue
 		}
@@ -1065,12 +1067,16 @@ func discoverRulePaths(root string, patterns []string, allowEmptyForLock bool) (
 		}
 	}
 	if unmatched != nil && len(discovered) > 0 {
-		return nil, unmatched
+		return nil, observe.Set{}, unmatched
 	}
 	results := make([]string, 0, len(discovered))
 	for path := range discovered {
 		results = append(results, path)
 	}
 	sort.Strings(results)
-	return results, nil
+	observations, err := observe.New(records)
+	if err != nil {
+		return nil, observe.Set{}, err
+	}
+	return results, observations, nil
 }

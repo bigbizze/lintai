@@ -1,10 +1,13 @@
 package workspace
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"slices"
 	"testing"
+
+	"github.com/bigbizze/lintai/observe"
 )
 
 func TestListSourceFilesSkipsToolDirectoriesAndExcludes(t *testing.T) {
@@ -108,11 +111,11 @@ func TestScopePlanAppliesRestoreExactAndInvocationPrecedenceAndTracksMembership(
 	if err := os.WriteFile(filepath.Join(root, "dist/contracts/new.ts"), []byte("export {};"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	unchanged, err := ValidateScope(plan)
+	mismatch, err := plan.Observations.Changed(context.Background(), observe.Full)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if unchanged {
+	if mismatch == nil {
 		t.Fatal("a newly eligible source did not invalidate scope membership")
 	}
 	if _, err := PlanSources(root, ScopeOptions{Sources: []string{".git/secret.ts"}}); err == nil {
@@ -123,5 +126,35 @@ func TestScopePlanAppliesRestoreExactAndInvocationPrecedenceAndTracksMembership(
 	}
 	if _, err := PlanSources(root, ScopeOptions{Sources: []string{"README.md"}}); err == nil {
 		t.Fatal("an exact source with an unsupported extension was accepted")
+	}
+}
+
+func TestExactSourceSymlinkRetargetInvalidatesScope(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"a.ts", "b.ts"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("export {};"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(root, "selected.ts")
+	if err := os.Symlink("a.ts", link); err != nil {
+		t.Skip(err)
+	}
+	plan, err := PlanSources(root, ScopeOptions{Sources: []string{"selected.ts"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("b.ts", link); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := plan.Observations.Changed(context.Background(), observe.Full)
+	if err != nil || changed == nil {
+		t.Fatalf("retargeted exact source not detected: %v %v", changed, err)
 	}
 }

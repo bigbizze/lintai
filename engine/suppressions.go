@@ -12,6 +12,7 @@ import (
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/facts"
 	"github.com/bigbizze/lintai/internal/atomicfile"
+	"github.com/bigbizze/lintai/observe"
 	"github.com/bigbizze/lintai/suppressions"
 )
 
@@ -30,9 +31,10 @@ type runInfo struct {
 	producerNames               []string
 }
 type suppressionsState struct {
-	path     string
-	file     suppressions.File
-	snapshot atomicfile.Snapshot
+	path         string
+	file         suppressions.File
+	snapshot     atomicfile.Snapshot
+	observations observe.Set
 }
 type suppressionWrite struct {
 	path             string
@@ -60,17 +62,21 @@ func loadSuppressions(options Options) (suppressionsState, error) {
 	if err != nil {
 		return suppressionsState{}, err
 	}
+	observations, err := policyObservations(path, snapshot)
+	if err != nil {
+		return suppressionsState{}, err
+	}
 	if !snapshot.Exists {
 		if options.SuppressionsLocation != "" && !options.SuppressAll && len(options.SuppressRules) == 0 {
 			return suppressionsState{}, fmt.Errorf("the suppressions file %s does not exist", path)
 		}
-		return suppressionsState{path: path, file: suppressions.File{}, snapshot: snapshot}, nil
+		return suppressionsState{path: path, file: suppressions.File{}, snapshot: snapshot, observations: observations}, nil
 	}
 	file, err := suppressions.Parse(path, snapshot.Data)
 	if err != nil {
 		return suppressionsState{}, err
 	}
-	return suppressionsState{path: path, file: file, snapshot: snapshot}, nil
+	return suppressionsState{path: path, file: file, snapshot: snapshot, observations: observations}, nil
 }
 func typedReason(v facts.Value) ([2]string, error) {
 	switch v.Kind {

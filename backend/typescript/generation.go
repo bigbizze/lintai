@@ -4,74 +4,31 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/bigbizze/lintai/internal/ambient"
 	"github.com/bigbizze/lintai/internal/canonical"
 	"github.com/bigbizze/lintai/internal/tsgo/lintaiapi"
 	"github.com/bigbizze/lintai/internal/workspace"
+	"github.com/bigbizze/lintai/observe"
 )
 
-type validationStats struct {
-	files   int
-	bytes   int64
-	retries int
-	elapsed time.Duration
+// validateGeneration checks exactly the observations captured for this generation.
+func (b *Backend) validateGeneration(ctx context.Context, generation *producerGeneration) (bool, error) {
+	changed, err := generation.observations.Changed(ctx, observe.Full)
+	return changed == nil && err == nil, err
 }
 
-func printValidationTrace(stats validationStats) {
-	fmt.Fprintf(os.Stderr, "lintai: validation files=%d bytes=%d retries=%d ms=%d\n", stats.files, stats.bytes, stats.retries, stats.elapsed.Milliseconds())
-}
-
-// validateGeneration is the single validity decision for publication and reuse.
-// Compiler observations, configuration and the retained selection plan all
-// contribute, even when an earlier component has already changed.
-func (b *Backend) validateGeneration(ctx context.Context, generation *producerGeneration, total *validationStats) (bool, error) {
-	started := time.Now()
-	defer func() { total.elapsed += time.Since(started) }()
-	stable, trace, err := generation.snapshot.CompilerInputs.Validate(ctx)
-	total.files += trace.Files
-	total.bytes += trace.Bytes
-	if err != nil {
-		return false, err
-	}
-	if b.settings.ConfigPath != "" {
-		valid, bytesRead, fileRead, err := validateConfigInput(b.settings.ConfigPath, b.settings.ConfigPresent, b.settings.ConfigDigest)
-		if fileRead {
-			total.files++
-		}
-		total.bytes += bytesRead
-		if err != nil {
-			return false, err
-		}
-		stable = stable && valid
-	}
-	valid, err := workspace.ValidateScope(generation.plan)
-	if err != nil {
-		return false, err
-	}
-	if err := ctx.Err(); err != nil {
-		return false, err
-	}
-	return stable && valid, nil
-}
-
-func (b *Backend) extractSnapshot(ctx context.Context, workspaceRoot string, relations []string, previous *lintaiapi.Snapshot, total *validationStats) (*producerGeneration, []ambient.Source, error) {
+func (b *Backend) extractSnapshot(ctx context.Context, workspaceRoot string, relations []string, previous *lintaiapi.Snapshot) (*producerGeneration, []ambient.Source, error) {
 	scope, err := ParseFileScope(string(b.settings.Files))
 	if err != nil {
 		return nil, nil, err
 	}
 	sources := ambient.Builtin()
-	options := workspace.ScopeOptions{
-		Exclude: b.settings.WorkspaceExcludes, Include: b.settings.Includes,
-		Sources: b.settings.Sources, InvocationExclude: b.settings.Excludes,
-	}
+	options := workspace.ScopeOptions{Exclude: b.settings.WorkspaceExcludes, Include: b.settings.Includes, Sources: b.settings.Sources, InvocationExclude: b.settings.Excludes}
 	for attempt := 0; attempt < 2; attempt++ {
 		plan, err := workspace.PlanSources(workspaceRoot, options)
 		if err != nil {
@@ -94,48 +51,67 @@ func (b *Backend) extractSnapshot(ctx context.Context, workspaceRoot string, rel
 			RequestedRelations: relations, TsconfigFiles: scope == FileScopeTsconfig,
 		}, previous)
 		if err != nil {
-			if errors.Is(err, lintaiapi.ErrCompilerInputsChanged) {
-				if attempt == 0 {
-					total.retries++
-					continue
-				}
-				return nil, nil, fmt.Errorf("inputs_changed: %w", err)
-			}
 			return nil, nil, err
 		}
 		generation := &producerGeneration{snapshot: snapshot, plan: plan}
+		if err := b.finishGeneration(generation, workspaceRoot, scope == FileScopeTsconfig); err != nil {
+			return nil, nil, err
+		}
 		if b.beforeValidation != nil {
 			b.beforeValidation()
 		}
-		stable, err := b.validateGeneration(ctx, generation, total)
+		stable, err := b.validateGeneration(ctx, generation)
 		if err != nil {
 			return nil, nil, err
 		}
 		if stable {
-			if err := b.finishGeneration(generation, workspaceRoot, scope == FileScopeTsconfig); err != nil {
-				return nil, nil, err
-			}
 			return generation, sources, nil
 		}
-		if attempt == 1 {
-			return nil, nil, fmt.Errorf("inputs_changed: compiler inputs or source membership changed during collection")
-		}
-		total.retries++
 	}
 	return nil, nil, fmt.Errorf("inputs_changed: compiler inputs or source membership changed during collection")
 }
 
+func compilerObservations(inputs []lintaiapi.CompilerObservation) (observe.Set, error) {
+	records := make([]observe.Record, 0, len(inputs))
+	for _, input := range inputs {
+		record := observe.Record{Kind: observe.Kind(input.Kind), Path: filepath.Clean(input.Path), Op: observe.Operation(input.Op), Value: observe.Value(input.Value), Entries: input.Entries}
+		if input.Stamp != nil {
+			record.Stamp = &observe.Stamp{Size: fmt.Sprint(input.Stamp.Size), MtimeNs: fmt.Sprint(input.Stamp.MtimeNs), ObservedAtNs: fmt.Sprint(input.Stamp.ObservedAtNs)}
+		}
+		records = append(records, record)
+	}
+	return observe.New(records)
+}
+
 func (b *Backend) finishGeneration(generation *producerGeneration, workspaceRoot string, tsconfigFiles bool) error {
 	snapshot, plan := generation.snapshot, generation.plan
-	encoded, err := canonical.Marshal(snapshot.CompilerInputs.IdentityRecords)
+	compilerSet, err := compilerObservations(snapshot.CompilerInputs)
 	if err != nil {
-		return fmt.Errorf("input revision: %w", err)
+		return fmt.Errorf("compiler observations: %w", err)
 	}
-	digest := sha256.Sum256(encoded)
-	revision := "sha256:" + hex.EncodeToString(digest[:])
+	generation.observations = observe.Union(compilerSet, plan.Observations)
+	if b.settings.ConfigPath != "" {
+		configPath, err := filepath.Abs(b.settings.ConfigPath)
+		if err != nil {
+			return err
+		}
+		configRecord := observe.Record{Kind: observe.State, Path: filepath.Clean(configPath), Op: observe.ReadFile, Value: observe.Missing}
+		if b.settings.ConfigPresent {
+			configRecord = observe.Record{Kind: observe.Content, Path: filepath.Clean(configPath), Value: observe.Value(b.settings.ConfigDigest)}
+		}
+		configSet, err := observe.New([]observe.Record{configRecord})
+		if err != nil {
+			return err
+		}
+		generation.observations = observe.Union(generation.observations, configSet)
+	}
 	requestedRoot, err := filepath.Abs(workspaceRoot)
 	if err != nil {
 		return err
+	}
+	revision, err := generation.observations.Digest(filepath.Clean(requestedRoot))
+	if err != nil {
+		return fmt.Errorf("input revision: %w", err)
 	}
 	// Compiler observations use the resolved plan root. Keep in-workspace
 	// input paths in the spelling supplied by the caller, including symlinked
@@ -160,17 +136,15 @@ func (b *Backend) finishGeneration(generation *producerGeneration, workspaceRoot
 	if b.settings.ConfigPath != "" {
 		addWatchHint(filepath.ToSlash(b.settings.ConfigPath))
 	}
-	for _, directory := range plan.Membership {
-		generation.watchHints = append(generation.watchHints, directory.Path)
+	for _, record := range plan.Observations.Records() {
+		if record.Kind == observe.Listing {
+			generation.watchHints = append(generation.watchHints, filepath.ToSlash(record.Path))
+		}
 	}
 	slices.Sort(generation.watchHints)
 	generation.watchHints = slices.Compact(generation.watchHints)
 	revision = combineInputRevisions(revision, plan.Revision)
 	generation.scope = scopeIdentity(plan, snapshot, tsconfigFiles)
-	if b.settings.ConfigPath != "" {
-		configPath := normalizeIdentityPath(workspaceRoot, b.settings.ConfigPath)
-		revision = combineInputRevisions(revision, configPath, b.settings.ConfigPresent, b.settings.ConfigDigest)
-	}
 	generation.inputRevision = revision
 	return nil
 }
@@ -192,27 +166,8 @@ func uniqueSnapshotInputs(items []lintaiapi.SnapshotInput) []lintaiapi.SnapshotI
 	return result
 }
 
-func validateConfigInput(path string, expectedPresent bool, expectedDigest string) (bool, int64, bool, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return !expectedPresent, 0, false, nil
-		}
-		return false, 0, false, fmt.Errorf("validate config %s: %w", path, err)
-	}
-	if !info.Mode().IsRegular() {
-		return false, 0, false, fmt.Errorf("validate config %s: not a regular file", path)
-	}
-	contents, err := os.ReadFile(path)
-	if err != nil {
-		return false, 0, false, fmt.Errorf("validate config %s: %w", path, err)
-	}
-	digest := sha256.Sum256(contents)
-	return expectedPresent && hex.EncodeToString(digest[:]) == expectedDigest, int64(len(contents)), true, nil
-}
-
 func combineInputRevisions(values ...any) string {
-	encoded, err := canonical.Marshal(append([]any{"typescript-input-revision-v1"}, values...))
+	encoded, err := canonical.Marshal(append([]any{"typescript-input-revision-v2"}, values...))
 	if err != nil {
 		return ""
 	}
@@ -230,8 +185,11 @@ func scopeIdentity(plan *workspace.ScopePlan, snapshot *lintaiapi.Snapshot, tsco
 	slices.Sort(primary)
 	primary = slices.Compact(primary)
 	dependencies := make([]string, 0)
-	for _, file := range snapshot.CompilerInputs.ReadPaths {
-		relative := relativeScopePath(plan.Root, file)
+	for _, input := range snapshot.CompilerInputs {
+		if input.Kind != "content" {
+			continue
+		}
+		relative := relativeScopePath(plan.Root, input.Path)
 		if _, isPrimary := primarySet[relative]; !isPrimary {
 			dependencies = append(dependencies, relative)
 		}
@@ -277,23 +235,4 @@ func relativeScopePath(root, path string) string {
 		return filepath.ToSlash(path)
 	}
 	return filepath.ToSlash(relative)
-}
-
-func normalizeIdentityPath(root, path string) string {
-	absoluteRoot, rootErr := filepath.Abs(root)
-	if rootErr == nil {
-		if resolvedRoot, err := filepath.EvalSymlinks(absoluteRoot); err == nil {
-			absoluteRoot = resolvedRoot
-		}
-	}
-	absolutePath, pathErr := filepath.Abs(path)
-	if pathErr == nil {
-		if resolvedPath, err := filepath.EvalSymlinks(absolutePath); err == nil {
-			absolutePath = resolvedPath
-		}
-	}
-	if rootErr != nil || pathErr != nil {
-		return filepath.ToSlash(filepath.Clean(path))
-	}
-	return relativeScopePath(absoluteRoot, absolutePath)
 }

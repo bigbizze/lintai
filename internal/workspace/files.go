@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/bigbizze/lintai/observe"
 	"github.com/bmatcuk/doublestar/v4"
 )
 
@@ -23,11 +24,6 @@ type ScopeOptions struct {
 	InvocationExclude []string
 }
 
-type DirectoryMembership struct {
-	Path    string
-	Entries []string
-}
-
 type ScopeMatch struct {
 	Path            string
 	ExcludePatterns []string
@@ -39,15 +35,14 @@ type ScopeMatch struct {
 // canonical absolute paths; membership is the directory evidence used to
 // detect a newly eligible file on validation.
 type ScopePlan struct {
-	Root          string
-	Files         []string
-	ExactFiles    []string
-	Pruned        []string
-	Membership    []DirectoryMembership
-	Matches       []ScopeMatch
-	Revision      string
-	Options       ScopeOptions
-	requestedRoot string
+	Root         string
+	Files        []string
+	ExactFiles   []string
+	Pruned       []string
+	Observations observe.Set
+	Matches      []ScopeMatch
+	Revision     string
+	Options      ScopeOptions
 }
 
 // PlanSources applies built-in, configured and invocation selection layers,
@@ -59,8 +54,14 @@ func PlanSources(root string, options ScopeOptions) (*ScopePlan, error) {
 	}
 	absoluteRoot = filepath.Clean(absoluteRoot)
 	requestedRoot := absoluteRoot
-	if resolved, err := filepath.EvalSymlinks(absoluteRoot); err == nil {
-		absoluteRoot = resolved
+	resolved, err := filepath.EvalSymlinks(absoluteRoot)
+	if err != nil {
+		return nil, fmt.Errorf("resolve workspace root %s: %w", absoluteRoot, err)
+	}
+	absoluteRoot = filepath.Clean(resolved)
+	observations := []observe.Record{
+		{Kind: observe.Resolved, Path: requestedRoot, Value: observe.Value(absoluteRoot)},
+		{Kind: observe.State, Path: requestedRoot, Op: observe.Directory, Value: observe.True},
 	}
 	info, err := os.Stat(absoluteRoot)
 	if err != nil {
@@ -84,8 +85,8 @@ func PlanSources(root string, options ScopeOptions) (*ScopePlan, error) {
 			}
 		}
 	}
-	plan := &ScopePlan{Root: filepath.Clean(absoluteRoot), Options: options, requestedRoot: requestedRoot}
-	exact, err := resolveExactSources(absoluteRoot, options.Sources)
+	plan := &ScopePlan{Root: filepath.Clean(absoluteRoot), Options: options}
+	exact, err := resolveExactSources(absoluteRoot, options.Sources, &observations)
 	if err != nil {
 		return nil, err
 	}
@@ -105,19 +106,20 @@ func PlanSources(root string, options ScopeOptions) (*ScopePlan, error) {
 		if err != nil {
 			return fmt.Errorf("read source membership %s: %w", directory, err)
 		}
-		membership := DirectoryMembership{Path: filepath.ToSlash(directory)}
+		listing := make([][2]string, 0, len(entries))
 		for _, entry := range entries {
-			kind := "f:"
-			if entry.Type()&fs.ModeSymlink != 0 {
-				kind = "s:"
-			} else if entry.IsDir() {
-				kind = "d:"
+			kind := observe.Other
+			switch {
+			case entry.Type()&fs.ModeSymlink != 0:
+				kind = observe.Symlink
+			case entry.IsDir():
+				kind = observe.DirectoryValue
+			case entry.Type().IsRegular():
+				kind = observe.File
 			}
-			if entry.IsDir() || entry.Type()&fs.ModeSymlink != 0 || isSupportedExactSource(entry.Name()) {
-				membership.Entries = append(membership.Entries, kind+entry.Name())
-			}
+			listing = append(listing, [2]string{entry.Name(), string(kind)})
 		}
-		plan.Membership = append(plan.Membership, membership)
+		observations = append(observations, observe.Record{Kind: observe.Listing, Path: directory, Op: observe.Physical, Entries: listing})
 		for _, entry := range entries {
 			nextRel := entry.Name()
 			if relative != "" {
@@ -171,22 +173,16 @@ func PlanSources(root string, options ScopeOptions) (*ScopePlan, error) {
 	}
 	slices.Sort(plan.Pruned)
 	plan.Pruned = slices.Compact(plan.Pruned)
-	slices.SortFunc(plan.Membership, func(a, b DirectoryMembership) int { return strings.Compare(a.Path, b.Path) })
-	for i := range plan.Membership {
-		slices.Sort(plan.Membership[i].Entries)
-	}
-	plan.Revision = scopeRevision(plan)
-	return plan, nil
-}
-
-// ValidateScope also checks the requested root, which may be a retargeted
-// symlink, as well as the selection and traversed directory memberships.
-func ValidateScope(plan *ScopePlan) (bool, error) {
-	current, err := PlanSources(plan.requestedRoot, plan.Options)
+	plan.Observations, err = observe.New(observations)
 	if err != nil {
-		return false, err
+		return nil, fmt.Errorf("source observations: %w", err)
 	}
-	return current.Root == plan.Root && current.Revision == plan.Revision, nil
+	observationDigest, err := plan.Observations.Digest(requestedRoot)
+	if err != nil {
+		return nil, err
+	}
+	plan.Revision = scopeRevision(plan, observationDigest)
+	return plan, nil
 }
 
 // ListSourceFiles preserves the small helper used by callers and tests while
@@ -213,7 +209,7 @@ func validatePatterns(options ScopeOptions) error {
 	return nil
 }
 
-func resolveExactSources(root string, names []string) ([]string, error) {
+func resolveExactSources(root string, names []string, observations *[]observe.Record) ([]string, error) {
 	byPath := make(map[string]struct{}, len(names))
 	for _, name := range names {
 		if name == "" {
@@ -235,6 +231,7 @@ func resolveExactSources(root string, names []string) ([]string, error) {
 			return nil, fmt.Errorf("exact source %q: %w", name, err)
 		}
 		resolved = filepath.Clean(resolved)
+		*observations = append(*observations, observe.Record{Kind: observe.Resolved, Path: path, Value: observe.Value(resolved)}, observe.Record{Kind: observe.State, Path: path, Op: observe.RegularFile, Value: observe.True})
 		if !withinRoot(root, resolved) || isGitMetadata(relativeSlash(root, resolved)) {
 			return nil, fmt.Errorf("exact source %q resolves outside the workspace or inside .git", name)
 		}
@@ -395,7 +392,7 @@ func cloneScopeOptions(options ScopeOptions) ScopeOptions {
 	}
 }
 
-func scopeRevision(plan *ScopePlan) string {
+func scopeRevision(plan *ScopePlan, observationDigest string) string {
 	var builder strings.Builder
 	write := func(value string) {
 		builder.WriteString(fmt.Sprintf("%d:", len(value)))
@@ -423,12 +420,7 @@ func scopeRevision(plan *ScopePlan) string {
 		write(value)
 	}
 	builder.WriteString("]")
-	for _, directory := range plan.Membership {
-		write(relativeSlash(plan.Root, directory.Path))
-		for _, entry := range directory.Entries {
-			write(entry)
-		}
-	}
+	write(observationDigest)
 	for _, match := range plan.Matches {
 		write(match.Path)
 		for _, pattern := range match.ExcludePatterns {

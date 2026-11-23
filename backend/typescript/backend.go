@@ -14,6 +14,7 @@ import (
 	"github.com/bigbizze/lintai/internal/ambient"
 	"github.com/bigbizze/lintai/internal/tsgo/lintaiapi"
 	"github.com/bigbizze/lintai/internal/workspace"
+	"github.com/bigbizze/lintai/observe"
 )
 
 // Backend extracts facts from TypeScript and JavaScript files.
@@ -38,6 +39,7 @@ type producerGeneration struct {
 	relations               []string
 	snapshot                *lintaiapi.Snapshot
 	plan                    *workspace.ScopePlan
+	observations            observe.Set
 	inputRevision           string
 	scope                   map[string]any
 	watchHints              []string
@@ -265,13 +267,11 @@ func (b *Backend) Close() error {
 // new extraction, whose own validation covers the new inputs. The prior
 // snapshot only supplies tracking keys whose captured source bytes still match.
 func (b *Backend) generation(ctx context.Context, repoRoot, workspaceRoot string, relations []string) (*producerGeneration, error) {
-	var total validationStats
-	defer func() { printValidationTrace(total) }()
 	var previousSnapshot *lintaiapi.Snapshot
 	if b.current != nil && b.current.repoRoot == repoRoot && b.current.workspaceRoot == workspaceRoot {
 		previousSnapshot = b.current.snapshot
 		if slices.Equal(relations, b.current.relations) {
-			valid, err := b.validateGeneration(ctx, b.current, &total)
+			valid, err := b.validateGeneration(ctx, b.current)
 			if err != nil {
 				b.current = nil
 				return nil, err
@@ -282,7 +282,7 @@ func (b *Backend) generation(ctx context.Context, repoRoot, workspaceRoot string
 		}
 	}
 	b.current = nil
-	generation, sources, err := b.extractSnapshot(ctx, workspaceRoot, relations, previousSnapshot, &total)
+	generation, sources, err := b.extractSnapshot(ctx, workspaceRoot, relations, previousSnapshot)
 	if err != nil {
 		return nil, err
 	}
