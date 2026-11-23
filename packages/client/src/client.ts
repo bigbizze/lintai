@@ -1,10 +1,10 @@
 import { type SpawnSyncReturns, spawn, spawnSync } from "node:child_process";
-import { existsSync, readFileSync, readSync, statSync, watch } from "node:fs";
+import { existsSync, readFileSync, readSync } from "node:fs";
 import path from "node:path";
 import { PassThrough, type Readable, type Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
-import chokidar from "chokidar";
 
+import { FrameDecoder, encodeFrame } from "./frames.js";
 import { type SpawnedProcess, activeSpawner, spawnerFor } from "./spawner.js";
 
 export type Diagnostic = {
@@ -61,12 +61,18 @@ export type ResolvedBridgeOptions = {
 	setupSandbox?: SetupSandbox;
 };
 
-type InitializeResult = {
+type FileResult = {
+	snapshotVersion: string;
+	rulesLoaded: number;
+	diagnostics: Diagnostic[];
+	problems: string[];
+};
+
+type AnalysisResult = {
+	snapshotVersion: string;
 	rulesLoaded: number;
 	diagnosticCount: number;
-	snapshotVersion: string;
-	diagnostics: Diagnostic[];
-	watchHints?: string[];
+	problems: string[];
 };
 
 type JSONRPCRequest = {
@@ -91,7 +97,7 @@ type IndexedDiagnostics = {
 	unlocated: Diagnostic[];
 };
 
-type ClientState = "idle" | "starting" | "ready" | "invalidated" | "fallback" | "disposed";
+type ClientState = "idle" | "starting" | "ready" | "fallback" | "disposed";
 
 type ClientProcess = {
 	stdin: Writable;
@@ -112,28 +118,15 @@ type SpawnSyncLike = (
 	options: { cwd: string; encoding: "utf8" },
 ) => Pick<SpawnSyncReturns<string>, "stdout" | "stderr" | "error" | "status">;
 
-type FileWatcher = {
-	close(): void;
-};
-
 type ClientDependencies = {
 	spawnServe: SpawnServe;
 	spawnSync: SpawnSyncLike;
-	watchPath: (target: string, onChange: (filename?: string) => void) => FileWatcher;
-	watchInputPath: (
-		target: string,
-		onChange: (filename?: string) => void,
-		onError: (error: Error) => void,
-	) => FileWatcher;
 	readServeSync: (child: ClientProcess, timeoutMs: number) => Buffer;
-	modifiedAt: (file: string) => number | undefined;
 	log: (message: string) => void;
-	now: () => number;
 };
 
 const clientCache = new Map<string, LintAIClient>();
 const initializeTimeoutMs = 60_000;
-const refreshIdleMs = 750;
 const syncSleep = new Int32Array(new SharedArrayBuffer(4));
 
 const defaultDependencies: ClientDependencies = {
@@ -156,31 +149,6 @@ const defaultDependencies: ClientDependencies = {
 			return spawner.spawnSync(command, args, options.cwd);
 		}
 		return spawnSync(command, args, options);
-	},
-	watchPath(target, onChange) {
-		const watcher = chokidar.watch(target, {
-			ignoreInitial: true,
-			persistent: false,
-			awaitWriteFinish: {
-				stabilityThreshold: 100,
-				pollInterval: 25,
-			},
-		});
-		watcher.on("all", (_event, filename) => {
-			onChange(path.relative(target, filename));
-		});
-		return {
-			close() {
-				void watcher.close();
-			},
-		};
-	},
-	watchInputPath(target, onChange, onError) {
-		const watcher = watch(target, { persistent: false, recursive: false }, (_event, filename) =>
-			onChange(filename ?? undefined),
-		);
-		watcher.on("error", onError);
-		return watcher;
 	},
 	readServeSync(child, timeoutMs) {
 		const spawner = spawnerFor(child);
@@ -213,246 +181,108 @@ const defaultDependencies: ClientDependencies = {
 			}
 		}
 	},
-	modifiedAt(file) {
-		try {
-			return statSync(file).mtimeMs;
-		} catch {
-			return undefined;
-		}
-	},
 	log(message) {
 		console.warn(message);
 	},
-	now() {
-		return Date.now();
-	},
 };
 
-type RuleWatchSpec = {
-	watchTarget: string;
-	scopeRoot: string;
-};
-
-type DirectoryIdentity = { dev: bigint; ino: bigint };
-
-type InputWatchTarget = { directory: boolean; target: string | undefined };
-
-type InputWatchSpec = {
-	identity: DirectoryIdentity | undefined;
-	inputs: Array<{ path: string; directory: boolean }>;
-	children: Map<string, DirectoryIdentity | undefined>;
-};
+class RPCError extends Error {
+	constructor(
+		readonly code: number,
+		message: string,
+	) {
+		super(message);
+	}
+}
 
 export class LintAIClient {
-	private readonly options: ResolvedBridgeOptions;
-	private readonly dependencies: ClientDependencies;
 	private state: ClientState = "idle";
 	private child: ClientProcess | undefined;
 	private nextRequestID = 1;
-	private pending = new Map<
-		number,
-		{ resolve: (value: unknown) => void; reject: (error: Error) => void }
-	>();
-	private stdoutBuffer = Buffer.alloc(0);
-	private diagnosticsByFile = new Map<string, Diagnostic[]>();
-	private unlocated: Diagnostic[] = [];
-	private serveFailure: string | undefined;
-	private analysisFailure: string | undefined;
+	private readonly decoder = new FrameDecoder();
+	private latestProblems: string[] = [];
+	private problemIdentity = "[]";
 	private problemsReported = false;
-	private initialization: Promise<void> | undefined;
-	private refreshInFlight: Promise<void> | undefined;
 	private oneshotCache: IndexedDiagnostics | undefined;
-	private warned = new Set<string>();
-	private lastDiagnosticsRequestAt = -1;
-	private diagnosticsAnalyzedAt = -1;
-	private readonly savedVersionsAnalyzed = new Map<string, number>();
-	private attachedStdoutListener = false;
-	private readonly ruleWatchers: FileWatcher[] = [];
-	private readonly inputWatchers: FileWatcher[] = [];
-	private inputPaths: string[] = [];
-	private inputPathSet = new Set<string>();
-	private inputWatchTargets = new Map<string, InputWatchTarget>();
-	private inputDirectories = new Map<string, DirectoryIdentity | undefined>();
-	private inputWatchGeneration = 0;
-	private ruleInvalidationTimer: ReturnType<typeof setTimeout> | undefined;
-	private inputInvalidationTimer: ReturnType<typeof setTimeout> | undefined;
-	private inputInvalidationNeedsReinstall = false;
-	private pendingRuleInvalidation = false;
-	private analysisEpoch = 0;
-	private readonly processExitHandler = () => {
-		this.dispose();
-	};
+	private serveFailure: string | undefined;
+	private readonly warned = new Set<string>();
+	private readonly processExitHandler = () => this.dispose();
 
 	constructor(
-		options: ResolvedBridgeOptions,
-		dependencies: ClientDependencies = defaultDependencies,
+		private readonly options: ResolvedBridgeOptions,
+		private readonly dependencies: ClientDependencies = defaultDependencies,
 	) {
-		this.options = options;
-		this.dependencies = dependencies;
-		this.ensureRuleWatchers();
-		if (this.updateInputWatchers([])) this.scheduleInputInvalidation(false);
 		process.on("exit", this.processExitHandler);
 	}
 
 	getDiagnostics(file: string): Diagnostic[] {
-		const normalized = normalizeFile(file);
 		this.ensureStarted();
-
-		if (this.state === "invalidated") {
-			this.refreshInvalidatedDiagnosticsSync();
-		}
-		if (this.state === "ready") {
-			const savedAt = this.savedSinceAnalysis(normalized);
-			if (savedAt !== undefined) {
-				this.savedVersionsAnalyzed.set(normalized, savedAt);
-				this.reanalyzeSync();
-			} else {
-				this.maybeStartRefresh();
-			}
-			return this.diagnosticsByFile.get(normalized) ?? [];
-		}
-		if (this.state === "fallback") {
-			return this.getOneshotDiagnostics(normalized);
-		}
-		return [];
-	}
-
-	// problems returns the workspace-wide problems that every file must show:
-	// a failed analysis, a serve process that fell back to oneshot mode, and
-	// rules that could not run. Without them a broken setup shows no
-	// diagnostics, which looks the same as a clean workspace.
-	//
-	// A linter CLI lints each file once, so the host adapter sets
-	// reportProblemsOnce and the problems are returned for the first file only,
-	// so that they are not repeated for every file. An editor lints files
-	// again, so it gets them on every call.
-	problems(): string[] {
-		if (this.options.reportProblemsOnce && this.problemsReported) {
-			return [];
-		}
-		const items: string[] = [];
-		if (this.serveFailure) {
-			items.push(
-				`[lintai] lintai serve failed, so diagnostics come from one lintai run and do not update until the linter restarts: ${this.serveFailure}`,
-			);
-		}
-		if (this.analysisFailure) {
-			items.push(`[lintai] lintai could not analyze the workspace: ${this.analysisFailure}`);
-		}
-		const unlocated =
-			this.state === "fallback" ? (this.oneshotCache?.unlocated ?? []) : this.unlocated;
-		for (const diagnostic of unlocated) {
-			const phase = diagnostic.phase ? ` (phase ${diagnostic.phase})` : "";
-			items.push(
-				`[lintai] rule ${diagnostic.rule_id} could not run${phase}: ${diagnostic.message}`,
-			);
-		}
-		if (items.length) this.problemsReported = true;
-		return items;
-	}
-
-	refresh(): Promise<void> {
-		this.ensureStarted();
-		if (this.state !== "ready") {
-			return Promise.resolve();
-		}
-		if (this.refreshInFlight) {
-			return this.refreshInFlight;
-		}
-		const targetEpoch = this.analysisEpoch;
-		const startedAt = this.dependencies.now();
-		this.refreshInFlight = this.sendRequest<InitializeResult>("reanalyze", {})
-			.then((result) => {
-				if (this.isOutdated(targetEpoch, startedAt)) {
-					return;
-				}
-				this.setDiagnostics(result.diagnostics, startedAt, result.watchHints);
-			})
-			.catch((error) => {
-				if (this.isOutdated(targetEpoch, startedAt)) {
-					return;
-				}
-				this.setReanalyzeFailure(asError(error), startedAt);
-			})
-			.finally(() => {
-				this.refreshInFlight = undefined;
+		if (this.state === "fallback") return this.getOneshotDiagnostics(normalizeFile(file));
+		if (this.state !== "ready") return [];
+		try {
+			const result = this.requestSync<FileResult>("diagnostics/file", {
+				file: file.replace(/\\/g, "/"),
 			});
-		return this.refreshInFlight;
+			if (!isSummary(result) || !Array.isArray(result.diagnostics))
+				throw new Error("invalid diagnostics/file response");
+			this.setProblems(result.problems);
+			return result.diagnostics;
+		} catch (error) {
+			return this.handleRequestError(error) ? this.getOneshotDiagnostics(normalizeFile(file)) : [];
+		}
 	}
 
-	waitUntilSettled(): Promise<void> {
-		return this.initialization ?? Promise.resolve();
+	// Reports a changed ordered list once per episode for CLI hosts.
+	problems(): string[] {
+		if (this.options.reportProblemsOnce && this.problemsReported) return [];
+		if (this.latestProblems.length) this.problemsReported = true;
+		return [...this.latestProblems];
+	}
+
+	// Forces preparation even if all recorded inputs appear unchanged.
+	reanalyze(): void {
+		this.ensureStarted();
+		if (this.state === "fallback") {
+			this.oneshotCache = undefined;
+			this.getOneshotDiagnostics("");
+			return;
+		}
+		if (this.state !== "ready") return;
+		try {
+			const result = this.requestSync<AnalysisResult>("reanalyze", {});
+			if (!isSummary(result) || typeof result.diagnosticCount !== "number")
+				throw new Error("invalid reanalyze response");
+			this.setProblems(result.problems);
+		} catch (error) {
+			if (this.handleRequestError(error)) this.getOneshotDiagnostics("");
+		}
 	}
 
 	dispose(): void {
-		if (this.state === "disposed") {
-			return;
-		}
+		if (this.state === "disposed") return;
 		process.off("exit", this.processExitHandler);
-		if (this.ruleInvalidationTimer) {
-			clearTimeout(this.ruleInvalidationTimer);
-			this.ruleInvalidationTimer = undefined;
-		}
-		if (this.inputInvalidationTimer) {
-			clearTimeout(this.inputInvalidationTimer);
-			this.inputInvalidationTimer = undefined;
-		}
-		for (const watcher of this.ruleWatchers) {
-			watcher.close();
-		}
-		this.ruleWatchers.length = 0;
-		this.inputWatchGeneration += 1;
-		for (const watcher of this.inputWatchers) {
-			watcher.close();
-		}
-		this.inputWatchers.length = 0;
-
 		const child = this.child;
 		this.child = undefined;
 		this.state = "disposed";
 		if (child && !child.stdin.destroyed) {
 			try {
-				const payload = Buffer.from(
-					JSON.stringify({
-						jsonrpc: "2.0",
-						id: this.nextRequestID++,
-						method: "shutdown",
-						params: {},
-					}),
-					"utf8",
-				);
 				child.stdin.write(
-					Buffer.concat([
-						Buffer.from(`Content-Length: ${payload.length}\r\n\r\n`, "utf8"),
-						payload,
-					]),
+					encodeFrame({ jsonrpc: "2.0", id: this.nextRequestID++, method: "shutdown", params: {} }),
 				);
 			} catch {
-				// Ignore best-effort shutdown failures.
+				/* best effort */
 			}
 			child.stdin.end();
 		}
 	}
 
 	private ensureStarted(): void {
-		if (
-			this.state === "disposed" ||
-			this.state === "ready" ||
-			this.state === "invalidated" ||
-			this.state === "fallback"
-		) {
-			return;
-		}
+		if (this.state !== "idle") return;
 		if (this.options.mode === "oneshot") {
 			this.state = "fallback";
 			return;
 		}
-		this.startServe();
-	}
-
-	private startServe(): void {
 		this.state = "starting";
-		let finishInitialization: () => void = () => undefined;
 		try {
 			const child = this.dependencies.spawnServe(
 				this.options.binary,
@@ -461,65 +291,115 @@ export class LintAIClient {
 			);
 			this.child = child;
 			child.unref?.();
-
-			child.on("exit", (code, signal) => {
-				const error = new Error(
-					`lintai serve exited unexpectedly (code=${code ?? "null"}, signal=${signal ?? "null"})`,
-				);
-				this.handleServeFailure(error);
-			});
-
-			this.initialization = new Promise<void>((resolve) => {
-				finishInitialization = resolve;
-			});
-			const startedAt = this.dependencies.now();
-			const resultValue = this.requestSync<InitializeResult>("initialize", {
+			child.on("exit", (code, signal) =>
+				this.handleServeFailure(
+					new Error(
+						`lintai serve exited unexpectedly (code=${code ?? "null"}, signal=${signal ?? "null"})`,
+					),
+				),
+			);
+			(child as unknown as { on(event: "error", listener: (error: Error) => void): void }).on(
+				"error",
+				(error) => this.handleServeFailure(error),
+			);
+			child.stdin.on("error", (error) => this.handleServeFailure(error));
+			child.stdout.on("error", (error) => this.handleServeFailure(error));
+			const result = this.requestSync<{ protocolVersion: number }>("initialize", {
 				repoRoot: this.options.repoRoot,
 				assetRoot: this.options.assetRoot,
 				workspaceRoot: this.options.workspaceRoot,
 				ruleGlobs: this.options.ruleGlobs,
 				excludes: this.options.excludes,
-				...(this.options.files === undefined ? {} : { files: this.options.files }),
-				...(this.options.sourceLinks === undefined
-					? {}
-					: { sourceLinks: this.options.sourceLinks }),
+				files: this.options.files,
+				sourceLinks: this.options.sourceLinks,
 				env: this.options.env,
-				...(this.options.factLimit === undefined ? {} : { factLimit: this.options.factLimit }),
-				...(this.options.ruleWorkers === undefined
-					? {}
-					: { ruleWorkers: this.options.ruleWorkers }),
-				...(this.options.rulesLock === undefined ? {} : { rulesLock: this.options.rulesLock }),
-				...(this.options.suppressionsLocation === undefined
-					? {}
-					: { suppressionsLocation: this.options.suppressionsLocation }),
-				...(this.options.setupSandbox === undefined
-					? {}
-					: { setupSandbox: this.options.setupSandbox }),
+				factLimit: this.options.factLimit,
+				ruleWorkers: this.options.ruleWorkers,
+				rulesLock: this.options.rulesLock,
+				suppressionsLocation: this.options.suppressionsLocation,
+				setupSandbox: this.options.setupSandbox,
 			});
-			this.attachStdoutListener();
-			this.setDiagnostics(resultValue.diagnostics, startedAt, resultValue.watchHints);
-			if (this.state === "starting") {
-				this.state = this.pendingRuleInvalidation ? "invalidated" : "ready";
-			}
-			finishInitialization();
+			if (!result || result.protocolVersion !== 1)
+				throw new Error("incompatible lintai serve protocol version");
+			this.state = "ready";
 		} catch (error) {
 			this.handleServeFailure(asError(error));
-		} finally {
-			finishInitialization();
-			this.initialization = undefined;
 		}
+	}
+
+	private requestSync<T>(method: string, params: unknown): T {
+		if (!this.child) throw new Error("lintai serve is not running");
+		const id = this.nextRequestID++;
+		const request: JSONRPCRequest = { jsonrpc: "2.0", id, method, params };
+		let writeError: Error | undefined;
+		this.child.stdin.write(encodeFrame(request), (error) => {
+			if (error) writeError = error;
+		});
+		const deadline = Date.now() + initializeTimeoutMs;
+		while (true) {
+			if (writeError) throw writeError;
+			const remaining = deadline - Date.now();
+			if (remaining <= 0) throw new Error(`lintai serve ${method} timed out`);
+			const messages = this.decoder.push(this.dependencies.readServeSync(this.child, remaining));
+			if (messages.length === 0) continue;
+			if (messages.length !== 1) throw new Error("unexpected lintai serve response count");
+			const response = messages[0] as JSONRPCResponse<T>;
+			if (
+				!response ||
+				response.jsonrpc !== "2.0" ||
+				response.id !== id ||
+				(response.error === undefined) === (response.result === undefined)
+			)
+				throw new Error("invalid lintai serve response");
+			if (response.error) {
+				if (typeof response.error.code !== "number" || typeof response.error.message !== "string")
+					throw new Error("invalid lintai serve error");
+				throw new RPCError(response.error.code, response.error.message);
+			}
+			return response.result as T;
+		}
+	}
+
+	private handleRequestError(error: unknown): boolean {
+		if (error instanceof RPCError) {
+			this.setProblems([`[lintai] lintai could not analyze the workspace: ${error.message}`]);
+		} else {
+			this.handleServeFailure(asError(error));
+			return true;
+		}
+		return false;
+	}
+
+	private handleServeFailure(error: Error): void {
+		if (this.state === "disposed" || this.state === "fallback") return;
+		this.warnOnce(`lintai serve unavailable, falling back to oneshot mode: ${error.message}`);
+		this.serveFailure = error.message;
+		const child = this.child;
+		this.child = undefined;
+		this.state = "fallback";
+		if (child && !child.stdin.destroyed) child.stdin.end();
+	}
+
+	private setProblems(problems: string[]): void {
+		const identity = JSON.stringify(problems);
+		if (identity !== this.problemIdentity) {
+			this.problemIdentity = identity;
+			this.problemsReported = false;
+		}
+		this.latestProblems = [...problems];
 	}
 
 	private getOneshotDiagnostics(file: string): Diagnostic[] {
-		if (!this.oneshotCache) {
-			this.oneshotCache = this.loadOneshotDiagnostics();
-		}
-		return this.oneshotCache?.byFile.get(file) ?? [];
+		if (!this.oneshotCache) this.oneshotCache = this.loadOneshotDiagnostics();
+		return this.oneshotCache.byFile.get(file) ?? [];
 	}
 
 	private loadOneshotDiagnostics(): IndexedDiagnostics {
-		this.analysisFailure = undefined;
-		this.problemsReported = false;
+		const problems: string[] = [];
+		if (this.serveFailure)
+			problems.push(
+				`[lintai] lintai serve failed, so diagnostics come from one lintai run and do not update until the linter restarts or reanalysis is forced: ${this.serveFailure}`,
+			);
 		const result = this.dependencies.spawnSync(
 			this.options.binary,
 			[
@@ -553,549 +433,62 @@ export class LintAIClient {
 					? []
 					: ["--setup-sandbox", this.options.setupSandbox]),
 			],
-			{
-				cwd: this.options.repoRoot,
-				encoding: "utf8",
-			},
+			{ cwd: this.options.repoRoot, encoding: "utf8" },
 		);
 		const fail = (message: string): IndexedDiagnostics => {
 			this.warnOnce(`lintai oneshot run failed: ${message}`);
-			this.analysisFailure = message;
+			problems.push(`[lintai] lintai could not analyze the workspace: ${message}`);
+			this.setProblems(problems);
 			return { byFile: new Map(), unlocated: [] };
 		};
-		if (result.error) {
-			return fail(result.error.message);
-		}
-		if (!result.stdout) {
-			const stderr = result.stderr?.trim();
+		if (result.error) return fail(result.error.message);
+		if (!result.stdout)
 			return fail(
-				`lintai exited with status ${result.status ?? "null"} and no output${stderr ? `: ${stderr}` : ""}`,
+				`lintai exited with status ${result.status ?? "null"} and no output${result.stderr?.trim() ? `: ${result.stderr.trim()}` : ""}`,
 			);
-		}
-		if (result.status !== 0 && result.status !== 1 && result.status !== 2 && result.status !== 3) {
+		if (result.status !== 0 && result.status !== 1 && result.status !== 2 && result.status !== 3)
 			return fail(
 				`lintai exited with status ${result.status ?? "null"}: ${result.stderr?.trim() ?? ""}`,
 			);
-		}
-		if (result.status === 2) {
+		if (result.status === 2)
 			return fail(result.stderr?.trim() || `lintai exited with status ${result.status}`);
-		}
 		try {
 			const diagnostics = JSON.parse(result.stdout) as Diagnostic[];
+			if (!Array.isArray(diagnostics)) throw new Error("expected a diagnostic array");
 			if (
 				result.status === 3 &&
 				!diagnostics.some((item) => item.diagnostic_kind === "rule_execution_error")
-			) {
+			)
 				return fail(result.stderr?.trim() || `lintai exited with status ${result.status}`);
+			const indexed = indexDiagnostics(diagnostics);
+			for (const diagnostic of indexed.unlocated) {
+				const phase = diagnostic.phase ? ` (phase ${diagnostic.phase})` : "";
+				problems.push(
+					`[lintai] rule ${diagnostic.rule_id} could not run${phase}: ${diagnostic.message}`,
+				);
 			}
-			return indexDiagnostics(diagnostics);
+			this.setProblems(problems);
+			return indexed;
 		} catch (error) {
 			return fail(`lintai returned invalid JSON: ${asError(error).message}`);
 		}
 	}
 
-	private sendRequest<T>(method: string, params: unknown): Promise<T> {
-		const child = this.child;
-		if (!child || this.state === "disposed") {
-			return Promise.reject(new Error("lintai serve is not running"));
-		}
-
-		return new Promise<T>((resolve, reject) => {
-			this.enqueueRequest(method, params, resolve as (value: unknown) => void, reject);
-		});
-	}
-
-	private waitForInitializationSync(isSettled: () => boolean): void {
-		const startedAt = this.dependencies.now();
-		while (!isSettled()) {
-			const remaining = initializeTimeoutMs - (this.dependencies.now() - startedAt);
-			if (remaining <= 0) {
-				throw new Error("lintai serve initialization timed out");
-			}
-			const chunk = this.dependencies.readServeSync(this.child as ClientProcess, remaining);
-			this.handleStdout(chunk);
-		}
-	}
-
-	private requestSync<T>(method: string, params: unknown): T {
-		let settled = false;
-		let resultValue: T | undefined;
-		let resultError: Error | undefined;
-		this.enqueueRequest(
-			method,
-			params,
-			(result) => {
-				settled = true;
-				resultValue = result as T;
-			},
-			(error) => {
-				settled = true;
-				resultError = error;
-			},
-		);
-		this.waitForInitializationSync(() => settled);
-		if (resultError) {
-			throw resultError;
-		}
-		if (resultValue === undefined) {
-			throw new Error(`lintai serve did not return a ${method} response`);
-		}
-		return resultValue;
-	}
-
-	private enqueueRequest(
-		method: string,
-		params: unknown,
-		resolve: (value: unknown) => void,
-		reject: (error: Error) => void,
-	): void {
-		const child = this.child;
-		if (!child || this.state === "disposed") {
-			reject(new Error("lintai serve is not running"));
-			return;
-		}
-
-		const id = this.nextRequestID++;
-		const request: JSONRPCRequest = {
-			jsonrpc: "2.0",
-			id,
-			method,
-			params,
-		};
-		const payload = Buffer.from(JSON.stringify(request), "utf8");
-		const header = Buffer.from(`Content-Length: ${payload.length}\r\n\r\n`, "utf8");
-
-		this.pending.set(id, { resolve, reject });
-		child.stdin.write(Buffer.concat([header, payload]), (error) => {
-			if (!error) {
-				return;
-			}
-			this.pending.delete(id);
-			reject(asError(error));
-		});
-	}
-
-	private attachStdoutListener(): void {
-		if (!this.child || this.attachedStdoutListener) {
-			return;
-		}
-		this.child.stdout.on("data", (chunk: Buffer | string) => {
-			this.handleStdout(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-		});
-		this.attachedStdoutListener = true;
-	}
-
-	private maybeStartRefresh(): void {
-		const now = this.dependencies.now();
-		const lastRequestAt = this.lastDiagnosticsRequestAt;
-		this.lastDiagnosticsRequestAt = now;
-		if (lastRequestAt < 0 || now - lastRequestAt <= refreshIdleMs || this.refreshInFlight) {
-			return;
-		}
-		void this.refresh();
-	}
-
-	private refreshInvalidatedDiagnosticsSync(): void {
-		if (this.state !== "invalidated") {
-			return;
-		}
-		const targetEpoch = this.analysisEpoch;
-		if (!this.child) {
-			this.startServe();
-			return;
-		}
-		const startedAt = this.dependencies.now();
-		try {
-			const result = this.requestSync<InitializeResult>("reanalyze", { reason: "rule_changed" });
-			if (targetEpoch !== this.analysisEpoch || this.state !== "invalidated") {
-				return;
-			}
-			this.setDiagnostics(result.diagnostics, startedAt, result.watchHints);
-			if (this.state === "invalidated") {
-				this.state = "ready";
-			}
-		} catch (error) {
-			if (this.state === "invalidated") {
-				this.setReanalyzeFailure(asError(error), startedAt);
-				this.state = "ready";
-			}
-		}
-	}
-
-	// isOutdated reports whether a background refresh result must be dropped:
-	// the rule files changed, or a newer analysis (for a saved file) finished
-	// while the refresh ran.
-	private isOutdated(targetEpoch: number, startedAt: number): boolean {
-		return (
-			targetEpoch !== this.analysisEpoch ||
-			this.state !== "ready" ||
-			startedAt < this.diagnosticsAnalyzedAt
-		);
-	}
-
-	// savedSinceAnalysis returns the modification time of the file when the
-	// file was saved after the analysis that produced the current diagnostics
-	// started. A linter lints a file again when it is saved, so that lint must
-	// not get the diagnostics of the old file. Each saved version causes one
-	// analysis at most, so a modification time in the future cannot cause an
-	// analysis on every lint. Some file systems store modification times in
-	// whole seconds, so for a whole-second time a save up to one second before
-	// the analysis started also counts.
-	private savedSinceAnalysis(file: string): number | undefined {
-		const modifiedAt = this.dependencies.modifiedAt(path.join(this.options.workspaceRoot, file));
-		if (modifiedAt === undefined) {
-			return undefined;
-		}
-		const margin = modifiedAt % 1_000 === 0 ? 1_000 : 0;
-		if (modifiedAt < this.diagnosticsAnalyzedAt - margin) {
-			return undefined;
-		}
-		return this.savedVersionsAnalyzed.get(file) === modifiedAt ? undefined : modifiedAt;
-	}
-
-	private reanalyzeSync(): void {
-		const targetEpoch = this.analysisEpoch;
-		const startedAt = this.dependencies.now();
-		this.lastDiagnosticsRequestAt = startedAt;
-		try {
-			const result = this.requestSync<InitializeResult>("reanalyze", { reason: "file_saved" });
-			if (targetEpoch !== this.analysisEpoch || this.state !== "ready") {
-				return;
-			}
-			this.setDiagnostics(result.diagnostics, startedAt, result.watchHints);
-		} catch (error) {
-			if (targetEpoch !== this.analysisEpoch || this.state !== "ready") {
-				return;
-			}
-			this.setReanalyzeFailure(asError(error), startedAt);
-		}
-	}
-
-	private setReanalyzeFailure(error: Error, startedAt: number): void {
-		this.warnOnce(`lintai serve reanalyze failed: ${error.message}`);
-		this.problemsReported = false;
-		this.diagnosticsByFile = new Map();
-		this.unlocated = [];
-		this.analysisFailure = error.message;
-		this.diagnosticsAnalyzedAt = startedAt;
-	}
-
-	private handleStdout(chunk: Buffer): void {
-		this.stdoutBuffer = Buffer.concat([this.stdoutBuffer, chunk]);
-		while (true) {
-			const headerEnd = this.stdoutBuffer.indexOf("\r\n\r\n");
-			if (headerEnd < 0) {
-				return;
-			}
-
-			const header = this.stdoutBuffer.subarray(0, headerEnd).toString("utf8");
-			const match = /^Content-Length:\s*(\d+)$/im.exec(header);
-			if (!match) {
-				this.handleServeFailure(new Error(`invalid lintai serve response header: ${header}`));
-				return;
-			}
-
-			const length = Number.parseInt(match[1], 10);
-			const payloadStart = headerEnd + 4;
-			const payloadEnd = payloadStart + length;
-			if (this.stdoutBuffer.length < payloadEnd) {
-				return;
-			}
-
-			const payload = this.stdoutBuffer.subarray(payloadStart, payloadEnd);
-			this.stdoutBuffer = this.stdoutBuffer.subarray(payloadEnd);
-			this.handleResponsePayload(payload);
-		}
-	}
-
-	private handleResponsePayload(payload: Buffer): void {
-		let response: JSONRPCResponse;
-		try {
-			response = JSON.parse(payload.toString("utf8")) as JSONRPCResponse;
-		} catch (error) {
-			this.handleServeFailure(
-				new Error(`lintai serve returned invalid JSON: ${asError(error).message}`),
-			);
-			return;
-		}
-
-		const pending = this.pending.get(response.id);
-		if (!pending) {
-			return;
-		}
-		this.pending.delete(response.id);
-
-		if (response.error) {
-			pending.reject(new Error(response.error.message));
-			return;
-		}
-		pending.resolve(response.result);
-	}
-
-	private handleServeFailure(error: Error): void {
-		if (this.state === "disposed" || this.state === "fallback") {
-			return;
-		}
-		this.warnOnce(`lintai serve unavailable, falling back to oneshot mode: ${error.message}`);
-		this.problemsReported = false;
-		this.serveFailure = error.message;
-		this.diagnosticsByFile = new Map();
-		this.unlocated = [];
-
-		for (const pending of this.pending.values()) {
-			pending.reject(error);
-		}
-		this.pending.clear();
-
-		if (this.child && !this.child.stdin.destroyed) {
-			this.child.stdin.end();
-		}
-		this.child = undefined;
-		this.stdoutBuffer = Buffer.alloc(0);
-		this.attachedStdoutListener = false;
-		this.refreshInFlight = undefined;
-		this.state = "fallback";
-	}
-
-	private setDiagnostics(
-		diagnostics: Diagnostic[],
-		analyzedAt: number,
-		watchHints?: string[],
-	): void {
-		const indexed = indexDiagnostics(diagnostics);
-		this.problemsReported = false;
-		this.diagnosticsAnalyzedAt = analyzedAt;
-		this.diagnosticsByFile = indexed.byFile;
-		this.unlocated = indexed.unlocated;
-		this.analysisFailure = undefined;
-		if (this.updateInputWatchers(watchHints ?? [])) {
-			// Keep the completed result, then check for changes during installation.
-			this.scheduleInputInvalidation(false);
-		}
-	}
-
-	private updateInputWatchers(inputPaths: string[], force = false): boolean {
-		const paths = [
-			...new Set([
-				...inputPaths.map((item) => path.resolve(item)),
-				...(this.options.sourceLinks === undefined ? [] : [path.resolve(this.options.sourceLinks)]),
-			]),
-		];
-		const nextInputWatchTargets = new Map<string, InputWatchTarget>();
-		for (const input of paths) {
-			const directory = directoryIdentity(input) !== undefined;
-			nextInputWatchTargets.set(input, {
-				directory,
-				target: nearestExistingDirectory(directory ? input : path.dirname(input)),
-			});
-		}
-		// Stable watches need no handoff when an analysis returns the same inputs.
-		if (
-			!force &&
-			paths.length === this.inputPathSet.size &&
-			paths.every((item) => this.inputPathSet.has(item)) &&
-			paths.every((item) => {
-				const installed = this.inputWatchTargets.get(item);
-				const current = nextInputWatchTargets.get(item);
-				return (
-					installed?.directory === current?.directory &&
-					installed?.target === current?.target
-				);
-			}) &&
-			[...this.inputDirectories].every(([directory, identity]) =>
-				sameDirectory(identity, directoryIdentity(directory)),
-			)
-		) {
-			return false;
-		}
-		this.inputPaths = paths;
-		this.inputPathSet = new Set(paths);
-		this.inputWatchTargets = nextInputWatchTargets;
-		const generation = ++this.inputWatchGeneration;
-		for (const watcher of this.inputWatchers) {
-			watcher.close();
-		}
-		this.inputWatchers.length = 0;
-		const specs = new Map<string, InputWatchSpec>();
-		const specFor = (directory: string): InputWatchSpec => {
-			let spec = specs.get(directory);
-			if (!spec) {
-				spec = { identity: directoryIdentity(directory), inputs: [], children: new Map() };
-				specs.set(directory, spec);
-			}
-			return spec;
-		};
-		const directories = new Set<string>();
-		for (const input of paths) {
-			const { directory, target } = this.inputWatchTargets.get(input)!;
-			if (target) {
-				directories.add(target);
-				specFor(target).inputs.push({ path: input, directory });
-			}
-		}
-		for (const directory of directories) {
-			// Parent watches only check the identities of directories leading to an
-			// input. They do not watch subtrees or invalidate for unrelated files.
-			const boundary = isSameOrAncestor(this.options.workspaceRoot, directory)
-				? path.dirname(this.options.workspaceRoot)
-				: path.parse(directory).root;
-			let child = directory;
-			while (child !== boundary) {
-				const parent = path.dirname(child);
-				if (parent === child) break;
-				specFor(parent).children.set(child, specFor(child).identity);
-				child = parent;
-			}
-		}
-		this.inputDirectories = new Map(
-			[...specs].map(([directory, spec]) => [directory, spec.identity]),
-		);
-		for (const [target, spec] of specs) {
-			// A parent rename event can name the destination, not the watched child.
-			const directoryChanged = () =>
-				(this.inputDirectories.has(target) &&
-					!sameDirectory(spec.identity, directoryIdentity(target))) ||
-				[...spec.children].some(
-					([child, identity]) =>
-						this.inputDirectories.has(child) && !sameDirectory(identity, directoryIdentity(child)),
-				);
-			const onError = (error: unknown) => {
-				if (this.state === "disposed" || generation !== this.inputWatchGeneration) return;
-				this.problemsReported = false;
-				const message = `input watcher unavailable for ${target}: ${asError(error).message}`;
-				if (this.state === "fallback") {
-					this.warnOnce(`lintai ${message}`);
-					this.serveFailure = [this.serveFailure, message].filter(Boolean).join("; ");
-				} else {
-					this.handleServeFailure(new Error(message));
-				}
-			};
-			try {
-				const watcher = this.dependencies.watchInputPath(
-					target,
-					(filename) => {
-						if (this.state === "disposed") return;
-						const changed = filename && path.resolve(target, filename);
-						if (
-							directoryChanged() ||
-							spec.inputs.some(
-								(input) =>
-									this.inputPathSet.has(input.path) &&
-									(!changed ||
-										isSameOrAncestor(changed, input.path) ||
-										(input.directory && isSameOrAncestor(input.path, changed))),
-							)
-						) {
-							this.scheduleInputInvalidation();
-						}
-					},
-					onError,
-				);
-				this.inputWatchers.push(watcher);
-				// A directory may have been replaced while the watches were installed.
-				if (directoryChanged()) this.scheduleInputInvalidation();
-			} catch (error) {
-				onError(error);
-			}
-		}
-		return this.inputWatchers.length > 0;
-	}
-
-	private scheduleInputInvalidation(reinstall = true): void {
-		this.inputInvalidationNeedsReinstall ||= reinstall;
-		if (this.inputInvalidationTimer) {
-			clearTimeout(this.inputInvalidationTimer);
-		}
-		this.inputInvalidationTimer = setTimeout(() => {
-			this.inputInvalidationTimer = undefined;
-			if (this.state === "disposed") {
-				return;
-			}
-			const reinstall = this.inputInvalidationNeedsReinstall;
-			this.inputInvalidationNeedsReinstall = false;
-			if (reinstall && this.updateInputWatchers(this.inputPaths, true)) {
-				// A change can land after the old watches close but before the new
-				// watches start reporting. Recheck once after the new watches exist.
-				this.scheduleInputInvalidation(false);
-			}
-			this.invalidateDiagnostics();
-		}, 200);
-	}
-
-	private ensureRuleWatchers(): void {
-		const specs = buildRuleWatchSpecs(this.options.ruleGlobs);
-		for (const spec of specs) {
-			try {
-				const watcher = this.dependencies.watchPath(spec.watchTarget, (filename) => {
-					if (!this.isRelevantRuleWatchEvent(spec, filename)) {
-						return;
-					}
-					this.scheduleRuleInvalidation();
-				});
-				this.ruleWatchers.push(watcher);
-			} catch (error) {
-				this.warnOnce(
-					`lintai rule watcher unavailable for ${spec.watchTarget}: ${asError(error).message}`,
-				);
-			}
-		}
-	}
-
-	private isRelevantRuleWatchEvent(spec: RuleWatchSpec, filename?: string): boolean {
-		if (!filename) {
-			return true;
-		}
-		const changed = path.resolve(spec.watchTarget, filename);
-		const relative = path.relative(spec.scopeRoot, changed);
-		return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
-	}
-
-	private scheduleRuleInvalidation(): void {
-		this.pendingRuleInvalidation = true;
-		if (this.ruleInvalidationTimer) {
-			clearTimeout(this.ruleInvalidationTimer);
-		}
-		this.ruleInvalidationTimer = setTimeout(() => {
-			this.ruleInvalidationTimer = undefined;
-			this.applyRuleInvalidation();
-		}, 200);
-	}
-
-	private applyRuleInvalidation(): void {
-		if (this.state === "disposed") {
-			return;
-		}
-		this.pendingRuleInvalidation = false;
-		this.invalidateDiagnostics();
-		if (this.state === "idle" || this.state === "starting") {
-			return;
-		}
-		if (this.state === "fallback") {
-			this.dependencies.log("lintai rule files changed; clearing cached diagnostics");
-			return;
-		}
-		this.dependencies.log("lintai rule files changed; refreshing diagnostics on next lint pass");
-	}
-
-	private invalidateDiagnostics(): void {
-		this.analysisEpoch += 1;
-		this.diagnosticsByFile = new Map();
-		this.unlocated = [];
-		this.analysisFailure = undefined;
-		this.oneshotCache = undefined;
-		this.refreshInFlight = undefined;
-		if (this.state === "ready") {
-			this.state = "invalidated";
-		}
-	}
-
 	private warnOnce(message: string): void {
-		if (this.warned.has(message)) {
-			return;
-		}
+		if (this.warned.has(message)) return;
 		this.warned.add(message);
 		this.dependencies.log(message);
 	}
+}
+
+function isSummary(value: FileResult | AnalysisResult): boolean {
+	return (
+		!!value &&
+		typeof value.snapshotVersion === "string" &&
+		typeof value.rulesLoaded === "number" &&
+		Array.isArray(value.problems) &&
+		value.problems.every((problem) => typeof problem === "string")
+	);
 }
 
 export type HostDefaults = {
@@ -1312,8 +705,6 @@ function parseRuleIds(result: ReturnType<SpawnSyncLike>): RuleIdList {
 export function createTestDependencies(overrides: Partial<ClientDependencies>): ClientDependencies {
 	return {
 		...defaultDependencies,
-		watchPath: () => ({ close() {} }),
-		modifiedAt: () => undefined,
 		...overrides,
 	};
 }
@@ -1353,86 +744,6 @@ function asError(error: unknown): Error {
 function getReadableFD(stream: Readable): number | undefined {
 	const handle = (stream as Readable & { _handle?: { fd?: number } })._handle;
 	return typeof handle?.fd === "number" ? handle.fd : undefined;
-}
-
-function buildRuleWatchSpecs(ruleGlobs: string[]): RuleWatchSpec[] {
-	const specs = new Map<string, RuleWatchSpec>();
-	for (const glob of ruleGlobs) {
-		const scopeRoot = deriveRuleScopeRoot(glob);
-		const watchTarget = nearestExistingAncestor(scopeRoot) ?? path.dirname(scopeRoot);
-		const key = `${watchTarget}::${scopeRoot}`;
-		if (specs.has(key)) {
-			continue;
-		}
-		specs.set(key, { watchTarget, scopeRoot });
-	}
-	return Array.from(specs.values());
-}
-
-function deriveRuleScopeRoot(glob: string): string {
-	const firstGlobIndex = glob.search(/[*?[{]/);
-	if (firstGlobIndex < 0) {
-		return path.dirname(glob);
-	}
-	const staticPrefix = glob.slice(0, firstGlobIndex);
-	if (!staticPrefix) {
-		return path.parse(glob).root;
-	}
-	if (/[\\/]$/.test(staticPrefix)) {
-		return staticPrefix.replace(/[\\/]+$/, "");
-	}
-	return path.dirname(staticPrefix);
-}
-
-function nearestExistingAncestor(target: string): string | undefined {
-	let current = target;
-	while (true) {
-		if (existsSync(current)) {
-			return current;
-		}
-		const parent = path.dirname(current);
-		if (parent === current) {
-			return undefined;
-		}
-		current = parent;
-	}
-}
-
-function nearestExistingDirectory(target: string): string | undefined {
-	let current = target;
-	while (true) {
-		if (existsSync(current)) {
-			try {
-				if (statSync(current).isDirectory()) return current;
-			} catch {
-				// Keep walking when the path disappeared between existsSync and statSync.
-			}
-		}
-		const parent = path.dirname(current);
-		if (parent === current) return undefined;
-		current = parent;
-	}
-}
-
-function directoryIdentity(directory: string): DirectoryIdentity | undefined {
-	try {
-		const stats = statSync(directory, { bigint: true });
-		return stats.isDirectory() ? { dev: stats.dev, ino: stats.ino } : undefined;
-	} catch {
-		return undefined;
-	}
-}
-
-function sameDirectory(
-	left: DirectoryIdentity | undefined,
-	right: DirectoryIdentity | undefined,
-): boolean {
-	return left?.dev === right?.dev && left?.ino === right?.ino;
-}
-
-function isSameOrAncestor(ancestor: string, candidate: string): boolean {
-	const relative = path.relative(ancestor, candidate);
-	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
 export function createTestProcess(): ClientProcess & {

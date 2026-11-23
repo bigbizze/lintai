@@ -27,7 +27,7 @@ Rules can identify the checked signature and lexical contract member at a call s
 
 This release adds public export and declaration inventories, checked-to-source declaration associations, explicit type-opacity facts, and suspension sites for `await`, `for await`, and module-scope suspension. Shared lexical ownership keeps call, reference, and suspension facts attached to the correct function or module. Rule listings expose validated versions, reported predicates, and `expectNonEmpty` declarations.
 
-Source associations report incomplete or ambiguous evidence instead of guessing. The session validates producer inputs before reusing analysis; clients request checks when watched inputs change. Library-type opacity remains explicit; accepting it also trusts any merged augmentations. See the predicate reference below and [examples.md](examples.md) for rule-author guidance.
+Source associations report incomplete or ambiguous evidence instead of guessing. The session validates producer inputs before reusing analysis; the server validates captured inputs on each file request. Library-type opacity remains explicit; accepting it also trusts any merged augmentations. See the predicate reference below and [examples.md](examples.md) for rule-author guidance.
 
 ## Linear reachability predicates (0.6.4)
 
@@ -144,7 +144,7 @@ For each rule:
 7. Each row of each reported predicate becomes a diagnostic. Anchor errors use phase `report`.
 8. `message()` runs for each row. Errors use phase `message`.
 
-Go callers using `Session.Refresh` may reuse a successful result without rerunning setup. Ambient reads made by config transforms or setup are not automatically observed; use `Session.Check` to force preparation after those inputs change. The current editor server runs checks rather than this Go refresh shortcut.
+File requests in serve mode and Go callers using `Session.Refresh` may reuse a successful result without rerunning setup. Ambient reads made by config transforms or setup are not automatically observed; use `reanalyze` or `Session.Check` to force preparation after those inputs change.
 
 A failing rule contributes only its error diagnostic. Other rules still run. Diagnostics are sorted by file, start line, start column, rule id, assertion id and anchor, so the output is identical across runs.
 
@@ -761,9 +761,9 @@ Plugin caveats:
 - ESLint 10 finds flat config from each linted file; pass `--config` to select one explicitly, and use Node 26 for the editor integration
 - `serve` is the default in editor-like long-lived processes
 - `oneshot` is the default under plain ESLint CLI detection
-- lintai reads the saved files on disk, not the editor buffer. In `serve` mode, when the editor text of a file is different from the saved file, `lintai/analysis` shows one message on line 1 that asks you to save the file, and the other lintai rules report nothing for that file. When the editor lints a file that was saved after the last analysis started, the plugin runs a new analysis first, so the diagnostics of the saved file are current. On a file system that stores modification times in whole seconds, a second save in the same second can show the diagnostics of the first save until the next background refresh.
-- rule-file edits force invalidation on the next lint pass. A new rule id still needs a restart (see "Linter rules").
-- in `serve` mode, the plugin also watches the extra files that the last analysis depended on: the source-links file, declaration maps, source entries, auxiliary tsconfig files and resolution candidates. Some of these files may not exist yet, because creating one, such as a new `.d.ts.map`, can change the facts. For a missing file or directory the plugin watches the nearest existing parent directory, without watching its subfolders. It also checks parent directories for replacement, so rebuilding a `dist` folder does not leave it watching the old folder. When one of these files changes, the plugin clears its diagnostics and the next lint pass runs a fresh analysis. After a check it updates the watches from producer-provided hints, including relevant source-membership directories. Events request another check; the producer validates captured contents and membership when that check runs. A newly discovered hint does not reject the completed result. If an input watcher fails, the plugin reports the problem and falls back to one-shot analysis.
+- lintai reads saved files, not the editor buffer. In `serve` mode, an unsaved buffer shows a save message through `lintai/analysis` and hides other lintai findings for that file.
+- each file request validates the recorded inputs and reloads changed configuration; source and rule changes are picked up on the next lint pass. There is no background refresh. Quick validation can miss a same-size edit whose modification time was deliberately restored; forced `reanalyze` performs a Full check.
+- a newly discovered rule's findings appear through `lintai/analysis` with restart guidance until the linter reloads its plugin and registers the ID. Changes to an existing rule implementation need no restart.
 - when lintai cannot produce diagnostics, `lintai/analysis` reports the reason on line 1 of each linted file, so a broken setup does not look like a clean workspace. In an `eslint` CLI run, these messages appear on the first linted file only.
 - the ESLint path never computes `explanation`
 
@@ -828,7 +828,7 @@ Options: the same `LintaiOptions` as the ESLint plugin.
 Modes:
 
 - `oxlint` CLI: `oneshot`. The plugin runs lintai once, and reports workspace problems on the first linted file only.
-- `oxlint --lsp`: `serve`. The plugin keeps one `lintai serve` process and reports workspace problems on each lint. When the editor text of a file is different from the saved file, `lintai/analysis` shows one message on line 1 that asks you to save the file. When the language server lints a file that was saved after the last analysis started, the plugin runs a new analysis first.
+- `oxlint --lsp`: `serve`. The plugin keeps one `lintai serve` process and reports workspace problems on each lint. When the editor text of a file is different from the saved file, `lintai/analysis` shows one message on line 1 that asks you to save the file. Each file request validates captured inputs and refreshes the analysis when needed.
 - The plugin detects the language server from the `--lsp` argument of the oxlint process. An explicit `mode` option always wins.
 - The plugin resolves relative paths in its options from the directory that the oxlint process runs in. An editor can start `oxlint --lsp` in a different directory, so set `workspaceRoot: import.meta.dirname` in `lintai.oxlint.mjs`, as in the example.
 

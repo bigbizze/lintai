@@ -154,7 +154,7 @@ export default [
 
 Each rule gets its own name, such as `lintai/arch.no-service-imports`, so you can set its severity and use ordinary ESLint overrides and disable comments. Keep `lintai/analysis` enabled: it reports analysis and rule execution failures.
 
-There is also an [oxlint plugin](docs/api.md#oxlint-plugin-reference-and-caveats). Both integrations can reuse a running lintai process in editor sessions. They read saved files, so save a file before expecting updated results. Restart the linter after adding a rule file or changing a rule ID.
+There is also an [oxlint plugin](docs/api.md#oxlint-plugin-reference-and-caveats). Both integrations can reuse a running lintai process in editor sessions. They validate recorded inputs on each file request and read saved files. Newly discovered rule IDs report through `lintai/analysis` until the linter reloads the plugin and registers those IDs; edits to an existing rule implementation need no restart.
 
 ## What a passing result means
 

@@ -21,9 +21,6 @@ type Options struct {
 	Excludes          []string
 	Files             FileScope
 	SourceLinks       string
-	ConfigPath        string
-	ConfigDigest      string
-	ConfigPresent     bool
 }
 
 func ParseFileScope(value string) (FileScope, error) {

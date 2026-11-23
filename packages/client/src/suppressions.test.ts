@@ -100,12 +100,18 @@ test("serve forwards suppression initialization parameters", () => {
 		options,
 		createTestDependencies({
 			spawnServe: () => child,
-			readServeSync: () =>
-				createFramedResponse({
-					jsonrpc: "2.0",
-					id: 1,
-					result: { rulesLoaded: 0, diagnosticCount: 0, snapshotVersion: "test", diagnostics: [] },
-				}),
+			readServeSync: (() => {
+				let id = 0;
+				return () =>
+					createFramedResponse({
+						jsonrpc: "2.0",
+						id: ++id,
+						result:
+							id === 1
+								? { protocolVersion: 1 }
+								: { rulesLoaded: 0, snapshotVersion: "test", diagnostics: [], problems: [] },
+					});
+			})(),
 		}),
 	);
 	try {

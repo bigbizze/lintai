@@ -108,6 +108,51 @@ it("unused suppressions report through analysis rather than the generated rule",
 	resetClientsForTest();
 });
 
+it("serve findings with unregistered IDs report through analysis with restart guidance", () => {
+	resetClientsForTest();
+	const options = { ...bridge, mode: "serve" as const };
+	const resolved = resolveBridgeOptions(options, process.cwd(), oxlintHostDefaults());
+	const child = createTestProcess();
+	let id = 0;
+	const dependencies = createTestDependencies({
+		spawnSync: () => ({
+			status: 0,
+			stderr: "",
+			stdout: JSON.stringify({ rules: [{ id: "arch.no-async", path: "rule.ts" }], errors: [] }),
+		}),
+		spawnServe: () => child,
+		readServeSync: () =>
+			createFramedResponse({
+				jsonrpc: "2.0",
+				id: ++id,
+				result:
+					id === 1
+						? { protocolVersion: 1 }
+						: {
+								snapshotVersion: "snap",
+								rulesLoaded: 2,
+								diagnostics: [{ ...violation, rule_id: "arch.new" }],
+								problems: [],
+							},
+			}),
+	});
+	loadRuleIds(resolved, dependencies);
+	getClient(resolved, dependencies);
+	const plugin = createLintaiPlugin(options);
+	const messages: string[] = [];
+	plugin.rules.analysis
+		?.create({
+			physicalFilename: path.join(workspace, "src/a.ts"),
+			sourceCode: { text: savedText },
+			report: (report: { message: string }) => messages.push(report.message),
+		})
+		.Program();
+	deepEqual(messages, [
+		"[lintai] rule arch.new has no linter rule lintai/arch.new, because the linter read the rule list when it loaded the plugin. Restart the linter or the editor's language server. [arch.new/violation] functions must not be async",
+	]);
+	resetClientsForTest();
+});
+
 // Each case sets process.argv to the observed oxlint CLI or language-server
 // argv, primes the rule list and the client cache with a stubbed lintai, and
 // creates the plugin, so that its rules get the client that they would
@@ -139,12 +184,23 @@ function withHost(argv: string[], fresh: boolean) {
 							}
 						: { stdout: JSON.stringify(diagnostics), stderr: "", error: undefined, status: 3 },
 				spawnServe: () => createTestProcess(),
-				readServeSync: () =>
-					createFramedResponse({
-						jsonrpc: "2.0",
-						id: 1,
-						result: { rulesLoaded: 2, diagnosticCount: 2, snapshotVersion: "snap", diagnostics },
-					}),
+				readServeSync: (() => {
+					let id = 0;
+					return () =>
+						createFramedResponse({
+							jsonrpc: "2.0",
+							id: ++id,
+							result:
+								id === 1
+									? { protocolVersion: 1 }
+									: {
+											rulesLoaded: 2,
+											snapshotVersion: "snap",
+											diagnostics: [violation],
+											problems: [problem],
+										},
+						});
+				})(),
 				log: () => undefined,
 			});
 			loadRuleIds(options, dependencies);

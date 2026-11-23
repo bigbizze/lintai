@@ -33,7 +33,6 @@ type composedFacts struct {
 	analyzedFiles            map[string]struct{}
 	namespaces               []string
 	snapshotID               string
-	watchHints               []string
 	observations             observe.Set
 	reusableFromObservations bool
 }
@@ -209,7 +208,6 @@ func (catalog producerCatalog) collect(ctx context.Context, options Options, req
 	records := make([]any, 0, len(catalog.entries))
 	var observations []observe.Set
 	reusable := true
-	hints := make(map[string]struct{})
 	for _, entry := range catalog.entries {
 		description := entry.description
 		wanted := requestedByNamespace[description.Namespace]
@@ -244,25 +242,6 @@ func (catalog producerCatalog) collect(ctx context.Context, options Options, req
 		}
 		observations = append(observations, metadata.Observations)
 		reusable = reusable && metadata.ReusableFromObservations
-		capturedRecords := metadata.Observations.Records()
-		requestedRoot, _ := filepath.Abs(options.WorkspaceRoot)
-		physicalRoot := requestedRoot
-		for _, record := range capturedRecords {
-			if record.Kind == observe.Resolved && record.Path == requestedRoot {
-				physicalRoot = string(record.Value)
-				break
-			}
-		}
-		for _, record := range capturedRecords {
-			if record.Kind == observe.Env {
-				continue
-			}
-			hints[filepath.ToSlash(record.Path)] = struct{}{}
-			relative, err := filepath.Rel(physicalRoot, record.Path)
-			if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-				hints[filepath.ToSlash(filepath.Join(requestedRoot, relative))] = struct{}{}
-			}
-		}
 		predicates := make([]any, len(requested))
 		for i, predicate := range requested {
 			predicates[i] = []any{predicate.Name, predicate.Arity}
@@ -276,15 +255,10 @@ func (catalog producerCatalog) collect(ctx context.Context, options Options, req
 	}
 	digest := sha256.Sum256(encoded)
 	snapshotID := "sha256:" + hex.EncodeToString(digest[:])
-	watchHints := make([]string, 0, len(hints))
-	for hint := range hints {
-		watchHints = append(watchHints, hint)
-	}
-	sort.Strings(watchHints)
 	captured := observe.Union(observations...)
 	if current != nil && current.snapshotID == snapshotID {
 		reused := *current
-		reused.watchHints, reused.observations, reused.reusableFromObservations = watchHints, captured, reusable
+		reused.observations, reused.reusableFromObservations = captured, reusable
 		return reused, nil
 	}
 	base := factstore.NewMultiIndexedArrayInMemoryStore()
@@ -329,7 +303,7 @@ func (catalog producerCatalog) collect(ctx context.Context, options Options, req
 			producerFiles[namespace][file] = struct{}{}
 		}
 	}
-	return composedFacts{base: base, sources: catalog.sources, schemaDecls: catalog.schemaDecls, anchors: anchors, anchorOwners: anchorOwners, producerFiles: producerFiles, reportable: reportable, factCounts: factCounts, analyzedFiles: analyzedFiles, namespaces: namespaces, snapshotID: snapshotID, watchHints: watchHints, observations: captured, reusableFromObservations: reusable}, nil
+	return composedFacts{base: base, sources: catalog.sources, schemaDecls: catalog.schemaDecls, anchors: anchors, anchorOwners: anchorOwners, producerFiles: producerFiles, reportable: reportable, factCounts: factCounts, analyzedFiles: analyzedFiles, namespaces: namespaces, snapshotID: snapshotID, observations: captured, reusableFromObservations: reusable}, nil
 }
 
 func captureGenerationMetadata(metadata backend.GenerationMetadata) (backend.GenerationMetadata, error) {

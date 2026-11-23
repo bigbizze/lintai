@@ -78,21 +78,6 @@ func (b *Backend) finishGeneration(generation *producerGeneration, workspaceRoot
 		return fmt.Errorf("compiler observations: %w", err)
 	}
 	generation.observations = observe.Union(compilerSet, plan.Observations)
-	if b.settings.ConfigPath != "" {
-		configPath, err := filepath.Abs(b.settings.ConfigPath)
-		if err != nil {
-			return err
-		}
-		configRecord := observe.Record{Kind: observe.State, Path: filepath.Clean(configPath), Op: observe.ReadFile, Value: observe.Missing}
-		if b.settings.ConfigPresent {
-			configRecord = observe.Record{Kind: observe.Content, Path: filepath.Clean(configPath), Value: observe.Value(b.settings.ConfigDigest)}
-		}
-		configSet, err := observe.New([]observe.Record{configRecord})
-		if err != nil {
-			return err
-		}
-		generation.observations = observe.Union(generation.observations, configSet)
-	}
 	requestedRoot, err := filepath.Abs(workspaceRoot)
 	if err != nil {
 		return err
