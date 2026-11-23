@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/bigbizze/lintai/facts"
+	"github.com/bigbizze/lintai/observe"
 )
 
 // Facts explicitly collects and formats the selected base relations without
@@ -49,7 +50,7 @@ func (e *Session) Facts(ctx context.Context, names []string) (string, error) {
 			}
 		}
 	}
-	assembled, err := catalog.collect(ctx, e.defaults, requested, nil)
+	assembled, err := catalog.collect(ctx, e.defaults, requested, nil, observe.Full)
 	if err != nil {
 		return "", err
 	}

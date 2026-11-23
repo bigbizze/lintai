@@ -97,8 +97,8 @@ export default rule("fixture.alias").version(1)
 		t.Fatal(err)
 	}
 	artifacts, failures, err := bundle.BuildAll(context.Background(), asset, repoRoot, workspace, t.TempDir(), []string{rulePath})
-	if err != nil || len(artifacts) != 0 || failures[rulePath] == nil || !strings.Contains(failures[rulePath].Error(), "changed during compilation") {
-		t.Fatalf("between-build config change must reject incomplete input evidence: artifacts=%+v failures=%+v err=%v", artifacts, failures, err)
+	if err != nil || len(artifacts) != 1 || failures[rulePath] != nil || bundleUnchanged(artifacts[rulePath].Observations) {
+		t.Fatalf("between-build config change must retain stale captured evidence: artifacts=%+v failures=%+v err=%v", artifacts, failures, err)
 	}
 	if err := os.WriteFile(control, []byte("disarmed"), 0o600); err != nil {
 		t.Fatal(err)

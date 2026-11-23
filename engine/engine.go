@@ -109,11 +109,12 @@ type Session struct {
 	stats          executionStats
 	currentFacts   *composedFacts
 	currentCatalog string
-	currentResult  *Result
+	currentResult  *publishedResult
 }
 
 type executionStats struct {
 	bundleArtifacts atomic.Int64
+	gojaRuntimes    atomic.Int64
 	programBuilds   atomic.Int64
 	mangleCompiles  atomic.Int64
 	activeJobs      atomic.Int64
@@ -122,6 +123,7 @@ type executionStats struct {
 
 type executionObservation struct {
 	bundleArtifacts int64
+	gojaRuntimes    int64
 	programBuilds   int64
 	mangleCompiles  int64
 	peakActiveJobs  int64
@@ -187,6 +189,7 @@ func (e *Session) beginCheck(parent context.Context) (context.Context, func(), e
 func (e *Session) executionObservation() executionObservation {
 	return executionObservation{
 		bundleArtifacts: e.stats.bundleArtifacts.Load(),
+		gojaRuntimes:    e.stats.gojaRuntimes.Load(),
 		programBuilds:   e.stats.programBuilds.Load(),
 		mangleCompiles:  e.stats.mangleCompiles.Load(),
 		peakActiveJobs:  e.stats.peakActiveJobs.Load(),
@@ -209,55 +212,130 @@ func (e *Session) Check(ctx context.Context, requests ...Options) (Result, error
 	success := false
 	defer func() {
 		if !success {
-			e.currentFacts = nil
-			e.currentCatalog = ""
+			e.clearCurrent()
 		}
 	}()
-	e.mu.Lock()
-	e.currentResult = nil
-	e.mu.Unlock()
+	e.clearPublished()
 	if len(requests) > 1 {
 		return Result{}, fmt.Errorf("check accepts at most one request")
 	}
-	if options.RuleWorkers < 0 {
-		return Result{}, fmt.Errorf("rule workers must be zero or a positive integer")
-	}
-	state, err := loadSuppressions(options)
+	options, key, err := effectiveOptions(options)
 	if err != nil {
 		return Result{}, err
 	}
-	result, run, evidence, err := e.analyzeWithEvidence(checkCtx, options)
+	result, err := e.runAndPublish(checkCtx, options, key, observe.Full)
 	if err != nil {
 		return Result{}, err
+	}
+	success = true
+	return cloneResult(result.result), nil
+}
+
+// Refresh validates the current read-only result and projects one file, or
+// runs a new analysis using Quick validation when its evidence has changed.
+func (e *Session) Refresh(ctx context.Context, options Options, file string) (FileResult, error) {
+	e.checkMu.Lock()
+	defer e.checkMu.Unlock()
+	checkCtx, finish, err := e.beginCheck(ctx)
+	if err != nil {
+		return FileResult{}, err
+	}
+	defer finish()
+	success := false
+	defer func() {
+		if !success {
+			e.clearCurrent()
+		}
+	}()
+	options, key, err := effectiveOptions(options)
+	if err != nil {
+		return FileResult{}, err
+	}
+	if options.SuppressAll || len(options.SuppressRules) != 0 || options.PruneSuppressions {
+		return FileResult{}, fmt.Errorf("refresh cannot record or prune suppressions")
 	}
 	if err := checkCtx.Err(); err != nil {
-		return Result{}, err
+		return FileResult{}, err
+	}
+	e.mu.Lock()
+	current := e.currentResult
+	e.mu.Unlock()
+	if current != nil && current.reusable && current.requestKey == key {
+		changed, err := current.observations.Changed(checkCtx, observe.Quick)
+		if err != nil {
+			return FileResult{}, err
+		}
+		if changed == nil {
+			e.mu.Lock()
+			defer e.mu.Unlock()
+			if e.closed {
+				return FileResult{}, fmt.Errorf("session is closed")
+			}
+			if err := checkCtx.Err(); err != nil {
+				return FileResult{}, err
+			}
+			success = true
+			return current.project(file), nil
+		}
+	}
+	e.clearPublished()
+	current, err = e.runAndPublish(checkCtx, options, key, observe.Quick)
+	if err != nil {
+		return FileResult{}, err
+	}
+	success = true
+	return current.project(file), nil
+}
+
+func (e *Session) clearPublished() {
+	e.mu.Lock()
+	e.currentResult = nil
+	e.mu.Unlock()
+}
+
+func (e *Session) clearCurrent() {
+	e.clearPublished()
+	e.currentFacts = nil
+	e.currentCatalog = ""
+}
+
+// runAndPublish is called with checkMu held and a registered active context.
+func (e *Session) runAndPublish(checkCtx context.Context, options Options, key string, mode observe.Mode) (*publishedResult, error) {
+	state, err := loadSuppressions(options)
+	if err != nil {
+		return nil, err
+	}
+	result, run, evidence, err := e.analyzeWithEvidence(checkCtx, options, mode)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkCtx.Err(); err != nil {
+		return nil, err
 	}
 	write, err := applySuppressions(options, state, run, evidence, &result)
 	if err != nil {
-		return Result{}, err
+		return nil, err
 	}
+	published := newPublishedResult(result, options, key, observe.Union(evidence.observations, state.observations), evidence.reusable)
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
-		return Result{}, fmt.Errorf("session is closed")
+		return nil, fmt.Errorf("session is closed")
 	}
 	if err := checkCtx.Err(); err != nil {
 		e.mu.Unlock()
-		return Result{}, err
+		return nil, err
 	}
 	if write != nil {
 		if err := commitSuppression(checkCtx, write); err != nil {
 			e.mu.Unlock()
-			return Result{}, err
+			return nil, err
 		}
-		result.SuppressionsWritten = true
+		published.result.SuppressionsWritten = true
 	}
-	published := cloneResult(result)
-	e.currentResult = &published
+	e.currentResult = published
 	e.mu.Unlock()
-	success = true
-	return cloneResult(result), nil
+	return published, nil
 }
 
 // Current reads the last completed generation without refreshing it.
@@ -270,7 +348,7 @@ func (e *Session) Current() (Result, error) {
 	if e.currentResult == nil {
 		return Result{}, fmt.Errorf("analysis results unavailable")
 	}
-	return cloneResult(*e.currentResult), nil
+	return cloneResult(e.currentResult.result), nil
 }
 
 // DiagnosticsFor reads this completed result without performing a check.
@@ -314,7 +392,7 @@ func cloneResult(result Result) Result {
 	return result
 }
 
-func (e *Session) analyzeWithEvidence(ctx context.Context, options Options) (Result, runInfo, executionEvidence, error) {
+func (e *Session) analyzeWithEvidence(ctx context.Context, options Options, mode observe.Mode) (Result, runInfo, executionEvidence, error) {
 	run := runInfo{
 		evaluated:  make(map[string]struct{}),
 		completed:  make(map[string]struct{}),
@@ -322,7 +400,7 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options) (Res
 		coverage:   make(map[string]map[string]struct{}),
 		assertions: make(map[string]map[string]assertionSchema),
 	}
-	evidence := executionEvidence{createdFactCounts: make(map[string]int64)}
+	evidence := executionEvidence{createdFactCounts: make(map[string]int64), reusable: true}
 	if err := ctx.Err(); err != nil {
 		return Result{}, run, evidence, err
 	}
@@ -339,8 +417,9 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options) (Res
 		}
 		lock = &loaded
 		run.lock = lock
+		evidence.observations = observe.Union(evidence.observations, lock.observations)
 	}
-	ruleCatalog, catalogErr := openRuleCatalogWithEntries(ctx, options, e, lock, observe.Full)
+	ruleCatalog, catalogErr := openRuleCatalogWithEntries(ctx, options, e, lock, mode)
 	if catalogErr != nil && ruleCatalog == nil {
 		return Result{}, run, evidence, catalogErr
 	}
@@ -348,6 +427,12 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options) (Res
 		return Result{}, run, evidence, fmt.Errorf("could not create rule catalog")
 	}
 	defer ruleCatalog.close()
+	inputSets := []observe.Set{evidence.observations, ruleCatalog.observations}
+	for _, artifact := range ruleCatalog.artifacts {
+		inputSets = append(inputSets, artifact.Observations)
+	}
+	evidence.observations = observe.Union(inputSets...)
+	evidence.reusable = len(ruleCatalog.artifacts) == len(ruleCatalog.paths)
 	e.stats.bundleArtifacts.Add(int64(ruleCatalog.bundleBuilds))
 	if len(ruleCatalog.paths) == 0 {
 		e.currentFacts = nil
@@ -356,10 +441,12 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options) (Res
 		if err != nil {
 			return Result{}, run, evidence, err
 		}
-		assembled, emptyErr := catalog.collect(ctx, options, nil, nil)
+		assembled, emptyErr := catalog.collect(ctx, options, nil, nil, mode)
 		if emptyErr != nil {
 			return Result{}, run, evidence, emptyErr
 		}
+		evidence.observations = observe.Union(evidence.observations, assembled.observations)
+		evidence.reusable = evidence.reusable && assembled.reusableFromObservations
 		run.complete = true
 		run.files = make(map[string]struct{})
 		run.snapshotVersion = assembled.snapshotID
@@ -409,6 +496,7 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options) (Res
 		lockedOut[rulePath] = struct{}{}
 	}
 	ruleCatalog.loadMetadata(lockedOut)
+	e.stats.gojaRuntimes.Add(int64(len(ruleCatalog.entries)))
 	if lock != nil {
 		for _, rulePath := range ruleCatalog.paths {
 			entry, exists := ruleCatalog.entries[rulePath]
@@ -553,6 +641,7 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options) (Res
 			allDiagnostics = append(allDiagnostics, errorDiagnostic(entry.metadata.ID, "setup", entry.metadata.Version, assembled.snapshotID, nil, err.Error()))
 			continue
 		}
+		e.stats.gojaRuntimes.Add(1)
 		loadedRule, err := runtime.LoadPureBundle(entry.pureCode)
 		if err != nil {
 			allDiagnostics = append(allDiagnostics, errorDiagnostic(entry.metadata.ID, "program", entry.metadata.Version, assembled.snapshotID, nil, err.Error()))
@@ -637,20 +726,22 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options) (Res
 		if e.currentCatalog == producerCatalog.identity {
 			current = e.currentFacts
 		}
-		assembled, err = producerCatalog.collect(ctx, options, requested, current)
+		assembled, err = producerCatalog.collect(ctx, options, requested, current, mode)
 		if err != nil {
 			return Result{}, run, evidence, err
 		}
 		e.currentFacts = &assembled
 		e.currentCatalog = producerCatalog.identity
 	} else {
-		assembled, err = producerCatalog.collect(ctx, options, nil, nil)
+		assembled, err = producerCatalog.collect(ctx, options, nil, nil, mode)
 		if err != nil {
 			return Result{}, run, evidence, err
 		}
 		e.currentFacts = nil
 		e.currentCatalog = ""
 	}
+	evidence.observations = observe.Union(evidence.observations, assembled.observations)
+	evidence.reusable = evidence.reusable && assembled.reusableFromObservations
 	producerNames := append([]string(nil), assembled.namespaces...)
 	run.producerNames = producerNames
 	evidence.anchors = assembled.anchors
@@ -706,7 +797,7 @@ func assembleSeverity(options Options, result *Result, run *runInfo) {
 // analyze remains a small package-private convenience for the tests that
 // exercise diagnostics and run eligibility without inspecting typed outcomes.
 func (e *Session) analyze(ctx context.Context, options Options) (Result, runInfo, error) {
-	result, run, _, err := e.analyzeWithEvidence(ctx, options)
+	result, run, _, err := e.analyzeWithEvidence(ctx, options, observe.Full)
 	return result, run, err
 }
 
@@ -734,6 +825,8 @@ type executionEvidence struct {
 	anchors           map[string]facts.AnchorSupport
 	anchorOwners      map[string]string
 	createdFactCounts map[string]int64
+	observations      observe.Set
+	reusable          bool
 }
 
 func (job *preparedRuleJob) release() {

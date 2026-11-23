@@ -30,8 +30,6 @@ type Backend struct {
 	reported   map[string]string
 	collectMu  sync.Mutex
 	current    *producerGeneration
-	// beforeValidation supports deterministic mutation tests at the publication boundary.
-	beforeValidation func()
 }
 
 type producerGeneration struct {
@@ -173,7 +171,7 @@ func (b *Backend) Close() error {
 }
 
 // generation is called with collectMu held. A changed relation demand needs a
-// new extraction, whose own validation covers the new inputs. The prior
+// new extraction. The prior
 // snapshot only supplies tracking keys whose captured source bytes still match.
 func (b *Backend) generation(ctx context.Context, repoRoot, workspaceRoot string, relations []string, description facts.ProducerDescription, mode observe.Mode) (*producerGeneration, error) {
 	var previousSnapshot *lintaiapi.Snapshot

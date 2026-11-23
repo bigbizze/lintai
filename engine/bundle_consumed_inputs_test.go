@@ -149,7 +149,6 @@ func TestBundleConsumedInputEdit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	changedError := "bundle inputs changed during compilation: content changed: " + realRulePath
 	writeA := func() {
 		t.Helper()
 		if err := os.WriteFile(rulePath, []byte(source), 0o600); err != nil {
@@ -202,38 +201,29 @@ func TestBundleConsumedInputEdit(t *testing.T) {
 	t.Logf("stable B: hash=%s behavior=diagnostic-B; different output directories agree", stable.Hash)
 
 	writeA()
+	stableA, err := build()
+	if err != nil {
+		t.Fatal(err)
+	}
 	setControl("armed")
 	edited, editErr := build()
-	if editErr == nil {
-		got := behavior(edited)
-		t.Logf("A compiled then edited to B: hash=%s behavior=%s B-hash=%s", edited.Hash, got, stable.Hash)
-		if got != "diagnostic-B" || edited.Hash != stable.Hash {
-			t.Errorf("edited build did not publish coherent B")
-		}
-	} else {
-		if !strings.Contains(editErr.Error(), changedError) {
-			t.Fatalf("unexpected A-to-B rejection: %v", editErr)
-		}
-		t.Logf("A-to-B build rejected: %v", editErr)
+	if editErr != nil || behavior(edited) != "diagnostic-A" || edited.Hash != stableA.Hash || bundleUnchanged(edited.Observations) {
+		t.Fatalf("post-capture edit did not publish captured A with stale evidence: artifact=%+v err=%v", edited, editErr)
 	}
 	setControl("disarmed")
 	writeA()
 	setControl("between")
 	betweenArtifact, betweenErr := build()
-	if betweenErr == nil {
-		prepared, failures, err := bundle.PrepareAll(context.Background(), asset, repoRoot, workspace, map[string]bundle.Artifacts{rulePath: betweenArtifact}, map[string]any{}, bundle.PrepareOptions{})
-		if err != nil || len(failures) != 0 {
-			t.Fatalf("prepare between-build artifact: %v %+v", err, failures)
-		}
-		setup, ok := prepared[rulePath].Setup.(map[string]any)
-		if !ok || setup["marker"] != "diagnostic-B" || behavior(betweenArtifact) != "diagnostic-B" || betweenArtifact.Hash != stable.Hash {
-			t.Errorf("prepare and pure consumed different source bytes: setup=%+v pure=%s", prepared[rulePath].Setup, behavior(betweenArtifact))
-		}
-	} else {
-		if !strings.Contains(betweenErr.Error(), changedError) {
-			t.Fatalf("unexpected between-build rejection: %v", betweenErr)
-		}
-		t.Logf("between-build edit rejected: %v", betweenErr)
+	if betweenErr != nil {
+		t.Fatalf("between-build capture: %v", betweenErr)
+	}
+	prepared, failures, err := bundle.PrepareAll(context.Background(), asset, repoRoot, workspace, map[string]bundle.Artifacts{rulePath: betweenArtifact}, map[string]any{}, bundle.PrepareOptions{})
+	if err != nil || len(failures) != 0 {
+		t.Fatalf("prepare between-build artifact: %v %+v", err, failures)
+	}
+	setup, ok := prepared[rulePath].Setup.(map[string]any)
+	if !ok || setup["marker"] != "diagnostic-A" || behavior(betweenArtifact) != "diagnostic-A" || betweenArtifact.Hash != stableA.Hash || bundleUnchanged(betweenArtifact.Observations) {
+		t.Fatalf("prepare and pure did not retain captured A: setup=%+v pure=%s", prepared[rulePath].Setup, behavior(betweenArtifact))
 	}
 	setControl("disarmed")
 
@@ -264,12 +254,8 @@ func TestBundleConsumedInputEdit(t *testing.T) {
 	if !reflect.DeepEqual(second, freshResult) {
 		t.Errorf("unchanged B retained result differs from fresh B")
 	}
-	if len(first.Diagnostics) == 1 && first.Diagnostics[0].Phase == "bundle" {
-		if !strings.Contains(first.Diagnostics[0].Message, changedError) || before != 0 || after != 1 {
-			t.Fatalf("rejected edit did not trigger a new B build: first=%+v builds=%d->%d", first.Diagnostics, before, after)
-		}
-	} else if !reflect.DeepEqual(first, second) || before != 1 || after != 1 {
-		t.Fatalf("coherent edit was not reused as B: first=%+v builds=%d->%d", first.Diagnostics, before, after)
+	if len(first.Diagnostics) != 3 || first.Diagnostics[0].Message != "diagnostic-A" || before != 1 || after != 2 {
+		t.Fatalf("captured A was not replaced by B on the next check: first=%+v builds=%d->%d", first.Diagnostics, before, after)
 	}
 	if len(second.Diagnostics) != 3 || second.Diagnostics[0].Message != "diagnostic-B" {
 		t.Fatalf("retained B did not run: %+v", second.Diagnostics)
@@ -305,34 +291,20 @@ func TestBundleConsumedInputEdit(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("B lock with A-to-B edit: %+v", lockedResult.Diagnostics)
-	if len(lockedResult.Diagnostics) == 1 && lockedResult.Diagnostics[0].Phase == "bundle" {
-		if !strings.Contains(lockedResult.Diagnostics[0].Message, changedError) {
-			t.Fatalf("unexpected locked build rejection: %+v", lockedResult.Diagnostics)
-		}
-	} else if len(lockedResult.Diagnostics) == 1 && lockedResult.Diagnostics[0].Phase == "integrity" {
-		if !strings.Contains(lockedResult.Diagnostics[0].Message, "bundle changed since the rules lock was written") {
-			t.Fatalf("unexpected lock rejection: %+v", lockedResult.Diagnostics)
-		}
-	} else {
-		if len(lockedResult.Diagnostics) != 3 {
-			t.Fatalf("locked edit did not produce coherent B or an expected rejection: %+v", lockedResult.Diagnostics)
-		}
-		for _, diagnostic := range lockedResult.Diagnostics {
-			if diagnostic.Message != "diagnostic-B" {
-				t.Errorf("B lock authorized different behavior: %+v", diagnostic)
-			}
-		}
+	if len(lockedResult.Diagnostics) != 1 || lockedResult.Diagnostics[0].Phase != "integrity" || !strings.Contains(lockedResult.Diagnostics[0].Message, "bundle changed since the rules lock was written") {
+		t.Fatalf("B lock authorized captured A: %+v", lockedResult.Diagnostics)
 	}
+
 	writeA()
 	setControl("delete-after")
 	if artifact, err := build(); err == nil {
-		t.Errorf("deleted source published an artifact: %+v", artifact)
-	} else {
-		message := err.Error()
-		if !strings.Contains(message, realRulePath) || !(strings.Contains(message, "bundle inputs changed during compilation: read ") || strings.Contains(message, "ENOENT") && strings.Contains(message, "realpath")) {
-			t.Errorf("unexpected deleted-source rejection: %v", err)
+		if behavior(artifact) != "diagnostic-A" || artifact.Hash != stableA.Hash || bundleUnchanged(artifact.Observations) {
+			t.Errorf("deleted source lost captured evidence: %+v", artifact)
 		}
+	} else if !strings.Contains(err.Error(), realRulePath) {
+		t.Errorf("unexpected deleted-source rejection: %v", err)
 	}
+
 }
 
 func TestBundleHelperInputEdit(t *testing.T) {
@@ -401,8 +373,19 @@ func TestBundleHelperInputEdit(t *testing.T) {
 		t.Fatal(err)
 	}
 	edited, failures := build()
-	if len(edited) != 0 || failures[rule] == nil || !strings.Contains(failures[rule].Error(), "bundle inputs changed during compilation") {
-		t.Fatalf("helper A-to-B must not publish A under B's identity: artifacts=%+v error=%v", edited, failures[rule])
+	if failures[rule] != nil || len(edited) != 1 || edited[rule].Hash == stable[rule].Hash || bundleUnchanged(edited[rule].Observations) {
+		t.Fatalf("helper A-to-B must retain A identity and stale evidence: artifacts=%+v error=%v", edited, failures[rule])
+	}
+	captured, err := os.ReadFile(edited[rule].PureBundlePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capturedRule, err := runtime.LoadPureBundle(string(captured))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message, err := capturedRule.Message(nil, "violation"); err != nil || message != "A" {
+		t.Fatalf("captured helper behavior: %q %v", message, err)
 	}
 
 	if err := os.WriteFile(control, []byte("disarmed"), 0o600); err != nil {

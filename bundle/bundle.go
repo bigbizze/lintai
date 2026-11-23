@@ -171,19 +171,6 @@ func BuildAll(ctx context.Context, assetRoot, repoRoot, workspaceRoot, outDir st
 			itemErrors[row.RulePath] = err
 			continue
 		}
-		changed, err := observations.Changed(ctx, observe.Full)
-		if err != nil {
-			itemErrors[row.RulePath] = fmt.Errorf("bundle inputs changed during compilation: %w", err)
-			continue
-		}
-		if changed != nil {
-			if changed.Kind == observe.Content {
-				itemErrors[row.RulePath] = fmt.Errorf("bundle inputs changed during compilation: content changed: %s", changed.Path)
-			} else {
-				itemErrors[row.RulePath] = fmt.Errorf("bundle inputs changed during compilation: %s %s changed", changed.Kind, changed.Path)
-			}
-			continue
-		}
 		results[row.RulePath] = Artifacts{
 			PureBundlePath: row.PureBundlePath, PrepareBundlePath: row.PrepareBundlePath,
 			Hash: row.Hash, Observations: observations,
@@ -222,8 +209,8 @@ func validateBundleEvidence(set observe.Set, source, helper string) error {
 	return nil
 }
 
-// stageBundleHelper gives Node the same helper bytes that the manifest later
-// validates against the asset root. The repository-root launcher imports the
+// stageBundleHelper gives Node the helper bytes recorded as bundle evidence
+// against the asset root. The repository-root launcher imports the
 // client helper, so both files are copied when that layout is present.
 func stageBundleHelper(assetRoot, scriptPath string) (root, stagedScript string, err error) {
 	assetRoot, err = filepath.Abs(assetRoot)

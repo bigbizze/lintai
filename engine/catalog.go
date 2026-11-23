@@ -198,7 +198,7 @@ func withoutPackageDeclaration(source string) string {
 }
 
 // collect prepares selected generations, establishes identity, then emits only on a miss.
-func (catalog producerCatalog) collect(ctx context.Context, options Options, requestedByNamespace map[string]map[facts.Predicate]struct{}, current *composedFacts) (composedFacts, error) {
+func (catalog producerCatalog) collect(ctx context.Context, options Options, requestedByNamespace map[string]map[facts.Predicate]struct{}, current *composedFacts, mode observe.Mode) (composedFacts, error) {
 	type prepared struct {
 		entry      producerEntry
 		requested  []facts.Predicate
@@ -231,7 +231,7 @@ func (catalog producerCatalog) collect(ctx context.Context, options Options, req
 			}
 			return requested[i].Arity < requested[j].Arity
 		})
-		generation, err := entry.producer.Prepare(ctx, backend.CollectionRequest{RepoRoot: options.RepoRoot, WorkspaceRoot: options.WorkspaceRoot, Predicates: slices.Clone(requested)}, observe.Full)
+		generation, err := entry.producer.Prepare(ctx, backend.CollectionRequest{RepoRoot: options.RepoRoot, WorkspaceRoot: options.WorkspaceRoot, Predicates: slices.Clone(requested)}, mode)
 		if err != nil {
 			return composedFacts{}, fmt.Errorf("prepare producer %q: %w", description.Namespace, err)
 		}

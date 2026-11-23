@@ -19,6 +19,8 @@ What the lock covers:
 - the `@lintai/sdk` files that the rule imports, including its suppression policy. Review and regenerate the lock when those inputs change.
 - the client bundling scripts, captured resolver/configuration inputs, and the bundler tools, including the platform-specific esbuild binary. Locks therefore need to be generated for the platform where they are enforced. Changes to the observation format also change the approved bundling helper; review and regenerate existing locks after upgrading, even if the rule source is unchanged. The lock format and platform policy are unchanged.
 
+The hash identifies captured bytes used by the prepare and pure bundles. The bundler checks its captured view for internal consistency and containment, but does not claim complete coverage of every esbuild file read on every platform. Inputs can change after capture; publication does not perform a second live-content comparison, and later checks validate the recorded evidence before reuse. Suppression and lock writes retain their separate concurrent-edit preconditions.
+
 What the lock does not cover:
 
 - data files that `setup()` reads through `fs`, for example a JSON deny list. Put these files under the same review as the rules, or import them statically so that the bundler reads them and they are in the hash.

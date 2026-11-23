@@ -608,8 +608,8 @@ type extractTiming struct {
 	types time.Duration
 }
 
-// BuildSnapshot performs one compiler extraction attempt. The producer must
-// validate the returned compiler inputs, configuration, and scope before use.
+// BuildSnapshot performs one compiler extraction and returns detached evidence
+// for the inputs it observed. The producer validates that evidence before reuse.
 func BuildSnapshot(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, error) {
 	snapshot, err := buildSnapshotAttempt(ctx, req)
 	if err != nil {

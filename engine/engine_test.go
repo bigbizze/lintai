@@ -15,6 +15,7 @@ import (
 	"github.com/bigbizze/lintai/backend/typescript"
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/facts"
+	"github.com/bigbizze/lintai/observe"
 	"github.com/bigbizze/lintai/runtime"
 )
 
@@ -783,7 +784,7 @@ export function choose(flag: boolean) {
 	for _, relation := range catalog.entries[0].description.BaseRelations {
 		requested["ts"][relation.Predicate] = struct{}{}
 	}
-	assembled, err := catalog.collect(context.Background(), Options{RepoRoot: root, WorkspaceRoot: root}, requested, nil)
+	assembled, err := catalog.collect(context.Background(), Options{RepoRoot: root, WorkspaceRoot: root}, requested, nil, observe.Full)
 	if err != nil {
 		t.Fatal(err)
 	}

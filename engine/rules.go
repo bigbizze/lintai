@@ -120,11 +120,14 @@ func openRuleCatalogWithEntries(ctx context.Context, options Options, engine *Se
 	if err != nil {
 		return nil, err
 	}
-	catalog.build(ctx, options, mode)
+	if err := catalog.build(ctx, options, mode); err != nil {
+		catalog.close()
+		return nil, err
+	}
 	return catalog, catalog.bundleError
 }
 
-func (catalog *ruleCatalog) build(ctx context.Context, options Options, mode observe.Mode) {
+func (catalog *ruleCatalog) build(ctx context.Context, options Options, mode observe.Mode) error {
 	toolContext := ruleToolContext{assetRootOf(options), options.RepoRoot, options.WorkspaceRoot}
 	misses := make([]string, 0, len(catalog.paths))
 	for _, rulePath := range catalog.paths {
@@ -137,8 +140,7 @@ func (catalog *ruleCatalog) build(ctx context.Context, options Options, mode obs
 		if reuse {
 			changed, err := entry.observations.Changed(ctx, mode)
 			if err != nil {
-				catalog.bundleError = err
-				return
+				return err
 			}
 			reuse = changed == nil
 		}
@@ -153,7 +155,7 @@ func (catalog *ruleCatalog) build(ctx context.Context, options Options, mode obs
 		catalog.artifacts[rulePath] = bundle.Artifacts{Hash: entry.approvalHash, Observations: entry.observations}
 	}
 	if len(misses) == 0 {
-		return
+		return nil
 	}
 	buildDir := filepath.Join(catalog.bundleDir, "built")
 	built, failures, buildErr := bundle.BuildAll(ctx, assetRootOf(options), options.RepoRoot, options.WorkspaceRoot, buildDir, misses)
@@ -182,6 +184,7 @@ func (catalog *ruleCatalog) build(ctx context.Context, options Options, mode obs
 		entry.pureCode, entry.prepareCode, entry.hasBundle = string(pureCode), string(prepareCode), true
 		catalog.artifacts[rulePath] = artifact
 	}
+	return nil
 }
 
 func (catalog *ruleCatalog) prepareArtifact(rulePath string) (bundle.Artifacts, error) {
