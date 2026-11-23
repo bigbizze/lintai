@@ -68,7 +68,7 @@ func TestParallelRuleExecutionContract(t *testing.T) {
 	}
 	assertParallelFixtureOutcomes(t, parallelResult, parallelRun, parallelEvidence)
 	firstObservation := engine.executionObservation()
-	if firstObservation.bundleArtifacts != 8 || firstObservation.programBuilds != 7 || firstObservation.mangleCompiles >= 7 || firstObservation.peakActiveJobs != 2 {
+	if firstObservation.bundleArtifacts != 8 || firstObservation.programBuilds != 7 || firstObservation.mangleCompiles != 7 || firstObservation.peakActiveJobs != 2 {
 		t.Fatalf("unexpected first-run execution observation: %+v", firstObservation)
 	}
 	t.Logf("R5 cold observation: bundle builds=%d, program builds=%d, Mangle plan compiles=%d, created facts=%v, peak active jobs=%d",

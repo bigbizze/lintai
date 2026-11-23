@@ -3,7 +3,6 @@ package engine
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -357,73 +356,80 @@ func TestSuppressionPolicyValidationOnPlanReuse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, tc := range []struct {
-		name  string
-		rules []string
-	}{
-		{name: "valid first", rules: []string{"valid", "invalid"}},
-		{name: "invalid first", rules: []string{"invalid", "valid"}},
-		{name: "invalid alone", rules: []string{"invalid"}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			workspace, rules := t.TempDir(), t.TempDir()
-			writeTestFile(t, workspace, "src/a.ts", "export const value = 1;\n")
-			for i, kind := range tc.rules {
-				options := `{}`
-				if kind == "invalid" {
-					options = `[] as any`
-				}
-				source := parallelRuleSource("fixture.policy-"+kind,
-					"Decl violation(Entity). violation(Entity) :- ts.module(Entity).", `(row) => "finding"`)
-				source = strings.Replace(source, `.report("violation").message(`,
-					`.report("violation").suppression("violation", `+options+`).message(`, 1)
-				writeTestFile(t, rules, fmt.Sprintf("%02d-%s.ts", i, kind), source)
-			}
-			options := Options{RepoRoot: repo, AssetRoot: filepath.Join(repo, "packages", "client"),
-				WorkspaceRoot: workspace, RuleGlobs: []string{filepath.Join(rules, "*.ts")}, RuleWorkers: 1}
-			session := Open(options, typescript.New(typescript.Options{Files: typescript.FileScopeWalk}))
-			defer session.Close()
-			var priorPolicies map[string][]suppressionPolicy
-			var firstCompiles int64
-			for check := 0; check < 2; check++ {
-				result, err := session.Check(context.Background())
-				if err != nil {
-					t.Fatal(err)
-				}
-				byRule := make(map[string]diagnostics.Diagnostic)
-				for _, diagnostic := range result.Diagnostics {
-					byRule[diagnostic.RuleID] = diagnostic
-				}
-				if len(result.Diagnostics) != len(tc.rules) {
-					t.Errorf("check %d: expected one result per rule: %+v", check, result.Diagnostics)
-				}
-				if invalid := byRule["fixture.policy-invalid"]; invalid.Phase != "program_analysis" ||
-					!strings.Contains(invalid.Message, `must be an options object`) {
-					t.Errorf("check %d: invalid rule did not get its options-object error: %+v", check, invalid)
-				}
-				if len(tc.rules) == 2 {
-					if valid := byRule["fixture.policy-valid"]; valid.AssertionID != "violation" || valid.Message != "finding" || valid.Phase != "" {
-						t.Errorf("check %d: valid finding was lost: %+v", check, valid)
-					}
-				}
-				currentPolicies := make(map[string][]suppressionPolicy)
-				for key, plan := range session.planCache.plans {
-					for _, policy := range plan.suppressionRules {
-						currentPolicies[key] = append(currentPolicies[key], suppressionPolicy{assertion: policy.assertion, by: append([]string(nil), policy.by...)})
-					}
-				}
-				compiles := session.executionObservation().mangleCompiles
-				if check == 0 {
-					priorPolicies, firstCompiles = currentPolicies, compiles
-				} else if len(tc.rules) == 2 {
-					if compiles != firstCompiles {
-						t.Errorf("warm check did not reuse the compiled plan: first=%d warm=%d", firstCompiles, compiles)
-					}
-					if !reflect.DeepEqual(currentPolicies, priorPolicies) {
-						t.Errorf("cached suppression policies changed: first=%+v warm=%+v", priorPolicies, currentPolicies)
-					}
-				}
-			}
-		})
+	workspace, rules := t.TempDir(), t.TempDir()
+	writeTestFile(t, workspace, "src/a.ts", "export const value = 1;\n")
+	paths := make(map[string]string)
+	for _, kind := range []string{"valid", "invalid"} {
+		policy := `{}`
+		if kind == "invalid" {
+			policy = `[] as any`
+		}
+		source := parallelRuleSource("fixture.policy-"+kind,
+			"Decl violation(Entity). violation(Entity) :- ts.module(Entity).", `(row) => "finding"`)
+		source = strings.Replace(source, `.report("violation").message(`,
+			`.report("violation").suppression("violation", `+policy+`).message(`, 1)
+		paths[kind] = writeTestFile(t, rules, kind+".ts", source)
+	}
+	options := Options{RepoRoot: repo, AssetRoot: filepath.Join(repo, "packages", "client"),
+		WorkspaceRoot: workspace, RuleGlobs: []string{filepath.Join(rules, "*.ts")}, RuleWorkers: 1}
+	session := Open(options, typescript.New(typescript.Options{Files: typescript.FileScopeWalk}))
+	defer session.Close()
+	var template *rulePlan
+	var firstCompiles int64
+	for check := 0; check < 2; check++ {
+		result, err := session.Check(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		byRule := make(map[string]diagnostics.Diagnostic)
+		for _, diagnostic := range result.Diagnostics {
+			byRule[diagnostic.RuleID] = diagnostic
+		}
+		if len(result.Diagnostics) != 2 {
+			t.Fatalf("check %d: expected one result per rule: %+v", check, result.Diagnostics)
+		}
+		if invalid := byRule["fixture.policy-invalid"]; invalid.Phase != "program_analysis" ||
+			!strings.Contains(invalid.Message, `must be an options object`) {
+			t.Errorf("check %d: invalid rule did not get its options-object error: %+v", check, invalid)
+		}
+		if valid := byRule["fixture.policy-valid"]; valid.AssertionID != "violation" || valid.Message != "finding" || valid.Phase != "" {
+			t.Errorf("check %d: valid finding was lost: %+v", check, valid)
+		}
+		entry := session.ruleEntries[paths["valid"]]
+		if entry.plan == nil || entry.plan.ruleFacts != nil || len(entry.plan.suppressionRules) != 0 {
+			t.Fatal("retained plan contains per-run facts or policies")
+		}
+		if session.ruleEntries[paths["invalid"]].plan != nil {
+			t.Fatal("invalid suppression policy retained a plan")
+		}
+		compiles := session.executionObservation().mangleCompiles
+		if check == 0 {
+			template, firstCompiles = entry.plan, compiles
+		} else if entry.plan != template || compiles != firstCompiles+1 {
+			t.Errorf("valid plan was not reused or invalid plan was not retried: first=%d warm=%d", firstCompiles, compiles)
+		}
+	}
+	validSource, err := os.ReadFile(paths["valid"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidSource := strings.Replace(string(validSource), `.suppression("violation", {})`, `.suppression("violation", [] as any)`, 1)
+	if invalidSource == string(validSource) {
+		t.Fatal("suppression fixture did not contain the expected declaration")
+	}
+	if err := os.WriteFile(paths["valid"], []byte(invalidSource), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := session.Check(context.Background())
+	if err != nil || len(result.Diagnostics) != 2 || session.executionObservation().mangleCompiles != firstCompiles+3 {
+		t.Fatalf("changed suppression declaration did not compile and fail independently: %+v %v", result.Diagnostics, err)
+	}
+	for _, diagnostic := range result.Diagnostics {
+		if diagnostic.Phase != "program_analysis" {
+			t.Fatalf("invalid declaration was accepted: %+v", diagnostic)
+		}
+	}
+	if session.ruleEntries[paths["valid"]].plan != template {
+		t.Fatal("failed compilation replaced the last valid template")
 	}
 }
