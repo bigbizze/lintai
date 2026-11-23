@@ -361,6 +361,11 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 			}
 		}
 	};
+	const rebased = new Map();
+	const rebase = (absolute) => {
+		if (!rebased.has(absolute)) rebased.set(absolute, mirror(canonical(absolute)));
+		return rebased.get(absolute);
+	};
 	const recordInput = (file, bytes) => {
 		const observation = {
 			path: lockPath(file, workspaceRoot, repoRoot),
@@ -553,20 +558,92 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 		// nearer packages, and recursively inspect the copied config files. This
 		// makes the staged filesystem, not the TypeScript resolver above, the
 		// authority for the bytes esbuild can consume.
+		// Esbuild treats a non-absolute specifier as relative only when it is
+		// "." or "..", or starts with "./" or "../". Others, such as ".foo",
+		// name packages and receive paths mappings. A backslash also separates
+		// on Windows.
+		const relativePattern = process.platform === "win32" ? /^\.\.?(?:[\\/]|$)/ : /^\.\.?(?:\/|$)/;
+		const relativeSpecifier = (specifier) => relativePattern.test(specifier);
 		const pendingConfigs = new Set();
-		const addConfig = (file) => {
-			if (jsonBytes.has(file)) pendingConfigs.add(file);
+		const configExtensions = new Map();
+		const configData = new Map();
+		// Esbuild tries the targets of every duplicate paths key in source
+		// order, so the decoded object alone cannot describe its lookups.
+		const pathsEntries = Symbol("paths entries");
+		// Esbuild takes the first occurrence of these fields, whereas the
+		// TypeScript JSON decoder keeps the last duplicate property.
+		const parseFirstProperties = (file, bytes, names, nested = []) => {
+			const text = bytes.toString("utf8");
+			const parsed = ts.parseConfigFileTextToJson(file, text).config;
+			if (!parsed || typeof parsed !== "object") return parsed;
+			const tree = ts.parseJsonText(file, text);
+			const property = (object, name) =>
+				ts.isObjectLiteralExpression(object)
+					? object.properties.find(
+							(item) => ts.isPropertyAssignment(item) && item.name.text === name,
+						)?.initializer
+					: undefined;
+			const value = (node) =>
+				node && ts.parseConfigFileTextToJson(file, `{"value":${node.getText(tree)}}`).config?.value;
+			const root = tree.statements[0]?.expression;
+			if (!root) return parsed;
+			for (const name of names) {
+				const node = property(root, name);
+				if (!node) continue;
+				parsed[name] = value(node);
+				if (name === "compilerOptions" && parsed[name] && typeof parsed[name] === "object") {
+					for (const key of nested) {
+						const child = property(node, key);
+						if (child) parsed[name][key] = value(child);
+						if (key === "paths" && child && ts.isObjectLiteralExpression(child))
+							parsed[name][pathsEntries] = child.properties
+								.filter(ts.isPropertyAssignment)
+								.map((item) => [item.name.text, value(item.initializer)]);
+					}
+				}
+			}
+			return parsed;
 		};
+		const stagedOriginal = (file) => {
+			try {
+				const staged = fsSync.realpathSync(mirror(file));
+				const result = original(staged);
+				if (!result) throw new Error(`bundle config resolved outside captured view: ${file}`);
+				return result;
+			} catch (error) {
+				if (["ENOENT", "ENOTDIR"].includes(error.code)) return undefined;
+				throw error;
+			}
+		};
+		const addConfig = (file, candidates) => {
+			const selected = stagedOriginal(file);
+			if (jsonBytes.has(selected)) {
+				pendingConfigs.add(selected);
+				candidates?.add(selected);
+				return selected;
+			}
+		};
+		// Esbuild applies only the nearest config of each source, with its
+		// extends chain. Other ancestor configs do not affect resolution, and
+		// sources inside node_modules use no config.
+		const nearestConfigs = new Set();
 		for (const source of sourceFiles) {
+			if (source.split(path.sep).includes("node_modules")) continue;
+			let nearest;
 			for (let directory = path.dirname(source); ; directory = path.dirname(directory)) {
 				for (const name of ["tsconfig.json", "jsconfig.json"]) {
 					const file = path.join(directory, name);
 					await candidate(file, true);
-					addConfig(canonical(file));
+					nearest ??= addConfig(file);
 				}
 				if (directory === path.dirname(directory)) break;
 			}
+			if (nearest) nearestConfigs.add(nearest);
 		}
+		// Generated entries are staged at the view root. Its tsconfig.json, or
+		// the empty sentinel written below, is their nearest config.
+		const entryConfig = addConfig(path.join(path.parse(workspaceRoot).root, "tsconfig.json"));
+		if (entryConfig) nearestConfigs.add(entryConfig);
 		const processedConfigs = new Set();
 		const configPackages = new Set();
 		while (pendingConfigs.size) {
@@ -575,17 +652,24 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 			if (processedConfigs.has(file)) continue;
 			processedConfigs.add(file);
 			recordInput(file, jsonBytes.get(file));
-			const parsed = ts.parseConfigFileTextToJson(
+			const parsed = parseFirstProperties(
 				file,
-				jsonBytes.get(file).toString("utf8"),
-			).config;
+				jsonBytes.get(file),
+				["extends", "compilerOptions"],
+				["baseUrl", "paths"],
+			);
 			if (!parsed || typeof parsed !== "object") continue;
+			configData.set(file, parsed);
+			const extended = [];
+			configExtensions.set(file, extended);
 			const extensions = typeof parsed.extends === "string" ? [parsed.extends] : parsed.extends;
 			for (const extension of Array.isArray(extensions) ? extensions : []) {
 				if (typeof extension !== "string" || !extension) continue;
+				const candidates = new Set();
+				extended.push(candidates);
 				const bases = [];
 				let packageSubpath;
-				if (extension.startsWith(".") || path.isAbsolute(extension)) {
+				if (relativeSpecifier(extension) || path.isAbsolute(extension)) {
 					bases.push(path.resolve(path.dirname(file), extension));
 				} else {
 					configPackages.add(extension);
@@ -599,35 +683,43 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 						if (directory === path.dirname(directory)) break;
 					}
 				}
+				let fallbackCovered = false;
 				for (const base of bases) {
+					let fallback =
+						packageSubpath && packageSubpath !== "." ? path.resolve(base, packageSubpath) : base;
 					const targets = [base, `${base}.json`, path.join(base, "tsconfig.json")];
 					if (packageSubpath && packageSubpath !== ".") {
 						const subpath = path.resolve(base, packageSubpath);
 						targets.push(subpath, `${subpath}.json`, path.join(subpath, "tsconfig.json"));
 					}
-					for (const target of targets) {
+					for (const [index, target] of targets.entries()) {
 						await candidate(target, true);
-						addConfig(canonical(target));
+						// A package subpath cannot select the package root's default
+						// config unless package metadata or the subpath itself names it.
+						const eligible = !packageSubpath || packageSubpath === "." || index >= 3;
+						addConfig(target, eligible && !fallbackCovered ? candidates : undefined);
 					}
 					if (packageSubpath) {
 						// Expand the observed package request across platform conditions.
 						// Esbuild can use extensionless exports that TypeScript misses.
-						const metadataFile = canonical(path.join(base, "package.json"));
+						const metadataFile = stagedOriginal(path.join(base, "package.json"));
 						const bytes = jsonBytes.get(metadataFile);
 						if (bytes) {
-							const metadata = ts.parseConfigFileTextToJson(
-								metadataFile,
-								bytes.toString("utf8"),
-							).config;
+							const metadata = parseFirstProperties(metadataFile, bytes, ["tsconfig", "exports"]);
+							if (typeof metadata?.tsconfig === "string" && metadata.tsconfig) {
+								fallback = path.isAbsolute(metadata.tsconfig)
+									? original(rebase(metadata.tsconfig))
+									: path.resolve(base, metadata.tsconfig);
+							}
 							const targets = [];
 							const collect = (value, match, allowBare = false) => {
 								if (typeof value === "string" && (allowBare || value.startsWith("./")))
-									targets.push(value.replaceAll("*", match));
+									targets.push(value.replaceAll("*", () => match));
 								else if (value && typeof value === "object")
 									for (const item of Object.values(value)) collect(item, match, allowBare);
 							};
 							if (metadata && typeof metadata === "object") {
-								if (packageSubpath === ".") collect(metadata.tsconfig, "", true);
+								collect(metadata.tsconfig, "", true);
 								const exports = metadata.exports;
 								if (
 									exports &&
@@ -658,49 +750,196 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 								} else if (packageSubpath === ".") collect(exports, "");
 							}
 							for (const target of targets) {
-								const absolute = path.resolve(path.dirname(metadataFile), target);
+								const absolute = path.isAbsolute(target)
+									? original(rebase(target))
+									: path.resolve(base, target);
 								for (const config of [
 									absolute,
 									`${absolute}.json`,
 									path.join(absolute, "tsconfig.json"),
 								]) {
 									await candidate(config, true);
-									addConfig(canonical(config));
+									addConfig(config, fallbackCovered ? undefined : candidates);
 								}
 							}
 						}
 					}
-				}
-			}
-			const options = parsed.compilerOptions;
-			if (!options || typeof options !== "object") continue;
-			const base = path.resolve(
-				path.dirname(file),
-				typeof options.baseUrl === "string" ? options.baseUrl : ".",
-			);
-			for (const { specifier } of lookups) {
-				if (!specifier || specifier.startsWith(".") || path.isAbsolute(specifier)) continue;
-				if (typeof options.baseUrl === "string")
-					await sourceCandidates(path.resolve(base, specifier));
-				for (const [pattern, targets] of Object.entries(options.paths ?? {})) {
-					const star = pattern.indexOf("*");
-					const prefix = star < 0 ? pattern : pattern.slice(0, star);
-					const suffix = star < 0 ? "" : pattern.slice(star + 1);
+					// A captured fallback prevents both platform resolvers from
+					// searching further ancestors, even if exports do not match.
 					if (
-						!specifier.startsWith(prefix) ||
-						!specifier.endsWith(suffix) ||
-						(star < 0 && specifier !== pattern)
+						packageSubpath &&
+						[path.join(fallback, "tsconfig.json"), fallback, `${fallback}.json`].some((file) =>
+							jsonBytes.has(stagedOriginal(file)),
+						)
 					)
-						continue;
-					const match =
-						star < 0 ? "" : specifier.slice(prefix.length, specifier.length - suffix.length);
-					for (const target of Array.isArray(targets) ? targets : []) {
-						if (typeof target === "string")
-							await sourceCandidates(path.resolve(base, target.replace("*", match)));
+						fallbackCovered = true;
+				}
+				if (!packageSubpath) {
+					// Relative and absolute extends select the exact file first,
+					// then its .json form; "." and ".." select tsconfig.json.
+					const exact = [".", ".."].includes(extension)
+						? path.join(bases[0], "tsconfig.json")
+						: path.isAbsolute(extension)
+							? original(rebase(extension))
+							: bases[0];
+					candidates.clear();
+					for (const target of [exact, ...(!exact.endsWith(".json") ? [`${exact}.json`] : [])]) {
+						const selected = stagedOriginal(target);
+						if (jsonBytes.has(selected)) {
+							candidates.add(selected);
+							break;
+						}
 					}
 				}
 			}
 		}
+
+		// Follow the captured extends candidates in order. Esbuild may select
+		// different package exports for the two builds, so retain every captured
+		// possibility and fail closed when a base cannot be established. The
+		// last inherited option wins, and a local option overrides all of them.
+		const unknown = Symbol("unknown config");
+		const pathChecks = [];
+		const stateCache = new Map();
+		let cycleHits = 0;
+		const uniqueStates = (states) => {
+			const seen = new Map();
+			for (const [base, paths] of states) {
+				if (!seen.has(base)) seen.set(base, new Set());
+				seen.get(base).add(paths);
+			}
+			return [...seen].flatMap(([base, paths]) => [...paths].map((item) => [base, item]));
+		};
+		const configState = (file, stack = new Set()) => {
+			if (stateCache.has(file)) return stateCache.get(file);
+			if (stack.has(file)) cycleHits++;
+			if (stack.has(file) || !configData.has(file)) return [[unknown, unknown]];
+			const hitsBefore = cycleHits;
+			const nextStack = new Set(stack).add(file);
+			let states = [[null, null]];
+			for (const candidates of configExtensions.get(file)) {
+				const inherited = candidates.size
+					? [...candidates].flatMap((candidate) => configState(candidate, nextStack))
+					: [[unknown, unknown]];
+				const merged = [];
+				for (const [base, paths] of states) {
+					for (const [nextBase, nextPaths] of inherited) {
+						const bases =
+							nextBase === null ? [base] : nextBase === unknown ? [base, unknown] : [nextBase];
+						const pathOptions =
+							nextPaths === null ? [paths] : nextPaths === unknown ? [paths, unknown] : [nextPaths];
+						for (const item of bases) for (const option of pathOptions) merged.push([item, option]);
+					}
+				}
+				states = uniqueStates(merged);
+			}
+			const options = configData.get(file).compilerOptions;
+			const hasBase = typeof options?.baseUrl === "string";
+			const hasPaths =
+				options?.paths && typeof options.paths === "object" && !Array.isArray(options.paths);
+			const result = uniqueStates(
+				states.map(([base, paths]) => [hasBase ? file : base, hasPaths ? file : paths]),
+			);
+			// A result that met a cycle depends on the current extends stack.
+			if (cycleHits === hitsBefore) stateCache.set(file, result);
+			return result;
+		};
+		const effectiveBase = (config, baseFile) => {
+			const value = configData.get(baseFile).compilerOptions.baseUrl;
+			const base = value.startsWith("${configDir}")
+				? path.resolve(path.dirname(mirror(config)), `./${value.slice(12)}`)
+				: path.isAbsolute(value)
+					? rebase(value)
+					: path.resolve(path.dirname(mirror(baseFile)), value);
+			if (!viewPathInside(root, base))
+				throw new Error(`bundle config path escapes captured view: ${baseFile}: ${value}`);
+			return base;
+		};
+		// Discovery saw original absolute specifiers. The staged build sees them
+		// rebased into the view and validates them in onResolve.
+		const bareSpecifiers = new Set();
+		for (const { specifier } of lookups)
+			if (specifier && !relativeSpecifier(specifier) && !path.isAbsolute(specifier))
+				bareSpecifiers.add(specifier);
+		const captureCandidates = async (resolved) => {
+			const host = original(resolved);
+			if (host) await sourceCandidates(host);
+		};
+		// Capture and check the lookups with the effective base of each
+		// nearest config, so that a later candidate cannot appear unrecorded.
+		for (const config of nearestConfigs) {
+			for (const [baseFile, pathsFile] of configState(config)) {
+				const base =
+					baseFile === null || baseFile === unknown ? undefined : effectiveBase(config, baseFile);
+				if (base)
+					for (const specifier of bareSpecifiers)
+						await captureCandidates(path.resolve(base, specifier));
+				if (pathsFile === null || pathsFile === unknown) continue;
+				const pathsOptions = configData.get(pathsFile).compilerOptions;
+				for (const [pattern, targets] of pathsOptions[pathsEntries] ??
+					Object.entries(pathsOptions.paths)) {
+					const star = pattern.indexOf("*");
+					const prefix = star < 0 ? pattern : pattern.slice(0, star);
+					const suffix = star < 0 ? "" : pattern.slice(star + 1);
+					// The staged config and staged specifiers carry rebased absolute keys.
+					const key = path.isAbsolute(pattern) ? rebase(pattern) : pattern;
+					const keyStar = key.indexOf("*");
+					for (const target of Array.isArray(targets) ? targets : []) {
+						if (typeof target !== "string") continue;
+						if (
+							baseFile === unknown &&
+							!path.isAbsolute(target) &&
+							!target.startsWith("${configDir}")
+						)
+							throw new Error(`bundle config paths base cannot be established: ${pathsFile}`);
+						const targetBase = base ?? path.dirname(mirror(pathsFile));
+						const template = path.isAbsolute(target) ? rebase(target) : target;
+						const check = (substitution) => {
+							const value =
+								substitution === null ? template : template.replace("*", () => substitution);
+							const resolved = target.startsWith("${configDir}")
+								? path.resolve(path.dirname(mirror(config)), `./${value.slice(12)}`)
+								: path.isAbsolute(target)
+									? path.resolve(value)
+									: path.resolve(targetBase, value);
+							if (!viewPathInside(root, resolved))
+								throw new Error(`bundle config path escapes captured view: ${pathsFile}: ${value}`);
+							return resolved;
+						};
+						check(null);
+						if (keyStar >= 0 && target.includes("*"))
+							pathChecks.push({
+								prefix: key.slice(0, keyStar),
+								suffix: key.slice(keyStar + 1),
+								check,
+							});
+						for (const specifier of bareSpecifiers) {
+							if (star < 0) {
+								if (specifier === pattern) await captureCandidates(check(null));
+							} else if (
+								specifier.length >= prefix.length + suffix.length &&
+								specifier.startsWith(prefix) &&
+								specifier.endsWith(suffix)
+							)
+								await captureCandidates(
+									check(specifier.slice(prefix.length, specifier.length - suffix.length)),
+								);
+						}
+					}
+				}
+			}
+		}
+		const validatePathsLookup = (specifier) => {
+			if (relativeSpecifier(specifier)) return;
+			for (const { prefix, suffix, check } of pathChecks) {
+				if (
+					specifier.startsWith(prefix) &&
+					specifier.endsWith(suffix) &&
+					specifier.length >= prefix.length + suffix.length
+				)
+					check(specifier.slice(prefix.length, specifier.length - suffix.length));
+			}
+		};
 
 		// Bare config extends can search past the mirrored filesystem root even
 		// when no ancestor node_modules existed during discovery. Install a
@@ -785,7 +1024,7 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 									request.length >= prefix.length + suffix.length
 								) {
 									const match = request.slice(prefix.length, request.length - suffix.length);
-									targets.add(value.replaceAll("*", match));
+									targets.add(value.replaceAll("*", () => match));
 								}
 							}
 						}
@@ -820,13 +1059,6 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 			if (!processedConfigs.has(file) && !processedPackages.has(file)) continue;
 			const text = bytes.toString("utf8");
 			const tree = ts.parseJsonText(file, text);
-			const parsed = ts.parseConfigFileTextToJson(file, text).config;
-			const baseUrl = parsed?.compilerOptions?.baseUrl;
-			const inheritedPathsBase = parsed?.extends && typeof baseUrl !== "string";
-			const pathsBase =
-				typeof baseUrl === "string"
-					? mirror(canonical(path.resolve(path.dirname(file), baseUrl)))
-					: path.dirname(mirror(file));
 			const edits = [];
 			const visit = (node, inPaths = false) => {
 				if (ts.isPropertyAssignment(node)) {
@@ -836,18 +1068,9 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 				}
 				if (ts.isStringLiteral(node)) {
 					if (path.isAbsolute(node.text)) {
-						edits.push([
-							node.getStart(tree),
-							node.end,
-							JSON.stringify(mirror(canonical(node.text))),
-						]);
-					} else {
-						if (inPaths && inheritedPathsBase && node.text.split(/[\\/]/).includes(".."))
-							throw new Error(
-								`bundle config paths with an inherited base cannot be constrained: ${file}`,
-							);
-						const base = inPaths ? pathsBase : path.dirname(mirror(file));
-						if (!viewPathInside(root, path.resolve(base, node.text)))
+						edits.push([node.getStart(tree), node.end, JSON.stringify(rebase(node.text))]);
+					} else if (!inPaths) {
+						if (!viewPathInside(root, path.resolve(path.dirname(mirror(file)), node.text)))
 							throw new Error(`bundle config path escapes captured view: ${file}: ${node.text}`);
 					}
 				}
@@ -873,6 +1096,7 @@ async function createInputView(workspaceRoot, outputRoot, metafiles, generated, 
 			root,
 			mirror,
 			canonical,
+			validatePathsLookup,
 			original,
 			inputs,
 			probes: [...probes, ...viewProbes],
@@ -1122,6 +1346,7 @@ function createInputPlugin(captured, generatedEntry, view) {
 		setup(buildCtx) {
 			buildCtx.onResolve({ filter: /.*/ }, (args) => {
 				if (args.kind === "require-resolve") return { path: args.path, external: true };
+				if (args.kind !== "entry-point") view.validatePathsLookup(args.path);
 				return null;
 			});
 			// Native resolution must retain esbuild's per-file tsconfig options.

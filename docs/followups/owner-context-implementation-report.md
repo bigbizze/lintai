@@ -45,6 +45,22 @@ Limits:
 - The captured view costs time. Go package times went from bundle 1.2 s to about 9 s, cmd/lintai from 30 s to about 80 s, and engine from 36 s to about 135 s. No speed improvement is claimed.
 - One full Go run during the integration fix failed golden parity with an undiagnosed rule error. It did not reproduce in isolation, in two further full runs, or in CI. It may be a flaky test.
 
+### Post-review captured-path correction receipt
+
+Correction commit: `c9fe5835256207e3e9630c6f382c6e53f0216d0f`. All 13 local CI steps passed on this commit: `pnpm install --frozen-lockfile`, `pnpm build`, `go vet $(go list ./... | grep -v /internal/tsgo/internal/)`, `go test -count=1 ./...`, `go run -mod=readonly .` from `testdata/consumer-module`, `pnpm build:npm-binary:host`, `pnpm --filter @lintai/{sdk,client,eslint-plugin,oxlint-plugin} test` (each package separately), `pnpm smoke:npm`, `pnpm smoke:oxlint`, and the pinned `scripts/sync-tsgo.sh` invocation followed by a clean-tree assertion. Each exited 0. The local environment was macOS arm64, Go 1.27.3, Node 22.23.4, and pnpm 10.9.0. Node 24 and Linux were not exercised locally for this correction; remote matrix results must be checked separately.
+
+On macOS arm64 with Go 1.27.3, Node 22.23.4, esbuild 0.25.12, and TypeScript 5.9.3, the following commands completed against the correction:
+
+- `/usr/bin/time -p go test -count=1 ./engine -run '^TestBundleConfigPaths(Base|CapturedAcrossBuilds|EscapeRejected|UnestablishedBaseRejected|ChangedLookupRejected)$' -v` — exit 0, 22.63 s.
+- `/usr/bin/time -p go test -count=1 ./engine -run '^(TestBundleConfigViewAcrossBuilds|TestBundleConfigCannotSearchOutsideView|TestRuleBundleInvalidatedByResolutionConfigChange|TestRulesLockIntegrityPrecedesSetupAndCollection|TestBundleChainedLinkRetargetInvalidatesWarmSession|TestBundleConsumedInputEdit|TestBundleHelperInputEdit|TestBundleToolInputEdit)$' -v` — exit 0, 54.98 s.
+- `/usr/bin/time -p go test -count=1 ./bundle -run '^(TestBuildAllAndPrepareAllFixtureRules|TestAbsoluteRequireResolveSetup|TestBuildAllPreservesLocallyBoundRequire)$' -v` — exit 0, 14.99 s.
+- `/usr/bin/time -p go test -count=1 ./cmd/lintai -run '^(TestRulesLockStopsAChangedRuleBeforeSetup|TestCustomRulesLockIgnoresUnrelatedDirectoryEntries)$' -v` — exit 0, 10.18 s.
+- `/usr/bin/time -p go build ./...` — exit 0, 2.59 s; `/usr/bin/time -p pnpm exec biome format packages/client/scripts/bundle-rule.mjs` — exit 0, 0.52 s. `/usr/bin/time -p pnpm exec biome check packages/client/scripts/bundle-rule.mjs` — exit 1, 0.58 s, for two parameter reassignments and import ordering already present at the starting commit.
+
+The absolute-selector and inherited-base A→B→A tests assert that their edit hooks ran; the separate unsafe-config tests assert rejection before publication and do not claim an edit-hook run. A19 remains qualified as above: esbuild does not expose all native config reads, and this correction is not a proof of every native path on every platform. This is a post-review correction and does not reset the feature review counts.
+
+Maintainer review fixes followed this receipt. They check every duplicate `paths` entry, apply `paths` only to bare and absolute lookups (a backslash marks a relative specifier only on Windows), use only the nearest config of each source and of the generated entries with its extends chain, capture lookup candidates with the same effective base that the escape check uses, match rebased absolute wildcard keys, and substitute wildcard text literally. The timings above do not cover those commits. Their results are the CI runs on the pull request.
+
 ## 6. Held work (not done)
 
 - Broader multi-config experiments (see `multi-config-analysis.md`).

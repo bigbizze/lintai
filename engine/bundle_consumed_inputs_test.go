@@ -54,6 +54,10 @@ func bundleEditAsset(t *testing.T, repoRoot, control string) string {
 		if (externalAfter.startsWith("config-external-aba:")) {
 			await fs.writeFile(externalAfter.slice("config-external-aba:".length), JSON.stringify({compilerOptions: {useDefineForClassFields: false}}));
 		}
+		if (externalAfter.startsWith("config-path-base-aba:")) {
+			const file = externalAfter.slice("config-path-base-aba:".length);
+			await fs.writeFile(file, (await fs.readFile(file, "utf8")).replace("rules-support/b/nested", "rules-support/a/nested"));
+		}
 `, control, control, control, control)
 			data = []byte(strings.Replace(string(data), anchor, edit+anchor, 1))
 			between := "\t\tconst pureBuild = await build({"
@@ -73,9 +77,32 @@ func bundleEditAsset(t *testing.T, repoRoot, control string) string {
 		const externalBetween = (await fs.readFile(%q, "utf8")).trim();
 		if (externalBetween.startsWith("config-external-aba:")) {
 			await fs.writeFile(externalBetween.slice("config-external-aba:".length), JSON.stringify({compilerOptions: {useDefineForClassFields: true}}));
+			await fs.writeFile(%q + ".hook", "reached");
 		}
-`, control, control, control)
+		if (externalBetween.startsWith("config-path-base-aba:")) {
+			const file = externalBetween.slice("config-path-base-aba:".length);
+			const contents = await fs.readFile(file, "utf8");
+			const changed = contents.replace("rules-support/a/nested", "rules-support/b/nested");
+			if (changed === contents) throw new Error("base config edit anchor missing");
+			await fs.writeFile(file, changed);
+			await fs.writeFile(%q + ".hook", "reached");
+		}
+`, control, control, control, control, control)
 			data = []byte(strings.Replace(string(data), between, editBetween+between, 1))
+			beforeView := "\t\tview = await createInputView("
+			if strings.Count(string(data), beforeView) != 1 {
+				t.Fatalf("view edit anchor occurs %d times", strings.Count(string(data), beforeView))
+			}
+			editBeforeView := fmt.Sprintf(`		const lookupEdit = (await fs.readFile(%q, "utf8")).trim();
+		if (lookupEdit.startsWith("config-path-lookup:")) {
+			const contents = await fs.readFile(resolvedRulePath, "utf8");
+			const changed = contents.replace("@fixture/safe", lookupEdit.slice("config-path-lookup:".length));
+			if (changed === contents) throw new Error("lookup edit anchor missing");
+			await fs.writeFile(resolvedRulePath, changed);
+			await fs.writeFile(%q + ".hook", "reached");
+		}
+`, control, control)
+			data = []byte(strings.Replace(string(data), beforeView, editBeforeView+beforeView, 1))
 		}
 		if err := os.WriteFile(filepath.Join(asset, "scripts", entry.Name()), data, 0o600); err != nil {
 			t.Fatal(err)
