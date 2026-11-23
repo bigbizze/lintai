@@ -45,6 +45,7 @@ type resolutionInputFS struct {
 	resolved   map[string]tspath.RootedPath
 	captureErr error
 	*compilerInputObservations
+	missingDirectories map[string]struct{}
 }
 
 // compilerInputObservations is the one captured-input model, transferred
@@ -60,7 +61,7 @@ type compilerInputObservations struct {
 
 func trackResolutionInputs(fs vfs.FS) *resolutionInputFS {
 	return &resolutionInputFS{
-		FS: fs, statInfo: make(map[string]vfs.FileInfo), resolved: make(map[string]tspath.RootedPath), compilerInputObservations: &compilerInputObservations{
+		FS: fs, statInfo: make(map[string]vfs.FileInfo), resolved: make(map[string]tspath.RootedPath), missingDirectories: make(map[string]struct{}), compilerInputObservations: &compilerInputObservations{
 			reads: make(map[string]capturedFile), fileProbes: make(map[string]bool),
 			dirProbes: make(map[string]bool), stats: make(map[string]string),
 			directories: make(map[string]capturedDirectory), realpaths: make(map[string]string),
@@ -178,9 +179,16 @@ func (fsys *resolutionInputFS) GetAccessibleEntries(path tspath.RootedDirectoryP
 	if captured, ok := fsys.directories[key]; ok {
 		return captured.entries()
 	}
+	if _, missing := fsys.missingDirectories[key]; missing {
+		return vfs.Entries{Symlinks: map[string]struct{}{}}
+	}
 	entries, err := os.ReadDir(filepath.FromSlash(key))
 	if err != nil {
-		fsys.captureErr = fmt.Errorf("read compiler directory %s: %w", key, err)
+		if isMissing(err) {
+			fsys.missingDirectories[key] = struct{}{}
+		} else {
+			fsys.captureErr = fmt.Errorf("read compiler directory %s: %w", key, err)
+		}
 		return vfs.Entries{Symlinks: map[string]struct{}{}}
 	}
 	captured := capturedDirectory{}
@@ -309,6 +317,11 @@ func (fsys *resolutionInputFS) inputs() []SnapshotInput {
 	for path := range fsys.directories {
 		byPath[path] = true
 	}
+	for path := range fsys.missingDirectories {
+		if _, observed := byPath[path]; !observed {
+			byPath[path] = false
+		}
+	}
 	for path, kind := range fsys.stats {
 		byPath[path] = byPath[path] || kind != "missing"
 	}
@@ -352,6 +365,9 @@ func (fsys *resolutionInputFS) observations() []CompilerObservation {
 			entries = append(entries, [2]string{name, "symlink"})
 		}
 		records = append(records, CompilerObservation{Kind: "listing", Path: filepath.FromSlash(path), Op: "compiler-accessible", Entries: entries})
+	}
+	for path := range fsys.missingDirectories {
+		records = append(records, CompilerObservation{Kind: "state", Path: filepath.FromSlash(path), Op: "read-directory", Value: "missing"})
 	}
 	for path, value := range fsys.realpaths {
 		records = append(records, CompilerObservation{Kind: "resolved", Path: filepath.FromSlash(path), Value: filepath.FromSlash(value)})

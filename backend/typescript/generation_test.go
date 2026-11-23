@@ -88,6 +88,41 @@ func TestCompilerObservationValidatesRawBytes(t *testing.T) {
 	}
 }
 
+func TestAbsentTsconfigIncludeRootIsObservedAndInvalidated(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "workspace")
+	writeWorkspaceFile(t, root, "tsconfig.json", `{"compilerOptions":{"module":"preserve","moduleResolution":"bundler"},"include":["src/**/*.ts","../generated/**/*.ts"]}`)
+	source := writeWorkspaceFile(t, root, "src/app.ts", `export const value = 1;`)
+	generatedRoot := filepath.Join(parent, "generated")
+	snapshot, err := lintaiapi.BuildSnapshot(context.Background(), lintaiapi.BuildSnapshotRequest{
+		WorkspaceRoot: root, Files: []string{source}, TsconfigFiles: true,
+	})
+	if err != nil {
+		t.Fatalf("collect with absent include root: %v", err)
+	}
+	if !slices.ContainsFunc(snapshot.Modules, func(module lintaiapi.Module) bool { return module.Path == "src/app.ts" }) {
+		t.Fatalf("source module was lost with absent include root: %+v", snapshot.Modules)
+	}
+	observations, err := compilerObservations(snapshot.CompilerInputs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(observations.Records(), func(record observe.Record) bool {
+		return record.Kind == observe.State && record.Path == generatedRoot && record.Op == observe.ReadDirectory && record.Value == observe.Missing
+	}) {
+		t.Fatalf("missing include root was not captured: %+v", observations.Records())
+	}
+	if changed, err := observations.Changed(context.Background(), observe.Full); err != nil || changed != nil {
+		t.Fatalf("unchanged observations: %v %v", changed, err)
+	}
+	if err := os.Mkdir(generatedRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := observations.Changed(context.Background(), observe.Full); err != nil || changed == nil {
+		t.Fatalf("created include root did not invalidate observations: %v %v", changed, err)
+	}
+}
+
 // V18, V20, V42: publication and reuse share content and scope validity. A
 // changing capture is retried once, with no metadata shortcut.
 func TestGenerationRetriesControlledInputChangesBeforePublication(t *testing.T) {
