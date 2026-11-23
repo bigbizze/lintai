@@ -30,7 +30,7 @@ func check(ctx context.Context, repoRoot, assetRoot, workspaceRoot string) error
 }
 ```
 
-`Check` validates the inputs used by each producer before reusing a generation. It retains eligible compiled code and plans, the current fact index, and complete raw results. A changed input replaces the affected producer generation. `Check(ctx, options)` supplies a complete request that overrides the defaults for that call. A returned result describes its completed generation; `DiagnosticsFor` and `Session.Current` only read it. A failed check makes the session's current result unavailable, and calls after `Close` fail. `Close` is idempotent and joins active rule jobs.
+`Check` validates the inputs used by each producer before reusing a generation. It retains eligible rule bundle texts and compiled plan templates per rule, the current fact index, and complete raw results. Each check reruns rule preparation and program generation in fresh runtimes, even when its bundle and plan are reused. A changed input replaces the affected producer generation. `Check(ctx, options)` supplies a complete request that overrides the defaults for that call. A returned result describes its completed generation; `DiagnosticsFor` and `Session.Current` only read it. A failed check makes the session's current result unavailable, and calls after `Close` fail. `Close` is idempotent and joins active rule jobs.
 
 `RuleWorkers` bounds independent rule evaluations: zero uses `GOMAXPROCS`, one runs sequentially, and a larger value permits that many active jobs. Negative values fail. Changing only this setting does not invalidate reusable work. `AssetRoot` contains `scripts/bundle-rule.mjs` and `scripts/prepare-rule.mjs`; in this repository it is `packages/client`.
 

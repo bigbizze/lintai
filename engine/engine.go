@@ -2,8 +2,6 @@ package engine
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"path/filepath"
 	goruntime "runtime"
@@ -101,10 +99,7 @@ type Session struct {
 	producers      []backend.Producer
 	checkMu        sync.Mutex
 	mu             sync.Mutex
-	planMu         sync.Mutex
-	planCache      *compiledPlanCache
-	bundleMu       sync.Mutex
-	bundleCache    map[string]cachedRuleBundle
+	ruleEntries    map[string]*ruleEntry
 	closed         bool
 	nextCheck      uint64
 	checks         map[uint64]context.CancelFunc
@@ -115,41 +110,6 @@ type Session struct {
 	currentFacts   *composedFacts
 	currentCatalog string
 	currentResult  *Result
-}
-
-type compiledPlanCache struct {
-	mu         sync.RWMutex
-	generation string
-	plans      map[string]*rulePlan
-}
-
-func (e *Session) compiledPlansFor(generation string) *compiledPlanCache {
-	e.planMu.Lock()
-	defer e.planMu.Unlock()
-	if e.planCache == nil || e.planCache.generation != generation {
-		e.planCache = &compiledPlanCache{generation: generation, plans: make(map[string]*rulePlan)}
-	}
-	return e.planCache
-}
-
-func (cache *compiledPlanCache) get(key string) *rulePlan {
-	if cache == nil || key == "" {
-		return nil
-	}
-	cache.mu.RLock()
-	defer cache.mu.RUnlock()
-	return cache.plans[key]
-}
-
-func (cache *compiledPlanCache) put(key string, plan *rulePlan) {
-	if cache == nil || key == "" || plan == nil {
-		return
-	}
-	template := *plan
-	template.ruleFacts = nil
-	cache.mu.Lock()
-	cache.plans[key] = &template
-	cache.mu.Unlock()
 }
 
 type executionStats struct {
@@ -186,12 +146,7 @@ func (e *Session) Close() error {
 			cancel()
 		}
 		e.checksWG.Wait()
-		e.planMu.Lock()
-		e.planCache = nil
-		e.planMu.Unlock()
-		e.bundleMu.Lock()
-		e.bundleCache = nil
-		e.bundleMu.Unlock()
+		e.ruleEntries = nil
 		e.currentFacts = nil
 		e.currentResult = nil
 		for _, producer := range e.producers {
@@ -385,7 +340,7 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options) (Res
 		lock = &loaded
 		run.lock = lock
 	}
-	ruleCatalog, catalogErr := openRuleCatalogWithCache(ctx, options, e, lock)
+	ruleCatalog, catalogErr := openRuleCatalogWithEntries(ctx, options, e, lock, observe.Full)
 	if catalogErr != nil && ruleCatalog == nil {
 		return Result{}, run, evidence, catalogErr
 	}
@@ -531,7 +486,12 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options) (Res
 			continue
 		}
 		if entry.metadata.HasSetup || entry.metadata.HasConfig {
-			setupArtifacts[rulePath] = entry.artifact
+			artifact, err := ruleCatalog.prepareArtifact(rulePath)
+			if err != nil {
+				allDiagnostics = append(allDiagnostics, errorDiagnostic(entry.metadata.ID, "setup", entry.metadata.Version, assembled.snapshotID, nil, err.Error()))
+				continue
+			}
+			setupArtifacts[rulePath] = artifact
 			if !entry.metadata.HasSetup {
 				skipSetup[rulePath] = struct{}{}
 			}
@@ -618,30 +578,16 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options) (Res
 	if err != nil {
 		return Result{}, run, evidence, err
 	}
-	planKeys := make(map[string]string, len(generated))
-	generationRecords := make([]any, 0, len(generated))
-	for _, generatedRule := range generated {
-		key, keyErr := generatedRulePlanKey(producerCatalog.identity, generatedRule.output,
-			generatedRule.loaded.Report(), generatedRule.loaded.ExpectNonEmpty(), generatedRule.loaded.SuppressionDeclarations())
-		if keyErr != nil {
-			key = ""
-		}
-		planKeys[generatedRule.path] = key
-		prepared := preparedByRule[generatedRule.path]
-		generationRecords = append(generationRecords, []any{generatedRule.path, key, generatedRule.output.Text,
-			ruleCatalog.entries[generatedRule.path].artifact.Hash, prepared.Env, prepared.Setup})
-	}
-	generationBytes, generationErr := canonical.Marshal([]any{"compiled-plan-generation-v1", producerCatalog.identity, generationRecords})
-	var planCache *compiledPlanCache
-	if generationErr == nil {
-		generationDigest := sha256.Sum256(generationBytes)
-		planCache = e.compiledPlansFor(hex.EncodeToString(generationDigest[:]))
-	}
 	jobs := make([]*preparedRuleJob, 0, len(generated))
 	requested := make(map[string]map[facts.Predicate]struct{})
 	for _, generatedRule := range generated {
-		planKey := planKeys[generatedRule.path]
-		plan := planCache.get(planKey)
+		planKey, keyErr := generatedRulePlanKey(producerCatalog.identity, generatedRule.output,
+			generatedRule.loaded.Report(), generatedRule.loaded.ExpectNonEmpty(), generatedRule.loaded.SuppressionDeclarations())
+		entry := e.ruleEntries[generatedRule.path]
+		var plan *rulePlan
+		if keyErr == nil && planKey != "" && entry.planKey == planKey {
+			plan = entry.plan
+		}
 		var perr *phaseError
 		if plan != nil {
 			var policies []suppressionPolicy
@@ -658,8 +604,12 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options) (Res
 			e.stats.mangleCompiles.Add(1)
 			plan, perr = prepareProgram(producerCatalog.sources, producerCatalog.schemaDecls, producerCatalog.namespaces,
 				generatedRule.output, generatedRule.loaded.Report(), generatedRule.loaded.ExpectNonEmpty(), generatedRule.loaded.SuppressionDeclarations())
-			if perr == nil {
-				planCache.put(planKey, plan)
+			if perr == nil && keyErr == nil && planKey != "" {
+				template := *plan
+				template.ruleFacts = nil
+				template.suppressionRules = nil
+				entry.planKey = planKey
+				entry.plan = &template
 			}
 		}
 		if perr != nil {
