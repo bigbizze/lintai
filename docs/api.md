@@ -765,7 +765,7 @@ Plugin caveats:
 - each file request validates the recorded inputs and reloads changed configuration; source and rule changes are picked up on the next lint pass. There is no background refresh. Quick validation can miss a same-size edit whose modification time was deliberately restored; forced `reanalyze` performs a Full check.
 - a newly discovered rule's findings appear through `lintai/analysis` with restart guidance until the linter reloads its plugin and registers the ID. Changes to an existing rule implementation need no restart.
 - when lintai cannot produce diagnostics, `lintai/analysis` reports the reason on line 1 of each linted file, so a broken setup does not look like a clean workspace. In an `eslint` CLI run, these messages appear on the first linted file only.
-- API callers that pass an existing ESLint `SourceCode` object to `Linter.verify` should use a fresh object for each verification; reusing it retains the same file-analysis identity.
+- Each ESLint verification that runs an enabled lintai rule starts a fresh file request, including when `Linter.verify` receives a previously used `SourceCode` object. Enabled lintai rules in that verification share the response, even when `lintai/analysis` is disabled.
 - the ESLint path never computes `explanation`
 
 ## Oxlint plugin reference and caveats

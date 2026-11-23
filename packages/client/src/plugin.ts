@@ -53,6 +53,8 @@ export type LintaiRules = {
 	rules: ReadonlyArray<{ id: string; path: string }>;
 	lintRule(id: string, file: LintedFile): void;
 	lintAnalysis(file: LintedFile): void;
+	// Invalidate a previous response when the host begins a new file analysis.
+	invalidateAnalysis(file: LintedFile): void;
 };
 
 // createLintaiRules reads the rule ids with lintai rules and returns the
@@ -65,7 +67,7 @@ export function createLintaiRules(
 	cwd: string = process.cwd(),
 ): LintaiRules {
 	if (options.rules !== undefined && options.rules.length === 0) {
-		return { rules: [], lintRule() {}, lintAnalysis() {} };
+		return { rules: [], lintRule() {}, lintAnalysis() {}, invalidateAnalysis() {} };
 	}
 	const resolved = resolveBridgeOptions(options, cwd, host);
 	const list = getClient(resolved).listRuleIds();
@@ -95,8 +97,9 @@ export function createLintaiRules(
 	for (const message of loadErrorMessages) {
 		console.error(message);
 	}
-	// ESLint provides one SourceCode per verification. Oxlint 1.90 supplies a
-	// singleton but resets its patched WeakMaps at the end of each linted file.
+	// Cache one response by host file identity. ESLint invalidates it from each
+	// enabled rule's create() before Program traversal; Oxlint keeps its existing
+	// per-file identity behavior.
 	const analyses = new WeakMap<
 		object,
 		{ response: ReturnType<ReturnType<typeof getClient>["getFileAnalysis"]> | undefined }
@@ -168,6 +171,9 @@ export function createLintaiRules(
 					file.report(report);
 				}
 			}
+		},
+		invalidateAnalysis(file) {
+			analyses.delete(file.analysis);
 		},
 	};
 }

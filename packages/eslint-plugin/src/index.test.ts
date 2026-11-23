@@ -337,8 +337,8 @@ test("rules: [] creates only analysis and the authoring rules and starts no lint
 	assert.equal(spawned, 0);
 });
 
-// Exercise ESLint's actual SourceCode lifetime: separate synchronous verify
-// calls must revalidate, while rules in one verification share a response.
+// Exercise ESLint's actual SourceCode lifetime: a reused SourceCode must
+// revalidate, while enabled rules share one response even with analysis off.
 test("plugin discovery and ESLint analysis follow their current lifetimes", () => {
 	const root = mkdtempSync(path.join(os.tmpdir(), "lintai-eslint-lifetime-"));
 	mkdirSync(path.join(root, "src"));
@@ -419,8 +419,21 @@ test("plugin discovery and ESLint analysis follow their current lifetimes", () =
 			["[alpha/v] initial", "[beta/v] initial", "[lintai] current syntax error"].sort(),
 		);
 		assert.equal(fileRequests, 1);
+		const previousSourceCode = linter.getSourceCode();
 		recovered = true;
-		assert.deepEqual(verify(), ["[alpha/v] repaired", "[beta/v] repaired"].sort());
+		const analysisDisabled: Linter.Config[] = [
+			{
+				...plugin.configs.all,
+				rules: { ...plugin.configs.all.rules, "lintai/analysis": "off" },
+			},
+		];
+		assert.deepEqual(
+			linter
+				.verify(previousSourceCode, analysisDisabled, filename)
+				.map((item) => item.message)
+				.sort(),
+			["[alpha/v] repaired", "[beta/v] repaired"].sort(),
+		);
 		assert.equal(fileRequests, 2);
 		const rebuilt = createLintaiPlugin(hostOptions);
 		assert.ok(rebuilt.rules.alpha && rebuilt.rules.gamma);
