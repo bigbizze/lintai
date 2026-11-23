@@ -58,19 +58,75 @@ func MarshalStructured(value any) ([]byte, error) {
 	return marshal(value, true)
 }
 
+// MarshalStructuredPreservingNull encodes nil maps and slices as JSON null
+// while retaining the object's and array's distinct structured forms.
+func MarshalStructuredPreservingNull(value any) ([]byte, error) {
+	normalized, err := normalizePreservingNull(value)
+	if err != nil {
+		return nil, err
+	}
+	buffer := &bytes.Buffer{}
+	if err := writeCanonicalJSON(buffer, normalized, true, true); err != nil {
+		return nil, err
+	}
+	return buffer.Bytes(), nil
+}
+
 func marshal(value any, structured bool) ([]byte, error) {
 	normalized, err := Normalize(value)
 	if err != nil {
 		return nil, err
 	}
 	buffer := &bytes.Buffer{}
-	if err := writeCanonicalJSON(buffer, normalized, structured); err != nil {
+	if err := writeCanonicalJSON(buffer, normalized, structured, false); err != nil {
 		return nil, err
 	}
 	return buffer.Bytes(), nil
 }
 
-func writeCanonicalJSON(buffer *bytes.Buffer, value any, structured bool) error {
+func normalizePreservingNull(value any) (any, error) {
+	switch typed := value.(type) {
+	case []any:
+		if typed == nil {
+			return []any(nil), nil
+		}
+		items := make([]any, 0, len(typed))
+		for _, item := range typed {
+			normalized, err := normalizePreservingNull(item)
+			if err != nil {
+				return nil, err
+			}
+			items = append(items, normalized)
+		}
+		return items, nil
+	case []string:
+		if typed == nil {
+			return []any(nil), nil
+		}
+		items := make([]any, 0, len(typed))
+		for _, item := range typed {
+			items = append(items, item)
+		}
+		return items, nil
+	case map[string]any:
+		if typed == nil {
+			return map[string]any(nil), nil
+		}
+		result := make(map[string]any, len(typed))
+		for key, item := range typed {
+			normalized, err := normalizePreservingNull(item)
+			if err != nil {
+				return nil, err
+			}
+			result[key] = normalized
+		}
+		return result, nil
+	default:
+		return Normalize(value)
+	}
+}
+
+func writeCanonicalJSON(buffer *bytes.Buffer, value any, structured, preserveNull bool) error {
 	switch typed := value.(type) {
 	case nil:
 		buffer.WriteString("null")
@@ -91,17 +147,25 @@ func writeCanonicalJSON(buffer *bytes.Buffer, value any, structured bool) error 
 		}
 		buffer.Write(raw)
 	case []any:
+		if preserveNull && typed == nil {
+			buffer.WriteString("null")
+			break
+		}
 		buffer.WriteByte('[')
 		for index, item := range typed {
 			if index > 0 {
 				buffer.WriteByte(',')
 			}
-			if err := writeCanonicalJSON(buffer, item, structured); err != nil {
+			if err := writeCanonicalJSON(buffer, item, structured, preserveNull); err != nil {
 				return err
 			}
 		}
 		buffer.WriteByte(']')
 	case map[string]any:
+		if preserveNull && typed == nil {
+			buffer.WriteString("null")
+			break
+		}
 		type encodedKey struct {
 			key     string
 			encoded string
@@ -133,7 +197,7 @@ func writeCanonicalJSON(buffer *bytes.Buffer, value any, structured bool) error 
 			} else {
 				buffer.WriteByte(',')
 			}
-			if err := writeCanonicalJSON(buffer, typed[key.key], structured); err != nil {
+			if err := writeCanonicalJSON(buffer, typed[key.key], structured, preserveNull); err != nil {
 				return err
 			}
 			if !structured {

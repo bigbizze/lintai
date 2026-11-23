@@ -8,12 +8,15 @@ import {
 	createFramedResponse,
 	createTestDependencies,
 	createTestProcess,
+	createTestTransport,
 	getClient,
 	loadRuleIds,
 	resetClientsForTest,
 	resolveBridgeOptions,
 } from "./client.js";
 import { hasUnsavedChanges, toReports } from "./index.js";
+import { Spawner } from "./spawner.js";
+import { SpawnerServeTransport } from "./transport.js";
 
 const editorHost = { defaultMode: "serve", reportProblemsOnce: false } as const;
 const cliHost = { defaultMode: "oneshot", reportProblemsOnce: true } as const;
@@ -41,21 +44,21 @@ test("file requests recover on the same connection and report distinct problem e
 			reportProblemsOnce: true,
 		}),
 		createTestDependencies({
-			spawnServe: () => child,
+			spawnServe: () =>
+				createTestTransport(child, (process) => {
+					const frame = process.stdin.read().toString();
+					const request = JSON.parse(frame.slice(frame.indexOf("\r\n\r\n") + 4));
+					calls.push(request.method);
+					const reply = replies.shift() as { error?: { code: number; message: string } };
+					return createFramedResponse({
+						jsonrpc: "2.0",
+						id: request.id,
+						...(reply.error ? { error: reply.error } : { result: reply }),
+					});
+				}),
 			spawnSync: () => {
 				oneShot++;
 				return { stdout: "[]", stderr: "", status: 0 };
-			},
-			readServeSync: () => {
-				const frame = child.stdin.read().toString();
-				const request = JSON.parse(frame.slice(frame.indexOf("\r\n\r\n") + 4));
-				calls.push(request.method);
-				const reply = replies.shift() as { error?: { code: number; message: string } };
-				return createFramedResponse({
-					jsonrpc: "2.0",
-					id: request.id,
-					...(reply.error ? { error: reply.error } : { result: reply }),
-				});
 			},
 		}),
 	);
@@ -104,21 +107,20 @@ test("transport and protocol failures fall back to one-shot until forced reanaly
 			createTestDependencies({
 				spawnServe: () => {
 					if (failure === "spawn") throw new Error("spawn failed");
-					return child;
-				},
-				readServeSync: () => {
-					reads++;
-					if (failure === "eof") throw new Error("closed stdout");
-					if (failure === "framing") return Buffer.from("bad header\r\n\r\n");
-					return createFramedResponse({
-						jsonrpc: "2.0",
-						id: reads,
-						result:
-							failure === "handshake"
-								? { protocolVersion: 0 }
-								: reads === 1
-									? { protocolVersion: 1 }
-									: { snapshotVersion: "snap", rulesLoaded: 1, diagnostics: null, problems: [] },
+					return createTestTransport(child, () => {
+						reads++;
+						if (failure === "eof") throw new Error("closed stdout");
+						if (failure === "framing") return Buffer.from("bad header\r\n\r\n");
+						return createFramedResponse({
+							jsonrpc: "2.0",
+							id: reads,
+							result:
+								failure === "handshake"
+									? { protocolVersion: 0 }
+									: reads === 1
+										? { protocolVersion: 1 }
+										: { snapshotVersion: "snap", rulesLoaded: 1, diagnostics: null, problems: [] },
+						});
 					});
 				},
 				spawnSync: () => {
@@ -141,10 +143,80 @@ test("transport and protocol failures fall back to one-shot until forced reanaly
 	}
 });
 
+test("the real client exchanges two file responses through the real spawner", () => {
+	const root = mkdtempSync(path.join(os.tmpdir(), "lintai-client-spawner-"));
+	const server = path.join(root, "server.mjs");
+	writeFileSync(
+		server,
+		[
+			'import { stdin, stdout } from "node:process";',
+			'const delimiter = Buffer.from("\\r\\n\\r\\n");',
+			"let input = Buffer.alloc(0);",
+			"let files = 0;",
+			"function send(message) {",
+			"  const body = Buffer.from(JSON.stringify(message));",
+			'  stdout.write(Buffer.concat([Buffer.from("Content-Length: " + body.length + "\\r\\n\\r\\n"), body]));',
+			"}",
+			"function consume() {",
+			"  while (true) {",
+			"    const end = input.indexOf(delimiter);",
+			"    if (end < 0) return;",
+			"    const header = input.subarray(0, end).toString();",
+			"    const length = Number(/Content-Length: (\\d+)/i.exec(header)?.[1]);",
+			"    if (!Number.isFinite(length) || input.length < end + 4 + length) return;",
+			"    const request = JSON.parse(input.subarray(end + 4, end + 4 + length).toString());",
+			"    input = input.subarray(end + 4 + length);",
+			'    if (request.method === "initialize") {',
+			'      send({ jsonrpc: "2.0", id: request.id, result: { protocolVersion: 1 } });',
+			'    } else if (request.method === "diagnostics/file") {',
+			"      files += 1;",
+			'      send({ jsonrpc: "2.0", id: request.id, result: {',
+			'        snapshotVersion: "snapshot-" + files, rulesLoaded: 1, problems: [],',
+			'        diagnostics: [{ rule_id: "fixture.rule", assertion_id: "default", message: "file response " + files }],',
+			"      } });",
+			'    } else if (request.method === "shutdown") {',
+			"      process.exit(0);",
+			"    }",
+			"  }",
+			"}",
+			'stdin.on("data", (chunk) => { input = Buffer.concat([input, chunk]); consume(); });',
+		].join("\n"),
+	);
+	const spawner = new Spawner();
+	let oneShot = 0;
+	const client = new LintAIClient(
+		resolveBridgeOptions(
+			{ mode: "serve", binary: "fixture", repoRoot: root, workspaceRoot: root },
+			root,
+			editorHost,
+		),
+		createTestDependencies({
+			spawnServe: () =>
+				new SpawnerServeTransport(spawner, spawner.spawn(process.execPath, [server], root)),
+			spawnSync: () => {
+				oneShot++;
+				return { stdout: "[]", stderr: "", status: 0 };
+			},
+		}),
+	);
+	try {
+		assert.deepEqual(client.getDiagnostics("src/a.ts"), [
+			{ rule_id: "fixture.rule", assertion_id: "default", message: "file response 1" },
+		]);
+		assert.deepEqual(client.getDiagnostics("src/b.ts"), [
+			{ rule_id: "fixture.rule", assertion_id: "default", message: "file response 2" },
+		]);
+		assert.equal(oneShot, 0);
+	} finally {
+		client.dispose();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("client cache reuses the same instance for the same resolved options", () => {
 	const child = createTestProcess();
 	const deps = createTestDependencies({
-		spawnServe: () => child,
+		spawnServe: () => createTestTransport(child, () => Buffer.alloc(0)),
 		log: () => undefined,
 	});
 	const options = resolveBridgeOptions(

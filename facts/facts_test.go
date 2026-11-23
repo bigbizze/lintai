@@ -91,6 +91,29 @@ func TestBuilderCoverageHandlesValidationAndOwnership(t *testing.T) {
 			}
 		})
 	}
+	for _, tc := range []struct {
+		name  string
+		value any
+	}{
+		{name: "nil slice", value: []any(nil)},
+		{name: "nil map", value: map[string]any(nil)},
+	} {
+		t.Run("identical repeated anchor with "+tc.name, func(t *testing.T) {
+			b := makeBuilder()
+			r, _ := b.Relation("object", 2)
+			nullSupport := support
+			nullSupport.Tracking = &TrackingKey{
+				Scheme: "fixture/1",
+				Data:   map[string]any{"nested": tc.value},
+			}
+			b.Anchor("nil", nullSupport)
+			b.Anchor("nil", nullSupport)
+			b.Add(r, String("nil"), Name("collection"))
+			if _, err := b.Finish(); err != nil {
+				t.Fatalf("identical support was rejected: %v", err)
+			}
+		})
+	}
 	b := makeBuilder()
 	r, _ := b.Relation("object", 2)
 	unwanted, _ := b.Relation("unused", 1)

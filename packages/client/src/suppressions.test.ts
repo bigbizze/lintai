@@ -8,6 +8,7 @@ import {
 	createFramedResponse,
 	createTestDependencies,
 	createTestProcess,
+	createTestTransport,
 	resolveBridgeOptions,
 } from "./client.js";
 import { suppressionOverlaps } from "./suppressions.js";
@@ -99,19 +100,22 @@ test("serve forwards suppression initialization parameters", () => {
 	const client = new LintAIClient(
 		options,
 		createTestDependencies({
-			spawnServe: () => child,
-			readServeSync: (() => {
-				let id = 0;
-				return () =>
-					createFramedResponse({
-						jsonrpc: "2.0",
-						id: ++id,
-						result:
-							id === 1
-								? { protocolVersion: 1 }
-								: { rulesLoaded: 0, snapshotVersion: "test", diagnostics: [], problems: [] },
-					});
-			})(),
+			spawnServe: () =>
+				createTestTransport(
+					child,
+					(() => {
+						let id = 0;
+						return () =>
+							createFramedResponse({
+								jsonrpc: "2.0",
+								id: ++id,
+								result:
+									id === 1
+										? { protocolVersion: 1 }
+										: { rulesLoaded: 0, snapshotVersion: "test", diagnostics: [], problems: [] },
+							});
+					})(),
+				),
 		}),
 	);
 	try {
