@@ -4,12 +4,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
 
 	"github.com/bigbizze/lintai/backend"
-	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/facts"
 	"github.com/bigbizze/lintai/internal/ambient"
 	"github.com/bigbizze/lintai/internal/tsgo/lintaiapi"
@@ -42,15 +42,12 @@ type producerGeneration struct {
 	observations            observe.Set
 	inputRevision           string
 	scope                   map[string]any
-	watchHints              []string
-	items                   []facts.Fact
+	description             facts.ProducerDescription
+	sources                 []ambient.Source
+	adjustments             []lintaiapi.ConfigAdjustment
 }
 
 var _ backend.Producer = (*Backend)(nil)
-
-func producerEntityID(localID string) string { return producerEntityIDIn("ts", localID) }
-
-func producerEntityIDIn(namespace, localID string) string { return namespace + ":" + localID }
 
 func New(settings ...Options) *Backend {
 	selected := Options{Files: FileScopeTsconfig}
@@ -115,145 +112,57 @@ func (b *Backend) Describe() (facts.ProducerDescription, error) {
 	return description, nil
 }
 
-func (b *Backend) Collect(ctx context.Context, request backend.CollectionRequest) (facts.Batch, error) {
+func (b *Backend) Prepare(ctx context.Context, request backend.CollectionRequest, mode observe.Mode) (backend.Generation, error) {
 	b.collectMu.Lock()
 	defer b.collectMu.Unlock()
-	batch := facts.Batch{Relations: make(map[facts.Predicate][]facts.Row), Anchors: make(map[string]facts.AnchorSupport)}
-	if len(request.Predicates) == 0 {
-		return batch, nil
+	if mode != observe.Full && mode != observe.Quick {
+		return nil, fmt.Errorf("unknown observation mode %d", mode)
 	}
 	description, err := b.Describe()
 	if err != nil {
-		return facts.Batch{}, err
+		return nil, err
+	}
+	available := make(map[facts.Predicate]struct{}, len(description.BaseRelations))
+	for _, relation := range description.BaseRelations {
+		available[relation.Predicate] = struct{}{}
 	}
 	requested := make(map[facts.Predicate]struct{}, len(request.Predicates))
+	relations := make([]string, 0, len(request.Predicates))
 	for _, predicate := range request.Predicates {
-		found := false
-		for _, relation := range description.BaseRelations {
-			if relation.Predicate == predicate {
-				found = true
-				break
-			}
+		if _, ok := available[predicate]; !ok {
+			return nil, fmt.Errorf("unknown TypeScript base predicate %s", predicate)
 		}
-		if !found {
-			return facts.Batch{}, fmt.Errorf("unknown TypeScript base predicate %s", predicate)
-		}
-		if _, exists := requested[predicate]; exists {
-			return facts.Batch{}, fmt.Errorf("duplicate requested TypeScript predicate %s", predicate)
+		if _, ok := requested[predicate]; ok {
+			return nil, fmt.Errorf("duplicate requested TypeScript predicate %s", predicate)
 		}
 		requested[predicate] = struct{}{}
-	}
-	relations := make([]string, 0, len(requested))
-	for predicate := range requested {
 		relations = append(relations, strings.TrimPrefix(predicate.Name, b.namespace+"."))
 	}
 	slices.Sort(relations)
-	generation, err := b.generation(ctx, request.RepoRoot, request.WorkspaceRoot, relations)
+	repoRoot, err := filepath.Abs(request.RepoRoot)
 	if err != nil {
-		return facts.Batch{}, err
+		return nil, err
 	}
-	snapshot, items := generation.snapshot, generation.items
-	metadata := make(map[facts.Predicate]facts.RelationDescription, len(description.BaseRelations))
-	for _, relation := range description.BaseRelations {
-		metadata[relation.Predicate] = relation
+	workspaceRoot, err := filepath.Abs(request.WorkspaceRoot)
+	if err != nil {
+		return nil, err
 	}
-	for predicate := range requested {
-		batch.Relations[predicate] = []facts.Row{}
+	return b.generation(ctx, filepath.Clean(repoRoot), filepath.Clean(workspaceRoot), relations, description, mode)
+}
+
+func (g *producerGeneration) Metadata() backend.GenerationMetadata {
+	files := make([]string, 0, len(g.snapshot.Modules))
+	for _, module := range g.snapshot.Modules {
+		files = append(files, module.Path)
 	}
-	for _, item := range items {
-		predicate := facts.Predicate{Name: b.namespace + "." + item.Relation, Arity: len(item.Values)}
-		if _, wanted := requested[predicate]; !wanted {
-			continue
-		}
-		values := slices.Clone(item.Values)
-		for index, argument := range metadata[predicate].Arguments {
-			if argument.Role != facts.EntityRole {
-				continue
-			}
-			if values[index].Kind != facts.StringKind {
-				return facts.Batch{}, fmt.Errorf("TypeScript entity %s argument %s is not a string", predicate, argument.Name)
-			}
-			id := values[index].String
-			values[index].String = producerEntityIDIn(b.namespace, id)
-		}
-		batch.Relations[predicate] = append(batch.Relations[predicate], facts.Row(values))
+	return backend.GenerationMetadata{InputRevision: g.inputRevision, Scope: cloneProducerValue(g.scope), AnalyzedFiles: files, Observations: g.observations, ReusableFromObservations: true}
+}
+
+func (g *producerGeneration) Emit(ctx context.Context, builder *facts.Builder) error {
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	locationPredicate := facts.Predicate{Name: b.namespace + ".location", Arity: 6}
-	if _, ok := metadata[locationPredicate]; ok {
-		descriptions := make(map[string]string)
-		for _, fn := range snapshot.Functions {
-			description := snapshot.Tracking[fn.SemanticKey].Description
-			if strings.HasPrefix(description, "function") {
-				description = "signature" + strings.TrimPrefix(description, "function")
-			} else if description != "" {
-				description = "signature " + description
-			} else {
-				description = "signature"
-			}
-			if fn.Signature != nil {
-				descriptions[lintaiapi.SignatureID(fn.SemanticKey, *fn.Signature, b.namespace)] = description
-			}
-		}
-		for _, item := range snapshot.Types {
-			if item.Description != "" {
-				descriptions[item.ID] = item.Description
-			}
-		}
-		for _, item := range items {
-			if item.Relation != "location" || len(item.Values) != 6 {
-				continue
-			}
-			id := producerEntityIDIn(b.namespace, item.Values[0].String)
-			file := item.Values[1].String
-			if strings.HasPrefix(file, "bundled://") {
-				continue
-			}
-			toInt := func(value facts.Value) int { return int(value.Number) }
-			support := snapshot.Tracking[item.Values[0].String]
-			description := support.Description
-			if description == "" {
-				description = descriptions[item.Values[0].String]
-			}
-			if description == "" {
-				description = "TypeScript " + strings.SplitN(item.Values[0].String, ":", 2)[0]
-			}
-			anchor := facts.AnchorSupport{
-				Location:    diagnostics.SourceLocation{File: file, StartLine: toInt(item.Values[2]), StartColumn: toInt(item.Values[3]), EndLine: toInt(item.Values[4]), EndColumn: toInt(item.Values[5])},
-				Description: description,
-			}
-			if support.Data != nil {
-				anchor.Tracking = &facts.TrackingKey{Scheme: "lintai.typescript.subject/1", Data: cloneProducerValue(support.Data)}
-			}
-			batch.Anchors[id] = anchor
-		}
-		for _, endpoint := range snapshot.SourceEndpoints {
-			id := producerEntityIDIn(b.namespace, endpoint.ID)
-			location := endpoint.Location
-			if _, exists := batch.Anchors[id]; exists || location.File == "" || strings.HasPrefix(location.File, "bundled://") || location.StartLine <= 0 || location.StartColumn <= 0 || location.EndLine <= 0 || location.EndColumn <= 0 {
-				continue
-			}
-			support := snapshot.SourceTracking[endpoint.ID]
-			description := support.Description
-			if description == "" {
-				description = "TypeScript declaration"
-			}
-			anchor := facts.AnchorSupport{
-				Location:    diagnostics.SourceLocation{File: location.File, StartLine: location.StartLine, StartColumn: location.StartColumn, EndLine: location.EndLine, EndColumn: location.EndColumn},
-				Description: description,
-			}
-			if support.Data != nil {
-				anchor.Tracking = &facts.TrackingKey{Scheme: "lintai.typescript.subject/1", Data: cloneProducerValue(support.Data)}
-			}
-			batch.Anchors[id] = anchor
-		}
-	}
-	for _, module := range snapshot.Modules {
-		batch.AnalyzedFiles = append(batch.AnalyzedFiles, module.Path)
-	}
-	batch.InputRevision = generation.inputRevision
-	batch.Scope = cloneProducerValue(generation.scope)
-	batch.WatchHints = slices.Clone(generation.watchHints)
-	return batch, nil
+	return emitSnapshot(ctx, builder, g.description, g.snapshot, g.sources, g.adjustments, g.description.Namespace)
 }
 
 func (b *Backend) Close() error {
@@ -266,12 +175,12 @@ func (b *Backend) Close() error {
 // generation is called with collectMu held. A changed relation demand needs a
 // new extraction, whose own validation covers the new inputs. The prior
 // snapshot only supplies tracking keys whose captured source bytes still match.
-func (b *Backend) generation(ctx context.Context, repoRoot, workspaceRoot string, relations []string) (*producerGeneration, error) {
+func (b *Backend) generation(ctx context.Context, repoRoot, workspaceRoot string, relations []string, description facts.ProducerDescription, mode observe.Mode) (*producerGeneration, error) {
 	var previousSnapshot *lintaiapi.Snapshot
 	if b.current != nil && b.current.repoRoot == repoRoot && b.current.workspaceRoot == workspaceRoot {
 		previousSnapshot = b.current.snapshot
 		if slices.Equal(relations, b.current.relations) {
-			valid, err := b.validateGeneration(ctx, b.current)
+			valid, err := b.validateGeneration(ctx, b.current, mode)
 			if err != nil {
 				b.current = nil
 				return nil, err
@@ -286,15 +195,12 @@ func (b *Backend) generation(ctx context.Context, repoRoot, workspaceRoot string
 	if err != nil {
 		return nil, err
 	}
-	snapshot := generation.snapshot
-	adjustments := convertAdjustments(generation.plan.Root, snapshot.ConfigAdjustments)
-	b.reportAdjustments(adjustments)
-	items, err := factsFromSnapshot(snapshot, sources, adjustments, b.namespace)
-	if err != nil {
-		return nil, err
-	}
+	generation.sources = sources
+	generation.description = description
+	generation.adjustments = convertAdjustments(generation.plan.Root, generation.snapshot.ConfigAdjustments)
+	b.reportAdjustments(generation.adjustments)
 	generation.repoRoot, generation.workspaceRoot = repoRoot, workspaceRoot
-	generation.relations, generation.items = slices.Clone(relations), items
+	generation.relations = slices.Clone(relations)
 	b.current = generation
 	return b.current, nil
 }

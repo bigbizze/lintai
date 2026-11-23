@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -17,27 +18,30 @@ import (
 	"github.com/bigbizze/lintai/backend"
 	"github.com/bigbizze/lintai/facts"
 	"github.com/bigbizze/lintai/internal/canonical"
-	"github.com/bigbizze/lintai/suppressions"
+	"github.com/bigbizze/lintai/observe"
 )
 
 type composedFacts struct {
-	base          factstore.ReadOnlyFactStore
-	sources       []parse.SourceUnit
-	schemaDecls   map[ast.PredicateSym]ast.Decl
-	anchors       map[string]facts.AnchorSupport
-	anchorOwners  map[string]string
-	producerFiles map[string]map[string]struct{}
-	reportable    map[facts.Predicate]map[string]struct{}
-	factCounts    map[ast.PredicateSym]int
-	analyzedFiles map[string]struct{}
-	namespaces    []string
-	snapshotID    string
-	watchHints    []string
+	base                     factstore.ReadOnlyFactStore
+	sources                  []parse.SourceUnit
+	schemaDecls              map[ast.PredicateSym]ast.Decl
+	anchors                  map[string]facts.AnchorSupport
+	anchorOwners             map[string]string
+	producerFiles            map[string]map[string]struct{}
+	reportable               map[facts.Predicate]map[string]struct{}
+	factCounts               map[ast.PredicateSym]int
+	analyzedFiles            map[string]struct{}
+	namespaces               []string
+	snapshotID               string
+	watchHints               []string
+	observations             observe.Set
+	reusableFromObservations bool
 }
 
 type producerEntry struct {
 	producer    backend.Producer
 	description facts.ProducerDescription
+	descriptor  facts.Descriptor
 }
 
 type producerCatalog struct {
@@ -63,10 +67,11 @@ func (e *Session) describeProducers() (producerCatalog, error) {
 			return producerCatalog{}, fmt.Errorf("producer namespace %q is registered more than once", description.Namespace)
 		}
 		owned[description.Namespace] = struct{}{}
-		if _, err := facts.ValidateBatch(description, nil, facts.Batch{Relations: map[facts.Predicate][]facts.Row{}}); err != nil {
+		descriptor, err := facts.ValidateDescription(description)
+		if err != nil {
 			return producerCatalog{}, fmt.Errorf("invalid producer description %q: %w", description.Namespace, err)
 		}
-		entries = append(entries, producerEntry{producer: producer, description: description})
+		entries = append(entries, producerEntry{producer: producer, description: descriptor.Description(), descriptor: descriptor})
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].description.Namespace < entries[j].description.Namespace })
 
@@ -192,158 +197,176 @@ func withoutPackageDeclaration(source string) string {
 	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
-// collect requests only the base relations selected by successfully prepared
-// rules. Producers with no requested relations are not called.
+// collect prepares selected generations, establishes identity, then emits only on a miss.
 func (catalog producerCatalog) collect(ctx context.Context, options Options, requestedByNamespace map[string]map[facts.Predicate]struct{}, current *composedFacts) (composedFacts, error) {
-	allFacts := make([]facts.Fact, 0)
-	anchors := make(map[string]facts.AnchorSupport)
-	anchorOwners := make(map[string]string)
-	producerFiles := make(map[string]map[string]struct{})
-	reportable := make(map[facts.Predicate]map[string]struct{})
-	factCounts := make(map[ast.PredicateSym]int)
-	analyzedFiles := make(map[string]struct{})
-	producerRecords := make([]any, 0, len(catalog.entries))
-	usedNamespaces := make([]string, 0, len(requestedByNamespace))
-	type collected struct {
-		description facts.ProducerDescription
-		requested   []facts.Predicate
-		validated   facts.ValidatedFacts
+	type prepared struct {
+		entry      producerEntry
+		requested  []facts.Predicate
+		generation backend.Generation
+		metadata   backend.GenerationMetadata
 	}
-	collectedBatches := make([]collected, 0, len(catalog.entries))
-	watchHints := make(map[string]struct{})
+	preparedGenerations := make([]prepared, 0, len(catalog.entries))
+	records := make([]any, 0, len(catalog.entries))
+	var observations []observe.Set
+	reusable := true
+	hints := make(map[string]struct{})
 	for _, entry := range catalog.entries {
-		producer := entry.producer
 		description := entry.description
-		requestedSet := requestedByNamespace[description.Namespace]
-		if len(requestedSet) == 0 {
+		wanted := requestedByNamespace[description.Namespace]
+		if len(wanted) == 0 {
 			continue
 		}
-		requested := make([]facts.Predicate, 0, len(requestedSet))
+		requested := make([]facts.Predicate, 0, len(wanted))
 		for _, relation := range description.BaseRelations {
-			if _, selected := requestedSet[relation.Predicate]; selected {
+			if _, ok := wanted[relation.Predicate]; ok {
 				requested = append(requested, relation.Predicate)
 			}
 		}
-		if len(requested) != len(requestedSet) {
+		if len(requested) != len(wanted) {
 			return composedFacts{}, fmt.Errorf("requested facts include an unknown base relation for producer %q", description.Namespace)
 		}
-		usedNamespaces = append(usedNamespaces, description.Namespace)
 		sort.Slice(requested, func(i, j int) bool {
 			if requested[i].Name != requested[j].Name {
 				return requested[i].Name < requested[j].Name
 			}
 			return requested[i].Arity < requested[j].Arity
 		})
-		batch, err := producer.Collect(ctx, backend.CollectionRequest{RepoRoot: options.RepoRoot, WorkspaceRoot: options.WorkspaceRoot, Predicates: slices.Clone(requested)})
+		generation, err := entry.producer.Prepare(ctx, backend.CollectionRequest{RepoRoot: options.RepoRoot, WorkspaceRoot: options.WorkspaceRoot, Predicates: slices.Clone(requested)}, observe.Full)
 		if err != nil {
-			return composedFacts{}, fmt.Errorf("collect producer %q: %w", description.Namespace, err)
+			return composedFacts{}, fmt.Errorf("prepare producer %q: %w", description.Namespace, err)
 		}
-		validated, err := facts.ValidateBatch(description, requested, batch)
+		if generation == nil {
+			return composedFacts{}, fmt.Errorf("producer %q returned a nil generation", description.Namespace)
+		}
+		metadata, err := captureGenerationMetadata(generation.Metadata())
 		if err != nil {
-			return composedFacts{}, fmt.Errorf("producer %q returned an invalid batch: %w", description.Namespace, err)
+			return composedFacts{}, fmt.Errorf("producer %q generation metadata: %w", description.Namespace, err)
 		}
-		for _, hint := range batch.WatchHints {
-			watchHints[hint] = struct{}{}
+		observations = append(observations, metadata.Observations)
+		reusable = reusable && metadata.ReusableFromObservations
+		capturedRecords := metadata.Observations.Records()
+		requestedRoot, _ := filepath.Abs(options.WorkspaceRoot)
+		physicalRoot := requestedRoot
+		for _, record := range capturedRecords {
+			if record.Kind == observe.Resolved && record.Path == requestedRoot {
+				physicalRoot = string(record.Value)
+				break
+			}
 		}
-		requestedNames := make([]string, len(requested))
+		for _, record := range capturedRecords {
+			if record.Kind == observe.Env {
+				continue
+			}
+			hints[filepath.ToSlash(record.Path)] = struct{}{}
+			relative, err := filepath.Rel(physicalRoot, record.Path)
+			if err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+				hints[filepath.ToSlash(filepath.Join(requestedRoot, relative))] = struct{}{}
+			}
+		}
+		predicates := make([]any, len(requested))
 		for i, predicate := range requested {
-			requestedNames[i] = predicate.Name
+			predicates[i] = []any{predicate.Name, predicate.Arity}
 		}
-		producerRecords = append(producerRecords, []any{
-			"producer-result-v2", description.Namespace, description.ImplementationID,
-			description.ImplementationStamp, description.ContractVersion, description.EffectiveConfiguration,
-			validated.InputRevision(), validated.Scope(), requestedNames,
-		})
-		collectedBatches = append(collectedBatches, collected{description, requested, validated})
+		records = append(records, []any{description.Namespace, description.ImplementationID, description.ImplementationStamp, description.ContractVersion, description.EffectiveConfiguration, metadata.InputRevision, metadata.Scope, predicates})
+		preparedGenerations = append(preparedGenerations, prepared{entry, requested, generation, metadata})
 	}
-	encoded, err := canonical.MarshalStructured([]any{"lintai-facts-v2", producerRecords})
+	encoded, err := canonical.MarshalStructured([]any{"lintai-facts-v3", catalog.identity, records})
 	if err != nil {
 		return composedFacts{}, fmt.Errorf("snapshot identity: %w", err)
 	}
 	digest := sha256.Sum256(encoded)
 	snapshotID := "sha256:" + hex.EncodeToString(digest[:])
-	hints := make([]string, 0, len(watchHints))
-	for hint := range watchHints {
-		hints = append(hints, hint)
+	watchHints := make([]string, 0, len(hints))
+	for hint := range hints {
+		watchHints = append(watchHints, hint)
 	}
-	sort.Strings(hints)
+	sort.Strings(watchHints)
+	captured := observe.Union(observations...)
 	if current != nil && current.snapshotID == snapshotID {
 		reused := *current
-		reused.watchHints = hints
+		reused.watchHints, reused.observations, reused.reusableFromObservations = watchHints, captured, reusable
 		return reused, nil
 	}
-	// describeProducers rejects duplicate namespaces and ValidateBatch rejects
-	// anchors outside each producer's namespace. Since Anchors is a map, these
-	// validated batches cannot claim the same anchor ID.
-	for _, item := range collectedBatches {
-		description, requested, validated := item.description, item.requested, item.validated
-		allFacts = append(allFacts, validated.Facts()...)
-		for _, predicate := range requested {
-			factCounts[ast.PredicateSym{Symbol: predicate.Name, Arity: predicate.Arity}] = len(validated.Rows(predicate))
+	base := factstore.NewMultiIndexedArrayInMemoryStore()
+	anchors := make(map[string]facts.AnchorSupport)
+	anchorOwners := make(map[string]string)
+	producerFiles := make(map[string]map[string]struct{})
+	reportable := make(map[facts.Predicate]map[string]struct{})
+	factCounts := make(map[ast.PredicateSym]int)
+	analyzedFiles := make(map[string]struct{})
+	namespaces := make([]string, 0, len(preparedGenerations))
+	for _, item := range preparedGenerations {
+		namespace := item.entry.description.Namespace
+		builder, err := facts.NewBuilder(item.entry.descriptor, item.requested)
+		if err != nil {
+			return composedFacts{}, fmt.Errorf("producer %q demand: %w", namespace, err)
 		}
-		producerAnchors := validated.Anchors()
-		for id, support := range producerAnchors {
-			anchors[id] = support
-			anchorOwners[id] = description.Namespace
+		if err := item.generation.Emit(ctx, builder); err != nil {
+			return composedFacts{}, fmt.Errorf("emit producer %q: %w", namespace, err)
 		}
-		for _, relation := range description.BaseRelations {
-			for _, row := range validated.Rows(relation.Predicate) {
-				for index, argument := range relation.Arguments {
-					if argument.Role != facts.EntityRole || argument.ReportSupport == facts.ReportNone || row[index].Kind != facts.StringKind {
-						continue
-					}
-					id := row[index].String
-					if _, hasSupport := producerAnchors[id]; !hasSupport {
-						continue
-					}
-					if reportable[relation.Predicate] == nil {
-						reportable[relation.Predicate] = make(map[string]struct{})
-					}
-					reportable[relation.Predicate][id] = struct{}{}
-				}
+		validated, err := builder.Finish()
+		if err != nil {
+			return composedFacts{}, fmt.Errorf("producer %q returned invalid facts: %w", namespace, err)
+		}
+		if err := ctx.Err(); err != nil {
+			return composedFacts{}, err
+		}
+		namespaces = append(namespaces, namespace)
+		for _, predicate := range item.requested {
+			factCounts[ast.PredicateSym{Symbol: predicate.Name, Arity: predicate.Arity}] = validated.Count(predicate)
+			reportable[predicate] = validated.Reportable(predicate)
+			for _, atom := range validated.Atoms(predicate) {
+				base.Add(atom)
 			}
 		}
-		producerFiles[description.Namespace] = make(map[string]struct{})
-		for _, file := range validated.AnalyzedFiles() {
-			file = suppressions.NormalizePath(file)
+		for id, support := range validated.Anchors() {
+			anchors[id] = support
+			anchorOwners[id] = namespace
+		}
+		producerFiles[namespace] = make(map[string]struct{})
+		for _, file := range item.metadata.AnalyzedFiles {
 			analyzedFiles[file] = struct{}{}
-			producerFiles[description.Namespace][file] = struct{}{}
+			producerFiles[namespace][file] = struct{}{}
 		}
 	}
-	base, err := facts.Store(allFacts)
-	if err != nil {
-		return composedFacts{}, fmt.Errorf("assembled facts: %w", err)
+	return composedFacts{base: base, sources: catalog.sources, schemaDecls: catalog.schemaDecls, anchors: anchors, anchorOwners: anchorOwners, producerFiles: producerFiles, reportable: reportable, factCounts: factCounts, analyzedFiles: analyzedFiles, namespaces: namespaces, snapshotID: snapshotID, watchHints: watchHints, observations: captured, reusableFromObservations: reusable}, nil
+}
+
+func captureGenerationMetadata(metadata backend.GenerationMetadata) (backend.GenerationMetadata, error) {
+	if metadata.InputRevision == "" {
+		return backend.GenerationMetadata{}, fmt.Errorf("input revision is empty")
 	}
-	files := make([]string, 0, len(analyzedFiles))
-	for file := range analyzedFiles {
+	if _, err := canonical.MarshalStructured(metadata.Scope); err != nil {
+		return backend.GenerationMetadata{}, fmt.Errorf("scope: %w", err)
+	}
+	scope, err := canonical.Normalize(metadata.Scope)
+	if err != nil {
+		return backend.GenerationMetadata{}, err
+	}
+	metadata.Scope = scope
+	files := make([]string, 0, len(metadata.AnalyzedFiles))
+	for _, file := range metadata.AnalyzedFiles {
+		if file == "" {
+			return backend.GenerationMetadata{}, fmt.Errorf("analyzed path is empty")
+		}
+		file = filepath.ToSlash(filepath.Clean(filepath.FromSlash(file)))
+		if file == "." || file == "/" {
+			return backend.GenerationMetadata{}, fmt.Errorf("invalid analyzed path %q", file)
+		}
 		files = append(files, file)
 	}
 	sort.Strings(files)
-	fileSet := make(map[string]struct{}, len(files))
-	for _, file := range files {
-		fileSet[file] = struct{}{}
-	}
-	return composedFacts{
-		base: base, sources: catalog.sources, schemaDecls: catalog.schemaDecls, anchors: anchors, anchorOwners: anchorOwners, producerFiles: producerFiles, reportable: reportable,
-		factCounts: factCounts, analyzedFiles: fileSet, namespaces: usedNamespaces, snapshotID: snapshotID, watchHints: hints,
-	}, nil
+	metadata.AnalyzedFiles = slices.Compact(files)
+	return metadata, nil
 }
 
 func emptyComposedFacts() (composedFacts, error) {
-	base, err := facts.Store(nil)
-	if err != nil {
-		return composedFacts{}, err
-	}
-	encoded, err := canonical.MarshalStructured([]any{"lintai-facts-v2", []any{}})
+	encoded, err := canonical.MarshalStructured([]any{"lintai-facts-v3", "", []any{}})
 	if err != nil {
 		return composedFacts{}, err
 	}
 	digest := sha256.Sum256(encoded)
-	return composedFacts{
-		base: base, schemaDecls: make(map[ast.PredicateSym]ast.Decl), anchors: make(map[string]facts.AnchorSupport),
-		reportable: make(map[facts.Predicate]map[string]struct{}), factCounts: make(map[ast.PredicateSym]int),
-		analyzedFiles: make(map[string]struct{}), snapshotID: "sha256:" + hex.EncodeToString(digest[:]),
-	}, nil
+	return composedFacts{base: factstore.NewMultiIndexedArrayInMemoryStore(), schemaDecls: make(map[ast.PredicateSym]ast.Decl), anchors: make(map[string]facts.AnchorSupport), reportable: make(map[facts.Predicate]map[string]struct{}), factCounts: make(map[ast.PredicateSym]int), analyzedFiles: make(map[string]struct{}), snapshotID: "sha256:" + hex.EncodeToString(digest[:])}, nil
 }
 
 const engineSchemaSource = `Package lintai!

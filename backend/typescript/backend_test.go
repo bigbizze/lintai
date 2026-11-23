@@ -25,8 +25,8 @@ func hasSnapshotInput(snapshot *lintaiapi.Snapshot, path string) bool {
 	return slices.ContainsFunc(snapshot.Inputs, func(input lintaiapi.SnapshotInput) bool { return input.Path == path })
 }
 
-func hasGenerationWatchHint(generation *producerGeneration, path string) bool {
-	return slices.Contains(generation.watchHints, filepath.ToSlash(path))
+func hasGenerationObservation(generation *producerGeneration, path string) bool {
+	return slices.ContainsFunc(generation.observations.Records(), func(record observe.Record) bool { return record.Path == filepath.Clean(path) })
 }
 
 // Inspect the retained producer generation after collecting and validating the
@@ -40,11 +40,8 @@ func (b *Backend) buildTestGeneration(ctx context.Context, repoRoot, workspaceRo
 	for _, relation := range description.BaseRelations {
 		predicates = append(predicates, relation.Predicate)
 	}
-	batch, err := b.Collect(ctx, backend.CollectionRequest{RepoRoot: repoRoot, WorkspaceRoot: workspaceRoot, Predicates: predicates})
+	_, err = inspectEmission(ctx, b, backend.CollectionRequest{RepoRoot: repoRoot, WorkspaceRoot: workspaceRoot, Predicates: predicates})
 	if err != nil {
-		return nil, err
-	}
-	if _, err := facts.ValidateBatch(description, predicates, batch); err != nil {
 		return nil, err
 	}
 	return b.current, nil
@@ -88,13 +85,10 @@ calculate({ value: helper("ok") });
 	if byName["ts.import_package"].Arguments[1].Name != "Package" {
 		t.Fatal("import_package catalog argument does not match Appendix A")
 	}
-	collect := func(predicates []facts.Predicate) facts.Batch {
+	collect := func(predicates []facts.Predicate) emissionView {
 		t.Helper()
-		batch, err := producer.Collect(context.Background(), backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: root, Predicates: predicates})
+		batch, err := inspectEmission(context.Background(), producer, backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: root, Predicates: predicates})
 		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := facts.ValidateBatch(description, predicates, batch); err != nil {
 			t.Fatal(err)
 		}
 		return batch
@@ -103,15 +97,6 @@ calculate({ value: helper("ok") });
 	fnKind := byName["ts.fn_kind"].Predicate
 	if len(full.Relations[fnKind]) == 0 {
 		t.Fatal("fixture did not produce a function kind")
-	}
-	invalidKind := slices.Clone(full.Relations[fnKind][0])
-	invalidKind[1] = facts.Name("not_a_function_kind")
-	invalidBatch := facts.Batch{
-		Relations: map[facts.Predicate][]facts.Row{fnKind: {invalidKind}},
-		Anchors:   map[string]facts.AnchorSupport{invalidKind[0].String: full.Anchors[invalidKind[0].String]},
-	}
-	if _, err := facts.ValidateBatch(description, []facts.Predicate{fnKind}, invalidBatch); err == nil || !strings.Contains(err.Error(), "/not_a_function_kind") {
-		t.Fatalf("expected unaccepted function kind to be rejected, got %v", err)
 	}
 	var stringLiteral, booleanLiteral bool
 	for _, row := range full.Relations[byName["ts.type_literal"].Predicate] {
@@ -146,7 +131,7 @@ calculate({ value: helper("ok") });
 			t.Errorf("%s source description or null key missing: %+v", item.category, support)
 		}
 	}
-	rowSet := func(rows []facts.Row) map[string]bool {
+	rowSet := func(rows [][]facts.Value) map[string]bool {
 		result := make(map[string]bool, len(rows))
 		for _, row := range rows {
 			result[fmt.Sprintf("%#v", row)] = true
@@ -255,18 +240,14 @@ func TestTwoTypeScriptProducersKeepConstructionSettingsIndependent(t *testing.T)
 		for index, relation := range description.BaseRelations {
 			requested[index] = relation.Predicate
 		}
-		batch, err := producer.Collect(context.Background(), backend.CollectionRequest{
+		batch, err := inspectEmission(context.Background(), producer, backend.CollectionRequest{
 			RepoRoot: root, WorkspaceRoot: root, Predicates: requested,
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
-		validated, err := facts.ValidateBatch(description, requested, batch)
-		if err != nil {
-			t.Fatal(err)
-		}
 		var result []string
-		for _, row := range validated.Rows(facts.Predicate{Name: "ts.module", Arity: 1}) {
+		for _, row := range batch.Relations[facts.Predicate{Name: "ts.module", Arity: 1}] {
 			result = append(result, row[0].String)
 		}
 		slices.Sort(result)
@@ -293,9 +274,6 @@ func TestTwoTypeScriptProducersKeepConstructionSettingsIndependent(t *testing.T)
 	if tsconfigProducer.current == generation {
 		t.Fatal("V18: changed content did not replace the producer generation")
 	}
-	if foo, prefixedFoo := producerEntityID("foo.ts"), producerEntityID("ts:foo.ts"); foo == prefixedFoo || foo != "ts:foo.ts" || prefixedFoo != "ts:ts:foo.ts" {
-		t.Fatalf("producer-local entity IDs are not uniquely namespaced: %q and %q", foo, prefixedFoo)
-	}
 }
 
 func TestExactSourceAndExcludedGlobalUseOneProductionScope(t *testing.T) {
@@ -313,7 +291,7 @@ func TestExactSourceAndExcludedGlobalUseOneProductionScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	modules := make([]string, 0)
-	for _, fact := range snapshot.items {
+	for _, fact := range generationItems(t, snapshot) {
 		if fact.Relation == "module_path" {
 			modules = append(modules, fact.Values[1].String)
 		}
@@ -323,23 +301,23 @@ func TestExactSourceAndExcludedGlobalUseOneProductionScope(t *testing.T) {
 		t.Fatalf("exact and ordinary primary modules = %v", modules)
 	}
 	var readID, returnType string
-	for _, fact := range snapshot.items {
+	for _, fact := range generationItems(t, snapshot) {
 		if fact.Relation == "fn" && fact.Values[2].String == "read" {
 			readID = fact.Values[0].String
 		}
 	}
 	var signature string
-	for _, fact := range snapshot.items {
+	for _, fact := range generationItems(t, snapshot) {
 		if fact.Relation == "fn_signature" && fact.Values[0].String == readID {
 			signature = fact.Values[1].String
 		}
 	}
-	for _, fact := range snapshot.items {
+	for _, fact := range generationItems(t, snapshot) {
 		if fact.Relation == "signature_returns" && fact.Values[0].String == signature {
 			returnType = fact.Values[1].String
 		}
 	}
-	if readID == "" || !slices.ContainsFunc(snapshot.items, func(fact facts.Fact) bool {
+	if readID == "" || !slices.ContainsFunc(generationItems(t, snapshot), func(fact testFact) bool {
 		return fact.Relation == "type_kind" && fact.Values[0].String == returnType && fact.Values[1].String == "string"
 	}) {
 		t.Fatalf("excluded global declaration did not affect selected code's inferred return type")
@@ -384,19 +362,16 @@ export function run(): boolean { return effect("ok"); }
 		byName[relation.Predicate.Name] = relation.Predicate
 		all = append(all, relation.Predicate)
 	}
-	collect := func(producer *Backend, predicates []facts.Predicate) facts.Batch {
+	collect := func(producer *Backend, predicates []facts.Predicate) emissionView {
 		t.Helper()
-		batch, err := producer.Collect(context.Background(), backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: root, Predicates: predicates})
+		batch, err := inspectEmission(context.Background(), producer, backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: root, Predicates: predicates})
 		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := facts.ValidateBatch(description, predicates, batch); err != nil {
 			t.Fatal(err)
 		}
 		return batch
 	}
 	full := collect(producer, all)
-	rows := func(batch facts.Batch, name string) []facts.Row { return batch.Relations[byName["ts."+name]] }
+	rows := func(batch emissionView, name string) [][]facts.Value { return batch.Relations[byName["ts."+name]] }
 	if slices.Contains(full.AnalyzedFiles, "src/excluded/effect.ts") || !slices.Contains(full.AnalyzedFiles, "src/main.ts") {
 		t.Fatalf("fixture has wrong primary modules: %v", full.AnalyzedFiles)
 	}
@@ -409,7 +384,7 @@ export function run(): boolean { return effect("ok"); }
 			t.Fatalf("missing %s declaration: %v", name, rows(full, "declaration"))
 		}
 	}
-	if !slices.ContainsFunc(rows(full, "call_declaration"), func(row facts.Row) bool { return row[1].String == ids["effect"] }) {
+	if !slices.ContainsFunc(rows(full, "call_declaration"), func(row []facts.Value) bool { return row[1].String == ids["effect"] }) {
 		t.Fatalf("excluded declaration was not retained for call provenance: %v", rows(full, "call_declaration"))
 	}
 	wantExports := map[string]struct{ space, declaration string }{
@@ -418,7 +393,7 @@ export function run(): boolean { return effect("ok"); }
 	for _, row := range rows(full, "module_export") {
 		binding, ok := wantExports[row[2].String]
 		if !ok || row[1].String != "ts:module:src/main.ts" || row[3].String != binding.space ||
-			!slices.ContainsFunc(rows(full, "export_target"), func(target facts.Row) bool {
+			!slices.ContainsFunc(rows(full, "export_target"), func(target []facts.Value) bool {
 				return target[0].String == row[0].String && target[1].String == binding.declaration
 			}) {
 			t.Fatalf("unexpected retained export or target: %v", row)
@@ -448,8 +423,8 @@ export function run(): boolean { return effect("ok"); }
 		}
 	}
 	for id, space := range want {
-		if !slices.ContainsFunc(rows(full, "declaration_type"), func(row facts.Row) bool { return row[0].String == id && row[1].String == space }) &&
-			!slices.ContainsFunc(rows(full, "declaration_type_incomplete"), func(row facts.Row) bool { return row[0].String == id && row[1].String == space }) {
+		if !slices.ContainsFunc(rows(full, "declaration_type"), func(row []facts.Value) bool { return row[0].String == id && row[1].String == space }) &&
+			!slices.ContainsFunc(rows(full, "declaration_type_incomplete"), func(row []facts.Value) bool { return row[0].String == id && row[1].String == space }) {
 			t.Errorf("subject %s /%s has no type or incomplete reason", id, space)
 		}
 	}
@@ -513,11 +488,11 @@ export function passing() { effect(kept); }
 		return snapshot
 	}
 	walk, filtered := build(FileScopeWalk), build(FileScopeTsconfig)
-	index := func(snapshot *producerGeneration) map[string]map[string]facts.Fact {
-		result := make(map[string]map[string]facts.Fact)
-		for _, fact := range snapshot.items {
+	index := func(snapshot *producerGeneration) map[string]map[string]testFact {
+		result := make(map[string]map[string]testFact)
+		for _, fact := range generationItems(t, snapshot) {
 			if result[fact.Relation] == nil {
-				result[fact.Relation] = make(map[string]facts.Fact)
+				result[fact.Relation] = make(map[string]testFact)
 			}
 			result[fact.Relation][fact.Values[0].String] = fact
 		}
@@ -525,7 +500,7 @@ export function passing() { effect(kept); }
 	}
 	before, after := index(walk), index(filtered)
 	findFunction := func(snapshot *producerGeneration, file, name string) string {
-		for _, fact := range snapshot.items {
+		for _, fact := range generationItems(t, snapshot) {
 			if fact.Relation == "fn" && fact.Values[1].String == file && fact.Values[2].String == name {
 				return fact.Values[0].String
 			}
@@ -562,7 +537,7 @@ export function passing() { effect(kept); }
 	// A call that ceases to be a collected local call must expose its direct
 	// callback argument, while the context where the call remains local must not.
 	for _, pair := range []struct {
-		facts map[string]map[string]facts.Fact
+		facts map[string]map[string]testFact
 		want  bool
 	}{{before, false}, {after, true}} {
 		found := false
@@ -660,7 +635,7 @@ export function run(callback: (n: number) => number, loose: any, callbacks: Arra
 	}
 	locations := make(map[string]int)
 	functions := make(map[string]string)
-	for _, item := range snapshot.items {
+	for _, item := range generationItems(t, snapshot) {
 		switch item.Relation {
 		case "location":
 			if item.Values[1].String == "src/main.ts" {
@@ -676,7 +651,7 @@ export function run(callback: (n: number) => number, loose: any, callbacks: Arra
 	call := make(map[string]bool)
 	provenance := make(map[string]bool)
 	references := make(map[string]string)
-	for _, item := range snapshot.items {
+	for _, item := range generationItems(t, snapshot) {
 		site := item.Values[0].String
 		switch item.Relation {
 		case "fn_value_escape":
@@ -756,17 +731,8 @@ func TestCapturedInputRevisionIgnoresAbsoluteRoot(t *testing.T) {
 	if left.inputRevision != right.inputRevision {
 		t.Fatalf("expected stable input revision across roots, got %q != %q", left.inputRevision, right.inputRevision)
 	}
-	if !hasGenerationWatchHint(left, configOne) || !hasGenerationWatchHint(right, configTwo) {
-		t.Fatalf("lintai.toml was missing from producer watch hints: left=%v right=%v", left.watchHints, right.watchHints)
-	}
-	for _, snapshot := range []*producerGeneration{left, right} {
-		seen := make(map[string]struct{}, len(snapshot.watchHints))
-		for _, path := range snapshot.watchHints {
-			if _, exists := seen[path]; exists {
-				t.Fatalf("watch hint %q was published more than once: %v", path, snapshot.watchHints)
-			}
-			seen[path] = struct{}{}
-		}
+	if !hasGenerationObservation(left, configOne) || !hasGenerationObservation(right, configTwo) {
+		t.Fatal("config content missing from generation observations")
 	}
 }
 
@@ -795,15 +761,15 @@ func TestSymlinkedWorkspaceRootKeepsScopeAndIdentity(t *testing.T) {
 	if !reflect.DeepEqual(realSnapshot.scope, aliasSnapshot.scope) {
 		t.Fatalf("symlinked root changed scope: %v != %v", realSnapshot.scope, aliasSnapshot.scope)
 	}
-	if len(realSnapshot.items) != len(aliasSnapshot.items) {
-		t.Fatalf("symlinked root changed fact count: %d != %d", len(realSnapshot.items), len(aliasSnapshot.items))
+	if len(generationItems(t, realSnapshot)) != len(generationItems(t, aliasSnapshot)) {
+		t.Fatalf("symlinked root changed fact count: %d != %d", len(generationItems(t, realSnapshot)), len(generationItems(t, aliasSnapshot)))
 	}
-	for _, fact := range realSnapshot.items {
-		if !slices.ContainsFunc(aliasSnapshot.items, func(other facts.Fact) bool { return reflect.DeepEqual(fact, other) }) {
+	for _, fact := range generationItems(t, realSnapshot) {
+		if !slices.ContainsFunc(generationItems(t, aliasSnapshot), func(other testFact) bool { return reflect.DeepEqual(fact, other) }) {
 			t.Fatalf("symlinked root lost fact: %+v", fact)
 		}
 	}
-	if !slices.ContainsFunc(aliasSnapshot.items, func(fact facts.Fact) bool {
+	if !slices.ContainsFunc(generationItems(t, aliasSnapshot), func(fact testFact) bool {
 		return fact.Relation == "module_path" && len(fact.Values) > 1 && fact.Values[1].String == "src/a.ts"
 	}) {
 		t.Fatal("symlinked root did not produce the workspace-relative module path")
@@ -818,8 +784,8 @@ func TestSymlinkedWorkspaceRootKeepsScopeAndIdentity(t *testing.T) {
 	if got := workspace.RelativePath(alias, filepath.Join(root, "src/a.ts")); got != "src/a.ts" {
 		t.Fatalf("relative path from symlinked root = %q", got)
 	}
-	if !hasGenerationWatchHint(aliasSnapshot, filepath.Join(alias, "src/a.ts")) {
-		t.Fatalf("symlinked root watch hints = %v", aliasSnapshot.watchHints)
+	if !hasGenerationObservation(aliasSnapshot, alias) || !hasGenerationObservation(aliasSnapshot, filepath.Join(root, "src/a.ts")) {
+		t.Fatal("symlinked root and captured source are missing from observations")
 	}
 	plan, err := workspace.PlanSources(alias, workspace.ScopeOptions{Sources: []string{filepath.Join(alias, "src/a.ts")}})
 	if err != nil {
@@ -1020,7 +986,7 @@ func TestSourceLinksFactsKeepUnappliedEntriesVisible(t *testing.T) {
 	entries := make(map[string]string)
 	statuses := make(map[string][]string)
 	attempts := make(map[string]int)
-	for _, fact := range snapshot.items {
+	for _, fact := range generationItems(t, snapshot) {
 		switch fact.Relation {
 		case "source_entry":
 			entries[fact.Values[1].String] = fact.Values[0].String
@@ -1354,14 +1320,14 @@ export const mapped = [1].map((n) => n);`,
 		t.Fatal(err)
 	}
 	var function string
-	for _, fact := range snapshot.items {
+	for _, fact := range generationItems(t, snapshot) {
 		if fact.Relation == "fn" && fact.Values[1].String == "shared/api.ts" && fact.Values[2].String == "parse" {
 			function = fact.Values[0].String
 		}
 	}
 	signatures := make(map[string]bool)
 	params, returns := make(map[string]string), make(map[string]string)
-	for _, fact := range snapshot.items {
+	for _, fact := range generationItems(t, snapshot) {
 		switch fact.Relation {
 		case "fn_signature":
 			if fact.Values[0].String == function {
@@ -1384,14 +1350,14 @@ export const mapped = [1].map((n) => n);`,
 		}
 	}
 	byName := make(map[string]string)
-	for _, fact := range snapshot.items {
+	for _, fact := range generationItems(t, snapshot) {
 		if fact.Relation == "fn" && fact.Values[1].String == "shared/api.ts" {
 			byName[fact.Values[2].String] = fact.Values[0].String
 		}
 	}
 	var zeroSignature, markedSignature string
 	var omitted bool
-	for _, fact := range snapshot.items {
+	for _, fact := range generationItems(t, snapshot) {
 		switch fact.Relation {
 		case "fn_signature":
 			switch fact.Values[0].String {
@@ -1409,7 +1375,7 @@ export const mapped = [1].map((n) => n);`,
 		}
 	}
 	has := func(relation, signature string, position int64) bool {
-		return slices.ContainsFunc(snapshot.items, func(fact facts.Fact) bool {
+		return slices.ContainsFunc(generationItems(t, snapshot), func(fact testFact) bool {
 			return fact.Relation == relation && fact.Values[0].String == signature && fact.Values[1].Number == position
 		})
 	}
@@ -1420,14 +1386,13 @@ export const mapped = [1].map((n) => n);`,
 	// without acquiring slots or a return from another observation.
 	partial := lintaiapi.FunctionSignatureObservation{ParameterTypes: []string{"", "type:known"}, ReturnType: "", Complete: false}
 	complete := lintaiapi.FunctionSignatureObservation{ParameterTypes: []string{"type:first", "type:second"}, ReturnType: "type:result", Complete: true}
-	projected, err := factsFromSnapshot(&lintaiapi.Snapshot{Functions: []lintaiapi.Function{{
-		SemanticKey: "fn:partial", Kind: "function", Signature: &partial,
-	}, {
-		SemanticKey: "fn:complete", Kind: "function", Signature: &complete,
-	}}}, nil, nil)
+	partialSnapshot := &lintaiapi.Snapshot{Functions: []lintaiapi.Function{{SemanticKey: "fn:partial", Kind: "function", Signature: &partial}, {SemanticKey: "fn:complete", Kind: "function", Signature: &complete}}}
+	description, err := New().Describe()
 	if err != nil {
 		t.Fatal(err)
 	}
+	requested := []facts.Predicate{{Name: "ts.signature_arity", Arity: 2}, {Name: "ts.signature_param", Arity: 3}, {Name: "ts.signature_returns", Arity: 2}, {Name: "ts.signature_complete", Arity: 1}, {Name: "ts.signature_incomplete", Arity: 2}}
+	projected := inspectLocalSnapshot(t, partialSnapshot, nil, nil, description, requested, true)
 	partialID := lintaiapi.SignatureID("fn:partial", partial)
 	var partialArity, partialKnown, incomplete bool
 	for _, fact := range projected {
@@ -1504,35 +1469,32 @@ func TestSourceLinksValidationAndDemand(t *testing.T) {
 		predicates[relation.Predicate.Name] = relation.Predicate
 	}
 	request := backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: root}
-	if _, err := producer.Collect(context.Background(), request); err != nil || producer.current != nil {
-		t.Fatalf("empty demand collected source links: %v", err)
-	}
 	request.Predicates = []facts.Predicate{predicates["ts.module"], predicates["ts.declaration"], predicates["ts.location"], predicates["ts.config_adjusted"]}
-	if _, err := producer.Collect(context.Background(), request); err == nil || !strings.Contains(err.Error(), "invalid --source-links") || producer.current != nil {
+	if _, err := inspectEmission(context.Background(), producer, request); err == nil || !strings.Contains(err.Error(), "invalid --source-links") || producer.current != nil {
 		t.Fatalf("ordinary demand did not reject invalid source links: %v", err)
 	}
 	writeWorkspaceFile(t, root, "source-links.json", valid)
-	if _, err := producer.Collect(context.Background(), request); err != nil {
+	if _, err := inspectEmission(context.Background(), producer, request); err != nil {
 		t.Fatalf("ordinary demand parsed the auxiliary config: %v", err)
 	}
 	generation := producer.current
 	if len(generation.snapshot.SourceEntries) != 0 || len(generation.snapshot.SourceEndpoints) != 0 {
 		t.Fatal("ordinary demand collected correspondence")
 	}
-	if _, err := producer.Collect(context.Background(), request); err != nil || producer.current != generation {
+	if _, err := inspectEmission(context.Background(), producer, request); err != nil || producer.current != generation {
 		t.Fatalf("unchanged ordinary demand did not reuse its generation: %v", err)
 	}
 	writeWorkspaceFile(t, root, "source-links.json", `{"version":2,"entries":[]}`)
-	if _, err := producer.Collect(context.Background(), request); err == nil || (producer.current != nil && producer.current != generation) {
+	if _, err := inspectEmission(context.Background(), producer, request); err == nil || (producer.current != nil && producer.current != generation) {
 		t.Fatalf("failed validation published or returned a new generation: %v", err)
 	}
 	writeWorkspaceFile(t, root, "source-links.json", valid)
 	request.Predicates = []facts.Predicate{predicates["ts.source_entry_incomplete"]}
-	batch, err := producer.Collect(context.Background(), request)
+	batch, err := inspectEmission(context.Background(), producer, request)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.ContainsFunc(batch.Relations[request.Predicates[0]], func(row facts.Row) bool { return row[1] == facts.Name("unsupported") }) {
+	if !slices.ContainsFunc(batch.Relations[request.Predicates[0]], func(row []facts.Value) bool { return row[1] == facts.Name("unsupported") }) {
 		t.Fatalf("correspondence demand did not inspect the auxiliary config: %v", batch.Relations[request.Predicates[0]])
 	}
 }
@@ -1570,25 +1532,22 @@ func TestCorrespondenceIsolationAndProjection(t *testing.T) {
 				all = append(all, relation.Predicate)
 				byName[relation.Predicate.Name] = relation
 			}
-			collect := func(producer *Backend, predicates []facts.Predicate) facts.Batch {
+			collect := func(producer *Backend, predicates []facts.Predicate) emissionView {
 				t.Helper()
-				batch, err := producer.Collect(context.Background(), backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: root, Predicates: predicates})
+				batch, err := inspectEmission(context.Background(), producer, backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: root, Predicates: predicates})
 				if err != nil {
-					t.Fatal(err)
-				}
-				if _, err := facts.ValidateBatch(description, predicates, batch); err != nil {
 					t.Fatal(err)
 				}
 				return batch
 			}
-			rows := func(items []facts.Row) map[string]bool {
+			rows := func(items [][]facts.Value) map[string]bool {
 				set := make(map[string]bool)
 				for _, row := range items {
 					set[fmt.Sprintf("%#v", row)] = true
 				}
 				return set
 			}
-			compare := func(left, right facts.Batch, predicates []facts.Predicate) {
+			compare := func(left, right emissionView, predicates []facts.Predicate) {
 				t.Helper()
 				for _, predicate := range predicates {
 					if !reflect.DeepEqual(rows(left.Relations[predicate]), rows(right.Relations[predicate])) {
@@ -1634,7 +1593,7 @@ func TestCorrespondenceIsolationAndProjection(t *testing.T) {
 			if len(checked) == 0 || len(endpoints) < 2 || len(onFull.Relations[byName["ts.module_owner_config"].Predicate]) == 0 || len(onFull.Relations[byName["ts.module_config"].Predicate]) == 0 {
 				t.Fatalf("fixture lacks ownership or endpoint evidence: checked=%v endpoints=%v", checked, endpoints)
 			}
-			if !slices.ContainsFunc(onFull.Relations[byName["ts.call_declaration"].Predicate], func(row facts.Row) bool { return row[1] == checked[0][1] }) {
+			if !slices.ContainsFunc(onFull.Relations[byName["ts.call_declaration"].Predicate], func(row []facts.Value) bool { return row[1] == checked[0][1] }) {
 				t.Fatal("fixture lacks an endpoint shared with ordinary call provenance")
 			}
 			sourceDeclarations := onFull.Relations[byName["ts.source_binding_source_decl"].Predicate]
@@ -1646,14 +1605,14 @@ func TestCorrespondenceIsolationAndProjection(t *testing.T) {
 			if !ok || support.Location.File != "source/index.ts" || support.Description == "" {
 				t.Fatalf("source-only endpoint lacks reporting support: %+v", support)
 			}
-			if slices.ContainsFunc(onFull.Relations[byName["ts.location"].Predicate], func(row facts.Row) bool { return row[0].String == sourceID }) {
+			if slices.ContainsFunc(onFull.Relations[byName["ts.location"].Predicate], func(row []facts.Value) bool { return row[0].String == sourceID }) {
 				t.Fatal("source-only endpoint added an ordinary location row")
 			}
 			entryConfig := onFull.Relations[byName["ts.source_entry_tsconfig"].Predicate]
 			sourceAdjust := onFull.Relations[byName["ts.source_config_adjusted"].Predicate]
 			owner := onFull.Relations[byName["ts.module_owner_config"].Predicate]
 			ordinaryAdjust := onFull.Relations[byName["ts.config_adjusted"].Predicate]
-			if len(entryConfig) != 1 || !slices.ContainsFunc(sourceAdjust, func(row facts.Row) bool { return row[0] == entryConfig[0][1] }) || !slices.ContainsFunc(ordinaryAdjust, func(row facts.Row) bool { return row[0] == owner[0][1] }) {
+			if len(entryConfig) != 1 || !slices.ContainsFunc(sourceAdjust, func(row []facts.Value) bool { return row[0] == entryConfig[0][1] }) || !slices.ContainsFunc(ordinaryAdjust, func(row []facts.Value) bool { return row[0] == owner[0][1] }) {
 				t.Fatalf("config joins failed: entry=%v source=%v owner=%v ordinary=%v", entryConfig, sourceAdjust, owner, ordinaryAdjust)
 			}
 			writeWorkspaceFile(t, root, "source-links.json", `{"version":1,"entries":[]}`)
@@ -1711,11 +1670,8 @@ func TestCorrespondenceIsolationAndProjection(t *testing.T) {
 		byName[relation.Predicate.Name] = relation.Predicate
 	}
 	predicates := []facts.Predicate{byName["project.module_config"], byName["project.module_owner_config"], byName["project.source_endpoint"]}
-	batch, err := custom.Collect(context.Background(), backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: root, Predicates: predicates})
+	batch, err := inspectEmission(context.Background(), custom, backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: root, Predicates: predicates})
 	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := facts.ValidateBatch(description, predicates, batch); err != nil {
 		t.Fatal(err)
 	}
 	for _, predicate := range predicates {
@@ -1742,11 +1698,8 @@ func TestOutsideOwnerConfigPathJoinsAdjustments(t *testing.T) {
 		byName[relation.Predicate.Name] = relation.Predicate
 	}
 	predicates := []facts.Predicate{byName["ts.module_config"], byName["ts.module_owner_config"], byName["ts.config_adjusted"]}
-	batch, err := producer.Collect(context.Background(), backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: workspace, Predicates: predicates})
+	batch, err := inspectEmission(context.Background(), producer, backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: workspace, Predicates: predicates})
 	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := facts.ValidateBatch(description, predicates, batch); err != nil {
 		t.Fatal(err)
 	}
 	canonicalRoot, err := filepath.EvalSymlinks(root)
@@ -1761,8 +1714,8 @@ func TestOutsideOwnerConfigPathJoinsAdjustments(t *testing.T) {
 	memberships := batch.Relations[byName["ts.module_config"]]
 	adjustments := batch.Relations[byName["ts.config_adjusted"]]
 	if len(owners) != 1 || owners[0][1] != facts.String(want) ||
-		!slices.ContainsFunc(memberships, func(row facts.Row) bool { return row[1] == facts.String(want) }) ||
-		!slices.ContainsFunc(adjustments, func(row facts.Row) bool { return row[0] == facts.String(want) }) {
+		!slices.ContainsFunc(memberships, func(row []facts.Value) bool { return row[1] == facts.String(want) }) ||
+		!slices.ContainsFunc(adjustments, func(row []facts.Value) bool { return row[0] == facts.String(want) }) {
 		t.Fatalf("outside config paths do not join: owner=%v membership=%v adjustments=%v", owners, memberships, adjustments)
 	}
 	if _, ok := batch.Anchors[want]; ok {

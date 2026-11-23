@@ -6,7 +6,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/bigbizze/lintai/backend"
 	"github.com/bigbizze/lintai/facts"
 )
 
@@ -39,31 +38,25 @@ func (e *Session) Facts(ctx context.Context, names []string) (string, error) {
 		}
 		selected[name] = struct{}{}
 	}
-	items := make([]facts.Fact, 0)
+	requested := make(map[string]map[facts.Predicate]struct{})
 	for _, entry := range catalog.entries {
-		requested := make([]facts.Predicate, 0)
 		for _, relation := range entry.description.BaseRelations {
 			if _, ok := selected[relation.Predicate.Name]; len(names) == 0 || ok {
-				requested = append(requested, relation.Predicate)
+				if requested[entry.description.Namespace] == nil {
+					requested[entry.description.Namespace] = make(map[facts.Predicate]struct{})
+				}
+				requested[entry.description.Namespace][relation.Predicate] = struct{}{}
 			}
 		}
-		if len(requested) == 0 {
-			continue
-		}
-		batch, err := entry.producer.Collect(ctx, backend.CollectionRequest{RepoRoot: e.defaults.RepoRoot, WorkspaceRoot: e.defaults.WorkspaceRoot, Predicates: requested})
-		if err != nil {
-			return "", fmt.Errorf("collect producer %q: %w", entry.description.Namespace, err)
-		}
-		validated, err := facts.ValidateBatch(entry.description, requested, batch)
-		if err != nil {
-			return "", fmt.Errorf("producer %q returned an invalid batch: %w", entry.description.Namespace, err)
-		}
-		items = append(items, validated.Facts()...)
+	}
+	assembled, err := catalog.collect(ctx, e.defaults, requested, nil)
+	if err != nil {
+		return "", err
 	}
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
 	sort.Strings(allowed)
-	formatted, err := facts.FormatFacts(items, allowed, names)
+	formatted, err := facts.FormatFacts(assembled.base, allowed, names)
 	return strings.TrimSpace(formatted), err
 }

@@ -4,9 +4,44 @@ import (
 	"fmt"
 	"testing"
 
+	"codeberg.org/TauCeti/mangle-go/ast"
+	"codeberg.org/TauCeti/mangle-go/factstore"
+
 	"github.com/bigbizze/lintai/facts"
 	"github.com/bigbizze/lintai/runtime"
 )
+
+type testFact struct {
+	Relation string
+	Values   []facts.Value
+}
+
+func testStore(items []testFact) (factstore.ReadOnlyFactStore, error) {
+	store := factstore.NewMultiIndexedArrayInMemoryStore()
+	for _, item := range items {
+		args := make([]ast.BaseTerm, len(item.Values))
+		for i, value := range item.Values {
+			switch value.Kind {
+			case facts.StringKind:
+				args[i] = ast.String(value.String)
+			case facts.NumberKind:
+				args[i] = ast.Number(value.Number)
+			case facts.FloatKind:
+				args[i] = ast.Float64(value.Float)
+			case facts.NameKind:
+				name, err := ast.Name("/" + value.String)
+				if err != nil {
+					return nil, err
+				}
+				args[i] = name
+			default:
+				return nil, fmt.Errorf("invalid value kind %d", value.Kind)
+			}
+		}
+		store.Add(ast.NewAtom(item.Relation, args...))
+	}
+	return store, nil
+}
 
 // fn_reaches_ambient must not build the call closure. On this chain the
 // closure has N*(N-1)/2 rows; the 0.6.3 prelude, which joined against
@@ -14,9 +49,9 @@ import (
 func TestFnReachesAmbientScalesLinearly(t *testing.T) {
 	const n = 500
 	fn := func(i int) string { return fmt.Sprintf("f%d", i) }
-	var items []facts.Fact
+	var items []testFact
 	add := func(relation string, values ...facts.Value) {
-		items = append(items, facts.Fact{Relation: relation, Values: values})
+		items = append(items, testFact{Relation: relation, Values: values})
 	}
 	for i := range n {
 		add("fn", facts.String(fn(i)), facts.String("a.ts"), facts.String(fn(i)))
@@ -29,7 +64,7 @@ func TestFnReachesAmbientScalesLinearly(t *testing.T) {
 	add("ambient_use", facts.String("use"), facts.Name("clock"), facts.Name("read"))
 	add("site_owner", facts.String("use"), facts.String(fn(n-1)))
 	items, anchors, reportable := qualifyTestFacts(t, items)
-	base, err := facts.Store(items)
+	base, err := testStore(items)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,9 +80,9 @@ func TestFnReachesAmbientScalesLinearly(t *testing.T) {
 }
 
 func TestTypeOpacityPolicyAcceptsLibraryLeavesAndChecksArguments(t *testing.T) {
-	var items []facts.Fact
+	var items []testFact
 	add := func(relation string, values ...facts.Value) {
-		items = append(items, facts.Fact{Relation: relation, Values: values})
+		items = append(items, testFact{Relation: relation, Values: values})
 	}
 	add("fn_signature", facts.String("fn:hidden"), facts.String("sig:hidden"))
 	add("fn_signature", facts.String("fn:plain"), facts.String("sig:plain"))
@@ -71,7 +106,7 @@ func TestTypeOpacityPolicyAcceptsLibraryLeavesAndChecksArguments(t *testing.T) {
 	add("type_arg", facts.String("array-string"), facts.Number(0), facts.String("string"))
 
 	items, anchors, reportable := qualifyTestFacts(t, items)
-	base, err := facts.Store(items)
+	base, err := testStore(items)
 	if err != nil {
 		t.Fatal(err)
 	}

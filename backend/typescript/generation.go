@@ -17,8 +17,8 @@ import (
 )
 
 // validateGeneration checks exactly the observations captured for this generation.
-func (b *Backend) validateGeneration(ctx context.Context, generation *producerGeneration) (bool, error) {
-	changed, err := generation.observations.Changed(ctx, observe.Full)
+func (b *Backend) validateGeneration(ctx context.Context, generation *producerGeneration, mode observe.Mode) (bool, error) {
+	changed, err := generation.observations.Changed(ctx, mode)
 	return changed == nil && err == nil, err
 }
 
@@ -60,7 +60,7 @@ func (b *Backend) extractSnapshot(ctx context.Context, workspaceRoot string, rel
 		if b.beforeValidation != nil {
 			b.beforeValidation()
 		}
-		stable, err := b.validateGeneration(ctx, generation)
+		stable, err := b.validateGeneration(ctx, generation, observe.Full)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -123,27 +123,11 @@ func (b *Backend) finishGeneration(generation *producerGeneration, workspaceRoot
 		}
 	}
 	snapshot.Inputs = uniqueSnapshotInputs(snapshot.Inputs)
-	addWatchHint := func(path string) {
-		relative := relativeScopePath(plan.Root, path)
-		if !filepath.IsAbs(filepath.FromSlash(relative)) {
-			path = filepath.ToSlash(filepath.Join(requestedRoot, filepath.FromSlash(relative)))
-		}
-		generation.watchHints = append(generation.watchHints, path)
+	description, err := b.Describe()
+	if err != nil {
+		return err
 	}
-	for _, input := range snapshot.Inputs {
-		addWatchHint(input.Path)
-	}
-	if b.settings.ConfigPath != "" {
-		addWatchHint(filepath.ToSlash(b.settings.ConfigPath))
-	}
-	for _, record := range plan.Observations.Records() {
-		if record.Kind == observe.Listing {
-			generation.watchHints = append(generation.watchHints, filepath.ToSlash(record.Path))
-		}
-	}
-	slices.Sort(generation.watchHints)
-	generation.watchHints = slices.Compact(generation.watchHints)
-	revision = combineInputRevisions(revision, plan.Revision)
+	revision = combineInputRevisions(revision, plan.Revision, description.EffectiveConfiguration)
 	generation.scope = scopeIdentity(plan, snapshot, tsconfigFiles)
 	generation.inputRevision = revision
 	return nil
@@ -167,7 +151,7 @@ func uniqueSnapshotInputs(items []lintaiapi.SnapshotInput) []lintaiapi.SnapshotI
 }
 
 func combineInputRevisions(values ...any) string {
-	encoded, err := canonical.Marshal(append([]any{"typescript-input-revision-v2"}, values...))
+	encoded, err := canonical.MarshalStructured(append([]any{"typescript-input-revision-v3"}, values...))
 	if err != nil {
 		return ""
 	}

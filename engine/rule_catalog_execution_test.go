@@ -290,8 +290,8 @@ func TestRulesWithoutBaseDependenciesSkipProducerCollection(t *testing.T) {
 	if len(result.Diagnostics) != 0 {
 		t.Fatalf("fact-free rule unexpectedly produced findings: %+v", result.Diagnostics)
 	}
-	if producer.collectCalls.Load() != 0 {
-		t.Fatalf("producer was collected although no prepared rule needs facts (%d calls)", producer.collectCalls.Load())
+	if producer.prepareCalls.Load() != 0 {
+		t.Fatalf("producer was collected although no prepared rule needs facts (%d calls)", producer.prepareCalls.Load())
 	}
 }
 
@@ -342,8 +342,8 @@ export default rule("fixture.locked-out").version(1)
 	if len(result.Diagnostics) != 1 || result.Diagnostics[0].Phase != "integrity" {
 		t.Fatalf("config-only change should require lock approval before setup, got %+v", result.Diagnostics)
 	}
-	if producer.collectCalls.Load() != 0 {
-		t.Fatalf("producer facts were collected for a rule rejected by lock integrity (%d calls)", producer.collectCalls.Load())
+	if producer.prepareCalls.Load() != 0 {
+		t.Fatalf("producer facts were collected for a rule rejected by lock integrity (%d calls)", producer.prepareCalls.Load())
 	}
 	lock, _, err = BuildRulesLock(context.Background(), options)
 	if err != nil {
@@ -393,7 +393,7 @@ func TestRulesLockReportsMissingRulesWhenInventoryEmpty(t *testing.T) {
 			!strings.Contains(result.Diagnostics[0].Message, "in the rules lock but was not found") {
 			t.Fatalf("expected missing-rule integrity diagnostic, got %+v", result.Diagnostics)
 		}
-		if result.RulesLoaded != 0 || len(result.AnalyzedFiles) != 0 || producer.collectCalls.Load() != 0 || result.SuppressionsWritten {
+		if result.RulesLoaded != 0 || len(result.AnalyzedFiles) != 0 || producer.prepareCalls.Load() != 0 || result.SuppressionsWritten {
 			t.Fatalf("empty discovery collected facts or wrote suppressions: %+v", result)
 		}
 		if _, err := os.Stat(options.SuppressionsLocation); !os.IsNotExist(err) {
