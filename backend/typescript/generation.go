@@ -29,46 +29,34 @@ func (b *Backend) extractSnapshot(ctx context.Context, workspaceRoot string, rel
 	}
 	sources := ambient.Builtin()
 	options := workspace.ScopeOptions{Exclude: b.settings.WorkspaceExcludes, Include: b.settings.Includes, Sources: b.settings.Sources, InvocationExclude: b.settings.Excludes}
-	for attempt := 0; attempt < 2; attempt++ {
-		plan, err := workspace.PlanSources(workspaceRoot, options)
+	plan, err := workspace.PlanSources(workspaceRoot, options)
+	if err != nil {
+		return nil, nil, err
+	}
+	sourceLinks := b.settings.SourceLinks
+	if filepath.IsAbs(sourceLinks) {
+		requestedRoot, err := filepath.Abs(workspaceRoot)
 		if err != nil {
 			return nil, nil, err
 		}
-		sourceLinks := b.settings.SourceLinks
-		if filepath.IsAbs(sourceLinks) {
-			requestedRoot, err := filepath.Abs(workspaceRoot)
-			if err != nil {
-				return nil, nil, err
-			}
-			relative := relativeScopePath(requestedRoot, sourceLinks)
-			if !filepath.IsAbs(filepath.FromSlash(relative)) {
-				sourceLinks = filepath.Join(plan.Root, filepath.FromSlash(relative))
-			}
-		}
-		snapshot, err := lintaiapi.BuildSnapshotReusingTracking(ctx, lintaiapi.BuildSnapshotRequest{
-			WorkspaceRoot: plan.Root, Files: plan.Files, ExactFiles: plan.ExactFiles,
-			SourceLinks: sourceLinks, AmbientMatchers: convertAmbientMatchers(sources),
-			RequestedRelations: relations, TsconfigFiles: scope == FileScopeTsconfig,
-		}, previous)
-		if err != nil {
-			return nil, nil, err
-		}
-		generation := &producerGeneration{snapshot: snapshot, plan: plan}
-		if err := b.finishGeneration(generation, workspaceRoot, scope == FileScopeTsconfig); err != nil {
-			return nil, nil, err
-		}
-		if b.beforeValidation != nil {
-			b.beforeValidation()
-		}
-		stable, err := b.validateGeneration(ctx, generation, observe.Full)
-		if err != nil {
-			return nil, nil, err
-		}
-		if stable {
-			return generation, sources, nil
+		relative := relativeScopePath(requestedRoot, sourceLinks)
+		if !filepath.IsAbs(filepath.FromSlash(relative)) {
+			sourceLinks = filepath.Join(plan.Root, filepath.FromSlash(relative))
 		}
 	}
-	return nil, nil, fmt.Errorf("inputs_changed: compiler inputs or source membership changed during collection")
+	snapshot, err := lintaiapi.BuildSnapshotReusingTracking(ctx, lintaiapi.BuildSnapshotRequest{
+		WorkspaceRoot: plan.Root, Files: plan.Files, ExactFiles: plan.ExactFiles,
+		SourceLinks: sourceLinks, AmbientMatchers: convertAmbientMatchers(sources),
+		RequestedRelations: relations, TsconfigFiles: scope == FileScopeTsconfig,
+	}, previous)
+	if err != nil {
+		return nil, nil, err
+	}
+	generation := &producerGeneration{snapshot: snapshot, plan: plan}
+	if err := b.finishGeneration(generation, workspaceRoot, scope == FileScopeTsconfig); err != nil {
+		return nil, nil, err
+	}
+	return generation, sources, nil
 }
 
 func compilerObservations(inputs []lintaiapi.CompilerObservation) (observe.Set, error) {

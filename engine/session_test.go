@@ -189,7 +189,9 @@ export default rule("fixture.setup-refresh").version(1)
 	value := writeTestFile(t, workspace, "setup-value", "first")
 	options := parallelFixtureOptions(repo, workspace)
 	options.SetupSandbox = bundle.SetupSandboxOff
-	session := Open(options, newParallelFixtureProducer())
+	producer := newParallelFixtureProducer()
+	producer.reusable = true
+	session := Open(options, producer)
 	defer session.Close()
 	for i := 0; i < 2; i++ {
 		result, err := session.Check(context.Background())
@@ -205,6 +207,14 @@ export default rule("fixture.setup-refresh").version(1)
 	if err := os.WriteFile(value, []byte("all"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	projected, err := session.Refresh(context.Background(), options, "catalog/items.sql")
+	if err != nil || len(projected.Diagnostics) != 1 {
+		t.Fatalf("unobserved setup input should not invalidate refresh: %+v %v", projected, err)
+	}
+	count, err = os.ReadFile(filepath.Join(workspace, "setup-count"))
+	if err != nil || string(count) != "2" {
+		t.Fatalf("unchanged refresh reran setup: setup=%q err=%v", count, err)
+	}
 	result, err := session.Check(context.Background())
 	if err != nil || len(result.Diagnostics) != 3 || session.currentFacts.base != index {
 		t.Fatalf("changed setup did not re-execute on the retained facts: %+v %v", result, err)
@@ -219,7 +229,7 @@ func TestComposedFactsCaptureCurrentEligibilityWithoutReemission(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	empty, err := catalog.collect(context.Background(), Options{}, nil, nil)
+	empty, err := catalog.collect(context.Background(), Options{}, nil, nil, observe.Full)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +238,7 @@ func TestComposedFactsCaptureCurrentEligibilityWithoutReemission(t *testing.T) {
 	}
 	predicate := facts.Predicate{Name: "catalog.item", Arity: 2}
 	demand := map[string]map[facts.Predicate]struct{}{"catalog": {predicate: {}}}
-	first, err := catalog.collect(context.Background(), Options{}, demand, &empty)
+	first, err := catalog.collect(context.Background(), Options{}, demand, &empty, observe.Full)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -240,7 +250,7 @@ func TestComposedFactsCaptureCurrentEligibilityWithoutReemission(t *testing.T) {
 		t.Fatal(err)
 	}
 	producer.observations, producer.reusable = set, true
-	next, err := catalog.collect(context.Background(), Options{}, demand, &first)
+	next, err := catalog.collect(context.Background(), Options{}, demand, &first, observe.Full)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +258,7 @@ func TestComposedFactsCaptureCurrentEligibilityWithoutReemission(t *testing.T) {
 		t.Fatal("equal identity failed to reuse facts with freshly captured eligibility")
 	}
 	producer.observations = observe.Set{}
-	immutable, err := catalog.collect(context.Background(), Options{}, demand, &next)
+	immutable, err := catalog.collect(context.Background(), Options{}, demand, &next, observe.Full)
 	if err != nil || !immutable.reusableFromObservations || len(immutable.observations.Records()) != 0 {
 		t.Fatalf("immutable empty observation promise: %v", err)
 	}

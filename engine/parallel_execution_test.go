@@ -59,7 +59,7 @@ func TestParallelRuleExecutionContract(t *testing.T) {
 		}
 		active.Add(-1)
 	}
-	parallelResult, parallelRun, parallelEvidence, err := engine.analyzeWithEvidence(context.Background(), parallelOptions)
+	parallelResult, parallelRun, parallelEvidence, err := engine.analyzeWithEvidence(context.Background(), parallelOptions, observe.Full)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestParallelRuleExecutionContract(t *testing.T) {
 		}
 		sequentialActive.Add(-1)
 	}
-	sequentialResult, sequentialRun, sequentialEvidence, err := engine.analyzeWithEvidence(context.Background(), sequentialOptions)
+	sequentialResult, sequentialRun, sequentialEvidence, err := engine.analyzeWithEvidence(context.Background(), sequentialOptions, observe.Full)
 	if err != nil {
 		t.Fatal(err)
 	}

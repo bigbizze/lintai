@@ -254,7 +254,7 @@ The asset root is the directory that contains `scripts/bundle-rule.mjs` and `scr
 
 ### Rule bundles fail unexpectedly
 
-The artifact identity covers the coherent inputs consumed by both bundle outputs: rule and generated-entry source, tool identity, configuration, package metadata and module-resolution observations. An input that changes, disappears, or cannot be accounted for during bundling produces a per-rule bundle error; lintai does not publish or reuse an incomplete artifact. Retry after the edit is complete.
+The artifact identity covers the coherent inputs consumed by both bundle outputs: rule and generated-entry source, tool identity, configuration, package metadata and module-resolution observations. The bundler rejects an incoherent or escaping captured view. A later file edit does not change the captured identity; the next check validates the evidence before reuse. Retry after the edit is complete if the captured view could not be built.
 
 Each rule execution uses a fresh pure JavaScript runtime. Its program and message callbacks share state during that run, and the next execution starts with fresh module state. Metadata listing uses a separate runtime and does not invoke rule callbacks. See [the rules-lock reference](api.md#rules-lock) for artifact identity and integrity checks.
 

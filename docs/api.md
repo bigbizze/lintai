@@ -135,6 +135,7 @@ Current caveats:
 For each rule:
 
 1. `setup()` runs in Node, under the setup sandbox when it is active (see [trust.md](trust.md)). Errors use phase `setup`. When a rules lock is given, each rule is checked against it before its `setup()` runs. A mismatch uses phase `integrity`, and the rule does not run.
+
 2. `facts()` and `program()` run in Goja. Errors use phase `program`.
 3. Go parses the prelude and the program. Parse errors use phase `program_parse`.
 4. Go analyzes and stratifies the program, with the base relations and the `facts()` relations as extensional predicates. Errors use phase `program_analysis`. This includes: a redefined base or prelude predicate, a `.report()` or `.expectNonEmpty()` name that does not exist, a reported predicate without `Decl`, a `facts()` relation without an `extensional()` declaration, a wrong tuple arity, and unsafe negation.
@@ -142,6 +143,8 @@ For each rule:
 6. `expectNonEmpty` predicates are checked. Errors use phase `premise`.
 7. Each row of each reported predicate becomes a diagnostic. Anchor errors use phase `report`.
 8. `message()` runs for each row. Errors use phase `message`.
+
+Go callers using `Session.Refresh` may reuse a successful result without rerunning setup. Ambient reads made by config transforms or setup are not automatically observed; use `Session.Check` to force preparation after those inputs change. The current editor server runs checks rather than this Go refresh shortcut.
 
 A failing rule contributes only its error diagnostic. Other rules still run. Diagnostics are sorted by file, start line, start column, rule id, assertion id and anchor, so the output is identical across runs.
 
@@ -614,7 +617,7 @@ Rules lock:
 }
 ```
 
-The artifact hash covers captured rule source, configuration and resolution inputs, including imported `@lintai/sdk` code, the suppression policy, and the bundler and generated-entry identity. The prepare and pure bundles use the same captured view. A changed, missing or incomplete input causes a bundle error instead of publishing or reusing that artifact. The lock also approves the current suppression groups and counts. New groups or increased counts require approval; reduced counts and removed groups do not. A recording under an enforced lock that would exceed approval fails without writing. To approve changes, record without the prior lock, review the suppression file, and explicitly regenerate the lock.
+The artifact hash covers captured rule source, configuration and resolution inputs, including imported `@lintai/sdk` code, the suppression policy, and the bundler and generated-entry identity. The prepare and pure bundles use the same captured view, and the bundler rejects an incoherent or escaping view. A result retains the captured evidence even if a file changes after capture; a later check validates that evidence before reuse. The lock also approves the current suppression groups and counts. New groups or increased counts require approval; reduced counts and removed groups do not. A recording under an enforced lock that would exceed approval fails without writing. To approve changes, record without the prior lock, review the suppression file, and explicitly regenerate the lock.
 
 With `--rules-lock`, lintai checks each rule against the lock after bundling and before `setup()`. These are `rule_execution_error` diagnostics with phase `integrity`, and exit code 3:
 
@@ -647,7 +650,7 @@ Exit codes:
 | 0 | No error diagnostics. |
 | 1 | At least one error-severity violation or unused suppression remains, and no execution failure took priority. |
 | 2 | Invalid arguments, configuration, saved format or suppression policy, including `suppression_policy_mismatch`. |
-| 3 | Integrity, setup, rule, producer, cancellation or input-instability failure. Violations from other rules may still be in the output. |
+| 3 | Integrity, setup, rule, producer, cancellation or incoherent bundle input failure. Violations from other rules may still be in the output. |
 
 CLI caveats:
 
