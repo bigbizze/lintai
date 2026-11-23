@@ -63,6 +63,13 @@ function lintedFile(context: Rule.RuleContext): LintedFile {
 // rules. The rule list is read once, when the config calls this function.
 export function createLintaiPlugin(options: LintaiOptions = {}): LintaiPlugin {
 	const lintai = createLintaiRules(options, eslintHostDefaults());
+	const beginFileAnalysis = (context: Rule.RuleContext) => {
+		const file = lintedFile(context);
+		// ESLint creates every enabled rule listener before Program traversal.
+		// These invalidations therefore all precede the one shared response read.
+		lintai.invalidateAnalysis(file);
+		return file;
+	};
 	const rules: Record<string, Rule.RuleModule> = { ...authoringRules };
 	for (const item of lintai.rules) {
 		rules[item.id] = {
@@ -72,9 +79,10 @@ export function createLintaiPlugin(options: LintaiOptions = {}): LintaiPlugin {
 				schema: [],
 			},
 			create(context) {
+				const file = beginFileAnalysis(context);
 				return {
 					Program() {
-						lintai.lintRule(item.id, lintedFile(context));
+						lintai.lintRule(item.id, file);
 					},
 				};
 			},
@@ -90,9 +98,10 @@ export function createLintaiPlugin(options: LintaiOptions = {}): LintaiPlugin {
 			schema: [],
 		},
 		create(context) {
+			const file = beginFileAnalysis(context);
 			return {
 				Program() {
-					lintai.lintAnalysis(lintedFile(context));
+					lintai.lintAnalysis(file);
 				},
 			};
 		},
