@@ -63,7 +63,7 @@ type InitializeParams struct {
 	Severity map[string]string `json:"severity,omitempty"`
 	// RulesLock is the path of a rules lock file to enforce.
 	RulesLock string `json:"rulesLock,omitempty"`
-	// SetupSandbox is "auto", "on" or "off". The default is auto.
+	// SetupSandbox is "on" or "off". The default is on.
 	SetupSandbox string `json:"setupSandbox,omitempty"`
 	// SuppressionsLocation is the path of the suppressions file. The
 	// default is lintai-suppressions.json at the workspace root.

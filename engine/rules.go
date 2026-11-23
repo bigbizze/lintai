@@ -71,6 +71,9 @@ func openRuleCatalog(ctx context.Context, options Options) (*ruleCatalog, error)
 }
 
 func openRuleCatalogWithCache(ctx context.Context, options Options, engine *Session, lock *RulesLock) (*ruleCatalog, error) {
+	if _, err := bundle.NodeExecutable(ctx); err != nil {
+		return nil, err
+	}
 	paths, err := discoverRulePaths(options.WorkspaceRoot, options.RuleGlobs, lock != nil && len(lock.Rules) > 0)
 	if err != nil {
 		return nil, err

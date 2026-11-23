@@ -194,6 +194,7 @@ test("serve initialization failure falls back to oneshot mode", () => {
 				workspaceRoot: "/workspace",
 				rules: ["lintai-rules/**/*.ts"],
 				factLimit: 1234,
+				setupSandbox: "off",
 			},
 			"/repo",
 			editorHost,
@@ -227,6 +228,7 @@ test("serve initialization failure falls back to oneshot mode", () => {
 	assert.deepEqual(client.getDiagnostics("src/fallback.ts"), oneshotDiagnostics);
 	assert.equal(oneshotCalls, 1);
 	assert.equal(oneshotArgs[oneshotArgs.indexOf("--fact-limit") + 1], "1234");
+	assert.equal(oneshotArgs[oneshotArgs.indexOf("--setup-sandbox") + 1], "off");
 	assert.match(warnings.join("\n"), /falling back to oneshot mode/);
 	client.dispose();
 });
@@ -923,6 +925,7 @@ test("missing semantic inputs invalidate diagnostics as their parent directories
 				workspaceRoot,
 				rules: ["lintai-rules/**/*.ts"],
 				sourceLinks: "source-links.json",
+				setupSandbox: "off",
 			},
 			"/repo",
 			editorHost,
@@ -954,6 +957,7 @@ test("missing semantic inputs invalidate diagnostics as their parent directories
 		assert.equal(client.getDiagnostics("src/app.ts")[0]?.rule_id, "arch.missing-map");
 		const inputWrite = Buffer.concat(initializeWrites).toString("utf8");
 		assert.ok(inputWrite.includes(`"sourceLinks":${JSON.stringify(path.join(workspaceRoot, "source-links.json"))}`));
+		assert.ok(inputWrite.includes('"setupSandbox":"off"'));
 		// Let the one-time post-install check settle before testing unrelated events.
 		await new Promise((resolve) => setTimeout(resolve, 250));
 		assert.equal(client.getDiagnostics("src/app.ts")[0]?.rule_id, "arch.missing-map");

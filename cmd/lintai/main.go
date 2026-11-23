@@ -410,7 +410,7 @@ func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 	var severities stringList
 	flags.Var(&severities, "severity", "rule severity as <rule-id>=error|warning|off (repeatable; default: error)")
 	rulesLock := flags.String("rules-lock", "", "rules lock file to enforce (see lintai lock); a changed, new or removed rule is a rule error with phase integrity")
-	setupSandbox := flags.String("setup-sandbox", string(bundle.SetupSandboxAuto), "run setup() under the Node permission model: auto, on or off")
+	setupSandbox := flags.String("setup-sandbox", string(bundle.SetupSandboxOn), "run setup() under the Node permission model: on or off (default on)")
 	suppressAll := flags.Bool("suppress-all", false, "record every error-severity violation in the suppressions file")
 	var suppressRules stringList
 	flags.Var(&suppressRules, "suppress-rule", "record the error-severity violations of this rule in the suppressions file (repeatable)")

@@ -5,105 +5,69 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 )
 
 // SetupSandbox selects whether setup() runs under the Node permission model.
 type SetupSandbox string
 
 const (
-	// SetupSandboxAuto sandboxes setup() when Node supports the permission
-	// model, and otherwise runs it as before with a warning.
-	SetupSandboxAuto SetupSandbox = "auto"
-	// SetupSandboxOn sandboxes setup() and fails when Node does not support
-	// the permission model.
+	// SetupSandboxOn sandboxes setup().
 	SetupSandboxOn SetupSandbox = "on"
 	// SetupSandboxOff runs setup() with full Node capabilities.
 	SetupSandboxOff SetupSandbox = "off"
 )
 
-// ParseSetupSandbox parses auto, on or off. An empty value is auto.
+// ParseSetupSandbox parses on or off. An empty value defaults to on.
 func ParseSetupSandbox(value string) (SetupSandbox, error) {
 	switch SetupSandbox(value) {
-	case "", SetupSandboxAuto:
-		return SetupSandboxAuto, nil
-	case SetupSandboxOn, SetupSandboxOff:
-		return SetupSandbox(value), nil
+	case "", SetupSandboxOn:
+		return SetupSandboxOn, nil
+	case SetupSandboxOff:
+		return SetupSandboxOff, nil
 	}
-	return "", fmt.Errorf("invalid setup sandbox %q: use auto, on or off", value)
+	return "", fmt.Errorf("invalid setup sandbox %q: use on or off", value)
 }
 
-var nodeVersion = sync.OnceValues(func() ([3]int, error) {
-	output, err := exec.CommandContext(context.Background(), "node", "--version").Output()
+var stableNodeVersion = regexp.MustCompile(`^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
+
+// NodeExecutable resolves and validates the Node executable that will actually
+// be launched. Resolve it each time so PATH changes cannot bypass the check.
+func NodeExecutable(ctx context.Context) (string, error) {
+	const requirement = "install stable Node >=26.13.1 and <27 and put it on PATH"
+	node, err := exec.LookPath("node")
 	if err != nil {
-		return [3]int{}, fmt.Errorf("could not run node --version: %w", err)
+		return "", fmt.Errorf("could not find node: %w; %s", err, requirement)
 	}
-	return parseNodeVersion(strings.TrimSpace(string(output)))
-})
-
-func parseNodeVersion(text string) ([3]int, error) {
-	parts := strings.SplitN(strings.TrimPrefix(text, "v"), ".", 3)
-	if len(parts) != 3 {
-		return [3]int{}, fmt.Errorf("unexpected node --version output %q", text)
-	}
-	var version [3]int
-	for index, part := range parts {
-		number, err := strconv.Atoi(strings.SplitN(part, "-", 2)[0])
-		if err != nil {
-			return [3]int{}, fmt.Errorf("unexpected node --version output %q", text)
-		}
-		version[index] = number
-	}
-	return version, nil
-}
-
-// supportsSandbox reports a Node release with the stable --permission flag:
-// 22.13 and later 22.x releases, and 23.5 and later. Node 23.0 to 23.4 has
-// only --experimental-permission.
-func supportsSandbox(version [3]int) bool {
-	major, minor := version[0], version[1]
-	switch {
-	case major == 22:
-		return minor >= 13
-	case major == 23:
-		return minor >= 5
-	}
-	return major > 23
-}
-
-// ResolveSetupSandbox decides whether setup() runs in the sandbox. It checks
-// the Node version once per process. For auto on an old Node, it returns
-// false and a warning to print. For on, an old Node is an error.
-func ResolveSetupSandbox(mode SetupSandbox) (sandbox bool, warning string, err error) {
-	if mode == SetupSandboxOff {
-		return false, "", nil
-	}
-	version, err := nodeVersion()
+	node, err = filepath.Abs(node)
 	if err != nil {
-		if mode == SetupSandboxOn {
-			return false, "", err
-		}
-		return false, fmt.Sprintf("lintai: setup() runs without a sandbox: %v", err), nil
+		return "", fmt.Errorf("could not resolve node executable: %w; %s", err, requirement)
 	}
-	if supportsSandbox(version) {
-		return true, "", nil
+	output, err := exec.CommandContext(ctx, node, "--version").Output()
+	if err != nil {
+		return "", fmt.Errorf("could not run %s --version: %w; %s", node, err, requirement)
 	}
-	text := fmt.Sprintf("Node %d.%d.%d does not support the permission model; the setup sandbox needs Node 22.13 or later, or 23.5 or later", version[0], version[1], version[2])
-	if mode == SetupSandboxOn {
-		return false, "", fmt.Errorf("--setup-sandbox=on: %s", text)
+	version := strings.TrimSpace(string(output))
+	parts := stableNodeVersion.FindStringSubmatch(version)
+	if parts == nil {
+		return "", fmt.Errorf("unsupported Node version %q from %s; %s (prereleases are not supported)", version, node, requirement)
 	}
-	return false, "lintai: setup() runs without a sandbox: " + text, nil
+	major, majorErr := strconv.Atoi(parts[1])
+	minor, minorErr := strconv.Atoi(parts[2])
+	patch, patchErr := strconv.Atoi(parts[3])
+	if majorErr != nil || minorErr != nil || patchErr != nil || major != 26 || minor < 13 || (minor == 13 && patch < 1) {
+		return "", fmt.Errorf("unsupported Node version %q from %s; %s", version, node, requirement)
+	}
+	return node, nil
 }
 
 // sandboxArgs returns the node arguments that run the prepare script under
 // the permission model. The process can read the workspace, the bundles and
-// the asset root. It cannot write files, start child processes or workers.
-// On Node 25 and later the network is also denied, because no --allow-net
-// is given. On Node 22.13 to 24 the permission model does not restrict the
-// network.
+// the asset root. It cannot write files, start child processes or workers,
+// or access the network.
 //
 // Node resolves the real path of the script and of each module, so a path
 // that goes through a symbolic link is also allowed as its real path.
