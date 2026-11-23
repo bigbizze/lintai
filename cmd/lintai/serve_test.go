@@ -95,6 +95,20 @@ export default rule("example.modules").version(1)
 		}
 		return result
 	}
+	batch := func(names ...string) server.FilesDiagnosticsResult {
+		t.Helper()
+		response := call("diagnostics/files", map[string]any{"files": names})
+		if response.Error != nil {
+			t.Fatalf("batch: %+v", response.Error)
+		}
+		var result server.FilesDiagnosticsResult
+		raw, _ := json.Marshal(response.Result)
+		if err := json.Unmarshal(raw, &result); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+
 	init := call("initialize", server.InitializeParams{RepoRoot: repo, AssetRoot: filepath.Join(repo, "packages/client"), WorkspaceRoot: root, RuleGlobs: []string{rulePath}, SetupSandbox: "off", RuleWorkers: 1, Files: "walk"})
 	if init.Error != nil || composition == nil || composition.session != nil {
 		t.Fatalf("handshake analyzed: %+v", init)
@@ -110,6 +124,18 @@ export default rule("example.modules").version(1)
 	if got := file("b.ts"); len(got.Diagnostics) != 0 {
 		t.Fatalf("excluded source: %+v", got)
 	}
+	initialBatch := batch("a.ts", "b.ts", "a.ts")
+	if len(initialBatch.Files) != 3 || len(initialBatch.Files[0].Diagnostics) != 1 || len(initialBatch.Files[1].Diagnostics) != 0 || len(initialBatch.Files[2].Diagnostics) != 1 {
+		t.Fatalf("batch projections: %+v", initialBatch)
+	}
+	for _, projected := range initialBatch.Files {
+		individual := file(projected.File)
+		left, _ := json.Marshal(projected.Diagnostics)
+		right, _ := json.Marshal(individual.Diagnostics)
+		if string(left) != string(right) || initialBatch.SnapshotVersion != individual.SnapshotVersion {
+			t.Fatalf("batch/file mismatch: %s / %s", left, right)
+		}
+	}
 	initial := composition.session
 	write(configPath, config("b.ts")+"# comment only\n")
 	if got := file("a.ts"); len(got.Diagnostics) != 1 || composition.session != initial {
@@ -124,7 +150,7 @@ export default rule("example.modules").version(1)
 	}
 	prior := composition.session
 	write(configPath, "[workspace\n")
-	broken := call("diagnostics/file", map[string]any{"file": "b.ts"})
+	broken := call("diagnostics/files", map[string]any{"files": []string{"a.ts", "b.ts"}})
 	if broken.Error == nil || broken.Error.Code != -32010 || composition.session != nil {
 		t.Fatalf("invalid config did not clear the previous session: %+v", broken)
 	}
@@ -132,7 +158,7 @@ export default rule("example.modules").version(1)
 		t.Fatal("invalid config retained the prior session")
 	}
 	write(configPath, config("a.ts"))
-	if got := file("b.ts"); len(got.Diagnostics) != 1 {
+	if got := batch("a.ts", "b.ts"); len(got.Files[0].Diagnostics) != 0 || len(got.Files[1].Diagnostics) != 1 {
 		t.Fatalf("configuration recovery: %+v", got)
 	}
 	write(ambient, "off")
@@ -148,11 +174,11 @@ export default rule("example.modules").version(1)
 	}
 	write(ambient, "on")
 	write(rulePath, "export default (\n")
-	if got := file("b.ts"); len(got.Problems) == 0 {
+	if got := batch("a.ts", "b.ts"); len(got.Problems) == 0 {
 		t.Fatalf("syntax error not reported: %+v", got)
 	}
 	write(rulePath, rule)
-	if got := file("b.ts"); len(got.Diagnostics) != 1 || len(got.Problems) != 0 {
+	if got := batch("a.ts", "b.ts"); len(got.Files[1].Diagnostics) != 1 || len(got.Problems) != 0 {
 		t.Fatalf("rule recovery: %+v", got)
 	}
 	previous := composition.session

@@ -27,7 +27,7 @@ Rules can identify the checked signature and lexical contract member at a call s
 
 This release adds public export and declaration inventories, checked-to-source declaration associations, explicit type-opacity facts, and suspension sites for `await`, `for await`, and module-scope suspension. Shared lexical ownership keeps call, reference, and suspension facts attached to the correct function or module. Rule listings expose validated versions, reported predicates, and `expectNonEmpty` declarations.
 
-Source associations report incomplete or ambiguous evidence instead of guessing. The session validates producer inputs before reusing analysis; the server validates captured inputs on each file request. Library-type opacity remains explicit; accepting it also trusts any merged augmentations. See the predicate reference below and [examples.md](examples.md) for rule-author guidance.
+Source associations report incomplete or ambiguous evidence instead of guessing. The session validates producer inputs before reusing analysis; the server validates captured inputs on each independent file or explicit multi-file request. Library-type opacity remains explicit; accepting it also trusts any merged augmentations. See the predicate reference below and [examples.md](examples.md) for rule-author guidance.
 
 ## Linear reachability predicates (0.6.4)
 
@@ -717,6 +717,32 @@ Linter rule caveats:
 - rule errors always appear under `lintai/analysis` at the level of `lintai/analysis`, whatever level the rule has, so a broken rule cannot pass as a warning or be hidden by `"off"`
 - `lintai rules` takes about 0.1 to 0.3 s for 1 to 20 rules. It runs once for each plugin construction.
 
+### Explicit ESLint multi-file operations
+
+ESLint's rule callbacks do not expose the `lintFiles()` boundary or its complete file list. A caller that has the exact concrete files can wrap the operation on the same plugin instance:
+
+```js
+import { ESLint } from "eslint";
+import { createLintaiPlugin } from "@lintai/eslint-plugin";
+
+const plugin = createLintaiPlugin({ mode: "serve" });
+const files = ["src/a.js", "src/b.js"]; // Complete list of concrete paths, not globs.
+const eslint = new ESLint({
+  overrideConfigFile: true,
+  overrideConfig: [plugin.configs.all],
+  concurrency: "off",
+});
+const results = await plugin.withFileBatch(files, async ({ problems }) => {
+  // Available even if analysis failed or files is empty. lintai/analysis also reports them.
+  if (problems.length) console.error(problems.join("\n"));
+  return eslint.lintFiles(files);
+});
+```
+
+Add the application's normal language/parser configuration to `overrideConfig` as needed. Relative paths resolve from the lintai workspace root. Supply every physical file whose enabled lintai rule can run; a file omitted from the list throws instead of silently appearing clean. In serve mode the wrapper makes one `diagnostics/files` request, resolving configuration and validating or reanalyzing once, then uses its ordered file projections and current workspace problems for the callback. A request failure is present in `problems` and is reported by `lintai/analysis`; the callback still runs so the caller can handle it. Throw from the callback if the caller prefers to stop. Existing one-shot mode keeps its one-shot behavior.
+
+The response belongs only to that invocation and is discarded when the callback's returned promise settles, including on a throw. Each later invocation requests a fresh result. Nested or overlapping calls have separate async contexts and retain their own results, even if ESLint reuses a `SourceCode`. The wrapper covers callbacks running in its async context in the same process and using that plugin instance; ESLint worker processes do not inherit it. Work left running after the callback settles and ordinary editor callbacks outside the wrapper use independent file requests, each with workspace validation. Unsaved-buffer handling is unchanged. The batch is a completed publication, not a filesystem transaction: edits during the operation can be reflected by the next operation.
+
 ## ESLint plugin reference and caveats
 
 Install:
@@ -765,7 +791,7 @@ Plugin caveats:
 - each file request validates the recorded inputs and reloads changed configuration; source and rule changes are picked up on the next lint pass. There is no background refresh. Quick validation can miss a same-size edit whose modification time was deliberately restored; forced `reanalyze` performs a Full check.
 - a newly discovered rule's findings appear through `lintai/analysis` with restart guidance until the linter reloads its plugin and registers the ID. Changes to an existing rule implementation need no restart.
 - when lintai cannot produce diagnostics, `lintai/analysis` reports the reason on line 1 of each linted file, so a broken setup does not look like a clean workspace. In an `eslint` CLI run, these messages appear on the first linted file only.
-- Each ESLint verification that runs an enabled lintai rule starts a fresh file request, including when `Linter.verify` receives a previously used `SourceCode` object. Enabled lintai rules in that verification share the response, even when `lintai/analysis` is disabled.
+- Outside an explicit `withFileBatch` callback, each ESLint verification that runs an enabled lintai rule starts a fresh file request, including when `Linter.verify` receives a previously used `SourceCode` object. Enabled lintai rules in that verification share the response, even when `lintai/analysis` is disabled.
 - the ESLint path never computes `explanation`
 
 ## Oxlint plugin reference and caveats

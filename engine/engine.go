@@ -226,14 +226,24 @@ func (e *Session) Check(ctx context.Context, requests ...Options) (Result, error
 	return cloneResult(result.result), nil
 }
 
-// Refresh validates the current read-only result and projects one file, or
-// runs a new analysis using Quick validation when its evidence has changed.
+// Refresh validates the current read-only result and projects one file.
 func (e *Session) Refresh(ctx context.Context, options Options, file string) (FileResult, error) {
+	result, err := e.RefreshFiles(ctx, options, []string{file})
+	if err != nil {
+		return FileResult{}, err
+	}
+	return FileResult{Diagnostics: result.Diagnostics[0], WorkspaceProblems: result.WorkspaceProblems,
+		SnapshotVersion: result.SnapshotVersion, RulesLoaded: result.RulesLoaded, Warnings: result.Warnings}, nil
+}
+
+// RefreshFiles validates or reanalyzes once, then projects all files from the
+// same completed publication. The order and duplicates in files are retained.
+func (e *Session) RefreshFiles(ctx context.Context, options Options, files []string) (FilesResult, error) {
 	e.checkMu.Lock()
 	defer e.checkMu.Unlock()
 	checkCtx, finish, err := e.beginCheck(ctx)
 	if err != nil {
-		return FileResult{}, err
+		return FilesResult{}, err
 	}
 	defer finish()
 	success := false
@@ -244,13 +254,13 @@ func (e *Session) Refresh(ctx context.Context, options Options, file string) (Fi
 	}()
 	options, key, err := effectiveOptions(options)
 	if err != nil {
-		return FileResult{}, err
+		return FilesResult{}, err
 	}
 	if options.SuppressAll || len(options.SuppressRules) != 0 || options.PruneSuppressions {
-		return FileResult{}, fmt.Errorf("refresh cannot record or prune suppressions")
+		return FilesResult{}, fmt.Errorf("refresh cannot record or prune suppressions")
 	}
 	if err := checkCtx.Err(); err != nil {
-		return FileResult{}, err
+		return FilesResult{}, err
 	}
 	e.mu.Lock()
 	current := e.currentResult
@@ -258,28 +268,28 @@ func (e *Session) Refresh(ctx context.Context, options Options, file string) (Fi
 	if current != nil && current.reusable && current.requestKey == key {
 		changed, err := current.observations.Changed(checkCtx, observe.Quick)
 		if err != nil {
-			return FileResult{}, err
+			return FilesResult{}, err
 		}
 		if changed == nil {
 			e.mu.Lock()
 			defer e.mu.Unlock()
 			if e.closed {
-				return FileResult{}, fmt.Errorf("session is closed")
+				return FilesResult{}, fmt.Errorf("session is closed")
 			}
 			if err := checkCtx.Err(); err != nil {
-				return FileResult{}, err
+				return FilesResult{}, err
 			}
 			success = true
-			return current.project(file), nil
+			return current.projectFiles(files), nil
 		}
 	}
 	e.clearPublished()
 	current, err = e.runAndPublish(checkCtx, options, key, observe.Quick)
 	if err != nil {
-		return FileResult{}, err
+		return FilesResult{}, err
 	}
 	success = true
-	return current.project(file), nil
+	return current.projectFiles(files), nil
 }
 
 func (e *Session) clearPublished() {

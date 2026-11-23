@@ -273,6 +273,17 @@ func (s *serveSession) Refresh(ctx context.Context, options engine.Options, file
 	return s.session.Refresh(ctx, options, file)
 }
 
+func (s *serveSession) RefreshFiles(ctx context.Context, options engine.Options, files []string) (engine.FilesResult, error) {
+	if err := s.configure(ctx, false); err != nil {
+		return engine.FilesResult{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		_ = s.Close()
+		return engine.FilesResult{}, err
+	}
+	return s.session.RefreshFiles(ctx, options, files)
+}
+
 func (s *serveSession) Close() error {
 	s.receipt = false
 	s.config = workspace.WorkspaceConfig{}

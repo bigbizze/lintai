@@ -2,6 +2,7 @@ import path from "node:path";
 
 import { rules as authoringRules } from "@lintai/authoring-rules";
 import {
+	type BatchOperation,
 	type HostDefaults,
 	type LintaiOptions,
 	type LintedFile,
@@ -10,7 +11,7 @@ import {
 } from "@lintai/client";
 import type { ESLint, Rule } from "eslint";
 
-export type { LintaiOptions } from "@lintai/client";
+export type { BatchOperation, LintaiOptions } from "@lintai/client";
 
 // The ESLint CLI lints each file once, so it runs lintai once (oneshot) and
 // reports workspace problems on the first file only. An editor lints files
@@ -33,6 +34,10 @@ export function eslintHostDefaults(argv: string[] = process.argv): HostDefaults 
 
 export type LintaiPlugin = {
 	meta: { name: "lintai" };
+	withFileBatch<T>(
+		files: readonly string[],
+		run: (operation: BatchOperation) => T | Promise<T>,
+	): Promise<T>;
 	rules: Record<string, Rule.RuleModule>;
 	configs: {
 		all: LintaiConfig;
@@ -115,6 +120,7 @@ export function createLintaiPlugin(options: LintaiOptions = {}): LintaiPlugin {
 	);
 	const plugin: LintaiPlugin = {
 		meta: { name: "lintai" },
+		withFileBatch: lintai.withFileBatch,
 		rules,
 		configs: {} as LintaiPlugin["configs"],
 	};

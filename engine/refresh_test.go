@@ -142,13 +142,29 @@ func TestRefreshPublicationAndReuse(t *testing.T) {
 		t.Fatalf("projection or detachment: %+v %+v %v %v", other, current, err, currentErr)
 	}
 
+	files := []string{"catalog/items.sql", "another.ts", "catalog/items.sql"}
+	batch, err := session.RefreshFiles(context.Background(), options, files)
+	if err != nil || batch.SnapshotVersion != current.SnapshotVersion || len(batch.Diagnostics) != len(files) || counts() != before {
+		t.Fatalf("batch refresh: %+v %v", batch, err)
+	}
+	for i, file := range files {
+		want := current.DiagnosticsFor(file)
+		if len(batch.Diagnostics[i]) != len(want) || (len(want) > 0 && !reflect.DeepEqual(batch.Diagnostics[i], want)) {
+			t.Fatalf("batch projection %d: got %+v want %+v", i, batch.Diagnostics[i], want)
+		}
+	}
+	batch.Diagnostics[0][0].Message = "batch mutation"
+	if batch.Diagnostics[2][0].Message == "batch mutation" {
+		t.Fatal("duplicate file projections share mutable diagnostics")
+	}
+
 	options.Env = map[string]any{"shape": map[string]any{"a": "b"}}
 	if _, err := session.Refresh(context.Background(), options, "catalog/items.sql"); err != nil {
 		t.Fatal(err)
 	}
 	policy := writeTestFile(t, workspace, "lintai-suppressions.json", "invalid")
-	if _, err := session.Refresh(context.Background(), options, "catalog/items.sql"); err == nil {
-		t.Fatal("changed suppressions were not re-read")
+	if result, err := session.RefreshFiles(context.Background(), options, files); err == nil || len(result.Diagnostics) != 0 {
+		t.Fatal("changed suppressions returned an old batch")
 	}
 	if _, err := session.Current(); err == nil {
 		t.Fatal("failed policy read left an old success")
@@ -156,8 +172,8 @@ func TestRefreshPublicationAndReuse(t *testing.T) {
 	if err := os.Remove(policy); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := session.Refresh(context.Background(), options, "catalog/items.sql"); err != nil {
-		t.Fatal(err)
+	if result, err := session.RefreshFiles(context.Background(), options, files); err != nil || len(result.Diagnostics[0]) != 3 {
+		t.Fatalf("batch recovery: %+v %v", result, err)
 	}
 	objectCount := evaluations.Load()
 	options.Env = map[string]any{"shape": []any{[]any{"a", "b"}}}

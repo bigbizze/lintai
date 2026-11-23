@@ -1,9 +1,11 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { realpathSync } from "node:fs";
 import path from "node:path";
 
 import { suppressionOverlaps } from "./suppressions.js";
 
 import {
+	type FileAnalysis,
 	type HostDefaults,
 	type LintaiOptions,
 	type ResolvedBridgeOptions,
@@ -45,6 +47,10 @@ export type LintedFile = {
 	report(report: Report): void;
 };
 
+// The completed batch's workspace problems, including a request failure. The
+// same problems are also available to lintai/analysis during the callback.
+export type BatchOperation = { problems: readonly string[] };
+
 export type LintaiRules = {
 	// rules are the lintai rules that get a linter rule lintai/<id>, sorted
 	// by id. A rule whose id is known but that cannot run, for example
@@ -53,6 +59,10 @@ export type LintaiRules = {
 	rules: ReadonlyArray<{ id: string; path: string }>;
 	lintRule(id: string, file: LintedFile): void;
 	lintAnalysis(file: LintedFile): void;
+	withFileBatch<T>(
+		files: readonly string[],
+		run: (operation: BatchOperation) => T | Promise<T>,
+	): Promise<T>;
 	// Invalidate a previous response when the host begins a new file analysis.
 	invalidateAnalysis(file: LintedFile): void;
 };
@@ -67,7 +77,15 @@ export function createLintaiRules(
 	cwd: string = process.cwd(),
 ): LintaiRules {
 	if (options.rules !== undefined && options.rules.length === 0) {
-		return { rules: [], lintRule() {}, lintAnalysis() {}, invalidateAnalysis() {} };
+		return {
+			rules: [],
+			lintRule() {},
+			lintAnalysis() {},
+			invalidateAnalysis() {},
+			async withFileBatch(_files, run) {
+				return run({ problems: [] });
+			},
+		};
 	}
 	const resolved = resolveBridgeOptions(options, cwd, host);
 	const list = getClient(resolved).listRuleIds();
@@ -99,19 +117,30 @@ export function createLintaiRules(
 	}
 	// Both hosts invalidate each enabled rule's identity in create(), before
 	// Program traversal, so the first response is shared only for this analysis.
-	const analyses = new WeakMap<
-		object,
-		{ response: ReturnType<ReturnType<typeof getClient>["getFileAnalysis"]> | undefined }
-	>();
+	const analyses = new WeakMap<object, { response: FileAnalysis | undefined }>();
+	type Batch = { active: boolean; files: Map<string, FileAnalysis>; analyses: typeof analyses };
+	const batches = new AsyncLocalStorage<Batch>();
+	const currentBatch = () => {
+		const batch = batches.getStore();
+		return batch?.active ? batch : undefined;
+	};
 	let reportedOverlaps = "";
 	const responseFor = (file: LintedFile) => {
-		const cached = analyses.get(file.analysis);
+		const batch = currentBatch();
+		const cache = batch?.analyses ?? analyses;
+		const cached = cache.get(file.analysis);
 		if (cached) return cached.response;
+		const name = workspacePath(resolved, file.physicalFilename);
+		if (batch && !batch.files.has(name)) {
+			throw new Error(`lintai: file ${name} was not supplied to withFileBatch`);
+		}
 		const response =
 			resolved.mode === "serve" && hasUnsavedChanges(file.physicalFilename, file.text)
 				? undefined
-				: getClient(resolved).getFileAnalysis(workspacePath(resolved, file.physicalFilename));
-		analyses.set(file.analysis, { response });
+				: batch
+					? batch.files.get(name)
+					: getClient(resolved).getFileAnalysis(name);
+		cache.set(file.analysis, { response });
 		return response;
 	};
 
@@ -171,8 +200,25 @@ export function createLintaiRules(
 				}
 			}
 		},
+		async withFileBatch(files, run) {
+			const names = files.map((file) => {
+				if (!file.trim()) throw new Error("withFileBatch requires non-empty file paths");
+				return workspacePath(resolved, path.resolve(resolved.workspaceRoot, file));
+			});
+			const result = getClient(resolved).getFilesAnalysis(names);
+			const batch: Batch = { active: true, files: new Map(), analyses: new WeakMap() };
+			for (let i = 0; i < names.length; i++) batch.files.set(names[i], result.files[i]);
+			return batches.run(batch, async () => {
+				try {
+					return await run({ problems: result.problems });
+				} finally {
+					batch.active = false;
+					batch.files.clear();
+				}
+			});
+		},
 		invalidateAnalysis(file) {
-			analyses.delete(file.analysis);
+			(currentBatch()?.analyses ?? analyses).delete(file.analysis);
 		},
 	};
 }

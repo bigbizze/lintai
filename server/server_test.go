@@ -31,6 +31,19 @@ func (f *fakeAnalyzer) Refresh(_ context.Context, options engine.Options, file s
 	}
 	return engine.FileResult{SnapshotVersion: "snap", RulesLoaded: 1, Diagnostics: []diagnostics.Diagnostic{{RuleID: "located", Message: file}}, WorkspaceProblems: []diagnostics.Diagnostic{{RuleID: "bad", DiagnosticKind: diagnostics.KindRuleExecutionError, Phase: "setup", Message: "failed"}}, Warnings: []string{"warning"}}, nil
 }
+func (f *fakeAnalyzer) RefreshFiles(ctx context.Context, options engine.Options, files []string) (engine.FilesResult, error) {
+	f.refreshCalls = append(f.refreshCalls, options)
+	if f.fail {
+		f.fail = false
+		return engine.FilesResult{}, errors.New("broken input")
+	}
+	result := engine.FilesResult{SnapshotVersion: "snap", RulesLoaded: 1, Diagnostics: make([][]diagnostics.Diagnostic, len(files)), WorkspaceProblems: []diagnostics.Diagnostic{{RuleID: "bad", DiagnosticKind: diagnostics.KindRuleExecutionError, Phase: "setup", Message: "failed"}}, Warnings: []string{"warning"}}
+	for i, file := range files {
+		result.Diagnostics[i] = []diagnostics.Diagnostic{{RuleID: "located", Message: file}}
+	}
+	return result, nil
+}
+
 func (f *fakeAnalyzer) Check(_ context.Context, options ...engine.Options) (engine.Result, error) {
 	f.checkCalls = append(f.checkCalls, options[0])
 	return engine.Result{SnapshotVersion: "forced", RulesLoaded: 1, Diagnostics: []diagnostics.Diagnostic{{RuleID: "bad", DiagnosticKind: diagnostics.KindRuleExecutionError, Message: "failed"}}, Warnings: []string{"warning"}}, nil
@@ -90,6 +103,20 @@ func TestProtocolHandshakeRecoveryAndForcedReanalysis(t *testing.T) {
 	if warnings.String() != "warning\n" {
 		t.Fatalf("warnings: %q", warnings.String())
 	}
+	before := len(first.refreshCalls)
+	batched := call(7, "diagnostics/files", FilesDiagnosticsParams{Files: []string{"b.ts", "a.ts", "b.ts"}})
+	if batched.Error != nil {
+		t.Fatalf("batch error: %+v", batched.Error)
+	}
+	batch := batched.Result.(FilesDiagnosticsResult)
+	if len(first.refreshCalls) != before+1 || len(batch.Files) != 3 || batch.Files[0].File != "b.ts" || batch.Files[1].Diagnostics[0].Message != "a.ts" || !reflect.DeepEqual(batch.Problems, file.Problems) {
+		t.Fatalf("batch projection or analyzer call count: %+v", batch)
+	}
+	for _, invalid := range []any{map[string]any{}, map[string]any{"files": []string{"a.ts", " "}}} {
+		if got := call(8, "diagnostics/files", invalid); got.Error == nil || got.Error.Code != errCodeInvalidParams {
+			t.Fatalf("invalid batch: %+v", got)
+		}
+	}
 	call(7, "initialize", params)
 	if first.closed != 1 || len(second.refreshCalls) != 0 || len(second.checkCalls) != 0 {
 		t.Fatalf("replacement: first=%+v second=%+v", first, second)
@@ -142,6 +169,10 @@ type emptyAnalyzer struct{ closed bool }
 func (*emptyAnalyzer) Refresh(context.Context, engine.Options, string) (engine.FileResult, error) {
 	return engine.FileResult{}, nil
 }
+func (*emptyAnalyzer) RefreshFiles(_ context.Context, _ engine.Options, files []string) (engine.FilesResult, error) {
+	return engine.FilesResult{Diagnostics: make([][]diagnostics.Diagnostic, len(files))}, nil
+}
+
 func (*emptyAnalyzer) Check(context.Context, ...engine.Options) (engine.Result, error) {
 	return engine.Result{}, nil
 }
