@@ -2,12 +2,8 @@ export { startSpawner } from "./spawner.js";
 
 export {
 	LintAIClient,
-	createFramedResponse,
-	createTestDependencies,
-	createTestProcess,
 	getClient,
 	loadRuleIds,
-	resetClientsForTest,
 	resolveBridgeOptions,
 	type Diagnostic,
 	type HostDefaults,

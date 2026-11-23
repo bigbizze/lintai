@@ -12,7 +12,6 @@ import (
 	"github.com/bigbizze/lintai/internal/tsgo/internal/contentmapper"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/core"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/module"
-	"github.com/bigbizze/lintai/internal/tsgo/internal/packagejson"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/tsoptions"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/tspath"
 )
@@ -22,7 +21,6 @@ type auxiliarySourceProgram struct {
 	checker              *checker.Checker
 	resolver             module.Resolver
 	done                 func()
-	inputs               []SnapshotInput
 	semanticBindingCache *semanticBindingCache
 }
 
@@ -120,8 +118,7 @@ func (a *auxiliarySourcePrograms) forEntry(entry configuredSourceEntry) (*auxili
 		item = &auxiliarySourceProgram{program: program, checker: typeChecker, resolver: resolver, done: done, semanticBindingCache: newSemanticBindingCache()}
 		a.programs[cacheKey] = item
 		inputExtractor := &extractor{workspaceRoot: a.workspaceRoot, program: program, host: a.host}
-		inputExtractor.recordProgramInputs()
-		item.inputs = inputExtractor.inputs
+		inputExtractor.probeProgramFiles()
 		a.timing.auxiliaryProgram += time.Since(started)
 	}
 	if configPath != "" {
@@ -135,7 +132,6 @@ func (a *auxiliarySourcePrograms) forEntry(entry configuredSourceEntry) (*auxili
 		workspaceRoot: a.workspaceRoot, host: a.host, program: item.program, resolver: item.resolver, checker: item.checker,
 		declarations: make(map[string]*DeclarationFact), semanticBindingCache: item.semanticBindingCache,
 	}
-	ex.inputs = append(ex.inputs, item.inputs...)
 	return &auxiliarySourceView{file: file, ex: ex}, ""
 }
 
@@ -244,7 +240,7 @@ func (e *extractor) applyConfiguredSourceEntries(entries []configuredSourceEntry
 		e.sourceEntryFacts = append(e.sourceEntryFacts, SourceEntryFact{
 			ID: entry.ID, CheckedEntry: entry.CheckedEntry, SourceEntry: entry.SourceEntry, Tsconfig: entry.SourceConfig, Applied: true,
 		})
-		e.inputs = append(e.inputs, SnapshotInput{Path: entry.CheckedPath, Exists: true}, SnapshotInput{Path: entry.SourcePath, Exists: e.host.FS().FileExists(tspath.RootedFilePathFromAbsolute(entry.SourcePath))})
+		e.host.FS().FileExists(tspath.RootedFilePathFromAbsolute(entry.SourcePath))
 		e.recordSourceConfigCandidates(entry.SourcePath)
 		sourceProgram, sourceOutcome := auxiliary.forEntry(entry)
 		if sourceOutcome == "" {
@@ -308,7 +304,6 @@ func (e *extractor) applyConfiguredSourceEntries(entries []configuredSourceEntry
 			e.declarationSourceCandidates = append(e.declarationSourceCandidates, sourceProgram.ex.declarationSourceCandidates...)
 			e.declarationSources = append(e.declarationSources, sourceProgram.ex.declarationSources...)
 			e.declarationSourceOutcomes = append(e.declarationSourceOutcomes, sourceProgram.ex.declarationSourceOutcomes...)
-			e.inputs = append(e.inputs, sourceProgram.ex.inputs...)
 			e.trackingKeyBuilds += sourceProgram.ex.trackingKeyBuilds
 			for id, support := range sourceProgram.ex.sourceTracking {
 				if e.sourceTracking == nil {
@@ -416,29 +411,21 @@ func (e *extractor) addDeclarationEndpoint(node *ast.Node, symbol *ast.Symbol, p
 	return id, supported
 }
 
-func (e *extractor) recordProgramInputs() {
+func (e *extractor) probeProgramFiles() {
 	for _, file := range e.program.FilesByPath() {
 		if file == nil {
 			continue
 		}
 		path := normalizeSlash(file.FileName().AsString())
 		// Bundled compiler libraries are virtual URLs served by the bundled
-		// filesystem. They are not workspace inputs and must not be handed to
-		// the OS-backed snapshot hasher as paths such as bundled:///libs/....
+		// filesystem, and are covered by the compiler implementation stamp.
 		if tspath.IsUrl(path) || strings.HasPrefix(path, "^/") {
 			continue
 		}
 		if rooted, ok := tspath.TryRootedFilePathFromAbsolute(path); ok {
-			e.inputs = append(e.inputs, SnapshotInput{Path: path, Exists: e.host.FS().FileExists(rooted)})
+			e.host.FS().FileExists(rooted)
 		}
 	}
-	e.program.PackageJsonCacheEntries(func(_ tspath.PathKey, entry *packagejson.InfoCacheEntry) bool {
-		if entry != nil {
-			path := normalizeSlash(entry.PackageDirectory.ResolveFile("package.json").AsString())
-			e.inputs = append(e.inputs, SnapshotInput{Path: path, Exists: entry.Exists()})
-		}
-		return true
-	})
 }
 
 func (e *extractor) recordSourceConfigCandidates(sourcePath string) {
@@ -450,7 +437,9 @@ func (e *extractor) recordSourceConfigCandidates(sourcePath string) {
 	for {
 		candidate := normalizeSlash(current + "/tsconfig.json")
 		rooted, ok := tspath.TryRootedFilePathFromAbsolute(candidate)
-		e.inputs = append(e.inputs, SnapshotInput{Path: candidate, Exists: ok && e.host.FS().FileExists(rooted)})
+		if ok {
+			e.host.FS().FileExists(rooted)
+		}
 		if current == root {
 			return
 		}

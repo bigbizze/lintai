@@ -351,7 +351,7 @@ func newParallelFixtureProducer() *parallelFixtureProducer {
 	rows := make([][]facts.Value, 3)
 	anchors := make(map[string]facts.AnchorSupport, len(rows))
 	for index, code := range []string{"a", "b", "c"} {
-		entity := "catalog:item-" + code
+		entity := "item-" + code
 		rows[index] = []facts.Value{facts.String(entity), facts.String(code)}
 		anchors[entity] = facts.AnchorSupport{
 			Location:    diagnostics.SourceLocation{File: "catalog/items.sql", StartLine: index + 1, StartColumn: 1, EndLine: index + 1, EndColumn: 5},
@@ -396,14 +396,12 @@ func (g *parallelGeneration) Emit(ctx context.Context, builder *facts.Builder) e
 		if err != nil {
 			return err
 		}
-		for _, original := range g.producer.rows {
-			row := append([]facts.Value(nil), original...)
-			row[0].String = strings.TrimPrefix(row[0].String, g.producer.description.Namespace+":")
+		for _, row := range g.producer.rows {
 			builder.Add(relation, row...)
 		}
 	}
 	for id, support := range g.producer.anchors {
-		builder.Anchor(strings.TrimPrefix(id, g.producer.description.Namespace+":"), support)
+		builder.Anchor(id, support)
 	}
 	return ctx.Err()
 }

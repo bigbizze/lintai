@@ -21,8 +21,6 @@ type WorkspaceConfig struct {
 	Include      []string
 	Sources      []string
 	Producers    map[string]ProducerConfig
-	Path         string
-	Digest       string
 	Observations observe.Set
 }
 
@@ -77,10 +75,8 @@ func LoadWorkspaceConfig(path string, optional bool) (WorkspaceConfig, error) {
 		}
 		return WorkspaceConfig{}, fmt.Errorf("read config %s: %w", path, err)
 	}
-	result.Path = absolute
 	digest := sha256.Sum256(contents)
-	result.Digest = hex.EncodeToString(digest[:])
-	records = append(records, observe.Record{Kind: observe.Content, Path: absolute, Value: observe.Value(result.Digest)})
+	records = append(records, observe.Record{Kind: observe.Content, Path: absolute, Value: observe.Value(hex.EncodeToString(digest[:]))})
 	result.Observations, err = observe.New(records)
 	if err != nil {
 		return WorkspaceConfig{}, err

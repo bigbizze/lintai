@@ -20,7 +20,6 @@ import (
 	"github.com/bigbizze/lintai/internal/tsgo/internal/scanner"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/tsoptions"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/tspath"
-	"github.com/bigbizze/lintai/internal/tsgo/internal/vfs"
 	"github.com/bigbizze/lintai/internal/tsgo/internal/vfs/osvfs"
 )
 
@@ -212,12 +211,6 @@ type SourceBindingFact struct {
 	Incomplete          []string
 }
 
-type SnapshotInput struct {
-	Path        string
-	Exists      bool
-	OptionalMap bool
-}
-
 type ExportSiteFact struct {
 	ID       string
 	Location SourceLocation
@@ -382,12 +375,6 @@ type Snapshot struct {
 	SourceBindings              []SourceBindingFact
 	SourceEndpoints             []SourceEndpointFact
 	SourceTracking              map[string]TrackingSupport
-	// ConfigFiles are the absolute paths of the tsconfig files that the
-	// snapshot read, including extended and referenced configs.
-	ConfigFiles []string
-	// Inputs includes program, configuration, and association inputs, including
-	// absent paths. ConfigFiles remains the list of present configs.
-	Inputs []SnapshotInput
 	// ConfigAdjustments are the compiler options that lintai changed because
 	// TypeScript 7 rejects them, sorted by config path and option.
 	ConfigAdjustments       []ConfigAdjustment
@@ -480,7 +467,6 @@ type extractor struct {
 	typeTruncated               map[*checker.Type]struct{}
 	timing                      *extractTiming
 	sourceEntries               []configuredSourceEntry
-	inputs                      []SnapshotInput
 	declarationNodes            map[string]*ast.Node
 	mapAttempted                map[string]struct{}
 	declarationMaps             *declarationMapCache
@@ -618,7 +604,6 @@ func BuildSnapshot(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, er
 	if snapshot.capture.captureErr != nil {
 		return nil, snapshot.capture.captureErr
 	}
-	snapshot.Inputs = uniqueSnapshotInputs(append(snapshot.Inputs, snapshot.capture.inputs()...))
 	snapshot.CompilerInputs = snapshot.capture.observations()
 	snapshot.capture = nil
 	return snapshot, nil
@@ -648,7 +633,7 @@ func buildSnapshotAttempt(ctx context.Context, req BuildSnapshotRequest) (*Snaps
 			return &Snapshot{capture: trackedFS}, nil
 		}
 	}
-	sourceEntries, sourceLinksFile, err := readSourceLinks(workspaceRoot, req.SourceLinks, host.FS())
+	sourceEntries, err := readSourceLinks(workspaceRoot, req.SourceLinks, host.FS())
 	if err != nil {
 		return nil, err
 	}
@@ -678,10 +663,8 @@ func buildSnapshotAttempt(ctx context.Context, req BuildSnapshotRequest) (*Snaps
 	slices.Sort(merged.ContextPaths)
 	merged.ContextPaths = slices.Compact(merged.ContextPaths)
 	for _, entry := range sourceEntries {
-		merged.Inputs = append(merged.Inputs,
-			SnapshotInput{Path: entry.CheckedPath, Exists: host.FS().FileExists(tspath.RootedFilePathFromAbsolute(entry.CheckedPath))},
-			SnapshotInput{Path: entry.SourcePath, Exists: host.FS().FileExists(tspath.RootedFilePathFromAbsolute(entry.SourcePath))},
-		)
+		host.FS().FileExists(tspath.RootedFilePathFromAbsolute(entry.CheckedPath))
+		host.FS().FileExists(tspath.RootedFilePathFromAbsolute(entry.SourcePath))
 	}
 	operations := operationsForRelations(req.RequestedRelations)
 	operations.trackingCache = req.trackingCache
@@ -739,11 +722,6 @@ func buildSnapshotAttempt(ctx context.Context, req BuildSnapshotRequest) (*Snaps
 		merged.Exports[i].typeSubjects = nil
 	}
 	merged.callDeclarationObservations = nil
-	merged.ConfigFiles = configs.files()
-	merged.Inputs = append(merged.Inputs, configs.inputs()...)
-	if sourceLinksFile != "" {
-		merged.Inputs = append(merged.Inputs, SnapshotInput{Path: sourceLinksFile, Exists: true})
-	}
 	ordinaryConfigs := make(map[string]bool)
 	for _, owner := range plan.programs {
 		if owner.group.ConfigPath != "" {
@@ -1055,7 +1033,7 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 	if ex.operations.sourceRecovery {
 		ex.recoverRetainedDeclarationMaps()
 	}
-	ex.recordProgramInputs()
+	ex.probeProgramFiles()
 
 	partial := &Snapshot{
 		Sites:                       slices.Collect(maps.Values(ex.sites)),
@@ -1093,7 +1071,6 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 		Declarations:                ex.sortedDeclarations(),
 		SourceEndpoints:             append(ex.sortedSourceEndpoints(), ex.sourceProgramEndpoints...),
 		SourceTracking:              ex.sourceTracking,
-		Inputs:                      ex.inputs,
 	}
 	sortSnapshot(partial)
 	return &validatedContribution{Snapshot: partial}, missingPrimary, nil
@@ -1106,57 +1083,25 @@ type parsedConfig struct {
 	// command line to build the program with: the original, or an adjusted
 	// copy when TypeScript 7 rejects options of the original. command is nil
 	// until program is called for the config.
-	original        *tsoptions.ParsedCommandLine
-	command         *tsoptions.ParsedCommandLine
-	adjustments     []ConfigAdjustment
-	rootFiles       map[string]struct{}
-	references      []string
-	referenceInputs []string
+	original    *tsoptions.ParsedCommandLine
+	command     *tsoptions.ParsedCommandLine
+	adjustments []ConfigAdjustment
+	rootFiles   map[string]struct{}
+	references  []string
 }
 
 type configCache struct {
-	host       compiler.CompilerHost
-	configs    map[string]*parsedConfig
-	errors     map[string]error
-	candidates map[string]bool
+	host    compiler.CompilerHost
+	configs map[string]*parsedConfig
+	errors  map[string]error
 }
 
 func newConfigCache(host compiler.CompilerHost) *configCache {
-	return &configCache{host: host, configs: make(map[string]*parsedConfig), errors: make(map[string]error), candidates: make(map[string]bool)}
+	return &configCache{host: host, configs: make(map[string]*parsedConfig), errors: make(map[string]error)}
 }
 
 func (c *configCache) pathKey(path string) string {
 	return c.host.FS().CaseSensitivity().PathKey(tspath.RootedPath(path)).AsString()
-}
-
-// configInputFS records the files consulted while parsing a config, including
-// dependencies read before a diagnostic causes the config to be rejected.
-// The regular resolution tracker already records missing directory probes.
-type configInputFS struct {
-	vfs.FS
-	inputs map[string]bool
-}
-
-func (fs configInputFS) record(path string, exists bool) {
-	path = normalizeSlash(path)
-	if path == "" || tspath.IsUrl(path) || strings.HasPrefix(path, "^/") {
-		return
-	}
-	fs.inputs[path] = fs.inputs[path] || exists
-}
-
-func (fs configInputFS) FileExists(path tspath.RootedFilePath) bool {
-	exists := fs.FS.FileExists(path)
-	if !exists && !fs.FS.DirectoryExists(tspath.RootedDirectoryPathFromAbsolute(path.AsString())) {
-		fs.record(path.AsString(), false)
-	}
-	return exists
-}
-
-func (fs configInputFS) ReadFile(path tspath.RootedFilePath) (string, bool) {
-	contents, ok := fs.FS.ReadFile(path)
-	fs.record(path.AsString(), ok || fs.FS.FileExists(path))
-	return contents, ok
 }
 
 func (c *configCache) load(configPath string) (*parsedConfig, error) {
@@ -1166,14 +1111,13 @@ func (c *configCache) load(configPath string) (*parsedConfig, error) {
 	if err, ok := c.errors[configPath]; ok {
 		return nil, err
 	}
-	command, diags := tsoptions.GetParsedCommandLineOfConfigFile(tspath.RootedFilePathFromAbsolute(configPath), &core.CompilerOptions{}, nil, configInputFS{FS: c.host.FS(), inputs: c.candidates}, nil)
+	command, diags := tsoptions.GetParsedCommandLineOfConfigFile(tspath.RootedFilePathFromAbsolute(configPath), &core.CompilerOptions{}, nil, c.host.FS(), nil)
 	if command != nil {
 		diags = append(diags, command.GetConfigFileParsingDiagnostics()...)
 		// References can affect later owner selection even if this config has
-		// diagnostics, so retain their paths before rejecting the parse.
+		// diagnostics, so probe them before rejecting the parse.
 		for _, reference := range command.ResolvedProjectReferencePaths() {
-			path := normalizeSlash(reference.AsString())
-			c.candidates[path] = c.candidates[path] || c.host.FS().FileExists(reference)
+			c.host.FS().FileExists(reference)
 		}
 	}
 	if len(diags) > 0 {
@@ -1186,15 +1130,13 @@ func (c *configCache) load(configPath string) (*parsedConfig, error) {
 		rootFiles[c.pathKey(normalizeSlash(fileName.AsString()))] = struct{}{}
 	}
 	references := make([]string, 0, len(command.ProjectReferences()))
-	referenceInputs := make([]string, 0, len(command.ProjectReferences()))
 	for _, reference := range command.ResolvedProjectReferencePaths() {
 		referencePath := normalizeSlash(reference.AsString())
-		referenceInputs = append(referenceInputs, referencePath)
 		if c.host.FS().FileExists(reference) {
 			references = append(references, referencePath)
 		}
 	}
-	parsed := &parsedConfig{original: command, rootFiles: rootFiles, references: references, referenceInputs: referenceInputs}
+	parsed := &parsedConfig{original: command, rootFiles: rootFiles, references: references}
 	c.configs[configPath] = parsed
 	return parsed, nil
 }
@@ -1218,40 +1160,6 @@ func (c *configCache) program(configPath string) (*tsoptions.ParsedCommandLine, 
 	parsed.command = adjusted
 	parsed.adjustments = adjustments
 	return adjusted, nil
-}
-
-// files returns the paths of every loaded config and of the configs that
-// they extend or reference, sorted.
-func (c *configCache) files() []string {
-	result := make([]string, 0, len(c.configs))
-	for configPath, parsed := range c.configs {
-		result = append(result, configPath)
-		for _, extended := range parsed.original.ExtendedSourceFiles() {
-			result = append(result, normalizeSlash(extended.AsString()))
-		}
-		result = append(result, parsed.references...)
-	}
-	slices.Sort(result)
-	return slices.Compact(result)
-}
-
-func (c *configCache) inputs() []SnapshotInput {
-	byPath := maps.Clone(c.candidates)
-	for configPath, parsed := range c.configs {
-		byPath[configPath] = true
-		for _, extended := range parsed.original.ExtendedSourceFiles() {
-			byPath[normalizeSlash(extended.AsString())] = true
-		}
-		for _, reference := range parsed.referenceInputs {
-			rooted, ok := tspath.TryRootedFilePathFromAbsolute(reference)
-			byPath[reference] = ok && c.host.FS().FileExists(rooted)
-		}
-	}
-	result := make([]SnapshotInput, 0, len(byPath))
-	for path, exists := range byPath {
-		result = append(result, SnapshotInput{Path: path, Exists: exists})
-	}
-	return uniqueSnapshotInputs(result)
 }
 
 // adjustmentsFor returns option changes only for programs used in the domain.
@@ -1403,13 +1311,11 @@ func (c *configCache) findNearestConfigPath(workspaceRoot string, file string) (
 		_, statErr := os.Stat(candidate)
 		exists := c.host.FS().FileExists(tspath.RootedFilePathFromAbsolute(candidate))
 		if statErr == nil && exists {
-			c.candidates[candidate] = true
 			return candidate, nil
 		} else if statErr != nil && !os.IsNotExist(statErr) {
 			return "", statErr
 		}
 		// Creation of a checked candidate can change the selected config.
-		c.candidates[candidate] = false
 		if current == rootPath {
 			return "", nil
 		}
@@ -1508,7 +1414,6 @@ func mergeSnapshot(into *Snapshot, contribution *validatedContribution) error {
 			into.SourceTracking[id] = support
 		}
 	}
-	into.Inputs = append(into.Inputs, partial.Inputs...)
 	return nil
 }
 
@@ -1535,7 +1440,6 @@ func sortSnapshot(snapshot *Snapshot) {
 	slices.SortFunc(snapshot.ModuleExportsIncomplete, func(a, b ModuleExportsIncompleteFact) int {
 		return strings.Compare(a.File+"\x00"+a.Reason, b.File+"\x00"+b.Reason)
 	})
-	snapshot.Inputs = uniqueSnapshotInputs(snapshot.Inputs)
 }
 
 func mergeFunctionSlices(existing []Function, incoming []Function) ([]Function, error) {

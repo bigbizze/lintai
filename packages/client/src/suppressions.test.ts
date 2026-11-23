@@ -1,16 +1,15 @@
+import {
+	createFramedResponse,
+	createTestDependencies,
+	createTestProcess,
+	createTestTransport,
+} from "./test-support.test.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import {
-	LintAIClient,
-	createFramedResponse,
-	createTestDependencies,
-	createTestProcess,
-	createTestTransport,
-	resolveBridgeOptions,
-} from "./client.js";
+import { LintAIClient, resolveBridgeOptions } from "./client.js";
 import { suppressionOverlaps } from "./suppressions.js";
 
 // V25, V31: current policy findings exit 1, and invalid policy exits 2.

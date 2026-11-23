@@ -532,9 +532,9 @@ Fallback to one-shot is for spawn failures, EOF, malformed framing/protocol or a
 
 Keep explicit one-shot mode and one-shot fallback. Their one-shot result cache is allowed because there is no retained server in that mode. A forced reanalyze clears and reruns that cache. Preserve the fallback explanation that ordinary file requests use one run until restart or forced reanalysis.
 
-For problems(), keep latestProblems, the exact problem-list identity and whether that list has been reported. JSON.stringify of the ordered string list is sufficient. An unchanged response must not reset reportProblemsOnce. A changed list resets it; an empty list ends the prior problem episode. Do not use SnapshotVersion to decide whether problems changed.
+For problems(), keep the exact problem-list identity and whether that episode has been reported; attach the episode to the file response that produced it. JSON.stringify of the ordered string list is sufficient. An unchanged response must not reset reportProblemsOnce. A changed list resets it; an empty list ends the prior problem episode. Do not use SnapshotVersion to decide whether problems changed.
 
-Keep process lifecycle/framed transport, the plugin's unsaved-buffer check and its existing per-file synchronous-pass cache. The pass cache is cleared after the pass and prevents one request per registered rule; it is not a workspace freshness cache.
+Keep process lifecycle/framed transport and the plugin's unsaved-buffer check. Share the response among rules using the host file-analysis identity: ESLint supplies a SourceCode object per ordinary verification, while Oxlint 1.90 resets its SourceCode-keyed WeakMaps after each file. A later file analysis validates again; a caller intentionally reusing a SourceCode object must provide a fresh operation identity.
 
 Delete rule/input watchers, watch dependency injection, idle timers, analysis epochs, saved-version maps, invalidated state, background refresh methods, rule/input invalidation scheduling, serve-mode diagnosticsByFile/unlocated caches and WatchHints throughout.
 

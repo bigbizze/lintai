@@ -36,8 +36,8 @@ func TestExternalNodeModulesDirectoryIsTracked(t *testing.T) {
 		t.Fatalf("expected unresolved import: %+v", before.ImportEdges)
 	}
 	nodeModules := filepath.ToSlash(filepath.Join(parent, "node_modules"))
-	if !slices.ContainsFunc(before.Inputs, func(input SnapshotInput) bool { return input.Path == nodeModules && !input.Exists }) {
-		t.Fatalf("missing external node_modules directory was not tracked: %+v", before.Inputs)
+	if !slices.ContainsFunc(before.CompilerInputs, func(input CompilerObservation) bool { return input.Path == nodeModules && observationMissing(input) }) {
+		t.Fatalf("missing external node_modules directory was not tracked: %+v", before.CompilerInputs)
 	}
 	packageDir := filepath.Join(parent, "node_modules", "fixture-pkg")
 	if err := os.MkdirAll(packageDir, 0o755); err != nil {

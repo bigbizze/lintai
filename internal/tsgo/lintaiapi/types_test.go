@@ -165,7 +165,7 @@ calculate({ value: "ok", nested: { count: 1 } });
 		t.Fatalf("metadata differs: full=%v metadata=%v", metadataFields(full), metadataFields(metadata))
 	}
 	hasMapInput := func(snapshot *Snapshot) bool {
-		return slices.ContainsFunc(snapshot.Inputs, func(input SnapshotInput) bool {
+		return slices.ContainsFunc(snapshot.CompilerInputs, func(input CompilerObservation) bool {
 			return strings.HasSuffix(input.Path, "/dist/generated.d.ts.map")
 		})
 	}

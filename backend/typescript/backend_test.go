@@ -19,8 +19,27 @@ import (
 	"github.com/bigbizze/lintai/observe"
 )
 
-func hasSnapshotInput(snapshot *lintaiapi.Snapshot, path string) bool {
-	return slices.ContainsFunc(snapshot.Inputs, func(input lintaiapi.SnapshotInput) bool { return input.Path == path })
+func hasCompilerInput(snapshot *lintaiapi.Snapshot, path string) bool {
+	// Compiler observations use the resolved workspace spelling, including on macOS
+	// where the temporary directory is reached through /var's symlink.
+	prefix := filepath.Clean(path)
+	var suffix []string
+	for {
+		if resolved, err := filepath.EvalSymlinks(prefix); err == nil {
+			for i := len(suffix) - 1; i >= 0; i-- {
+				resolved = filepath.Join(resolved, suffix[i])
+			}
+			path = resolved
+			break
+		}
+		parent := filepath.Dir(prefix)
+		if parent == prefix {
+			break
+		}
+		suffix = append(suffix, filepath.Base(prefix))
+		prefix = parent
+	}
+	return slices.ContainsFunc(snapshot.CompilerInputs, func(input lintaiapi.CompilerObservation) bool { return input.Path == path })
 }
 
 func hasGenerationObservation(generation *producerGeneration, path string) bool {
@@ -46,7 +65,11 @@ func (b *Backend) buildTestGeneration(ctx context.Context, repoRoot, workspaceRo
 }
 
 func (b *Backend) buildLintaiSnapshot(ctx context.Context, repoRoot, workspaceRoot string) (*lintaiapi.Snapshot, []ambient.Source, string, error) {
-	generation, sources, err := b.extractSnapshot(ctx, workspaceRoot, nil, nil)
+	description, err := b.Describe()
+	if err != nil {
+		return nil, nil, "", err
+	}
+	generation, sources, err := b.extractSnapshot(ctx, workspaceRoot, nil, description, nil)
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -320,7 +343,7 @@ func TestExactSourceAndExcludedGlobalUseOneProductionScope(t *testing.T) {
 	}) {
 		t.Fatalf("excluded global declaration did not affect selected code's inferred return type")
 	}
-	if !hasSnapshotInput(snapshot.snapshot, filepath.Join(root, "src/globals.ts")) {
+	if !hasCompilerInput(snapshot.snapshot, filepath.Join(root, "src/globals.ts")) {
 		t.Fatal("compiler-read excluded global was absent from captured dependency inputs")
 	}
 	explanation, err := ExplainScope(context.Background(), root, options)
@@ -932,8 +955,8 @@ func TestSnapshotVersionTracksAssociationConfigAndMissingInputs(t *testing.T) {
 	}
 	initial, initialVersion := build()
 	mapPath := filepath.Join(root, "dist/index.d.ts.map")
-	if !hasSnapshotInput(initial, mapPath) {
-		t.Fatalf("missing declaration map path was not included in snapshot inputs: %v", initial.Inputs)
+	if !hasCompilerInput(initial, mapPath) {
+		t.Fatalf("missing declaration map path was not included in snapshot inputs: %v", initial.CompilerInputs)
 	}
 	if err := os.WriteFile(mapPath, []byte(`{"version":3,"file":"index.d.ts","sources":[],"mappings":""}`), 0o644); err != nil {
 		t.Fatal(err)
@@ -947,8 +970,8 @@ func TestSnapshotVersionTracksAssociationConfigAndMissingInputs(t *testing.T) {
 		t.Fatal(err)
 	}
 	missing, missingVersion := build()
-	if mapCreatedVersion == missingVersion || !hasSnapshotInput(missing, missingSource) {
-		t.Fatalf("source-links changes or missing source were not retained: version=%s inputs=%v", missingVersion, missing.Inputs)
+	if mapCreatedVersion == missingVersion || !hasCompilerInput(missing, missingSource) {
+		t.Fatalf("source-links changes or missing source were not retained: version=%s inputs=%v", missingVersion, missing.CompilerInputs)
 	}
 	writeWorkspaceFile(t, root, "src/missing.ts", `export const load = 2;`)
 	_, createdSourceVersion := build()
@@ -1010,14 +1033,14 @@ func TestSnapshotTracksMissingPackageDirectoryAndDeclaration(t *testing.T) {
 		return snapshot, version
 	}
 	// Without node_modules, resolution probes no file under it.
-	if before, _ := build(); !hasSnapshotInput(before, filepath.Join(root, "node_modules")) {
-		t.Fatalf("missing node_modules directory was not retained as an input: %v", before.Inputs)
+	if before, _ := build(); !hasCompilerInput(before, filepath.Join(root, "node_modules")) {
+		t.Fatalf("missing node_modules directory was not retained as an input: %v", before.CompilerInputs)
 	}
 	writeWorkspaceFile(t, root, "node_modules/latepkg/package.json", `{"types":"index.d.ts"}`)
 	declarationPath := filepath.Join(root, "node_modules/latepkg/index.d.ts")
 	withoutDeclaration, withoutDeclarationVersion := build()
-	if !hasSnapshotInput(withoutDeclaration, declarationPath) {
-		t.Fatalf("missing package declaration candidate was not retained as an input: %v", withoutDeclaration.Inputs)
+	if !hasCompilerInput(withoutDeclaration, declarationPath) {
+		t.Fatalf("missing package declaration candidate was not retained as an input: %v", withoutDeclaration.CompilerInputs)
 	}
 	writeWorkspaceFile(t, root, "node_modules/latepkg/index.d.ts", `export declare const value: string;`)
 	if _, afterVersion := build(); withoutDeclarationVersion == afterVersion {
@@ -1261,7 +1284,7 @@ func TestUnreadableOptionalMapKeepsCheckedFactsAndChangesVersionWhenReadable(t *
 		t.Fatal(err)
 	}
 	if !slices.ContainsFunc(unreadable.DeclarationSourceOutcomes, func(item lintaiapi.DeclarationSourceOutcomeFact) bool { return item.Outcome == "unavailable_map" }) ||
-		!slices.ContainsFunc(unreadable.Exports, func(item lintaiapi.ExportFact) bool { return item.Name == "value" && len(item.Targets) == 1 }) || !hasSnapshotInput(unreadable, mapPath) {
+		!slices.ContainsFunc(unreadable.Exports, func(item lintaiapi.ExportFact) bool { return item.Name == "value" && len(item.Targets) == 1 }) || !hasCompilerInput(unreadable, mapPath) {
 		t.Fatalf("unreadable optional map lost checked facts, outcome or input: %+v", unreadable)
 	}
 	if err := os.Chmod(mapPath, 0o600); err != nil {

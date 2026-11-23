@@ -13,7 +13,6 @@ import (
 	"github.com/bigbizze/lintai/facts"
 	"github.com/bigbizze/lintai/internal/ambient"
 	"github.com/bigbizze/lintai/internal/tsgo/lintaiapi"
-	"github.com/bigbizze/lintai/internal/workspace"
 	"github.com/bigbizze/lintai/observe"
 )
 
@@ -36,7 +35,6 @@ type producerGeneration struct {
 	repoRoot, workspaceRoot string
 	relations               []string
 	snapshot                *lintaiapi.Snapshot
-	plan                    *workspace.ScopePlan
 	observations            observe.Set
 	inputRevision           string
 	scope                   map[string]any
@@ -189,13 +187,12 @@ func (b *Backend) generation(ctx context.Context, repoRoot, workspaceRoot string
 		}
 	}
 	b.current = nil
-	generation, sources, err := b.extractSnapshot(ctx, workspaceRoot, relations, previousSnapshot)
+	generation, sources, err := b.extractSnapshot(ctx, workspaceRoot, relations, description, previousSnapshot)
 	if err != nil {
 		return nil, err
 	}
 	generation.sources = sources
 	generation.description = description
-	generation.adjustments = convertAdjustments(generation.plan.Root, generation.snapshot.ConfigAdjustments)
 	b.reportAdjustments(generation.adjustments)
 	generation.repoRoot, generation.workspaceRoot = repoRoot, workspaceRoot
 	generation.relations = slices.Clone(relations)

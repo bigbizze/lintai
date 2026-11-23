@@ -71,6 +71,7 @@ startSpawner();
 function lintedFile(context: OxlintContext): LintedFile {
 	return {
 		physicalFilename: context.physicalFilename,
+		analysis: context.sourceCode,
 		text: context.sourceCode.text,
 		report(report) {
 			context.report(report);

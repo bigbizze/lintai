@@ -50,6 +50,7 @@ export type LintaiConfig = { plugins: { lintai: ESLint.Plugin }; rules: Record<s
 function lintedFile(context: Rule.RuleContext): LintedFile {
 	return {
 		physicalFilename: context.physicalFilename,
+		analysis: context.sourceCode,
 		text: context.sourceCode.text,
 		report(report) {
 			context.report(report);

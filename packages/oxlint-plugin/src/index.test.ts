@@ -1,20 +1,19 @@
-import { deepEqual } from "node:assert/strict";
+import {
+	createFramedResponse,
+	createTestDependencies,
+	createTestProcess,
+	createTestTransport,
+	getClient,
+	resetClientsForTest,
+} from "../../client/dist/test-support.test.js";
+import { deepEqual, strictEqual } from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { after, describe, it } from "node:test";
 
 import { rules as authoringRules } from "@lintai/authoring-rules";
-import {
-	type Diagnostic,
-	createFramedResponse,
-	createTestDependencies,
-	createTestProcess,
-	getClient,
-	loadRuleIds,
-	resetClientsForTest,
-	resolveBridgeOptions,
-} from "@lintai/client";
+import { type Diagnostic, resolveBridgeOptions } from "@lintai/client";
 import { RuleTester as ESLintRuleTester } from "eslint";
 import { RuleTester } from "oxlint/plugins-dev";
 
@@ -71,8 +70,6 @@ const violation: Diagnostic = {
 };
 const diagnostics = [ruleError, violation];
 const problem = "[lintai] rule arch.broken could not run (phase program_parse): parse error";
-const loadError =
-	"[lintai] rule file lintai-rules/typo.ts could not be loaded: Unexpected end of file";
 const violationError = {
 	message: "[arch.no-async/violation] functions must not be async",
 	line: 3,
@@ -81,7 +78,6 @@ const violationError = {
 	endColumn: 29,
 };
 const problemError = { message: problem, line: 1, column: 1 };
-const loadErrorReport = { message: loadError, line: 1, column: 1 };
 
 const bridge = { binary: "/tmp/lintai", workspaceRoot: workspace, repoRoot: workspace };
 
@@ -109,7 +105,6 @@ it("unused suppressions report through analysis rather than the generated rule",
 			};
 		},
 	});
-	loadRuleIds(resolved, dependencies);
 	getClient(resolved, dependencies);
 	const plugin = createLintaiPlugin(options);
 	const messages: string[] = [];
@@ -154,7 +149,6 @@ it("serve findings with unregistered IDs report through analysis with restart gu
 				}),
 			),
 	});
-	loadRuleIds(resolved, dependencies);
 	getClient(resolved, dependencies);
 	const plugin = createLintaiPlugin(options);
 	const messages: string[] = [];
@@ -225,7 +219,6 @@ function withHost(argv: string[], fresh: boolean) {
 					),
 				log: () => undefined,
 			});
-			loadRuleIds(options, dependencies);
 			getClient(options, dependencies);
 		},
 		after() {
@@ -326,11 +319,11 @@ tester.run("analysis (oxlint CLI, oneshot)", cli.analysis, {
 	valid: [],
 	invalid: [
 		{
-			name: "rule errors and load errors are on line 1 of the first file",
+			name: "current rule errors are on line 1 of the first file",
 			code: savedText,
 			filename: path.join(workspace, "src", "a.ts"),
 			...withHost(cliArgv, false),
-			errors: [problemError, loadErrorReport],
+			errors: [problemError],
 		},
 	],
 });
@@ -357,14 +350,14 @@ tester.run("analysis (oxlint --lsp, serve)", lsp.analysis, {
 			code: savedText,
 			filename: path.join(workspace, "src", "a.ts"),
 			...withHost(lspArgv, false),
-			errors: [problemError, loadErrorReport],
+			errors: [problemError],
 		},
 		{
 			name: "a later lint of another file reports the problems again",
 			code: savedText,
 			filename: path.join(workspace, "src", "b.ts"),
 			...withHost(lspArgv, false),
-			errors: [problemError, loadErrorReport],
+			errors: [problemError],
 		},
 		{
 			name: "unsaved changes give the save message and nothing else",
@@ -476,3 +469,108 @@ for (const [name, cases] of Object.entries(authoringCases)) {
 	oxlintAuthoring.run(`oxlint ${name}`, authoringPlugin.rules[name] as never, cases);
 	eslintAuthoring.run(`eslint ${name}`, rule, cases);
 }
+
+// RuleTester calls Oxlint's real file runner, including its singleton
+// SourceCode and per-file WeakMap reset. Run two cases synchronously.
+it("oxlint shares a response within each file and revalidates the next file analysis", () => {
+	resetClientsForTest();
+	const options = { ...bridge, mode: "serve" as const };
+	const resolved = resolveBridgeOptions(options, process.cwd(), oxlintHostDefaults());
+	const child = createTestProcess();
+	let id = 0;
+	let files = 0;
+	let sourceCode: object | undefined;
+	const dependencies = createTestDependencies({
+		spawnSync: () => ({
+			status: 0,
+			stderr: "",
+			stdout: JSON.stringify({
+				rules: [
+					{ id: "first", path: "first.ts" },
+					{ id: "second", path: "second.ts" },
+				],
+				errors: [],
+			}),
+		}),
+		spawnServe: () =>
+			createTestTransport(child, () => {
+				const requestID = ++id;
+				if (requestID === 1)
+					return createFramedResponse({
+						jsonrpc: "2.0",
+						id: requestID,
+						result: { protocolVersion: 1 },
+					});
+				files++;
+				return createFramedResponse({
+					jsonrpc: "2.0",
+					id: requestID,
+					result: {
+						snapshotVersion: String(files),
+						rulesLoaded: 2,
+						problems: [],
+						diagnostics: ["first", "second"].map((rule_id) => ({
+							...violation,
+							rule_id,
+							message: `generation ${files}`,
+						})),
+					},
+				});
+			}),
+	});
+	getClient(resolved, dependencies);
+	const plugin = createLintaiPlugin(options);
+	type Context = Parameters<(typeof plugin.rules)[string]["create"]>[0];
+	const combined = {
+		meta: {
+			type: "problem" as const,
+			docs: { description: "exercise host file lifetime" },
+			schema: [],
+		},
+		create(context: Context) {
+			if (sourceCode === undefined) sourceCode = context.sourceCode;
+			else strictEqual(context.sourceCode, sourceCode);
+			const first = plugin.rules.first!.create(context);
+			const second = plugin.rules.second!.create(context);
+			const analysis = plugin.rules.analysis!.create(context);
+			return {
+				Program() {
+					first.Program();
+					second.Program();
+					analysis.Program();
+				},
+			};
+		},
+	};
+	const previousDescribe = RuleTester.describe;
+	const previousIt = RuleTester.it;
+	try {
+		RuleTester.describe = ((_name: string, callback: () => void) =>
+			callback()) as typeof RuleTester.describe;
+		RuleTester.it = ((_name: string, callback: () => void) => callback()) as typeof RuleTester.it;
+		const runner = new RuleTester({ eslintCompat: true, cwd: workspace });
+		for (const generation of [1, 2]) {
+			runner.run(`lifetime ${generation}`, combined as never, {
+				valid: [],
+				invalid: [
+					{
+						code: savedText,
+						filename: path.join(workspace, "src/a.ts"),
+						errors: ["first", "second"].map((rule) => ({
+							message: `[${rule}/violation] generation ${generation}`,
+							line: 3,
+							column: 8,
+							endLine: 3,
+							endColumn: 29,
+						})),
+					},
+				],
+			});
+		}
+		deepEqual(files, 2);
+	} finally {
+		RuleTester.describe = previousDescribe;
+		RuleTester.it = previousIt;
+		resetClientsForTest();
+	}
+});

@@ -1376,23 +1376,6 @@ func mergeSourceEndpoints(items []SourceEndpointFact) []SourceEndpointFact {
 	return result
 }
 
-func uniqueSnapshotInputs(items []SnapshotInput) []SnapshotInput {
-	byPath := make(map[string]SnapshotInput, len(items))
-	for _, item := range items {
-		current := byPath[item.Path]
-		current.Path = item.Path
-		current.Exists = current.Exists || item.Exists
-		current.OptionalMap = current.OptionalMap || item.OptionalMap
-		byPath[item.Path] = current
-	}
-	result := make([]SnapshotInput, 0, len(byPath))
-	for _, item := range byPath {
-		result = append(result, item)
-	}
-	slices.SortFunc(result, func(left, right SnapshotInput) int { return strings.Compare(left.Path, right.Path) })
-	return result
-}
-
 func uniqueDeclarationSources(items []DeclarationSourceFact) []DeclarationSourceFact {
 	seen := make(map[DeclarationSourceFact]struct{}, len(items))
 	result := make([]DeclarationSourceFact, 0, len(items))

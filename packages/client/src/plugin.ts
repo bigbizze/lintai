@@ -4,12 +4,10 @@ import path from "node:path";
 import { suppressionOverlaps } from "./suppressions.js";
 
 import {
-	type Diagnostic,
 	type HostDefaults,
 	type LintaiOptions,
 	type ResolvedBridgeOptions,
 	getClient,
-	loadRuleIds,
 	resolveBridgeOptions,
 } from "./client.js";
 import {
@@ -37,10 +35,12 @@ export const authoringRuleNames = [
 export const reservedRuleNames: readonly string[] = [analysisRuleName, ...authoringRuleNames];
 
 // LintedFile is the part of a linter rule context that the lintai rules
-// use: the path of the file on disk, the text that the linter lints, and
-// report().
+// use: the path and text, an identity shared for one host file analysis,
+// and report().
 export type LintedFile = {
 	physicalFilename: string;
+	// ESLint SourceCode or Oxlint's per-file WeakMap key.
+	analysis: object;
 	text: string;
 	report(report: Report): void;
 };
@@ -68,7 +68,7 @@ export function createLintaiRules(
 		return { rules: [], lintRule() {}, lintAnalysis() {} };
 	}
 	const resolved = resolveBridgeOptions(options, cwd, host);
-	const list = loadRuleIds(resolved);
+	const list = getClient(resolved).listRuleIds();
 	const known = new Map(list.rules.map((item) => [item.id, item]));
 	for (const item of list.errors) {
 		if (item.id && !known.has(item.id)) {
@@ -95,50 +95,32 @@ export function createLintaiRules(
 	for (const message of loadErrorMessages) {
 		console.error(message);
 	}
-	// An error with an id (a duplicate id) is also a rule error of the
-	// analysis, so lintai/analysis reports it only once, as a rule error.
-	const loadErrors = loadErrorMessages.filter((_, index) => !list.errors[index]?.id);
-	loadErrors.push(...suppressionOverlaps(resolved.workspaceRoot));
-	let loadErrorsReported = false;
-
-	// The linter calls every lintai rule for a file in one synchronous pass,
-	// so the diagnostics of the file are read once per pass and the cache is
-	// cleared in the next microtask.
-	type PassEntry = { text: string; diagnostics: Diagnostic[] | undefined };
-	let passCache: Map<string, PassEntry> | undefined;
-	const readDiagnostics = (file: LintedFile): Diagnostic[] | undefined => {
-		if (resolved.mode === "serve" && hasUnsavedChanges(file.physicalFilename, file.text)) {
-			return undefined;
-		}
-		return getClient(resolved).getDiagnostics(workspacePath(resolved, file.physicalFilename));
-	};
-	const diagnosticsFor = (file: LintedFile): Diagnostic[] | undefined => {
-		if (!passCache) {
-			const cache = new Map<string, PassEntry>();
-			passCache = cache;
-			queueMicrotask(() => {
-				if (passCache === cache) {
-					passCache = undefined;
-				}
-			});
-		}
-		const cached = passCache.get(file.physicalFilename);
-		if (cached && cached.text === file.text) {
-			return cached.diagnostics;
-		}
-		const diagnostics = readDiagnostics(file);
-		passCache.set(file.physicalFilename, { text: file.text, diagnostics });
-		return diagnostics;
+	// ESLint provides one SourceCode per verification. Oxlint 1.90 supplies a
+	// singleton but resets its patched WeakMaps at the end of each linted file.
+	const analyses = new WeakMap<
+		object,
+		{ response: ReturnType<ReturnType<typeof getClient>["getFileAnalysis"]> | undefined }
+	>();
+	let reportedOverlaps = "";
+	const responseFor = (file: LintedFile) => {
+		const cached = analyses.get(file.analysis);
+		if (cached) return cached.response;
+		const response =
+			resolved.mode === "serve" && hasUnsavedChanges(file.physicalFilename, file.text)
+				? undefined
+				: getClient(resolved).getFileAnalysis(workspacePath(resolved, file.physicalFilename));
+		analyses.set(file.analysis, { response });
+		return response;
 	};
 
 	return {
 		rules,
 		lintRule(id, file) {
-			const diagnostics = diagnosticsFor(file);
-			if (!diagnostics) {
+			const response = responseFor(file);
+			if (!response) {
 				return;
 			}
-			const own = diagnostics.filter(
+			const own = response.diagnostics.filter(
 				(diagnostic) =>
 					diagnostic.rule_id === id &&
 					diagnostic.diagnostic_kind !== "rule_execution_error" &&
@@ -149,20 +131,22 @@ export function createLintaiRules(
 			}
 		},
 		lintAnalysis(file) {
-			const diagnostics = diagnosticsFor(file);
-			if (!diagnostics) {
+			const response = responseFor(file);
+			if (!response) {
 				file.report({ loc: programLocation, message: unsavedChangesMessage });
 				return;
 			}
-			const problems = getClient(resolved).problems();
-			if (!resolved.reportProblemsOnce || !loadErrorsReported) {
-				loadErrorsReported = true;
-				problems.push(...loadErrors);
+			const problems = response.problems();
+			const overlaps = suppressionOverlaps(resolved.workspaceRoot);
+			const overlapIdentity = JSON.stringify(overlaps);
+			if (!resolved.reportProblemsOnce || overlapIdentity !== reportedOverlaps) {
+				problems.push(...overlaps);
 			}
+			reportedOverlaps = overlapIdentity;
 			for (const message of problems) {
 				file.report({ loc: programLocation, message });
 			}
-			const ruleErrors = diagnostics.filter(
+			const ruleErrors = response.diagnostics.filter(
 				(diagnostic) =>
 					diagnostic.diagnostic_kind === "rule_execution_error" ||
 					diagnostic.diagnostic_kind === "unused_suppression",
@@ -170,7 +154,7 @@ export function createLintaiRules(
 			for (const report of toReports(ruleErrors)) {
 				file.report(report);
 			}
-			const orphans = diagnostics.filter(
+			const orphans = response.diagnostics.filter(
 				(diagnostic) =>
 					diagnostic.diagnostic_kind !== "rule_execution_error" &&
 					diagnostic.diagnostic_kind !== "unused_suppression" &&
