@@ -10,12 +10,10 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"codeberg.org/TauCeti/mangle-go/factstore"
 	"github.com/bigbizze/lintai/backend"
 	"github.com/bigbizze/lintai/bundle"
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/facts"
-	"github.com/bigbizze/lintai/internal/canonical"
 	"github.com/bigbizze/lintai/observe"
 	"github.com/bigbizze/lintai/runtime"
 	"github.com/bigbizze/lintai/suppressions"
@@ -426,13 +424,17 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options, mode
 	}
 	defer ruleCatalog.close()
 	inputSets := []observe.Set{evidence.observations, ruleCatalog.observations}
-	for _, artifact := range ruleCatalog.artifacts {
-		inputSets = append(inputSets, artifact.Observations)
+	bundled := 0
+	for _, rule := range ruleCatalog.rules {
+		if rule.bundled {
+			bundled++
+			inputSets = append(inputSets, rule.artifact.Observations)
+		}
 	}
 	evidence.observations = observe.Union(inputSets...)
-	evidence.reusable = len(ruleCatalog.artifacts) == len(ruleCatalog.paths)
+	evidence.reusable = bundled == len(ruleCatalog.rules)
 	e.stats.bundleArtifacts.Add(int64(ruleCatalog.bundleBuilds))
-	if len(ruleCatalog.paths) == 0 {
+	if len(ruleCatalog.rules) == 0 {
 		e.currentFacts = nil
 		e.currentCatalog = ""
 		catalog, err := e.describeProducers()
@@ -445,280 +447,56 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options, mode
 		}
 		evidence.observations = observe.Union(evidence.observations, assembled.observations)
 		evidence.reusable = evidence.reusable && assembled.reusableFromObservations
-		run.complete = true
+		inventory, complete := preMetadataIntegrity(ruleCatalog, lock, options.WorkspaceRoot, assembled.snapshotID)
+		run.complete = complete
 		run.files = make(map[string]struct{})
 		run.snapshotVersion = assembled.snapshotID
-		result := Result{Diagnostics: []diagnostics.Diagnostic{}, SnapshotVersion: assembled.snapshotID}
-		if lock != nil {
-			for _, failure := range checkRulesLock(*lock, options.WorkspaceRoot, ruleCatalog.paths, ruleCatalog.artifacts) {
-				result.Diagnostics = append(result.Diagnostics, errorDiagnostic(failure.key, "integrity", 0, assembled.snapshotID, nil, failure.message))
-			}
-			run.complete = len(result.Diagnostics) == 0
-			sortDiagnostics(result.Diagnostics)
-		}
+		result := Result{Diagnostics: append([]diagnostics.Diagnostic{}, inventory...), SnapshotVersion: assembled.snapshotID}
+		sortDiagnostics(result.Diagnostics)
 		return result, run, evidence, nil
 	}
 	assembled, err := emptyComposedFacts()
 	if err != nil {
 		return Result{}, run, evidence, err
 	}
-	allDiagnostics := make([]diagnostics.Diagnostic, 0)
-	result := Result{Diagnostics: allDiagnostics, SnapshotVersion: assembled.snapshotID}
+	result := Result{Diagnostics: []diagnostics.Diagnostic{}, SnapshotVersion: assembled.snapshotID}
 	if catalogErr != nil {
-		for _, rulePath := range ruleCatalog.paths {
-			if itemErr, failed := ruleCatalog.bundleFailures[rulePath]; failed {
-				allDiagnostics = append(allDiagnostics, errorDiagnostic(filepath.Base(rulePath), "bundle", 0, assembled.snapshotID, nil, itemErr.Error()))
-			} else {
-				allDiagnostics = append(allDiagnostics, errorDiagnostic(filepath.Base(rulePath), "bundle", 0, assembled.snapshotID, nil, catalogErr.Error()))
+		for _, rule := range ruleCatalog.rules {
+			failure := rule.bundleError
+			if failure == nil {
+				failure = catalogErr
 			}
+			bundleDiagnostic(rule, failure, assembled.snapshotID)
 		}
-		sortDiagnostics(allDiagnostics)
-		result.Diagnostics = allDiagnostics
+		result.Diagnostics = catalogDiagnostics(ruleCatalog, nil)
+		sortDiagnostics(result.Diagnostics)
 		return result, run, evidence, nil
 	}
-	for rulePath, itemErr := range ruleCatalog.bundleFailures {
-		allDiagnostics = append(allDiagnostics, errorDiagnostic(filepath.Base(rulePath), "bundle", 0, assembled.snapshotID, nil, itemErr.Error()))
-	}
-
-	integrityByPath := make(map[string]integrityFailure)
-	if lock != nil {
-		integrityByPath = checkRulesLock(*lock, options.WorkspaceRoot, ruleCatalog.paths, ruleCatalog.artifacts)
-		for _, failure := range integrityByPath {
-			allDiagnostics = append(allDiagnostics, errorDiagnostic(failure.key, "integrity", 0, assembled.snapshotID, nil, failure.message))
-		}
-	}
-	complete := len(ruleCatalog.bundleFailures) == 0 && len(integrityByPath) == 0
-	run.complete = complete
-	lockedOut := make(map[string]struct{})
-	for rulePath := range integrityByPath {
-		lockedOut[rulePath] = struct{}{}
-	}
-	ruleCatalog.loadMetadata(lockedOut)
-	e.stats.gojaRuntimes.Add(int64(len(ruleCatalog.entries)))
-	if lock != nil {
-		for _, rulePath := range ruleCatalog.paths {
-			entry, exists := ruleCatalog.entries[rulePath]
-			if !exists || !entry.isRule {
-				continue
-			}
-			key := lockKey(options.WorkspaceRoot, rulePath)
-			locked, approved := lock.Rules[key]
-			message := ""
-			if !approved {
-				message = fmt.Sprintf("rule %s is not in the rules lock; review it and run lintai lock", key)
-			} else if entry.loadError == nil && (locked.ID != entry.metadata.ID || locked.Version != entry.metadata.Version) {
-				message = fmt.Sprintf("rule %s metadata does not match the rules lock", key)
-			}
-			if message != "" {
-				integrityByPath[rulePath] = integrityFailure{key: key, message: message}
-				allDiagnostics = append(allDiagnostics, errorDiagnostic(key, "integrity", 0, assembled.snapshotID, nil, message))
-				run.complete = false
-			}
-		}
-	}
-
-	knownRules := make(map[string]struct{})
-	pathsByID := make(map[string][]string)
-	loadedRuleCount := 0
-	for _, rulePath := range ruleCatalog.paths {
-		entry, exists := ruleCatalog.entries[rulePath]
-		if !exists {
-			continue
-		}
-		if entry.isRule {
-			loadedRuleCount++
-		}
-		if entry.metadata.ID != "" {
-			knownRules[entry.metadata.ID] = struct{}{}
-			if runtime.ValidateRuleID(entry.metadata.ID) == nil {
-				pathsByID[entry.metadata.ID] = append(pathsByID[entry.metadata.ID], rulePath)
-			}
-		}
-	}
-	result.RulesLoaded = loadedRuleCount
-	duplicateFailures := make(map[string]string)
-	for id, paths := range pathsByID {
-		if len(paths) < 2 {
-			continue
-		}
-		keys := make([]string, len(paths))
-		for index, path := range paths {
-			keys[index] = lockKey(options.WorkspaceRoot, path)
-		}
-		message := duplicateIDMessage(id, keys)
-		for _, path := range paths {
-			duplicateFailures[path] = message
-		}
-	}
-
-	setupArtifacts := make(map[string]bundle.Artifacts)
-	skipSetup := make(map[string]struct{})
-	withoutSetup := make([]string, 0)
-	for _, rulePath := range ruleCatalog.paths {
-		entry := ruleCatalog.entries[rulePath]
-		if entry.loadError != nil {
+	run.complete = true
+	for _, rule := range ruleCatalog.rules {
+		if rule.bundleError != nil {
+			bundleDiagnostic(rule, rule.bundleError, assembled.snapshotID)
 			run.complete = false
-			allDiagnostics = append(allDiagnostics, errorDiagnostic(ruleIDOrPath(entry.metadata.ID, rulePath), "setup", entry.metadata.Version, assembled.snapshotID, nil, entry.loadError.Error()))
-			continue
-		}
-		if message, duplicate := duplicateFailures[rulePath]; duplicate {
-			allDiagnostics = append(allDiagnostics, errorDiagnostic(entry.metadata.ID, "config", entry.metadata.Version, assembled.snapshotID, nil, message))
-			continue
-		}
-		if _, failed := integrityByPath[rulePath]; failed {
-			continue
-		}
-		if !entry.isRule || severityOf(options, entry.metadata.ID) == diagnostics.SeverityOff {
-			continue
-		}
-		if entry.metadata.HasSetup || entry.metadata.HasConfig {
-			artifact, err := ruleCatalog.prepareArtifact(rulePath)
-			if err != nil {
-				allDiagnostics = append(allDiagnostics, errorDiagnostic(entry.metadata.ID, "setup", entry.metadata.Version, assembled.snapshotID, nil, err.Error()))
-				continue
-			}
-			setupArtifacts[rulePath] = artifact
-			if !entry.metadata.HasSetup {
-				skipSetup[rulePath] = struct{}{}
-			}
-		} else {
-			withoutSetup = append(withoutSetup, rulePath)
 		}
 	}
 
-	preparedByRule, prepareFailures, prepareErr := bundle.PrepareAll(ctx, assetRootOf(options), options.RepoRoot, options.WorkspaceRoot, setupArtifacts, options.Env, bundle.PrepareOptions{
-		Sandbox: sandbox, RestrictRequire: lock != nil, SkipSetup: skipSetup,
-	})
-	if prepareErr != nil {
-		for rulePath := range setupArtifacts {
-			entry := ruleCatalog.entries[rulePath]
-			allDiagnostics = append(allDiagnostics, errorDiagnostic(entry.metadata.ID, "setup", entry.metadata.Version, assembled.snapshotID, nil, prepareErr.Error()))
-		}
-		preparedByRule = make(map[string]bundle.PrepareResult)
-	} else {
-		for rulePath, setupErr := range prepareFailures {
-			entry := ruleCatalog.entries[rulePath]
-			allDiagnostics = append(allDiagnostics, errorDiagnostic(ruleIDOrPath(entry.metadata.ID, rulePath), "setup", entry.metadata.Version, assembled.snapshotID, nil, setupErr.Message))
-		}
-	}
-	if preparedByRule == nil {
-		preparedByRule = make(map[string]bundle.PrepareResult)
-	}
-	for _, rulePath := range withoutSetup {
-		entry := ruleCatalog.entries[rulePath]
-		env := options.Env
-		if env == nil {
-			env = map[string]any{}
-		}
-		preparedByRule[rulePath] = bundle.PrepareResult{
-			RuleID: entry.metadata.ID, RuleVersion: entry.metadata.Version,
-			Env: env, Setup: map[string]any{},
-		}
-	}
-
-	type generatedRule struct {
-		path     string
-		ruleID   string
-		version  int
-		severity diagnostics.Severity
-		loaded   *runtime.LoadedRule
-		output   runtime.ProgramOutput
-	}
-	generated := make([]generatedRule, 0, len(preparedByRule))
-	for _, rulePath := range ruleCatalog.paths {
-		prepared, ready := preparedByRule[rulePath]
-		if !ready {
-			continue
-		}
-		entry := ruleCatalog.entries[rulePath]
-		if _, err := canonical.Marshal(prepared.Env); err != nil {
-			allDiagnostics = append(allDiagnostics, errorDiagnostic(entry.metadata.ID, "setup", entry.metadata.Version, assembled.snapshotID, nil, err.Error()))
-			continue
-		}
-		if _, err := canonical.Marshal(prepared.Setup); err != nil {
-			allDiagnostics = append(allDiagnostics, errorDiagnostic(entry.metadata.ID, "setup", entry.metadata.Version, assembled.snapshotID, nil, err.Error()))
-			continue
-		}
-		e.stats.gojaRuntimes.Add(1)
-		loadedRule, err := runtime.LoadPureBundle(entry.pureCode)
-		if err != nil {
-			allDiagnostics = append(allDiagnostics, errorDiagnostic(entry.metadata.ID, "program", entry.metadata.Version, assembled.snapshotID, nil, err.Error()))
-			continue
-		}
-		if loadedRule.RuleID() != entry.metadata.ID || loadedRule.RuleVersion() != entry.metadata.Version {
-			allDiagnostics = append(allDiagnostics, errorDiagnostic(entry.metadata.ID, "program", entry.metadata.Version, assembled.snapshotID, nil, "rule metadata changed between catalog and execution load"))
-			continue
-		}
-		e.stats.programBuilds.Add(1)
-		output, err := loadedRule.Program(prepared.Env, prepared.Setup)
-		if err != nil {
-			allDiagnostics = append(allDiagnostics, errorDiagnostic(entry.metadata.ID, "program", entry.metadata.Version, assembled.snapshotID, nil, err.Error()))
-			continue
-		}
-		generated = append(generated, generatedRule{
-			path: rulePath, ruleID: entry.metadata.ID, version: entry.metadata.Version,
-			severity: severityOf(options, entry.metadata.ID), loaded: loadedRule, output: output,
-		})
-	}
-
+	// The two integrity barriers surround metadata loading; duplicate analysis
+	// deliberately sees partial and unapproved IDs before eligibility is set.
+	inventory, integrityComplete := preMetadataIntegrity(ruleCatalog, lock, options.WorkspaceRoot, assembled.snapshotID)
+	run.complete = run.complete && integrityComplete
+	e.stats.gojaRuntimes.Add(int64(ruleCatalog.loadMetadata()))
+	integrityComplete = postMetadataIntegrity(ruleCatalog, lock, options.WorkspaceRoot, assembled.snapshotID)
+	run.complete = run.complete && integrityComplete
+	knownRules, loaded := classifyRuleIDs(ruleCatalog, options.WorkspaceRoot, assembled.snapshotID)
+	result.RulesLoaded = loaded
+	prepareRuleConfigs(ctx, ruleCatalog, options, sandbox, lock != nil, assembled.snapshotID, &run)
+	e.generateRulePrograms(ruleCatalog, assembled.snapshotID)
 	producerCatalog, err := e.describeProducers()
 	if err != nil {
 		return Result{}, run, evidence, err
 	}
-	jobs := make([]*preparedRuleJob, 0, len(generated))
-	requested := make(map[string]map[facts.Predicate]struct{})
-	for _, generatedRule := range generated {
-		planKey, keyErr := generatedRulePlanKey(producerCatalog.identity, generatedRule.output,
-			generatedRule.loaded.Report(), generatedRule.loaded.ExpectNonEmpty(), generatedRule.loaded.SuppressionDeclarations())
-		entry := e.ruleEntries[generatedRule.path]
-		var plan *rulePlan
-		if keyErr == nil && planKey != "" && entry.planKey == planKey {
-			plan = entry.plan
-		}
-		var perr *phaseError
-		if plan != nil {
-			var policies []suppressionPolicy
-			policies, perr = validateSuppressionPolicies(generatedRule.loaded.SuppressionDeclarations(), plan.reportDecls)
-			if perr == nil {
-				var extraFacts factstore.ReadOnlyFactStore
-				extraFacts, perr = prepareExtraFacts(generatedRule.output, producerCatalog.namespaces)
-				if perr == nil {
-					plan = planWithExtraFacts(plan, extraFacts)
-					plan.suppressionRules = policies
-				}
-			}
-		} else {
-			e.stats.mangleCompiles.Add(1)
-			plan, perr = prepareProgram(producerCatalog.sources, producerCatalog.schemaDecls, producerCatalog.namespaces,
-				generatedRule.output, generatedRule.loaded.Report(), generatedRule.loaded.ExpectNonEmpty(), generatedRule.loaded.SuppressionDeclarations())
-			if perr == nil && keyErr == nil && planKey != "" {
-				template := *plan
-				template.ruleFacts = nil
-				template.suppressionRules = nil
-				entry.planKey = planKey
-				entry.plan = &template
-			}
-		}
-		if perr != nil {
-			allDiagnostics = append(allDiagnostics, errorDiagnostic(generatedRule.ruleID, perr.phase, generatedRule.version, assembled.snapshotID, producerCatalog.namespaces, perr.Error()))
-			continue
-		}
-		for _, entry := range producerCatalog.entries {
-			for _, relation := range entry.description.BaseRelations {
-				if _, needed := plan.required[relation.Predicate.Name]; !needed {
-					continue
-				}
-				if requested[entry.description.Namespace] == nil {
-					requested[entry.description.Namespace] = make(map[facts.Predicate]struct{})
-				}
-				requested[entry.description.Namespace][relation.Predicate] = struct{}{}
-			}
-		}
-		jobs = append(jobs, &preparedRuleJob{
-			path: generatedRule.path, ruleID: generatedRule.ruleID, version: generatedRule.version,
-			severity: generatedRule.severity, loaded: generatedRule.loaded, plan: plan,
-		})
-	}
+	e.prepareRulePlans(ruleCatalog, producerCatalog, assembled.snapshotID)
+	jobs, requested := ruleRelationDemand(ruleCatalog, producerCatalog)
 	if len(jobs) > 0 {
 		var current *composedFacts
 		if e.currentCatalog == producerCatalog.identity {
@@ -749,23 +527,27 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options, mode
 	result.SnapshotVersion = assembled.snapshotID
 	result.AnalyzedFiles = sortedSet(assembled.analyzedFiles)
 	run.known = knownRules
-	if run.complete {
-		allDiagnostics = append(allDiagnostics, unknownSeverityRules(options, knownRules, assembled.snapshotID, producerNames)...)
-	}
-
 	outcomes, dispatchErr := dispatchRuleJobs(ctx, jobs, assembled, options, &e.stats)
 	if dispatchErr != nil {
 		return Result{}, run, evidence, dispatchErr
 	}
-	for _, outcome := range outcomes {
-		allDiagnostics = append(allDiagnostics, outcome.diagnostics...)
+	for index, outcome := range outcomes {
+		rule := jobs[index].record
+		rule.diagnostics = append(rule.diagnostics, outcome.diagnostics...)
 		evidence.findings = append(evidence.findings, outcome.findings...)
 		evidence.createdFactCounts[outcome.ruleID] = outcome.createdFacts
 		if outcome.completed {
+			rule.disposition = ruleCompleted
 			run.completed[outcome.ruleID] = struct{}{}
 			run.coverage[outcome.ruleID] = outcome.coverage
 			run.assertions[outcome.ruleID] = outcome.assertions
+		} else {
+			rule.disposition = ruleFailed
 		}
+	}
+	allDiagnostics := catalogDiagnostics(ruleCatalog, inventory)
+	if run.complete {
+		allDiagnostics = append(allDiagnostics, unknownSeverityRules(options, knownRules, assembled.snapshotID, producerNames)...)
 	}
 	restampDiagnostics(allDiagnostics, assembled.snapshotID, producerNames)
 	sortDiagnostics(allDiagnostics)
@@ -799,7 +581,7 @@ func (e *Session) analyze(ctx context.Context, options Options) (Result, runInfo
 }
 
 type preparedRuleJob struct {
-	path     string
+	record   *ruleRecord
 	ruleID   string
 	version  int
 	severity diagnostics.Severity
