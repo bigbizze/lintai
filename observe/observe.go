@@ -74,9 +74,11 @@ type Record struct {
 }
 
 type setData struct {
-	records []Record
-	mu      sync.Mutex
-	hints   []*Stamp
+	records     []Record
+	conflicting [2]int
+	hasConflict bool
+	mu          sync.Mutex
+	hints       []*Stamp
 }
 
 // Set owns immutable semantic records and synchronized, renewable hints.
@@ -209,6 +211,17 @@ func normalize(r Record) (Record, error) {
 }
 func semanticKey(r Record) string { r.Stamp = nil; b, _ := json.Marshal(r); return string(b) }
 
+// operationKey groups expectations that cannot both hold when their results
+// differ. Listings with different ignore sets are not assumed to conflict.
+func operationKey(r Record) string {
+	r.Value = ""
+	r.Present = false
+	if r.Kind == Listing {
+		r.Entries = nil
+	}
+	return semanticKey(r)
+}
+
 // New validates and detaches records, retaining conflicting expectations.
 func New(records []Record) (Set, error) {
 	unique := make(map[string]Record, len(records))
@@ -231,8 +244,18 @@ func New(records []Record) (Set, error) {
 		return Set{}, nil
 	}
 	d := &setData{records: make([]Record, 0, len(keys)), hints: make([]*Stamp, 0, len(keys))}
+	operations := make(map[string]int, len(keys))
 	for _, k := range keys {
 		r := unique[k]
+		op := operationKey(r)
+		if first, ok := operations[op]; ok {
+			if !d.hasConflict {
+				d.conflicting = [2]int{first, len(d.records)}
+				d.hasConflict = true
+			}
+		} else {
+			operations[op] = len(d.records)
+		}
 		d.records = append(d.records, r)
 		if r.Stamp == nil {
 			d.hints = append(d.hints, nil)

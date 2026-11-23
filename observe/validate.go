@@ -48,6 +48,25 @@ func (s Set) Changed(ctx context.Context, mode Mode) (*Record, error) {
 	if s.data == nil {
 		return nil, nil
 	}
+	if s.data.hasConflict {
+		// Check one result against the live input once. Whichever answer was
+		// captured by this check, at least one conflicting expectation is
+		// wrong; Quick hints must not make both expectations appear valid.
+		index := s.data.conflicting[0]
+		r := s.data.records[index]
+		matches, err := s.matches(index, r, Full)
+		if canceled := ctx.Err(); canceled != nil {
+			return nil, canceled
+		}
+		if err != nil {
+			return nil, fmt.Errorf("validate %s %s: %w", r.Kind, r.Path, err)
+		}
+		if matches {
+			r = s.data.records[s.data.conflicting[1]]
+		}
+		v := copyRecord(r)
+		return &v, nil
+	}
 	for i, r := range s.data.records {
 		if err := ctx.Err(); err != nil {
 			return nil, err

@@ -167,8 +167,16 @@ func TestIdentityAndConflicts(t *testing.T) {
 	}
 	file := filepath.Join(root, "file")
 	write(t, file, "a")
-	set := Union(mustSet(t, Record{Kind: Content, Path: file, Value: hash("a")}), mustSet(t, Record{Kind: Content, Path: file, Value: hash("b")}))
-	if len(set.Records()) != 2 || !changed(t, set, Full) {
+	mtime := time.Unix(1700000000, 0)
+	if err := os.Chtimes(file, mtime, mtime); err != nil {
+		t.Fatal(err)
+	}
+	// Separate captures of same-sized A and B can both have certified hints
+	// if a writer restores the old timestamp between them.
+	stamp := &Stamp{"1", fmt.Sprint(mtime.UnixNano()), fmt.Sprint(mtime.Add(3 * time.Second).UnixNano())}
+	set := Union(mustSet(t, Record{Kind: Content, Path: file, Value: hash("a"), Stamp: stamp}), mustSet(t, Record{Kind: Content, Path: file, Value: hash("b"), Stamp: stamp}))
+	conflict, err := set.Changed(context.Background(), Quick)
+	if err != nil || conflict == nil || conflict.Value != hash("b") || len(set.Records()) != 2 || !changed(t, set, Full) {
 		t.Fatal("conflicting expectations must reject reuse")
 	}
 	detached := first.Records()
