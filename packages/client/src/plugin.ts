@@ -39,7 +39,7 @@ export const reservedRuleNames: readonly string[] = [analysisRuleName, ...author
 // and report().
 export type LintedFile = {
 	physicalFilename: string;
-	// ESLint SourceCode or Oxlint's per-file WeakMap key.
+	// Host SourceCode shared by enabled rules in this analysis.
 	analysis: object;
 	text: string;
 	report(report: Report): void;
@@ -97,9 +97,8 @@ export function createLintaiRules(
 	for (const message of loadErrorMessages) {
 		console.error(message);
 	}
-	// Cache one response by host file identity. ESLint invalidates it from each
-	// enabled rule's create() before Program traversal; Oxlint keeps its existing
-	// per-file identity behavior.
+	// Both hosts invalidate each enabled rule's identity in create(), before
+	// Program traversal, so the first response is shared only for this analysis.
 	const analyses = new WeakMap<
 		object,
 		{ response: ReturnType<ReturnType<typeof getClient>["getFileAnalysis"]> | undefined }

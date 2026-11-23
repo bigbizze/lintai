@@ -830,6 +830,7 @@ Modes:
 
 - `oxlint` CLI: `oneshot`. The plugin runs lintai once, and reports workspace problems on the first linted file only.
 - `oxlint --lsp`: `serve`. The plugin keeps one `lintai serve` process and reports workspace problems on each lint. When the editor text of a file is different from the saved file, `lintai/analysis` shows one message on line 1 that asks you to save the file. Each file request validates captured inputs and refreshes the analysis when needed.
+- In serve mode, each oxlint file analysis that runs an enabled lintai rule makes a fresh file request; its enabled lintai rules share the response, including when `lintai/analysis` is disabled.
 - The plugin detects the language server from the `--lsp` argument of the oxlint process. An explicit `mode` option always wins.
 - The plugin resolves relative paths in its options from the directory that the oxlint process runs in. An editor can start `oxlint --lsp` in a different directory, so set `workspaceRoot: import.meta.dirname` in `lintai.oxlint.mjs`, as in the example.
 

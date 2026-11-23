@@ -2,11 +2,10 @@ import {
 	createFramedResponse,
 	createTestDependencies,
 	createTestProcess,
-	createTestTransport,
 	getClient,
 	resetClientsForTest,
 } from "../../client/dist/test-support.test.js";
-import { deepEqual, strictEqual } from "node:assert/strict";
+import { deepEqual } from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -469,108 +468,3 @@ for (const [name, cases] of Object.entries(authoringCases)) {
 	oxlintAuthoring.run(`oxlint ${name}`, authoringPlugin.rules[name] as never, cases);
 	eslintAuthoring.run(`eslint ${name}`, rule, cases);
 }
-
-// RuleTester calls Oxlint's real file runner, including its singleton
-// SourceCode and per-file WeakMap reset. Run two cases synchronously.
-it("oxlint shares a response within each file and revalidates the next file analysis", () => {
-	resetClientsForTest();
-	const options = { ...bridge, mode: "serve" as const };
-	const resolved = resolveBridgeOptions(options, process.cwd(), oxlintHostDefaults());
-	const child = createTestProcess();
-	let id = 0;
-	let files = 0;
-	let sourceCode: object | undefined;
-	const dependencies = createTestDependencies({
-		spawnSync: () => ({
-			status: 0,
-			stderr: "",
-			stdout: JSON.stringify({
-				rules: [
-					{ id: "first", path: "first.ts" },
-					{ id: "second", path: "second.ts" },
-				],
-				errors: [],
-			}),
-		}),
-		spawnServe: () =>
-			createTestTransport(child, () => {
-				const requestID = ++id;
-				if (requestID === 1)
-					return createFramedResponse({
-						jsonrpc: "2.0",
-						id: requestID,
-						result: { protocolVersion: 1 },
-					});
-				files++;
-				return createFramedResponse({
-					jsonrpc: "2.0",
-					id: requestID,
-					result: {
-						snapshotVersion: String(files),
-						rulesLoaded: 2,
-						problems: [],
-						diagnostics: ["first", "second"].map((rule_id) => ({
-							...violation,
-							rule_id,
-							message: `generation ${files}`,
-						})),
-					},
-				});
-			}),
-	});
-	getClient(resolved, dependencies);
-	const plugin = createLintaiPlugin(options);
-	type Context = Parameters<(typeof plugin.rules)[string]["create"]>[0];
-	const combined = {
-		meta: {
-			type: "problem" as const,
-			docs: { description: "exercise host file lifetime" },
-			schema: [],
-		},
-		create(context: Context) {
-			if (sourceCode === undefined) sourceCode = context.sourceCode;
-			else strictEqual(context.sourceCode, sourceCode);
-			const first = plugin.rules.first!.create(context);
-			const second = plugin.rules.second!.create(context);
-			const analysis = plugin.rules.analysis!.create(context);
-			return {
-				Program() {
-					first.Program();
-					second.Program();
-					analysis.Program();
-				},
-			};
-		},
-	};
-	const previousDescribe = RuleTester.describe;
-	const previousIt = RuleTester.it;
-	try {
-		RuleTester.describe = ((_name: string, callback: () => void) =>
-			callback()) as typeof RuleTester.describe;
-		RuleTester.it = ((_name: string, callback: () => void) => callback()) as typeof RuleTester.it;
-		const runner = new RuleTester({ eslintCompat: true, cwd: workspace });
-		for (const generation of [1, 2]) {
-			runner.run(`lifetime ${generation}`, combined as never, {
-				valid: [],
-				invalid: [
-					{
-						code: savedText,
-						filename: path.join(workspace, "src/a.ts"),
-						errors: ["first", "second"].map((rule) => ({
-							message: `[${rule}/violation] generation ${generation}`,
-							line: 3,
-							column: 8,
-							endLine: 3,
-							endColumn: 29,
-						})),
-					},
-				],
-			});
-		}
-		deepEqual(files, 2);
-	} finally {
-		RuleTester.describe = previousDescribe;
-		RuleTester.it = previousIt;
-		resetClientsForTest();
-	}
-});

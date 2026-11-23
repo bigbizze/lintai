@@ -123,19 +123,28 @@ const authoring = spawnSync("pnpm", ["exec", "oxlint", "--format", "json", "lint
 });
 assert.equal(authoring.status, 0, `expected the rule file to pass the authoring rules\n${authoring.stdout}\n${authoring.stderr}`);
 
-// Language server: serve mode.
+// Language server: serve mode with the TypeScript config importing the plugin.
+// Give it a workspace without the JSON config, using the same packed install.
+const lspRepoDir = path.join(path.dirname(repoDir), "lsp-repo");
+await fs.mkdir(lspRepoDir);
+await fs.cp(path.join(repoDir, "src"), path.join(lspRepoDir, "src"), { recursive: true });
+await fs.cp(path.join(repoDir, "lintai-rules"), path.join(lspRepoDir, "lintai-rules"), { recursive: true });
+await fs.copyFile(path.join(repoDir, "package.json"), path.join(lspRepoDir, "package.json"));
+await fs.copyFile(path.join(repoDir, "lintai.oxlint.mjs"), path.join(lspRepoDir, "lintai.oxlint.mjs"));
+await fs.copyFile(path.join(repoDir, "oxlint.config.ts.off"), path.join(lspRepoDir, "oxlint.config.ts"));
+await fs.symlink(path.join(repoDir, "node_modules"), path.join(lspRepoDir, "node_modules"), "dir");
 await lintaiRuns();
-const examplePath = path.join(repoDir, "src", "example.ts");
+const examplePath = path.join(lspRepoDir, "src", "example.ts");
 const exampleURI = pathToFileURL(examplePath).href;
 const exampleText = await fs.readFile(examplePath, "utf8");
-const server = startLanguageServer(repoDir);
+const server = startLanguageServer(lspRepoDir);
 try {
 	await server.request("initialize", {
 		processId: process.pid,
-		rootUri: pathToFileURL(repoDir).href,
+		rootUri: pathToFileURL(lspRepoDir).href,
 		capabilities: {},
-		workspaceFolders: [{ uri: pathToFileURL(repoDir).href, name: "smoke" }],
-		initializationOptions: [{ workspaceUri: pathToFileURL(repoDir).href, options: { run: "onSave" } }],
+		workspaceFolders: [{ uri: pathToFileURL(lspRepoDir).href, name: "smoke" }],
+		initializationOptions: [{ workspaceUri: pathToFileURL(lspRepoDir).href, options: { run: "onSave" } }],
 	});
 	server.notify("initialized", {});
 	server.notify("textDocument/didOpen", {
@@ -150,7 +159,7 @@ try {
 	// The language server uses 0-based lines and characters.
 	assert.deepEqual(located.range.start, { line: 0, character: 0 });
 
-	const actionPath = path.join(repoDir, "src", "actions", "save.ts");
+	const actionPath = path.join(lspRepoDir, "src", "actions", "save.ts");
 	const actionURI = pathToFileURL(actionPath).href;
 	server.notify("textDocument/didOpen", {
 		textDocument: { uri: actionURI, languageId: "typescript", version: 1, text: await fs.readFile(actionPath, "utf8") },
@@ -159,6 +168,18 @@ try {
 	assert.ok(
 		action.some((diagnostic) => diagnostic.message.includes("[arch.actions-return-action-result/violation] legacySave")),
 		`expected the type rule diagnostic after didOpen\n${JSON.stringify(action)}`,
+	);
+
+	// Re-lint the same saved file and text after changing a rule implementation.
+	const rulePath = path.join(lspRepoDir, "lintai-rules", "no-async.ts");
+	const ruleText = await fs.readFile(rulePath, "utf8");
+	assert.ok(ruleText.includes("must not be async"));
+	await fs.writeFile(rulePath, ruleText.replace("must not be async", "must never be async"));
+	server.notify("textDocument/didSave", { textDocument: { uri: exampleURI } });
+	const refreshed = await server.diagnostics(exampleURI);
+	assert.ok(
+		refreshed.some((diagnostic) => diagnostic.message.includes("example in src/example.ts must never be async")),
+		`expected the edited rule's diagnostic for unchanged file text\n${JSON.stringify(refreshed)}`,
 	);
 
 	const fixedText = exampleText.replace("export async function", "export function");

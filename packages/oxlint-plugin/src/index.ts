@@ -87,6 +87,13 @@ function lintedFile(context: OxlintContext): LintedFile {
 // the directory that oxlint runs in.
 export function createLintaiPlugin(options: LintaiOptions = {}): LintaiPlugin {
 	const lintai = createLintaiRules(options, oxlintHostDefaults());
+	const beginFileAnalysis = (context: OxlintContext) => {
+		const file = lintedFile(context);
+		// Oxlint creates every enabled rule listener before Program traversal.
+		// Invalidate here even if the plugin loaded before Oxlint's WeakMap patch.
+		lintai.invalidateAnalysis(file);
+		return file;
+	};
 	const rules: Record<string, OxlintRule> = {
 		...(authoringRules as unknown as Record<string, OxlintRule>),
 	};
@@ -98,9 +105,10 @@ export function createLintaiPlugin(options: LintaiOptions = {}): LintaiPlugin {
 				schema: [],
 			},
 			create(context) {
+				const file = beginFileAnalysis(context);
 				return {
 					Program() {
-						lintai.lintRule(item.id, lintedFile(context));
+						lintai.lintRule(item.id, file);
 					},
 				};
 			},
@@ -116,9 +124,10 @@ export function createLintaiPlugin(options: LintaiOptions = {}): LintaiPlugin {
 			schema: [],
 		},
 		create(context) {
+			const file = beginFileAnalysis(context);
 			return {
 				Program() {
-					lintai.lintAnalysis(lintedFile(context));
+					lintai.lintAnalysis(file);
 				},
 			};
 		},

@@ -534,7 +534,7 @@ Keep explicit one-shot mode and one-shot fallback. Their one-shot result cache i
 
 For problems(), keep the exact problem-list identity and whether that episode has been reported; attach the episode to the file response that produced it. JSON.stringify of the ordered string list is sufficient. An unchanged response must not reset reportProblemsOnce. A changed list resets it; an empty list ends the prior problem episode. Do not use SnapshotVersion to decide whether problems changed.
 
-Keep process lifecycle/framed transport and the plugin's unsaved-buffer check. Share one response among enabled rules in a host file analysis. ESLint invalidates the prior response while its enabled lintai rules are created, before `Program` listeners run, so every verification that runs an enabled lintai rule refreshes even when a caller reuses a `SourceCode` object. Oxlint keeps its SourceCode-keyed per-file behavior.
+Keep process lifecycle/framed transport and the plugin's unsaved-buffer check. Share one response among enabled rules in a host file analysis. ESLint and Oxlint invalidate the prior response while their enabled lintai rules are created, before `Program` listeners run, so every analysis that runs an enabled lintai rule requests a new response even when the host reuses its `SourceCode` object. In serve mode, that request validates freshness.
 
 Delete rule/input watchers, watch dependency injection, idle timers, analysis epochs, saved-version maps, invalidated state, background refresh methods, rule/input invalidation scheduling, serve-mode diagnosticsByFile/unlocated caches and WatchHints throughout.
 
