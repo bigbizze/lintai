@@ -118,3 +118,53 @@ func TestCompilerDecodesAndHashesTheCapturedBytes(t *testing.T) {
 		})
 	}
 }
+
+func TestCompilerRealpathMemoizesTheCapturedAnswer(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := filepath.Join(root, "first")
+	second := filepath.Join(root, "second")
+	for _, name := range []string{first, second} {
+		if err := os.WriteFile(name, []byte(name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(first, link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	fsys := trackResolutionInputs(osvfs.FS())
+	path := tspath.RootedPathFromAbsolute(link)
+	got := fsys.Realpath(path)
+	if got.AsString() != filepath.ToSlash(first) {
+		t.Fatalf("resolved %q, want %q", got.AsString(), first)
+	}
+	if err := os.Remove(link); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(second, link); err != nil {
+		t.Fatal(err)
+	}
+	if again := fsys.Realpath(path); again != got {
+		t.Fatalf("resolution changed from %q to %q within a collection", got.AsString(), again.AsString())
+	}
+	if !slices.ContainsFunc(fsys.observations(), func(record CompilerObservation) bool {
+		return record.Kind == "resolved" && record.Path == link && record.Value == first
+	}) {
+		t.Fatal("resolution observation does not match the compiler's answer")
+	}
+
+	missing := filepath.Join(root, "missing")
+	missingPath := tspath.RootedPathFromAbsolute(missing)
+	if got := fsys.Realpath(missingPath); got != missingPath {
+		t.Fatalf("missing resolution returned %q", got.AsString())
+	}
+	if err := os.Symlink(first, missing); err != nil {
+		t.Fatal(err)
+	}
+	if got := fsys.Realpath(missingPath); got != missingPath {
+		t.Fatalf("missing resolution was not memoized: %q", got.AsString())
+	}
+}

@@ -42,6 +42,7 @@ type resolutionInputFS struct {
 	vfs.FS
 	mu         sync.Mutex
 	statInfo   map[string]vfs.FileInfo
+	resolved   map[string]tspath.RootedPath
 	captureErr error
 	*compilerInputObservations
 }
@@ -59,7 +60,7 @@ type compilerInputObservations struct {
 
 func trackResolutionInputs(fs vfs.FS) *resolutionInputFS {
 	return &resolutionInputFS{
-		FS: fs, statInfo: make(map[string]vfs.FileInfo), compilerInputObservations: &compilerInputObservations{
+		FS: fs, statInfo: make(map[string]vfs.FileInfo), resolved: make(map[string]tspath.RootedPath), compilerInputObservations: &compilerInputObservations{
 			reads: make(map[string]capturedFile), fileProbes: make(map[string]bool),
 			dirProbes: make(map[string]bool), stats: make(map[string]string),
 			directories: make(map[string]capturedDirectory), realpaths: make(map[string]string),
@@ -237,16 +238,25 @@ func (fsys *resolutionInputFS) Realpath(path tspath.RootedPath) tspath.RootedPat
 	}
 	fsys.mu.Lock()
 	defer fsys.mu.Unlock()
-	if captured, ok := fsys.realpaths[key]; ok {
-		return tspath.RootedPathFromAbsolute(captured)
+	if captured, ok := fsys.resolved[key]; ok {
+		return captured
 	}
-	resolved := fsys.FS.Realpath(path)
-	if actual, err := filepath.EvalSymlinks(filepath.FromSlash(key)); err == nil {
-		fsys.realpaths[key] = normalizeSlash(actual)
-	} else if !isMissing(err) {
+	// Match the underlying OS filesystem's resolution and use that same
+	// answer for both the compiler and the observation. In particular, do
+	// not resolve twice: the target could change between those operations.
+	answer := path
+	actual, err := nativepath.Realpath(filepath.FromSlash(key))
+	if err == nil {
+		actual, err = filepath.Abs(actual)
+	}
+	if err == nil && !nativepath.IsNetworkPath(actual) {
+		answer = tspath.RootedPathFromAbsolute(actual)
+		fsys.realpaths[key] = answer.AsString()
+	} else if err != nil && !isMissing(err) {
 		fsys.captureErr = fmt.Errorf("resolve input %s: %w", key, err)
 	}
-	return resolved
+	fsys.resolved[key] = answer
+	return answer
 }
 
 func (fsys *resolutionInputFS) inputPath(path string) string { return normalizeSlash(path) }
