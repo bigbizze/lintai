@@ -12,7 +12,6 @@ import (
 	"github.com/bigbizze/lintai/backend"
 	"github.com/bigbizze/lintai/backend/typescript"
 	"github.com/bigbizze/lintai/diagnostics"
-	"github.com/bigbizze/lintai/facts"
 	"github.com/bigbizze/lintai/observe"
 	"github.com/bigbizze/lintai/suppressions"
 )
@@ -40,14 +39,6 @@ func secondCoverageProducer() *coverageProducer {
 	p.description.Schema.Prelude = strings.ReplaceAll(p.description.Schema.Prelude, "catalog.", "other.")
 	p.description.BaseRelations[0].Predicate.Name = "other.item"
 	p.description.Helpers[0].Predicate.Name = "other.usable"
-	for _, row := range p.rows {
-		row[0].String = strings.Replace(row[0].String, "catalog:", "other:", 1)
-	}
-	anchors := map[string]facts.AnchorSupport{}
-	for id, support := range p.anchors {
-		anchors[strings.Replace(id, "catalog:", "other:", 1)] = support
-	}
-	p.anchors = anchors
 	return &coverageProducer{parallelFixtureProducer: p, files: []string{"catalog/items.sql"}, revision: "other:1"}
 }
 
@@ -60,10 +51,10 @@ func TestSuppressionProducerCoverage(t *testing.T) {
 	}
 	workspace := t.TempDir()
 	p := newParallelFixtureProducer()
-	support := p.anchors["catalog:item-b"]
+	support := p.anchors["item-b"]
 	support.Location.File = "../catalog/items.sql"
 	support.Tracking = nil
-	p.anchors["catalog:item-b"] = support
+	p.anchors["item-b"] = support
 	catalog := &coverageProducer{parallelFixtureProducer: p, revision: "catalog:1"}
 	other := secondCoverageProducer()
 	writeTestFile(t, workspace, "lintai-rules/catalog.ts", parallelRuleSource("fixture.catalog", "Decl violation(Entity, Code). violation(Entity, Code) :- catalog.usable(Entity, Code).", "(row) => row.Code"))
@@ -80,16 +71,35 @@ func TestSuppressionProducerCoverage(t *testing.T) {
 	if len(result.Suppressed) != 6 {
 		t.Fatalf("recording: %+v", result.Diagnostics)
 	}
+	wantEntities := map[string]bool{
+		"catalog:item-a": false, "catalog:item-b": false, "catalog:item-c": false,
+		"other:item-a": false, "other:item-b": false, "other:item-c": false,
+	}
+	for _, item := range result.Suppressed {
+		if item.EntityIdentity == nil {
+			t.Fatalf("missing producer-qualified entity: %+v", item)
+		}
+		id := item.EntityIdentity.SemanticKey
+		if _, ok := wantEntities[id]; !ok {
+			t.Fatalf("unexpected producer-qualified entity %q", id)
+		}
+		wantEntities[id] = true
+	}
+	for id, found := range wantEntities {
+		if !found {
+			t.Fatalf("missing producer-qualified entity %q", id)
+		}
+	}
 	path := filepath.Join(workspace, suppressions.DefaultFile)
 	originalBytes, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	oneProducer := newParallelFixtureProducer()
-	nullSupport := oneProducer.anchors["catalog:item-b"]
+	nullSupport := oneProducer.anchors["item-b"]
 	nullSupport.Location.File = "../catalog/items.sql"
 	nullSupport.Tracking = nil
-	oneProducer.anchors["catalog:item-b"] = nullSupport
+	oneProducer.anchors["item-b"] = nullSupport
 	single := Open(Options{}, &coverageProducer{parallelFixtureProducer: oneProducer, revision: "catalog:1"}, secondCoverageProducer())
 	oneOptions := options
 	oneOptions.RuleWorkers = 1
