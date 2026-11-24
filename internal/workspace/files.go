@@ -1,8 +1,6 @@
 package workspace
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io/fs"
 	"os"
@@ -41,8 +39,6 @@ type ScopePlan struct {
 	Pruned       []string
 	Observations observe.Set
 	Matches      []ScopeMatch
-	Revision     string
-	Options      ScopeOptions
 }
 
 // PlanSources applies built-in, configured and invocation selection layers,
@@ -73,8 +69,8 @@ func PlanSources(root string, options ScopeOptions) (*ScopePlan, error) {
 	if err := validatePatterns(options); err != nil {
 		return nil, err
 	}
-	// Store in-workspace absolute sources relative to the requested or resolved
-	// root so they can be replanned and hashed independently of the root spelling.
+	// Normalize a copy so in-workspace absolute sources also work when the
+	// workspace root is reached through a symlink.
 	options = cloneScopeOptions(options)
 	for i, name := range options.Sources {
 		if filepath.IsAbs(name) {
@@ -85,7 +81,7 @@ func PlanSources(root string, options ScopeOptions) (*ScopePlan, error) {
 			}
 		}
 	}
-	plan := &ScopePlan{Root: filepath.Clean(absoluteRoot), Options: options}
+	plan := &ScopePlan{Root: filepath.Clean(absoluteRoot)}
 	exact, err := resolveExactSources(absoluteRoot, options.Sources, &observations)
 	if err != nil {
 		return nil, err
@@ -177,11 +173,6 @@ func PlanSources(root string, options ScopeOptions) (*ScopePlan, error) {
 	if err != nil {
 		return nil, fmt.Errorf("source observations: %w", err)
 	}
-	observationDigest, err := plan.Observations.Digest(requestedRoot)
-	if err != nil {
-		return nil, err
-	}
-	plan.Revision = scopeRevision(plan, observationDigest)
 	return plan, nil
 }
 
@@ -390,49 +381,6 @@ func cloneScopeOptions(options ScopeOptions) ScopeOptions {
 		Exclude: slices.Clone(options.Exclude), Include: slices.Clone(options.Include),
 		Sources: slices.Clone(options.Sources), InvocationExclude: slices.Clone(options.InvocationExclude),
 	}
-}
-
-func scopeRevision(plan *ScopePlan, observationDigest string) string {
-	var builder strings.Builder
-	write := func(value string) {
-		builder.WriteString(fmt.Sprintf("%d:", len(value)))
-		builder.WriteString(value)
-	}
-	for _, layer := range [][]string{plan.Options.Exclude, plan.Options.Include, plan.Options.Sources, plan.Options.InvocationExclude} {
-		builder.WriteString("[")
-		values := slices.Clone(layer)
-		slices.Sort(values)
-		values = slices.Compact(values)
-		for _, value := range values {
-			write(value)
-		}
-		builder.WriteString("]")
-	}
-	for _, layer := range [][]string{plan.Files, plan.ExactFiles} {
-		builder.WriteString("[")
-		for _, value := range layer {
-			write(relativeSlash(plan.Root, value))
-		}
-		builder.WriteString("]")
-	}
-	builder.WriteString("[")
-	for _, value := range plan.Pruned {
-		write(value)
-	}
-	builder.WriteString("]")
-	write(observationDigest)
-	for _, match := range plan.Matches {
-		write(match.Path)
-		for _, pattern := range match.ExcludePatterns {
-			write("exclude:" + pattern)
-		}
-		for _, pattern := range match.IncludePatterns {
-			write("include:" + pattern)
-		}
-		write(fmt.Sprint(match.Exact))
-	}
-	digest := sha256.Sum256([]byte(builder.String()))
-	return hex.EncodeToString(digest[:])
 }
 
 func sortedPaths(values map[string]struct{}) []string {

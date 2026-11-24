@@ -187,7 +187,7 @@ func (b *Backend) generation(ctx context.Context, repoRoot, workspaceRoot string
 		}
 	}
 	b.current = nil
-	generation, sources, err := b.extractSnapshot(ctx, workspaceRoot, relations, description, previousSnapshot)
+	generation, sources, err := b.extractSnapshot(ctx, workspaceRoot, relations, previousSnapshot)
 	if err != nil {
 		return nil, err
 	}

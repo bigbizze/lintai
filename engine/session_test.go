@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"codeberg.org/TauCeti/mangle-go/ast"
 	"github.com/bigbizze/lintai/backend"
 	"github.com/bigbizze/lintai/backend/typescript"
 	"github.com/bigbizze/lintai/bundle"
@@ -274,4 +275,56 @@ func TestComposedFactsCaptureCurrentEligibilityWithoutReemission(t *testing.T) {
 	if metadata.Scope.(map[string]any)["items"].([]any)[0] != "original" || !slices.Equal(metadata.AnalyzedFiles, []string{"src/a.ts"}) {
 		t.Fatal("metadata was not normalized and detached")
 	}
+
+	t.Run("TypeScript identity components", func(t *testing.T) {
+		root := t.TempDir()
+		writeTestFile(t, root, "src/a.ts", "import { b } from './b'; export const a = b;\n")
+		writeTestFile(t, root, "src/b.ts", "export const b = 1;\n")
+		module := facts.Predicate{Name: "ts.module", Arity: 1}
+		modulePath := facts.Predicate{Name: "ts.module_path", Arity: 2}
+		demand := map[string]map[facts.Predicate]struct{}{"ts": {module: {}}}
+		collect := func(settings typescript.Options, requested map[string]map[facts.Predicate]struct{}, previous *composedFacts) composedFacts {
+			t.Helper()
+			session := Open(Options{}, typescript.New(settings))
+			t.Cleanup(func() { _ = session.Close() })
+			catalog, err := session.describeProducers()
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, err := catalog.collect(context.Background(), Options{RepoRoot: root, WorkspaceRoot: root}, requested, previous, observe.Full)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return result
+		}
+		digest := func(result composedFacts) string {
+			t.Helper()
+			value, err := result.observations.Digest(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return value
+		}
+		first := collect(typescript.Options{Files: typescript.FileScopeWalk, Excludes: []string{"unused-a/**", "unused-b/**"}}, demand, nil)
+		reordered := collect(typescript.Options{Files: typescript.FileScopeWalk, Excludes: []string{"unused-b/**", "unused-a/**"}}, demand, &first)
+		if reordered.snapshotID != first.snapshotID || reordered.base != first.base || digest(reordered) != digest(first) {
+			t.Fatal("equivalent source-selection ordering changed the composed identity")
+		}
+		descriptorChanged := collect(typescript.Options{Files: typescript.FileScopeWalk, Excludes: []string{"unused-c/**"}}, demand, &first)
+		if digest(descriptorChanged) != digest(first) || descriptorChanged.snapshotID == first.snapshotID || descriptorChanged.base == first.base {
+			t.Fatal("unchanged observations authorized reuse across different producer settings")
+		}
+		selectionChanged := collect(typescript.Options{Files: typescript.FileScopeWalk, Excludes: []string{"src/b.ts"}}, demand, &first)
+		moduleSym := ast.PredicateSym{Symbol: module.Name, Arity: module.Arity}
+		if first.factCounts[moduleSym] != 2 || selectionChanged.factCounts[moduleSym] != 1 ||
+			selectionChanged.snapshotID == first.snapshotID || selectionChanged.base == first.base {
+			t.Fatalf("changed source selection reused output: first=%d changed=%d", first.factCounts[moduleSym], selectionChanged.factCounts[moduleSym])
+		}
+		moreDemand := map[string]map[facts.Predicate]struct{}{"ts": {module: {}, modulePath: {}}}
+		requested := collect(typescript.Options{Files: typescript.FileScopeWalk, Excludes: []string{"unused-a/**", "unused-b/**"}}, moreDemand, &first)
+		pathSym := ast.PredicateSym{Symbol: modulePath.Name, Arity: modulePath.Arity}
+		if digest(requested) != digest(first) || requested.snapshotID == first.snapshotID || requested.base == first.base || requested.factCounts[pathSym] != 2 {
+			t.Fatal("unchanged observations authorized reuse across different relation demand")
+		}
+	})
 }
