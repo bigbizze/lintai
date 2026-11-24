@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"testing"
 
@@ -102,8 +103,10 @@ func TestScopePlanAppliesRestoreExactAndInvocationPrecedenceAndTracksMembership(
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reordered.Revision != plan.Revision {
-		t.Fatal("reordering set-valued scope options changed the scope revision")
+	if !slices.Equal(reordered.Files, plan.Files) || !slices.Equal(reordered.ExactFiles, plan.ExactFiles) ||
+		!slices.Equal(reordered.Pruned, plan.Pruned) || !reflect.DeepEqual(reordered.Matches, plan.Matches) ||
+		!reflect.DeepEqual(reordered.Observations.Records(), plan.Observations.Records()) {
+		t.Fatal("reordering set-valued scope options changed selection or evidence")
 	}
 	if !slices.Contains(plan.Pruned, ".git") || !slices.Contains(plan.Pruned, "node_modules") {
 		t.Fatalf("scope explanation omitted pruned boundaries: %v", plan.Pruned)

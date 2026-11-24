@@ -65,11 +65,7 @@ func (b *Backend) buildTestGeneration(ctx context.Context, repoRoot, workspaceRo
 }
 
 func (b *Backend) buildLintaiSnapshot(ctx context.Context, repoRoot, workspaceRoot string) (*lintaiapi.Snapshot, []ambient.Source, string, error) {
-	description, err := b.Describe()
-	if err != nil {
-		return nil, nil, "", err
-	}
-	generation, sources, err := b.extractSnapshot(ctx, workspaceRoot, nil, description, nil)
+	generation, sources, err := b.extractSnapshot(ctx, workspaceRoot, nil, nil)
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -765,9 +761,22 @@ func TestSymlinkedWorkspaceRootKeepsScopeAndIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	options.SourceLinks = filepath.Join(alias, "source-links.json")
-	aliasSnapshot, err := New(options).buildTestGeneration(context.Background(), alias, alias)
+	absoluteSource := filepath.Join(alias, "src/a.ts")
+	options.Sources = []string{absoluteSource}
+	aliasProducer := New(options)
+	aliasSnapshot, err := aliasProducer.buildTestGeneration(context.Background(), alias, alias)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if options.Sources[0] != absoluteSource || aliasProducer.settings.Sources[0] != absoluteSource {
+		t.Fatal("source normalization mutated caller or producer settings")
+	}
+	repeated, err := New(options).buildTestGeneration(context.Background(), alias, alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repeated.inputRevision != aliasSnapshot.inputRevision || !reflect.DeepEqual(repeated.scope, aliasSnapshot.scope) {
+		t.Fatalf("unchanged symlinked-root identity: revision=%q repeated=%q", aliasSnapshot.inputRevision, repeated.inputRevision)
 	}
 	if !reflect.DeepEqual(realSnapshot.scope, aliasSnapshot.scope) {
 		t.Fatalf("symlinked root changed scope: %v != %v", realSnapshot.scope, aliasSnapshot.scope)
@@ -798,9 +807,13 @@ func TestSymlinkedWorkspaceRootKeepsScopeAndIdentity(t *testing.T) {
 	if !hasGenerationObservation(aliasSnapshot, alias) || !hasGenerationObservation(aliasSnapshot, filepath.Join(root, "src/a.ts")) {
 		t.Fatal("symlinked root and captured source are missing from observations")
 	}
-	plan, err := workspace.PlanSources(alias, workspace.ScopeOptions{Sources: []string{filepath.Join(alias, "src/a.ts")}})
+	scopeOptions := workspace.ScopeOptions{Sources: []string{absoluteSource}}
+	plan, err := workspace.PlanSources(alias, scopeOptions)
 	if err != nil {
 		t.Fatalf("absolute exact source through symlinked root: %v", err)
+	}
+	if scopeOptions.Sources[0] != absoluteSource {
+		t.Fatal("source selection mutated caller options")
 	}
 	if changed, err := plan.Observations.Changed(context.Background(), observe.Full); err != nil || changed != nil {
 		t.Fatalf("validate scope with absolute exact source: changed=%v err=%v", changed, err)

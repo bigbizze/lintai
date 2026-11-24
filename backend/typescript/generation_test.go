@@ -22,6 +22,14 @@ func TestGenerationInvalidatesCapturedContentAndScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	rootPath, err := filepath.Abs(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := first.observations.Digest(filepath.Clean(rootPath))
+	if err != nil || first.inputRevision != digest {
+		t.Fatalf("input revision must equal captured observation digest: revision=%q digest=%q err=%v", first.inputRevision, digest, err)
+	}
 	again, err := producer.buildTestGeneration(context.Background(), root, root)
 	if err != nil || again != first {
 		t.Fatalf("unchanged generation not reused: %v", err)

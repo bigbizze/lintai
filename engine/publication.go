@@ -32,13 +32,13 @@ type FilesResult struct {
 }
 
 type publishedResult struct {
-	result       Result
-	request      Options
-	requestKey   string
-	observations observe.Set
-	reusable     bool
-	byFile       map[string][]int
-	unlocated    []int
+	result        Result
+	workspaceRoot string
+	requestKey    string
+	observations  observe.Set
+	reusable      bool
+	byFile        map[string][]int
+	unlocated     []int
 }
 
 // effectiveOptions detaches the request and encodes every output-affecting
@@ -112,10 +112,8 @@ func effectiveOptions(options Options) (Options, string, error) {
 	return options, string(identity), nil
 }
 
-func newPublishedResult(result Result, request Options, key string, observations observe.Set, reusable bool) *publishedResult {
-	request.beforeEvaluation, request.onDerivedFact, request.afterDispatch = nil, nil, nil
-	reusable = reusable && !request.SuppressAll && len(request.SuppressRules) == 0 && !request.PruneSuppressions
-	published := &publishedResult{result: result, request: request, requestKey: key, observations: observations, reusable: reusable, byFile: make(map[string][]int)}
+func newPublishedResult(result Result, workspaceRoot, key string, observations observe.Set, reusable bool) *publishedResult {
+	published := &publishedResult{result: result, workspaceRoot: workspaceRoot, requestKey: key, observations: observations, reusable: reusable, byFile: make(map[string][]int)}
 	for i, item := range result.Diagnostics {
 		if item.DiagnosticKind == diagnostics.KindRuleExecutionError {
 			published.reusable = false
@@ -123,7 +121,7 @@ func newPublishedResult(result Result, request Options, key string, observations
 		if item.SourceLocation == nil {
 			published.unlocated = append(published.unlocated, i)
 		} else {
-			file := publicationFileKey(request.WorkspaceRoot, item.SourceLocation.File)
+			file := publicationFileKey(workspaceRoot, item.SourceLocation.File)
 			published.byFile[file] = append(published.byFile[file], i)
 		}
 	}
@@ -147,7 +145,7 @@ func (p *publishedResult) projectFiles(files []string) FilesResult {
 		Warnings: slices.Clone(p.result.Warnings),
 	}
 	for i, file := range files {
-		for _, index := range p.byFile[publicationFileKey(p.request.WorkspaceRoot, file)] {
+		for _, index := range p.byFile[publicationFileKey(p.workspaceRoot, file)] {
 			result.Diagnostics[i] = append(result.Diagnostics[i], p.result.Diagnostics[index])
 		}
 		result.Diagnostics[i] = cloneDiagnostics(result.Diagnostics[i])
