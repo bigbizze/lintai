@@ -68,6 +68,16 @@ type FileResult = {
 	problems: string[];
 };
 
+type FilesResult = {
+	snapshotVersion: string;
+	rulesLoaded: number;
+	files: Array<{ file: string; diagnostics: Diagnostic[] }>;
+	problems: string[];
+};
+
+export type FileAnalysis = { diagnostics: Diagnostic[]; problems(): string[] };
+export type FilesAnalysis = { files: FileAnalysis[]; problems: string[] };
+
 type AnalysisResult = {
 	snapshotVersion: string;
 	rulesLoaded: number;
@@ -185,10 +195,51 @@ export class LintAIClient {
 	}
 
 	// Hold diagnostics and their problem episode together for one host analysis.
-	getFileAnalysis(file: string): { diagnostics: Diagnostic[]; problems(): string[] } {
+	getFileAnalysis(file: string): FileAnalysis {
 		const diagnostics = this.getDiagnostics(file);
 		const episode = this.problemEpisode;
 		return { diagnostics, problems: () => this.reportProblems(episode) };
+	}
+
+	// One explicit operation; each returned file keeps this response's problem episode.
+	getFilesAnalysis(files: readonly string[]): FilesAnalysis {
+		const names = files.map((file) => file.replace(/\\/g, "/"));
+		this.ensureStarted();
+		let diagnostics: Diagnostic[][] = names.map(() => []);
+		const oneshot = () => {
+			// An empty batch must still expose failures in the one-shot operation.
+			if (names.length === 0) this.getOneshotDiagnostics("");
+			diagnostics = names.map((file) => this.getOneshotDiagnostics(normalizeFile(file)));
+		};
+		if (this.state === "fallback") {
+			oneshot();
+		} else if (this.state === "ready") {
+			try {
+				const result = this.requestSync<FilesResult>("diagnostics/files", { files: names });
+				if (
+					!isSummary(result) ||
+					!Array.isArray(result.files) ||
+					result.files.length !== names.length ||
+					!result.files.every(
+						(item, i) => item && item.file === names[i] && Array.isArray(item.diagnostics),
+					)
+				) {
+					throw new Error("invalid diagnostics/files response");
+				}
+				this.setProblems(result.problems);
+				diagnostics = result.files.map((item) => item.diagnostics);
+			} catch (error) {
+				if (this.handleRequestError(error)) oneshot();
+			}
+		}
+		const episode = this.problemEpisode;
+		return {
+			files: diagnostics.map((items) => ({
+				diagnostics: items,
+				problems: () => this.reportProblems(episode),
+			})),
+			problems: [...episode.messages],
+		};
 	}
 
 	// Reports a changed ordered list once per episode for CLI hosts.
@@ -432,7 +483,7 @@ export class LintAIClient {
 	}
 }
 
-function isSummary(value: FileResult | AnalysisResult): boolean {
+function isSummary(value: FileResult | FilesResult | AnalysisResult): boolean {
 	return (
 		!!value &&
 		typeof value.snapshotVersion === "string" &&

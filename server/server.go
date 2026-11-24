@@ -26,6 +26,7 @@ const (
 type Analyzer interface {
 	Check(ctx context.Context, options ...engine.Options) (engine.Result, error)
 	Refresh(ctx context.Context, options engine.Options, file string) (engine.FileResult, error)
+	RefreshFiles(ctx context.Context, options engine.Options, files []string) (engine.FilesResult, error)
 	Close() error
 }
 
@@ -61,6 +62,9 @@ type InitializeParams struct {
 type FileDiagnosticsParams struct {
 	File string `json:"file"`
 }
+type FilesDiagnosticsParams struct {
+	Files []string `json:"files"`
+}
 type ReanalyzeParams struct {
 	Reason      string `json:"reason,omitempty"`
 	RuleWorkers *int   `json:"ruleWorkers,omitempty"`
@@ -79,6 +83,18 @@ type FileDiagnosticsResult struct {
 	RulesLoaded     int                      `json:"rulesLoaded"`
 	Diagnostics     []diagnostics.Diagnostic `json:"diagnostics"`
 	Problems        []string                 `json:"problems"`
+}
+
+// FilesDiagnosticsResult preserves the order and duplicates in the request.
+type FilesDiagnosticsResult struct {
+	SnapshotVersion string            `json:"snapshotVersion"`
+	RulesLoaded     int               `json:"rulesLoaded"`
+	Files           []FileDiagnostics `json:"files"`
+	Problems        []string          `json:"problems"`
+}
+type FileDiagnostics struct {
+	File        string                   `json:"file"`
+	Diagnostics []diagnostics.Diagnostic `json:"diagnostics"`
 }
 
 func NewWithFactory(factory AnalyzerFactory) *Server { return &Server{factory: factory} }
@@ -127,6 +143,8 @@ func (s *Server) handleRequest(ctx context.Context, request jsonrpc.Request) (js
 		response.Result, err = s.handleInitialize(request.Params)
 	case "diagnostics/file":
 		response.Result, err = s.handleFileDiagnostics(ctx, request.Params)
+	case "diagnostics/files":
+		response.Result, err = s.handleFilesDiagnostics(ctx, request.Params)
 	case "reanalyze":
 		response.Result, err = s.handleReanalyze(ctx, request.Params)
 	case "shutdown":
@@ -204,6 +222,35 @@ func (s *Server) handleFileDiagnostics(ctx context.Context, rawParams json.RawMe
 	s.logWarnings(result.Warnings)
 	items := append([]diagnostics.Diagnostic{}, result.Diagnostics...)
 	return FileDiagnosticsResult{SnapshotVersion: result.SnapshotVersion, RulesLoaded: result.RulesLoaded, Diagnostics: items, Problems: problemStrings(result.WorkspaceProblems)}, nil
+}
+
+func (s *Server) handleFilesDiagnostics(ctx context.Context, rawParams json.RawMessage) (FilesDiagnosticsResult, error) {
+	if !s.initialized {
+		return FilesDiagnosticsResult{}, fmt.Errorf("server not initialized")
+	}
+	var params FilesDiagnosticsParams
+	if err := decodeParams(rawParams, &params); err != nil {
+		return FilesDiagnosticsResult{}, err
+	}
+	if params.Files == nil {
+		return FilesDiagnosticsResult{}, invalidParams("files array is required")
+	}
+	for _, file := range params.Files {
+		if strings.TrimSpace(file) == "" {
+			return FilesDiagnosticsResult{}, invalidParams("each file is required")
+		}
+	}
+	result, err := s.engine.RefreshFiles(ctx, s.options, params.Files)
+	if err != nil {
+		return FilesDiagnosticsResult{}, err
+	}
+	s.logWarnings(result.Warnings)
+	files := make([]FileDiagnostics, len(params.Files))
+	for i, name := range params.Files {
+		files[i] = FileDiagnostics{File: name, Diagnostics: append([]diagnostics.Diagnostic{}, result.Diagnostics[i]...)}
+	}
+	return FilesDiagnosticsResult{SnapshotVersion: result.SnapshotVersion, RulesLoaded: result.RulesLoaded,
+		Files: files, Problems: problemStrings(result.WorkspaceProblems)}, nil
 }
 
 func (s *Server) handleReanalyze(ctx context.Context, rawParams json.RawMessage) (AnalysisResult, error) {

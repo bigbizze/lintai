@@ -21,6 +21,16 @@ type FileResult struct {
 	Warnings          []string
 }
 
+// FilesResult contains ordered projections and workspace problems from one
+// completed publication. Diagnostics[i] corresponds to the ith requested file.
+type FilesResult struct {
+	Diagnostics       [][]diagnostics.Diagnostic
+	WorkspaceProblems []diagnostics.Diagnostic
+	SnapshotVersion   string
+	RulesLoaded       int
+	Warnings          []string
+}
+
 type publishedResult struct {
 	result       Result
 	request      Options
@@ -161,20 +171,21 @@ func publicationFileKey(root, file string) string {
 	return strings.TrimPrefix(filepath.ToSlash(file), "/")
 }
 
-func (p *publishedResult) project(file string) FileResult {
-	copyAt := func(indexes []int) []diagnostics.Diagnostic {
-		if len(indexes) == 0 {
-			return nil
-		}
-		items := make([]diagnostics.Diagnostic, len(indexes))
-		for i, index := range indexes {
-			items[i] = p.result.Diagnostics[index]
-		}
-		return cloneDiagnostics(items)
+func (p *publishedResult) projectFiles(files []string) FilesResult {
+	result := FilesResult{
+		Diagnostics:     make([][]diagnostics.Diagnostic, len(files)),
+		SnapshotVersion: p.result.SnapshotVersion, RulesLoaded: p.result.RulesLoaded,
+		Warnings: slices.Clone(p.result.Warnings),
 	}
-	return FileResult{
-		Diagnostics:       copyAt(p.byFile[publicationFileKey(p.request.WorkspaceRoot, file)]),
-		WorkspaceProblems: copyAt(p.unlocated), SnapshotVersion: p.result.SnapshotVersion,
-		RulesLoaded: p.result.RulesLoaded, Warnings: slices.Clone(p.result.Warnings),
+	for i, file := range files {
+		for _, index := range p.byFile[publicationFileKey(p.request.WorkspaceRoot, file)] {
+			result.Diagnostics[i] = append(result.Diagnostics[i], p.result.Diagnostics[index])
+		}
+		result.Diagnostics[i] = cloneDiagnostics(result.Diagnostics[i])
 	}
+	for _, index := range p.unlocated {
+		result.WorkspaceProblems = append(result.WorkspaceProblems, p.result.Diagnostics[index])
+	}
+	result.WorkspaceProblems = cloneDiagnostics(result.WorkspaceProblems)
+	return result
 }

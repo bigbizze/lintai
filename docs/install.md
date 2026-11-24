@@ -178,6 +178,7 @@ Plugin caveats:
 
 - if `mode` is omitted, plain `eslint` CLI runs default to `oneshot`
 - long-lived editor/language-server use defaults to `serve`
+- an ESLint API caller with a complete file list can opt into one validation for the operation with [`plugin.withFileBatch`](api.md#explicit-eslint-multi-file-operations). Ordinary editor callbacks validate each file request; ESLint CLI one-shot behavior is unchanged
 - each file request checks recorded inputs and configuration. Source and rule edits are picked up on the next lint pass, without a background watcher. Quick validation can miss a same-size edit with a deliberately restored modification time; forced reanalysis performs a Full check
 - lintai reads saved files, not the editor buffer. While a file has unsaved changes, `lintai/analysis` shows one message on line 1 that asks you to save the file, and the other lintai rules report nothing for that file.
 - when lintai cannot produce diagnostics, `lintai/analysis` reports the reason on line 1 of each linted file, so a broken setup does not look like a clean workspace. This covers a failed analysis, a `serve` process that failed and fell back to one `oneshot` run, a rule that could not run (a `rule_execution_error`) and a rule file that did not load. In an `eslint` CLI run, these messages appear on the first linted file only.
