@@ -406,8 +406,8 @@ func TestSuppressionPolicyValidationOnPlanReuse(t *testing.T) {
 			t.Errorf("check %d: valid finding was lost: %+v", check, valid)
 		}
 		entry := session.ruleEntries[paths["valid"]]
-		if entry.plan == nil || entry.plan.ruleFacts != nil || len(entry.plan.suppressionRules) != 0 {
-			t.Fatal("retained plan contains per-run facts or policies")
+		if entry.plan == nil || entry.plan.ruleFacts == nil || len(entry.plan.suppressionRules) != 1 {
+			t.Fatal("retained plan is missing facts or the validated suppression policy")
 		}
 		if session.ruleEntries[paths["invalid"]].plan != nil {
 			t.Fatal("invalid suppression policy retained a plan")

@@ -56,11 +56,11 @@ func TestBundleAncestorPackageLink(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		loaded, err := runtime.LoadPureBundle(string(code))
+		loaded, err := runtime.InspectPureBundle(string(code))
 		if err != nil {
 			t.Fatal(err)
 		}
-		result, err := loaded.Message(nil, "violation")
+		result, err := loaded.Rule.Message(nil, "violation")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -174,11 +174,11 @@ func TestBundleRelativeRedirectCandidateDuringCapture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := runtime.LoadPureBundle(string(code))
+	loaded, err := runtime.InspectPureBundle(string(code))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if message, err := loaded.Message(nil, "violation"); err != nil || message != "new" {
+	if message, err := loaded.Rule.Message(nil, "violation"); err != nil || message != "new" {
 		t.Fatalf("updated redirect message: %q %v", message, err)
 	}
 }

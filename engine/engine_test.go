@@ -981,7 +981,7 @@ bad_owner(Site) :- ts.site_attribution_unsupported(Site, _), ts.site_owner(Site,
 Decl uncertain(Fn).
 uncertain(Fn) :- ts.fn(Fn, _, "choose"), ts.owner_has_unresolved_call(Fn).
 `}
-	violations, perr := evaluateProgram(assembled.base, assembled.sources, assembled.schemaDecls, assembled.anchors, assembled.reportable, assembled.namespaces, output, []string{"call_only", "follow_refs", "module_seen", "bad_owner", "uncertain"}, nil, evalOptions{})
+	violations, perr := evaluateProgram(assembled.base, catalog.sources, catalog.schemaDecls, assembled.anchors, assembled.reportable, assembled.namespaces, output, []string{"call_only", "follow_refs", "module_seen", "bad_owner", "uncertain"}, nil, evalOptions{})
 	if perr != nil {
 		t.Fatal(perr)
 	}

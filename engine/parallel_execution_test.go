@@ -68,7 +68,7 @@ func TestParallelRuleExecutionContract(t *testing.T) {
 	}
 	assertParallelFixtureOutcomes(t, parallelResult, parallelRun, parallelEvidence)
 	firstObservation := engine.executionObservation()
-	if firstObservation.bundleArtifacts != 8 || firstObservation.programBuilds != 7 || firstObservation.mangleCompiles != 7 || firstObservation.peakActiveJobs != 2 {
+	if firstObservation.bundleArtifacts != 8 || firstObservation.gojaRuntimes != 8 || firstObservation.programBuilds != 7 || firstObservation.mangleCompiles != 7 || firstObservation.peakActiveJobs != 2 {
 		t.Fatalf("unexpected first-run execution observation: %+v", firstObservation)
 	}
 	t.Logf("R5 cold observation: bundle builds=%d, program builds=%d, Mangle plan compiles=%d, created facts=%v, peak active jobs=%d",
@@ -114,7 +114,7 @@ func TestParallelRuleExecutionContract(t *testing.T) {
 	if secondObservation.bundleArtifacts != firstObservation.bundleArtifacts || secondObservation.mangleCompiles != firstObservation.mangleCompiles {
 		t.Fatalf("unchanged bundle artifacts or generated plans were rebuilt: first=%+v second=%+v", firstObservation, secondObservation)
 	}
-	if secondObservation.programBuilds != firstObservation.programBuilds+7 {
+	if secondObservation.gojaRuntimes != firstObservation.gojaRuntimes+8 || secondObservation.programBuilds != firstObservation.programBuilds+7 {
 		t.Fatalf("each run must generate programs in fresh rule runtimes: first=%+v second=%+v", firstObservation, secondObservation)
 	}
 	t.Logf("R5 unchanged observation delta: bundle builds=%d, program builds=%d, Mangle plan compiles=%d, peak active jobs=%d",

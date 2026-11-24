@@ -188,11 +188,11 @@ func bundlePathsMessage(t *testing.T, asset, repo, workspace, rule string, artif
 	if err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := runtime.LoadPureBundle(string(js))
+	loaded, err := runtime.InspectPureBundle(string(js))
 	if err != nil {
 		t.Fatal(err)
 	}
-	message, err := loaded.Message(nil, "violation")
+	message, err := loaded.Rule.Message(nil, "violation")
 	if err != nil || prepared[rule].Setup.(map[string]any)["marker"] != message {
 		t.Fatalf("setup/pure mismatch: setup=%v message=%q err=%v", prepared[rule].Setup, message, err)
 	}

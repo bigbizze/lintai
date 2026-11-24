@@ -56,11 +56,11 @@ func TestBundleConfigViewAcrossBuilds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := runtime.LoadPureBundle(string(js))
+	loaded, err := runtime.InspectPureBundle(string(js))
 	if err != nil {
 		t.Fatal(err)
 	}
-	msg, err := loaded.Message(nil, "violation")
+	msg, err := loaded.Rule.Message(nil, "violation")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,11 +97,11 @@ func TestBundleConfigViewAcrossBuilds(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		loaded, err := runtime.LoadPureBundle(string(js))
+		loaded, err := runtime.InspectPureBundle(string(js))
 		if err != nil {
 			t.Fatal(err)
 		}
-		message, err := loaded.Message(nil, "violation")
+		message, err := loaded.Rule.Message(nil, "violation")
 		if err != nil || prepared[rule].Setup.(map[string]any)["marker"] != message {
 			t.Fatalf("external config prepare/pure mismatch: %v %v", message, err)
 		}
@@ -377,11 +377,11 @@ export default rule("fixture.ancestor-config").version(1).setup(() => ({marker: 
 			if err != nil {
 				t.Fatal(err)
 			}
-			loaded, err := runtime.LoadPureBundle(string(js))
+			loaded, err := runtime.InspectPureBundle(string(js))
 			if err != nil {
 				t.Fatal(err)
 			}
-			message, err := loaded.Message(nil, "violation")
+			message, err := loaded.Rule.Message(nil, "violation")
 			if err != nil {
 				t.Fatal(err)
 			}

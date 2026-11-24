@@ -94,7 +94,7 @@ type ruleToolContext struct {
 }
 
 // ruleEntry is owned by the serialized session lifecycle. Bundle texts and the
-// plan template are independent of the request's temporary files and runtimes.
+// compiled plan are independent of the request's temporary files and runtimes.
 type ruleEntry struct {
 	context      ruleToolContext
 	observations observe.Set
@@ -241,7 +241,8 @@ func (catalog *ruleCatalog) loadMetadata() int {
 		if !rule.bundled || rule.disposition == ruleIntegrityRejected || rule.metadataRead {
 			continue
 		}
-		rule.metadata, rule.isRule, rule.loadError = runtime.ReadRuleMetadata(rule.retained.pureCode)
+		inspection, err := runtime.InspectPureBundle(rule.retained.pureCode)
+		rule.metadata, rule.isRule, rule.loaded, rule.loadError = inspection.Metadata, inspection.IsRule, inspection.Rule, err
 		rule.metadataRead = true
 		loaded++
 		switch {
@@ -255,7 +256,13 @@ func (catalog *ruleCatalog) loadMetadata() int {
 }
 
 func (catalog *ruleCatalog) close() {
-	if catalog != nil && catalog.bundleDir != "" {
+	if catalog == nil {
+		return
+	}
+	for _, rule := range catalog.rules {
+		rule.release()
+	}
+	if catalog.bundleDir != "" {
 		_ = os.RemoveAll(catalog.bundleDir)
 		catalog.bundleDir = ""
 	}

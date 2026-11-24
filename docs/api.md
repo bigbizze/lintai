@@ -148,7 +148,7 @@ File requests in serve mode and Go callers using `Session.Refresh` may reuse a s
 
 A failing rule contributes only its error diagnostic. Other rules still run. Diagnostics are sorted by file, start line, start column, rule id, assertion id and anchor, so the output is identical across runs.
 
-Each rule execution uses a fresh pure runtime. Its `facts()` and `program()` callbacks and its `message()` callbacks share that runtime, so state initialized by the program is available to messages in that run. A later execution starts with fresh module state. Listing reads metadata in a separate runtime and does not call those callbacks.
+Each actual analysis loads each inspected rule's pure bundle once into a fresh runtime. Metadata inspection does not call setup, config, facts, program, or message callbacks; facts, program, and messages then share that runtime for the rule. A later analysis starts with fresh module state. Listing uses the same inspection path and discards the runtime without running those callbacks. When the generated program, facts, declarations, and producer catalog are unchanged, the engine reuses the complete immutable compiled plan; setup, config, facts, and program generation for eligible rules still run on each actual check.
 
 ## Base relations and caveats
 
