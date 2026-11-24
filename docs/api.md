@@ -731,6 +731,7 @@ const eslint = new ESLint({
   overrideConfigFile: true,
   overrideConfig: [plugin.configs.all],
   concurrency: "off",
+  cache: false,
 });
 const results = await plugin.withFileBatch(files, async ({ problems }) => {
   // Available even if analysis failed or files is empty. lintai/analysis also reports them.
@@ -742,6 +743,8 @@ const results = await plugin.withFileBatch(files, async ({ problems }) => {
 Add the application's normal language/parser configuration to `overrideConfig` as needed. Relative paths resolve from the lintai workspace root. Supply every physical file whose enabled lintai rule can run; a file omitted from the list throws instead of silently appearing clean. In serve mode the wrapper makes one `diagnostics/files` request, resolving configuration and validating or reanalyzing once, then uses its ordered file projections and current workspace problems for the callback. A request failure is present in `problems` and is reported by `lintai/analysis`; the callback still runs so the caller can handle it. Throw from the callback if the caller prefers to stop. Existing one-shot mode keeps its one-shot behavior.
 
 The response belongs only to that invocation and is discarded when the callback's returned promise settles, including on a throw. Each later invocation requests a fresh result. Nested or overlapping calls have separate async contexts and retain their own results, even if ESLint reuses a `SourceCode`. The wrapper covers callbacks running in its async context in the same process and using that plugin instance; ESLint worker processes do not inherit it. Work left running after the callback settles and ordinary editor callbacks outside the wrapper use independent file requests, each with workspace validation. Unsaved-buffer handling is unchanged. The batch is a completed publication, not a filesystem transaction: edits during the operation can be reflected by the next operation.
+
+Keep ESLint's result cache disabled for lintai runs (`cache: false` in the API or do not pass CLI `--cache`). ESLint can return a cached result without invoking the lintai rule callback, so the batch wrapper cannot refresh that result when lintai's workspace, rules, configuration, or suppressions change. Enable ESLint caching only if its cache identity accounts for those lintai inputs.
 
 ## ESLint plugin reference and caveats
 

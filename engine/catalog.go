@@ -310,12 +310,9 @@ func captureGenerationMetadata(metadata backend.GenerationMetadata) (backend.Gen
 	if metadata.InputRevision == "" {
 		return backend.GenerationMetadata{}, fmt.Errorf("input revision is empty")
 	}
-	if _, err := canonical.MarshalStructured(metadata.Scope); err != nil {
-		return backend.GenerationMetadata{}, fmt.Errorf("scope: %w", err)
-	}
-	scope, err := canonical.Normalize(metadata.Scope)
+	scope, err := canonical.NormalizeStructured(metadata.Scope)
 	if err != nil {
-		return backend.GenerationMetadata{}, err
+		return backend.GenerationMetadata{}, fmt.Errorf("scope: %w", err)
 	}
 	metadata.Scope = scope
 	files := make([]string, 0, len(metadata.AnalyzedFiles))

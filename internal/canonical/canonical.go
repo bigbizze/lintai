@@ -9,16 +9,37 @@ import (
 	"unicode/utf8"
 )
 
-func Normalize(value any) (any, error) {
+// NormalizeSuppressionOptions retains the historical policy normalization in
+// which typed nil maps and slices are treated as empty collections. Suppression
+// policy identity deliberately keeps this behavior; JSON identities should use
+// NormalizeStructured instead.
+func NormalizeSuppressionOptions(value any) (any, error) {
+	return detach(value, false)
+}
+
+// NormalizeStructured validates and detaches a JSON-shaped value while
+// preserving null, array, and object distinctions, including typed nil maps
+// and slices.
+func NormalizeStructured(value any) (any, error) {
+	return detach(value, true)
+}
+
+// detach applies one recursive JSON-shaped copy with an explicit nil-collection
+// policy. Legacy suppression identity treats typed nil collections as empty;
+// structured request and generation identities preserve them as JSON null.
+func detach(value any, preserveNull bool) (any, error) {
 	switch typed := value.(type) {
 	case nil, bool, string:
 		return typed, nil
 	case float64, float32, int, int32, int64, uint, uint32, uint64:
 		return typed, nil
 	case []any:
+		if preserveNull && typed == nil {
+			return []any(nil), nil
+		}
 		items := make([]any, 0, len(typed))
 		for _, item := range typed {
-			normalized, err := Normalize(item)
+			normalized, err := detach(item, preserveNull)
 			if err != nil {
 				return nil, err
 			}
@@ -26,15 +47,21 @@ func Normalize(value any) (any, error) {
 		}
 		return items, nil
 	case []string:
+		if preserveNull && typed == nil {
+			return []any(nil), nil
+		}
 		items := make([]any, 0, len(typed))
 		for _, item := range typed {
 			items = append(items, item)
 		}
 		return items, nil
 	case map[string]any:
+		if preserveNull && typed == nil {
+			return map[string]any(nil), nil
+		}
 		result := make(map[string]any, len(typed))
 		for key, item := range typed {
-			normalized, err := Normalize(item)
+			normalized, err := detach(item, preserveNull)
 			if err != nil {
 				return nil, err
 			}
@@ -49,84 +76,31 @@ func Normalize(value any) (any, error) {
 }
 
 func Marshal(value any) ([]byte, error) {
-	return marshal(value, false)
+	normalized, err := detach(value, false)
+	if err != nil {
+		return nil, err
+	}
+	buffer := &bytes.Buffer{}
+	if err := writeCanonicalJSON(buffer, normalized, false); err != nil {
+		return nil, err
+	}
+	return buffer.Bytes(), nil
 }
 
-// MarshalStructured preserves the distinction between JSON objects and arrays
-// for identities that include arbitrary JSON-shaped values.
+// MarshalStructured emits a canonical JSON identity, preserving null, arrays,
+// and objects for arbitrary JSON-shaped values.
 func MarshalStructured(value any) ([]byte, error) {
-	return marshal(value, true)
-}
-
-// MarshalStructuredPreservingNull encodes nil maps and slices as JSON null
-// while retaining the object's and array's distinct structured forms.
-func MarshalStructuredPreservingNull(value any) ([]byte, error) {
-	normalized, err := normalizePreservingNull(value)
+	normalized, err := detach(value, true)
 	if err != nil {
 		return nil, err
 	}
 	buffer := &bytes.Buffer{}
-	if err := writeCanonicalJSON(buffer, normalized, true, true); err != nil {
+	if err := writeCanonicalJSON(buffer, normalized, true); err != nil {
 		return nil, err
 	}
 	return buffer.Bytes(), nil
 }
-
-func marshal(value any, structured bool) ([]byte, error) {
-	normalized, err := Normalize(value)
-	if err != nil {
-		return nil, err
-	}
-	buffer := &bytes.Buffer{}
-	if err := writeCanonicalJSON(buffer, normalized, structured, false); err != nil {
-		return nil, err
-	}
-	return buffer.Bytes(), nil
-}
-
-func normalizePreservingNull(value any) (any, error) {
-	switch typed := value.(type) {
-	case []any:
-		if typed == nil {
-			return []any(nil), nil
-		}
-		items := make([]any, 0, len(typed))
-		for _, item := range typed {
-			normalized, err := normalizePreservingNull(item)
-			if err != nil {
-				return nil, err
-			}
-			items = append(items, normalized)
-		}
-		return items, nil
-	case []string:
-		if typed == nil {
-			return []any(nil), nil
-		}
-		items := make([]any, 0, len(typed))
-		for _, item := range typed {
-			items = append(items, item)
-		}
-		return items, nil
-	case map[string]any:
-		if typed == nil {
-			return map[string]any(nil), nil
-		}
-		result := make(map[string]any, len(typed))
-		for key, item := range typed {
-			normalized, err := normalizePreservingNull(item)
-			if err != nil {
-				return nil, err
-			}
-			result[key] = normalized
-		}
-		return result, nil
-	default:
-		return Normalize(value)
-	}
-}
-
-func writeCanonicalJSON(buffer *bytes.Buffer, value any, structured, preserveNull bool) error {
+func writeCanonicalJSON(buffer *bytes.Buffer, value any, structured bool) error {
 	switch typed := value.(type) {
 	case nil:
 		buffer.WriteString("null")
@@ -147,7 +121,7 @@ func writeCanonicalJSON(buffer *bytes.Buffer, value any, structured, preserveNul
 		}
 		buffer.Write(raw)
 	case []any:
-		if preserveNull && typed == nil {
+		if typed == nil {
 			buffer.WriteString("null")
 			break
 		}
@@ -156,13 +130,13 @@ func writeCanonicalJSON(buffer *bytes.Buffer, value any, structured, preserveNul
 			if index > 0 {
 				buffer.WriteByte(',')
 			}
-			if err := writeCanonicalJSON(buffer, item, structured, preserveNull); err != nil {
+			if err := writeCanonicalJSON(buffer, item, structured); err != nil {
 				return err
 			}
 		}
 		buffer.WriteByte(']')
 	case map[string]any:
-		if preserveNull && typed == nil {
+		if typed == nil {
 			buffer.WriteString("null")
 			break
 		}
@@ -197,7 +171,7 @@ func writeCanonicalJSON(buffer *bytes.Buffer, value any, structured, preserveNul
 			} else {
 				buffer.WriteByte(',')
 			}
-			if err := writeCanonicalJSON(buffer, typed[key.key], structured, preserveNull); err != nil {
+			if err := writeCanonicalJSON(buffer, typed[key.key], structured); err != nil {
 				return err
 			}
 			if !structured {
