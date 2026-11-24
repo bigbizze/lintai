@@ -1,13 +1,13 @@
-import { spawn, type ChildProcess } from "node:child_process";
-import { readSync } from "node:fs";
+import { type ChildProcess, spawn } from "node:child_process";
+import { readSync, writeSync } from "node:fs";
 import type { Readable, Writable } from "node:stream";
 
-import { type SpawnedProcess, type Spawner } from "./spawner.js";
+import type { SpawnedProcess, Spawner } from "./spawner.js";
 
 const syncSleep = new Int32Array(new SharedArrayBuffer(4));
 
 export interface ServeTransport {
-	write(bytes: Buffer): void;
+	write(bytes: Buffer, deadline: number): void;
 	read(deadline: number): Buffer;
 	close(): void;
 	failure(): Error | undefined;
@@ -42,12 +42,42 @@ export class NativeServeTransport implements ServeTransport {
 		unrefStream(this.stdout);
 	}
 
-	write(bytes: Buffer): void {
+	write(bytes: Buffer, deadline: number): void {
 		this.throwIfFailed();
 		if (this.stdin.destroyed) {
 			throw new Error("lintai serve stdin is closed");
 		}
-		this.stdin.write(bytes);
+		const fd = getWritableFD(this.stdin);
+		if (fd == null) {
+			throw new Error("lintai serve stdin fd is unavailable for synchronous requests");
+		}
+		// The caller blocks this event loop in read() as soon as write() returns.
+		let offset = 0;
+		while (offset < bytes.length) {
+			const remaining = deadline - Date.now();
+			if (remaining <= 0) {
+				const failure = new Error("lintai serve write timed out");
+				this.fail(failure);
+				throw failure;
+			}
+			try {
+				const bytesWritten = writeSync(fd, bytes, offset, bytes.length - offset, null);
+				if (bytesWritten > 0) {
+					offset += bytesWritten;
+				} else {
+					Atomics.wait(syncSleep, 0, 0, Math.min(10, remaining));
+				}
+			} catch (error) {
+				const value = error as NodeJS.ErrnoException;
+				if (value?.code !== "EAGAIN" && value?.code !== "EWOULDBLOCK") {
+					const failure = asError(error);
+					this.fail(failure);
+					throw failure;
+				}
+				this.throwIfFailed();
+				Atomics.wait(syncSleep, 0, 0, Math.min(10, remaining));
+			}
+		}
 	}
 
 	read(deadline: number): Buffer {
@@ -105,9 +135,9 @@ export class SpawnerServeTransport implements ServeTransport {
 		private readonly child: SpawnedProcess,
 	) {}
 
-	write(bytes: Buffer): void {
+	write(bytes: Buffer, deadline: number): void {
 		this.throwIfFailed();
-		this.child.writeBytes(bytes);
+		this.child.writeBytes(bytes, deadline);
 	}
 
 	read(deadline: number): Buffer {
@@ -137,6 +167,11 @@ export function spawnNativeServe(binary: string, args: string[], cwd: string): S
 
 function getReadableFD(stream: Readable): number | undefined {
 	const handle = (stream as Readable & { _handle?: { fd?: number } })._handle;
+	return typeof handle?.fd === "number" ? handle.fd : undefined;
+}
+
+function getWritableFD(stream: Writable): number | undefined {
+	const handle = (stream as Writable & { _handle?: { fd?: number } })._handle;
 	return typeof handle?.fd === "number" ? handle.fd : undefined;
 }
 

@@ -284,6 +284,7 @@ export class LintAIClient {
 			try {
 				transport.write(
 					encodeFrame({ jsonrpc: "2.0", id: this.nextRequestID++, method: "shutdown", params: {} }),
+					Date.now() + initializeTimeoutMs,
 				);
 			} catch {
 				/* best effort */
@@ -334,8 +335,8 @@ export class LintAIClient {
 		if (!transport) throw new Error("lintai serve is not running");
 		const id = this.nextRequestID++;
 		const request: JSONRPCRequest = { jsonrpc: "2.0", id, method, params };
-		transport.write(encodeFrame(request));
 		const deadline = Date.now() + initializeTimeoutMs;
+		transport.write(encodeFrame(request), deadline);
 		while (true) {
 			if (deadline - Date.now() <= 0) throw new Error(`lintai serve ${method} timed out`);
 			let bytes: Buffer;
