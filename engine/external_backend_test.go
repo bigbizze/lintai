@@ -243,6 +243,50 @@ func TestOpaqueProducerScopeContributesToResultIdentity(t *testing.T) {
 	if leftResult.SnapshotVersion == rightResult.SnapshotVersion {
 		t.Fatalf("producer scope did not affect identity: %s", leftResult.SnapshotVersion)
 	}
+	cases := []struct {
+		name          string
+		before, after any
+	}{
+		{"slice", []any(nil), []any{}},
+		{"map", map[string]any(nil), map[string]any{}},
+	}
+	for _, tc := range cases {
+		t.Run("forced-check/"+tc.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			writeCatalogRule(t, workspace,
+				"Decl violation(Entity). violation(Entity) :- catalog.item(Entity).",
+				"violation")
+			producer := fakeProducer("catalog", "item")
+			producer.scope = map[string]any{"selection": tc.before}
+			setFakeRow(producer, "item", "users")
+
+			session := engine.Open(engine.Options{}, producer)
+			defer session.Close()
+			options := engine.Options{
+				RepoRoot:      repoRoot,
+				AssetRoot:     filepath.Join(repoRoot, "packages/client"),
+				WorkspaceRoot: workspace,
+				RuleGlobs:     []string{"lintai-rules/**/*.ts"},
+			}
+			first, err := session.Check(context.Background(), options)
+			if err != nil || len(first.Diagnostics) != 1 {
+				t.Fatalf("first: diagnostics=%d err=%v", len(first.Diagnostics), err)
+			}
+
+			producer.scope = map[string]any{"selection": tc.after}
+			producer.rows[facts.Predicate{Name: "catalog.item", Arity: 1}] = nil
+			second, err := session.Check(context.Background(), options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if first.SnapshotVersion == second.SnapshotVersion ||
+				len(second.Diagnostics) != 0 || producer.prepares != 2 || producer.emits != 2 {
+				t.Fatalf("scope change reused old facts: sameIdentity=%v diagnostics=%d prepares=%d emits=%d",
+					first.SnapshotVersion == second.SnapshotVersion,
+					len(second.Diagnostics), producer.prepares, producer.emits)
+			}
+		})
+	}
 }
 
 func TestTypeScriptAndFakeComposeThroughCatalog(t *testing.T) {
