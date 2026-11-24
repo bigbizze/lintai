@@ -109,8 +109,7 @@ for (const pass of ["batch-cold", "batch-warm", "ordinary-warm"]) {
 	const delta = Object.fromEntries(
 		Object.entries(counts).map(([key, value]) => [key, value - (prior[key] ?? 0)]),
 	);
-	assert.equal(delta["diagnostics/files"] ?? 0, pass.startsWith("batch") ? 1 : 0);
-	assert.equal(delta["diagnostics/file"] ?? 0, pass === "ordinary-warm" ? 477 : 0);
+	assert.equal(delta["diagnostics/files"] ?? 0, pass.startsWith("batch") ? 1 : 477);
 	const validations = trace ? readFileSync(trace, "utf8").trim().split("\n").filter(Boolean) : [];
 	if (trace && pass !== "batch-cold") {
 		const expected = pass === "batch-warm" ? 1 : 477;

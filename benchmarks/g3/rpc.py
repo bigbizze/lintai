@@ -46,12 +46,13 @@ try:
     call("initialize", {"repoRoot": str(repo), "assetRoot": str(repo / "packages/client"),
                         "workspaceRoot": str(root), "ruleGlobs": [str(rules / "modules.ts"), str(rules / "functions.ts")],
                         "files": "tsconfig", "env": {}, "ruleWorkers": 1})
-    first, cold = call("diagnostics/file", {"file": file})
-    assert len(first["diagnostics"]) == 2 and not first["problems"]
-    _, seed = call("diagnostics/file", {"file": file})
+    first, cold = call("diagnostics/files", {"files": [file]})
+    assert len(first["files"]) == 1 and first["files"][0]["file"] == file
+    assert len(first["files"][0]["diagnostics"]) == 2 and not first["problems"]
+    _, seed = call("diagnostics/files", {"files": [file]})
     samples = []
     for _ in range(20):
-        result, elapsed = call("diagnostics/file", {"file": file})
+        result, elapsed = call("diagnostics/files", {"files": [file]})
         assert result == first
         samples.append(elapsed)
     print(json.dumps({"event": "rpc_file", "cold_file_ms": cold, "first_unchanged_ms": seed,

@@ -1,7 +1,6 @@
 import {
 	createFramedResponse,
 	createTestDependencies,
-	createTestProcess,
 	createTestTransport,
 } from "./test-support.test.js";
 import assert from "node:assert/strict";
@@ -85,7 +84,23 @@ test("serve forwards suppression initialization parameters", () => {
 			}),
 		/ruleWorkers/,
 	);
-	const child = createTestProcess();
+	const transport = createTestTransport((writes) => {
+		const frame = writes[writes.length - 1].toString();
+		const request = JSON.parse(frame.slice(frame.indexOf("\r\n\r\n") + 4));
+		return createFramedResponse({
+			jsonrpc: "2.0",
+			id: request.id,
+			result:
+				request.method === "initialize"
+					? { protocolVersion: 2 }
+					: {
+							rulesLoaded: 0,
+							snapshotVersion: "test",
+							files: request.params.files.map((file: string) => ({ file, diagnostics: [] })),
+							problems: [],
+						},
+		});
+	});
 	const options = resolveBridgeOptions(
 		{
 			mode: "serve",
@@ -99,27 +114,12 @@ test("serve forwards suppression initialization parameters", () => {
 	const client = new LintAIClient(
 		options,
 		createTestDependencies({
-			spawnServe: () =>
-				createTestTransport(
-					child,
-					(() => {
-						let id = 0;
-						return () =>
-							createFramedResponse({
-								jsonrpc: "2.0",
-								id: ++id,
-								result:
-									id === 1
-										? { protocolVersion: 1 }
-										: { rulesLoaded: 0, snapshotVersion: "test", diagnostics: [], problems: [] },
-							});
-					})(),
-				),
+			spawnServe: () => transport,
 		}),
 	);
 	try {
 		assert.deepEqual(client.getDiagnostics("src/a.ts"), []);
-		const frame = child.stdin.read().toString();
+		const frame = transport.writes[0].toString();
 		const request = JSON.parse(frame.slice(frame.indexOf("\r\n\r\n") + 4));
 		assert.equal(request.params.suppressionsLocation, "/workspace/counts.json");
 		assert.equal(request.params.ruleWorkers, 2);

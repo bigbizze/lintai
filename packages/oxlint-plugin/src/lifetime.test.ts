@@ -1,7 +1,6 @@
 import {
 	createFramedResponse,
 	createTestDependencies,
-	createTestProcess,
 	createTestTransport,
 	getClient,
 	resetClientsForTest,
@@ -29,8 +28,6 @@ test("oxlint shares one response per analysis even when its plugin loads before 
 		mode: "serve" as const,
 	};
 	const resolved = resolveBridgeOptions(options, process.cwd(), oxlintHostDefaults());
-	const child = createTestProcess();
-	let requestID = 0;
 	let fileRequests = 0;
 	const dependencies = createTestDependencies({
 		spawnSync: () => ({
@@ -45,10 +42,15 @@ test("oxlint shares one response per analysis even when its plugin loads before 
 			}),
 		}),
 		spawnServe: () =>
-			createTestTransport(child, () => {
-				const id = ++requestID;
-				if (id === 1)
-					return createFramedResponse({ jsonrpc: "2.0", id, result: { protocolVersion: 1 } });
+			createTestTransport((writes) => {
+				const frame = writes[writes.length - 1].toString();
+				const request = JSON.parse(frame.slice(frame.indexOf("\r\n\r\n") + 4));
+				const id = request.id;
+				if (request.method === "initialize")
+					return createFramedResponse({ jsonrpc: "2.0", id, result: { protocolVersion: 2 } });
+				strictEqual(request.method, "diagnostics/files");
+				strictEqual(request.params.files.length, 1);
+				strictEqual(request.params.files[0], "src/a.ts");
 				fileRequests++;
 				return createFramedResponse({
 					jsonrpc: "2.0",
@@ -57,18 +59,21 @@ test("oxlint shares one response per analysis even when its plugin loads before 
 						snapshotVersion: String(fileRequests),
 						rulesLoaded: 2,
 						problems: [],
-						diagnostics: ["first", "second"].map((rule_id) => ({
-							rule_id,
-							assertion_id: "violation",
-							diagnostic_kind: "architecture_violation",
-							message: `generation ${fileRequests}`,
-							source_location: {
-								file: "src/a.ts",
-								startLine: 3,
-								startColumn: 8,
-								endLine: 3,
-								endColumn: 29,
-							},
+						files: request.params.files.map((file: string) => ({
+							file,
+							diagnostics: ["first", "second"].map((rule_id) => ({
+								rule_id,
+								assertion_id: "violation",
+								diagnostic_kind: "architecture_violation",
+								message: `generation ${fileRequests}`,
+								source_location: {
+									file: "src/a.ts",
+									startLine: 3,
+									startColumn: 8,
+									endLine: 3,
+									endColumn: 29,
+								},
+							})),
 						})),
 					},
 				});

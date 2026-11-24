@@ -1,7 +1,6 @@
 import {
 	createFramedResponse,
 	createTestDependencies,
-	createTestProcess,
 	createTestTransport,
 	getClient,
 	resetClientsForTest,
@@ -348,12 +347,14 @@ test("rules: [] creates only analysis and the authoring rules and starts no lint
 
 // Exercise ESLint's actual SourceCode lifetime: a reused SourceCode must
 // revalidate, while enabled rules share one response even with analysis off.
-test("plugin discovery and ESLint analysis follow their current lifetimes", () => {
+test("plugin discovery and ESLint analysis follow their current lifetimes", async () => {
 	const root = mkdtempSync(path.join(os.tmpdir(), "lintai-eslint-lifetime-"));
 	mkdirSync(path.join(root, "src"));
 	const filename = path.join(root, "src/a.js");
+	const secondFilename = path.join(root, "src/b.js");
 	const code = "export const a = 1;\n";
 	writeFileSync(filename, code);
+	writeFileSync(secondFilename, code);
 	const hostOptions: LintaiOptions = {
 		mode: "serve",
 		binary: "/fixture/lintai",
@@ -361,9 +362,8 @@ test("plugin discovery and ESLint analysis follow their current lifetimes", () =
 		workspaceRoot: root,
 	};
 	const resolved = resolveBridgeOptions(hostOptions, process.cwd(), eslintHostDefaults());
-	const child = createTestProcess();
-	let requestID = 0;
 	let fileRequests = 0;
+	const requestedFiles: string[][] = [];
 	let listings = 0;
 	let recovered = false;
 	const stderr: string[] = [];
@@ -384,10 +384,14 @@ test("plugin discovery and ESLint analysis follow their current lifetimes", () =
 			};
 		},
 		spawnServe: () =>
-			createTestTransport(child, () => {
-				const id = ++requestID;
-				if (id === 1)
-					return createFramedResponse({ jsonrpc: "2.0", id, result: { protocolVersion: 1 } });
+			createTestTransport((writes) => {
+				const frame = writes[writes.length - 1].toString();
+				const request = JSON.parse(frame.slice(frame.indexOf("\r\n\r\n") + 4));
+				const id = request.id;
+				if (request.method === "initialize")
+					return createFramedResponse({ jsonrpc: "2.0", id, result: { protocolVersion: 2 } });
+				assert.equal(request.method, "diagnostics/files");
+				requestedFiles.push(request.params.files);
 				fileRequests++;
 				return createFramedResponse({
 					jsonrpc: "2.0",
@@ -395,15 +399,18 @@ test("plugin discovery and ESLint analysis follow their current lifetimes", () =
 					result: {
 						snapshotVersion: String(fileRequests),
 						rulesLoaded: 2,
-						diagnostics: ["alpha", "beta"].map((rule_id) => ({
-							...located(rule_id, recovered ? "repaired" : "initial", 1),
-							source_location: {
-								file: "src/a.js",
-								startLine: 1,
-								startColumn: 1,
-								endLine: 1,
-								endColumn: 2,
-							},
+						files: request.params.files.map((file: string) => ({
+							file,
+							diagnostics: ["alpha", "beta"].map((rule_id) => ({
+								...located(rule_id, recovered ? "repaired" : "initial", 1),
+								source_location: {
+									file: "src/a.js",
+									startLine: 1,
+									startColumn: 1,
+									endLine: 1,
+									endColumn: 2,
+								},
+							})),
 						})),
 						problems: recovered ? [] : ["[lintai] current syntax error"],
 					},
@@ -444,6 +451,25 @@ test("plugin discovery and ESLint analysis follow their current lifetimes", () =
 			["[alpha/v] repaired", "[beta/v] repaired"].sort(),
 		);
 		assert.equal(fileRequests, 2);
+		const firstName = "src/a.js";
+		const secondName = "src/b.js";
+		assert.deepEqual(requestedFiles, [[firstName], [firstName]]);
+		await plugin.withFileBatch([filename, secondFilename], ({ problems }) => {
+			assert.deepEqual(problems, []);
+			assert.deepEqual(verify(), ["[alpha/v] repaired", "[beta/v] repaired"].sort());
+			assert.deepEqual(
+				linter
+					.verify(code, [plugin.configs.all], secondFilename)
+					.map((item) => item.message)
+					.sort(),
+				["[alpha/v] repaired", "[beta/v] repaired"].sort(),
+			);
+		});
+		assert.equal(fileRequests, 3);
+		assert.deepEqual(requestedFiles[2], [firstName, secondName]);
+		assert.deepEqual(verify(), ["[alpha/v] repaired", "[beta/v] repaired"].sort());
+		assert.equal(fileRequests, 4);
+		assert.deepEqual(requestedFiles[3], [firstName]);
 		const rebuilt = createLintaiPlugin(hostOptions);
 		assert.ok(rebuilt.rules.alpha && rebuilt.rules.gamma);
 		assert.equal(rebuilt.rules.beta, undefined);

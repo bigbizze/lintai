@@ -262,17 +262,6 @@ func (s *serveSession) Check(ctx context.Context, requests ...engine.Options) (e
 	return s.session.Check(ctx, requests...)
 }
 
-func (s *serveSession) Refresh(ctx context.Context, options engine.Options, file string) (engine.FileResult, error) {
-	if err := s.configure(ctx, false); err != nil {
-		return engine.FileResult{}, err
-	}
-	if err := ctx.Err(); err != nil {
-		_ = s.Close()
-		return engine.FileResult{}, err
-	}
-	return s.session.Refresh(ctx, options, file)
-}
-
 func (s *serveSession) RefreshFiles(ctx context.Context, options engine.Options, files []string) (engine.FilesResult, error) {
 	if err := s.configure(ctx, false); err != nil {
 		return engine.FilesResult{}, err

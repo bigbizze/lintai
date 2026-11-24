@@ -1,7 +1,7 @@
 import {
 	createFramedResponse,
 	createTestDependencies,
-	createTestProcess,
+	createTestTransport,
 	getClient,
 	resetClientsForTest,
 } from "../../client/dist/test-support.test.js";
@@ -35,23 +35,6 @@ after(() => {
 	resetClientsForTest();
 	rmSync(workspace, { recursive: true, force: true });
 });
-
-function testServeTransport(child: ReturnType<typeof createTestProcess>, read: () => Buffer) {
-	return {
-		write(bytes: Buffer) {
-			child.stdin.write(bytes);
-		},
-		read(_deadline: number) {
-			return read();
-		},
-		close() {
-			if (!child.stdin.destroyed) child.stdin.end();
-		},
-		failure() {
-			return undefined;
-		},
-	};
-}
 
 const ruleError: Diagnostic = {
 	rule_id: "arch.broken",
@@ -123,8 +106,6 @@ it("serve findings with unregistered IDs report through analysis with restart gu
 	resetClientsForTest();
 	const options = { ...bridge, mode: "serve" as const };
 	const resolved = resolveBridgeOptions(options, process.cwd(), oxlintHostDefaults());
-	const child = createTestProcess();
-	let id = 0;
 	const dependencies = createTestDependencies({
 		spawnSync: () => ({
 			status: 0,
@@ -132,21 +113,26 @@ it("serve findings with unregistered IDs report through analysis with restart gu
 			stdout: JSON.stringify({ rules: [{ id: "arch.no-async", path: "rule.ts" }], errors: [] }),
 		}),
 		spawnServe: () =>
-			testServeTransport(child, () =>
-				createFramedResponse({
+			createTestTransport((writes) => {
+				const frame = writes[writes.length - 1].toString();
+				const request = JSON.parse(frame.slice(frame.indexOf("\r\n\r\n") + 4));
+				return createFramedResponse({
 					jsonrpc: "2.0",
-					id: ++id,
+					id: request.id,
 					result:
-						id === 1
-							? { protocolVersion: 1 }
+						request.method === "initialize"
+							? { protocolVersion: 2 }
 							: {
 									snapshotVersion: "snap",
 									rulesLoaded: 2,
-									diagnostics: [{ ...violation, rule_id: "arch.new" }],
+									files: request.params.files.map((file: string) => ({
+										file,
+										diagnostics: [{ ...violation, rule_id: "arch.new" }],
+									})),
 									problems: [],
 								},
-				}),
-			),
+				});
+			}),
 	});
 	getClient(resolved, dependencies);
 	const plugin = createLintaiPlugin(options);
@@ -178,7 +164,6 @@ function withHost(argv: string[], fresh: boolean) {
 				resetClientsForTest();
 			}
 			const options = resolveBridgeOptions(bridge, process.cwd(), oxlintHostDefaults(argv));
-			const child = createTestProcess();
 			const dependencies = createTestDependencies({
 				spawnSync: (_binary, args) =>
 					args[0] === "rules"
@@ -196,26 +181,26 @@ function withHost(argv: string[], fresh: boolean) {
 							}
 						: { stdout: JSON.stringify(diagnostics), stderr: "", error: undefined, status: 3 },
 				spawnServe: () =>
-					testServeTransport(
-						child,
-						(() => {
-							let id = 0;
-							return () =>
-								createFramedResponse({
-									jsonrpc: "2.0",
-									id: ++id,
-									result:
-										id === 1
-											? { protocolVersion: 1 }
-											: {
-													rulesLoaded: 2,
-													snapshotVersion: "snap",
-													diagnostics: [violation],
-													problems: [problem],
-												},
-								});
-						})(),
-					),
+					createTestTransport((writes) => {
+						const frame = writes[writes.length - 1].toString();
+						const request = JSON.parse(frame.slice(frame.indexOf("\r\n\r\n") + 4));
+						return createFramedResponse({
+							jsonrpc: "2.0",
+							id: request.id,
+							result:
+								request.method === "initialize"
+									? { protocolVersion: 2 }
+									: {
+											rulesLoaded: 2,
+											snapshotVersion: "snap",
+											files: request.params.files.map((file: string) => ({
+												file,
+												diagnostics: [violation],
+											})),
+											problems: [problem],
+										},
+						});
+					}),
 				log: () => undefined,
 			});
 			getClient(options, dependencies);
