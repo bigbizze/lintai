@@ -320,7 +320,8 @@ func (e *Session) runAndPublish(checkCtx context.Context, options Options, key s
 	if err != nil {
 		return nil, err
 	}
-	published := newPublishedResult(result, options, key, observe.Union(evidence.observations, state.observations), evidence.reusable)
+	reusable := evidence.reusable && !options.SuppressAll && len(options.SuppressRules) == 0 && !options.PruneSuppressions
+	published := newPublishedResult(result, options.WorkspaceRoot, key, observe.Union(evidence.observations, state.observations), reusable)
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()

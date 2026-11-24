@@ -135,6 +135,10 @@ func TestRefreshPublicationAndReuse(t *testing.T) {
 	if err != nil || len(warm.Diagnostics) != 3 || counts() != before {
 		t.Fatalf("unchanged refresh did work: before %s after %s result=%+v err=%v", before, counts(), warm, err)
 	}
+	absolute, err := session.Refresh(context.Background(), options, filepath.Join(workspace, "catalog/items.sql"))
+	if err != nil || len(absolute.Diagnostics) != 3 || counts() != before {
+		t.Fatalf("absolute file projection: %+v %v", absolute, err)
+	}
 	warm.Diagnostics[0].Message = "mutated"
 	other, err := session.Refresh(context.Background(), options, "another.ts")
 	current, currentErr := session.Current()
