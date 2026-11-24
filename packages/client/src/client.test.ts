@@ -1,3 +1,11 @@
+import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import test, { afterEach } from "node:test";
+import { LintAIClient, loadRuleIds, resolveBridgeOptions } from "./client.js";
+import { hasUnsavedChanges, toReports } from "./index.js";
+import { Spawner } from "./spawner.js";
 import {
 	createFramedResponse,
 	createTestDependencies,
@@ -6,15 +14,7 @@ import {
 	getClient,
 	resetClientsForTest,
 } from "./test-support.test.js";
-import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import test, { afterEach } from "node:test";
-import { LintAIClient, loadRuleIds, resolveBridgeOptions } from "./client.js";
-import { hasUnsavedChanges, toReports } from "./index.js";
-import { Spawner } from "./spawner.js";
-import { SpawnerServeTransport } from "./transport.js";
+import { SpawnerServeTransport, spawnNativeServe } from "./transport.js";
 
 const editorHost = { defaultMode: "serve", reportProblemsOnce: false } as const;
 const cliHost = { defaultMode: "oneshot", reportProblemsOnce: true } as const;
@@ -209,6 +209,91 @@ test("the real client exchanges two file responses through the real spawner", ()
 			{ rule_id: "fixture.rule", assertion_id: "default", message: "file response 2" },
 		]);
 		assert.equal(oneShot, 0);
+	} finally {
+		client.dispose();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("native serve transport sends a batch larger than pipe capacity and stays live", () => {
+	const root = mkdtempSync(path.join(os.tmpdir(), "lintai-client-native-"));
+	const server = path.join(root, "server.mjs");
+	writeFileSync(
+		server,
+		[
+			'import { stdin, stdout } from "node:process";',
+			'const delimiter = Buffer.from("\\r\\n\\r\\n");',
+			"let input = Buffer.alloc(0);",
+			"let revision = 0;",
+			"function send(message) {",
+			"  const body = Buffer.from(JSON.stringify(message));",
+			'  const header = Buffer.from("Content-Length: " + body.length + "\\r\\n\\r\\n");',
+			"  stdout.write(Buffer.concat([header, body]));",
+			"}",
+			"function consume() {",
+			"  while (true) {",
+			"    const end = input.indexOf(delimiter);",
+			"    if (end < 0) return;",
+			"    const header = input.subarray(0, end).toString();",
+			"    const length = Number(/Content-Length: (\\d+)/i.exec(header)?.[1]);",
+			"    if (!Number.isFinite(length) || input.length < end + 4 + length) return;",
+			"    const request = JSON.parse(input.subarray(end + 4, end + 4 + length).toString());",
+			"    input = input.subarray(end + 4 + length);",
+			'    if (request.method === "initialize") {',
+			'      send({ jsonrpc: "2.0", id: request.id, result: { protocolVersion: 1 } });',
+			'    } else if (request.method === "diagnostics/files") {',
+			"      revision += 1;",
+			'      send({ jsonrpc: "2.0", id: request.id, result: {',
+			'        snapshotVersion: "batch-" + revision, rulesLoaded: 1, problems: [],',
+			"        files: request.params.files.map((file) => ({ file, diagnostics: [] })),",
+			"      } });",
+			'    } else if (request.method === "diagnostics/file") {',
+			'      send({ jsonrpc: "2.0", id: request.id, result: {',
+			'        snapshotVersion: "current-" + revision, rulesLoaded: 1, problems: [],',
+			'        diagnostics: [{ rule_id: "fixture.rule", assertion_id: "default", message: "current revision " + revision }],',
+			"      } });",
+			"    }",
+			"  }",
+			"}",
+			'stdin.on("data", (chunk) => { input = Buffer.concat([input, chunk]); consume(); });',
+		].join("\n"),
+	);
+	const files = Array.from(
+		{ length: 8192 },
+		(_, i) => `src/${String(i).padStart(5, "0")}-${"a".repeat(120)}.ts`,
+	);
+	assert.ok(Buffer.byteLength(JSON.stringify({ files })) > 1024 * 1024);
+	let oneShot = 0;
+	const warnings: string[] = [];
+	const client = new LintAIClient(
+		resolveBridgeOptions(
+			{ mode: "serve", binary: "fixture", repoRoot: root, workspaceRoot: root, rules: [] },
+			root,
+			editorHost,
+		),
+		createTestDependencies({
+			spawnServe: () => spawnNativeServe(process.execPath, [server], root),
+			spawnSync: () => {
+				oneShot++;
+				return { stdout: "[]", stderr: "", status: 0 };
+			},
+			log: (message) => warnings.push(message),
+		}),
+	);
+	try {
+		const batch = client.getFilesAnalysis(files);
+		assert.equal(batch.files.length, files.length);
+		assert.deepEqual(batch.problems, []);
+		assert.deepEqual(client.getDiagnostics("src/current.ts"), [
+			{
+				rule_id: "fixture.rule",
+				assertion_id: "default",
+				message: "current revision 1",
+			},
+		]);
+		assert.deepEqual(client.problems(), []);
+		assert.equal(oneShot, 0);
+		assert.deepEqual(warnings, []);
 	} finally {
 		client.dispose();
 		rmSync(root, { recursive: true, force: true });

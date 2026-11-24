@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { readSync, writeSync } from "node:fs";
 import path from "node:path";
 import { PassThrough, type Readable } from "node:stream";
@@ -60,7 +60,7 @@ export type SpawnedProcess = {
 		readonly destroyed: boolean;
 	};
 	stdout: Readable;
-	writeBytes(bytes: Buffer): void;
+	writeBytes(bytes: Buffer, deadline: number): void;
 	readBytes(timeoutMs: number): Buffer;
 	close(): void;
 	failure(): Error | undefined;
@@ -197,12 +197,8 @@ export class Spawner {
 					},
 				},
 				stdout: new PassThrough(),
-				writeBytes(bytes) {
-					let error: Error | null | undefined;
-					channel.process.stdin.write(bytes, (writeError) => {
-						error = writeError;
-					});
-					if (error) throw error;
+				writeBytes(bytes, deadline) {
+					spawner.send({ type: "stdin", id, data: bytes.toString("base64") }, deadline);
 				},
 				readBytes(timeoutMs) {
 					return spawner.readSync(channel.process, timeoutMs);
@@ -280,7 +276,7 @@ export class Spawner {
 	// send writes the whole frame before it returns. The callers then block
 	// the event loop while they wait for the answer, so a write that the
 	// event loop would finish later could never complete.
-	private send(message: HostMessage): void {
+	private send(message: HostMessage, deadline?: number): void {
 		if (this.failure) {
 			throw this.failure;
 		}
@@ -292,17 +288,37 @@ export class Spawner {
 		}
 		let offset = 0;
 		while (offset < frame.length) {
+			if (deadline !== undefined && deadline - Date.now() <= 0) {
+				const failure = new Error("lintai spawner write timed out");
+				this.fail(failure);
+				throw failure;
+			}
 			try {
-				offset += writeSync(fd, frame, offset);
+				const bytesWritten = writeSync(fd, frame, offset);
+				if (bytesWritten > 0) {
+					offset += bytesWritten;
+				} else {
+					this.waitForWrite(deadline);
+				}
 			} catch (error) {
 				const code = (error as NodeJS.ErrnoException)?.code;
 				if (code !== "EAGAIN" && code !== "EWOULDBLOCK") {
 					this.fail(error instanceof Error ? error : new Error(String(error)));
 					throw this.failure;
 				}
-				Atomics.wait(syncSleep, 0, 0, 1);
+				this.waitForWrite(deadline);
 			}
 		}
+	}
+
+	private waitForWrite(deadline: number | undefined): void {
+		const remaining = deadline === undefined ? 1 : deadline - Date.now();
+		if (remaining <= 0) {
+			const failure = new Error("lintai spawner write timed out");
+			this.fail(failure);
+			throw failure;
+		}
+		Atomics.wait(syncSleep, 0, 0, Math.min(1, remaining));
 	}
 
 	private readOnce(deadline: number | undefined): void {
