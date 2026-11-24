@@ -1,5 +1,4 @@
 import { spawnSync } from "node:child_process";
-import { PassThrough } from "node:stream";
 import {
 	type ClientDependencies,
 	type LintAIClient,
@@ -41,63 +40,19 @@ export function createFramedResponse(response: {
 	return Buffer.concat([Buffer.from(`Content-Length: ${payload.length}\r\n\r\n`, "utf8"), payload]);
 }
 
-type TestProcess = {
-	stdin: PassThrough;
-	stdout: PassThrough;
-	on(
-		event: "exit",
-		listener: (code: number | null, signal: NodeJS.Signals | null) => void,
-	): TestProcess;
-	kill(signal?: NodeJS.Signals | number): boolean;
-	unref(): void;
-	emitExit(code?: number | null, signal?: NodeJS.Signals | null): void;
-};
-
-export function createTestProcess(): TestProcess {
-	const listeners = new Set<(code: number | null, signal: NodeJS.Signals | null) => void>();
-	const stdin = new PassThrough();
-	const stdout = new PassThrough();
-	stdin.on("finish", () => {
-		stdout.end();
-	});
-	stdin.on("close", () => {
-		stdout.end();
-	});
-	return {
-		stdin,
-		stdout,
-		on(event, listener) {
-			if (event === "exit") {
-				listeners.add(listener);
-			}
-			return this;
-		},
-		kill() {
-			stdout.end();
-			listeners.forEach((listener) => listener(0, null));
-			return true;
-		},
-		unref() {},
-		emitExit(code = 0, signal = null) {
-			listeners.forEach((listener) => listener(code, signal));
-		},
-	};
-}
-
 export function createTestTransport(
-	child: TestProcess,
-	read: (child: TestProcess, timeoutMs: number) => Buffer,
-): ServeTransport {
+	read: (writes: readonly Buffer[]) => Buffer,
+): ServeTransport & { writes: Buffer[] } {
+	const writes: Buffer[] = [];
 	return {
+		writes,
 		write(bytes) {
-			child.stdin.write(bytes);
+			writes.push(bytes);
 		},
-		read(deadline) {
-			return read(child, deadline);
+		read() {
+			return read(writes);
 		},
-		close() {
-			if (!child.stdin.destroyed) child.stdin.end();
-		},
+		close() {},
 		failure() {
 			return undefined;
 		},

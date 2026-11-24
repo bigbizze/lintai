@@ -9,7 +9,6 @@ import { Spawner } from "./spawner.js";
 import {
 	createFramedResponse,
 	createTestDependencies,
-	createTestProcess,
 	createTestTransport,
 	getClient,
 	resetClientsForTest,
@@ -21,20 +20,57 @@ const cliHost = { defaultMode: "oneshot", reportProblemsOnce: true } as const;
 afterEach(() => resetClientsForTest());
 
 test("file requests recover on the same connection and report distinct problem episodes", () => {
-	const child = createTestProcess();
-	const calls: string[] = [];
+	const calls: Array<{ method: string; params: unknown }> = [];
 	let oneShot = 0;
 	const problem = "[lintai] rule broken could not run (phase setup): failed";
 	const diagnostic = { rule_id: "new.id", assertion_id: "v", message: "found" };
 	const replies: unknown[] = [
-		{ protocolVersion: 1 },
+		{ protocolVersion: 2 },
 		{ error: { code: -32010, message: "invalid config" } },
 		{ error: { code: -32602, message: "invalid request parameters" } },
-		{ snapshotVersion: "a", rulesLoaded: 1, diagnostics: [diagnostic], problems: [problem] },
-		{ snapshotVersion: "b", rulesLoaded: 1, diagnostics: [diagnostic], problems: [problem] },
-		{ snapshotVersion: "b", rulesLoaded: 1, diagnostics: [], problems: [] },
+		{
+			snapshotVersion: "a",
+			rulesLoaded: 1,
+			files: [{ file: "src/a.ts", diagnostics: [diagnostic] }],
+			problems: [problem],
+		},
+		{
+			snapshotVersion: "b",
+			rulesLoaded: 1,
+			files: [{ file: "src/a.ts", diagnostics: [diagnostic] }],
+			problems: [problem],
+		},
+		{
+			snapshotVersion: "b",
+			rulesLoaded: 1,
+			files: [{ file: "src/a.ts", diagnostics: [] }],
+			problems: [],
+		},
 		{ snapshotVersion: "c", rulesLoaded: 1, diagnosticCount: 1, problems: [problem] },
-		{ snapshotVersion: "c", rulesLoaded: 1, diagnostics: [diagnostic], problems: [problem] },
+		{
+			snapshotVersion: "c",
+			rulesLoaded: 1,
+			files: [{ file: "src/a.ts", diagnostics: [diagnostic] }],
+			problems: [problem],
+		},
+		{
+			snapshotVersion: "d",
+			rulesLoaded: 1,
+			files: [
+				{ file: "b.ts", diagnostics: [diagnostic] },
+				{ file: "a.ts", diagnostics: [] },
+				{ file: "b.ts", diagnostics: [diagnostic] },
+			],
+			problems: [problem],
+		},
+		{ snapshotVersion: "d", rulesLoaded: 1, files: [], problems: [problem] },
+		{ error: { code: -32010, message: "changed input failed" } },
+		{
+			snapshotVersion: "e",
+			rulesLoaded: 1,
+			files: [{ file: "b.ts", diagnostics: [diagnostic] }],
+			problems: [],
+		},
 	];
 	const client = new LintAIClient(
 		resolveBridgeOptions({ mode: "serve", workspaceRoot: "/workspace" }, "/workspace", {
@@ -43,10 +79,10 @@ test("file requests recover on the same connection and report distinct problem e
 		}),
 		createTestDependencies({
 			spawnServe: () =>
-				createTestTransport(child, (process) => {
-					const frame = process.stdin.read().toString();
+				createTestTransport((writes) => {
+					const frame = writes[writes.length - 1].toString();
 					const request = JSON.parse(frame.slice(frame.indexOf("\r\n\r\n") + 4));
-					calls.push(request.method);
+					calls.push({ method: request.method, params: request.params });
 					const reply = replies.shift() as { error?: { code: number; message: string } };
 					return createFramedResponse({
 						jsonrpc: "2.0",
@@ -79,25 +115,64 @@ test("file requests recover on the same connection and report distinct problem e
 		assert.deepEqual(client.problems(), [problem]);
 		assert.deepEqual(client.getDiagnostics("src/a.ts"), [diagnostic]);
 		assert.deepEqual(client.problems(), []);
+		const batch = client.getFilesAnalysis(["b.ts", "a.ts", "b.ts"]);
+		assert.deepEqual(
+			batch.files.map((file) => file.diagnostics),
+			[[diagnostic], [], [diagnostic]],
+		);
+		assert.deepEqual(batch.problems, [problem]);
+		const empty = client.getFilesAnalysis([]);
+		assert.deepEqual(empty.files, []);
+		assert.deepEqual(empty.problems, [problem]);
+		const failed = client.getFilesAnalysis(["b.ts"]);
+		assert.deepEqual(failed.files[0].diagnostics, []);
+		assert.match(failed.problems[0], /changed input failed/);
+		assert.deepEqual(client.getFileAnalysis("b.ts").diagnostics, [diagnostic]);
+		assert.deepEqual(failed.files[0].problems(), failed.problems);
 		assert.equal(oneShot, 0);
-		assert.deepEqual(calls, [
-			"initialize",
-			"diagnostics/file",
-			"diagnostics/file",
-			"diagnostics/file",
-			"diagnostics/file",
-			"diagnostics/file",
-			"reanalyze",
-			"diagnostics/file",
-		]);
+		assert.deepEqual(
+			calls.map((call) => call.method),
+			[
+				"initialize",
+				"diagnostics/files",
+				"diagnostics/files",
+				"diagnostics/files",
+				"diagnostics/files",
+				"diagnostics/files",
+				"reanalyze",
+				"diagnostics/files",
+				"diagnostics/files",
+				"diagnostics/files",
+				"diagnostics/files",
+				"diagnostics/files",
+			],
+		);
+		for (const call of calls.slice(1, 8).filter((item) => item.method === "diagnostics/files")) {
+			assert.deepEqual(call.params, { files: ["src/a.ts"] });
+		}
+		assert.deepEqual(
+			calls.slice(8).map((call) => call.params),
+			[
+				{ files: ["b.ts", "a.ts", "b.ts"] },
+				{ files: [] },
+				{ files: ["b.ts"] },
+				{ files: ["b.ts"] },
+			],
+		);
 	} finally {
 		client.dispose();
 	}
 });
 
 test("transport and protocol failures fall back to one-shot until forced reanalysis", () => {
-	for (const failure of ["spawn", "eof", "framing", "handshake", "file response"]) {
-		const child = createTestProcess();
+	for (const failure of [
+		"spawn",
+		"eof",
+		"framing",
+		"handshake v1",
+		"handshake v3",
+		"file response",
+	]) {
 		let runs = 0;
 		let reads = 0;
 		const client = new LintAIClient(
@@ -109,19 +184,18 @@ test("transport and protocol failures fall back to one-shot until forced reanaly
 			createTestDependencies({
 				spawnServe: () => {
 					if (failure === "spawn") throw new Error("spawn failed");
-					return createTestTransport(child, () => {
+					return createTestTransport(() => {
 						reads++;
 						if (failure === "eof") throw new Error("closed stdout");
 						if (failure === "framing") return Buffer.from("bad header\r\n\r\n");
 						return createFramedResponse({
 							jsonrpc: "2.0",
 							id: reads,
-							result:
-								failure === "handshake"
-									? { protocolVersion: 0 }
-									: reads === 1
-										? { protocolVersion: 1 }
-										: { snapshotVersion: "snap", rulesLoaded: 1, diagnostics: null, problems: [] },
+							result: failure.startsWith("handshake")
+								? { protocolVersion: failure === "handshake v1" ? 1 : 3 }
+								: reads === 1
+									? { protocolVersion: 2 }
+									: { snapshotVersion: "snap", rulesLoaded: 1, files: null, problems: [] },
 						});
 					});
 				},
@@ -139,6 +213,30 @@ test("transport and protocol failures fall back to one-shot until forced reanaly
 			assert.match(client.problems().join("\n"), /reanalysis is forced/, failure);
 			client.reanalyze();
 			assert.equal(runs, 2, failure);
+		} finally {
+			client.dispose();
+		}
+	}
+	for (const mode of ["oneshot", "serve"] as const) {
+		let runs = 0;
+		const client = new LintAIClient(
+			resolveBridgeOptions({ mode, workspaceRoot: "/workspace" }, "/workspace", editorHost),
+			createTestDependencies({
+				spawnServe: () => {
+					throw new Error("spawn failed");
+				},
+				spawnSync: () => {
+					runs++;
+					return { status: 2, stdout: "[]", stderr: "invalid config" };
+				},
+				log: () => undefined,
+			}),
+		);
+		try {
+			const result = client.getFilesAnalysis([]);
+			assert.deepEqual(result.files, []);
+			assert.match(result.problems.join("\n"), /invalid config/, mode);
+			assert.equal(runs, 1, mode);
 		} finally {
 			client.dispose();
 		}
@@ -169,12 +267,12 @@ test("the real client exchanges two file responses through the real spawner", ()
 			"    const request = JSON.parse(input.subarray(end + 4, end + 4 + length).toString());",
 			"    input = input.subarray(end + 4 + length);",
 			'    if (request.method === "initialize") {',
-			'      send({ jsonrpc: "2.0", id: request.id, result: { protocolVersion: 1 } });',
-			'    } else if (request.method === "diagnostics/file") {',
+			'      send({ jsonrpc: "2.0", id: request.id, result: { protocolVersion: 2 } });',
+			'    } else if (request.method === "diagnostics/files") {',
 			"      files += 1;",
 			'      send({ jsonrpc: "2.0", id: request.id, result: {',
 			'        snapshotVersion: "snapshot-" + files, rulesLoaded: 1, problems: [],',
-			'        diagnostics: [{ rule_id: "fixture.rule", assertion_id: "default", message: "file response " + files }],',
+			'        files: request.params.files.map((file) => ({ file, diagnostics: [{ rule_id: "fixture.rule", assertion_id: "default", message: "file response " + files }] })),',
 			"      } });",
 			'    } else if (request.method === "shutdown") {',
 			"      process.exit(0);",
@@ -240,17 +338,12 @@ test("native serve transport sends a batch larger than pipe capacity and stays l
 			"    const request = JSON.parse(input.subarray(end + 4, end + 4 + length).toString());",
 			"    input = input.subarray(end + 4 + length);",
 			'    if (request.method === "initialize") {',
-			'      send({ jsonrpc: "2.0", id: request.id, result: { protocolVersion: 1 } });',
+			'      send({ jsonrpc: "2.0", id: request.id, result: { protocolVersion: 2 } });',
 			'    } else if (request.method === "diagnostics/files") {',
 			"      revision += 1;",
 			'      send({ jsonrpc: "2.0", id: request.id, result: {',
 			'        snapshotVersion: "batch-" + revision, rulesLoaded: 1, problems: [],',
-			"        files: request.params.files.map((file) => ({ file, diagnostics: [] })),",
-			"      } });",
-			'    } else if (request.method === "diagnostics/file") {',
-			'      send({ jsonrpc: "2.0", id: request.id, result: {',
-			'        snapshotVersion: "current-" + revision, rulesLoaded: 1, problems: [],',
-			'        diagnostics: [{ rule_id: "fixture.rule", assertion_id: "default", message: "current revision " + revision }],',
+			'        files: request.params.files.map((file) => ({ file, diagnostics: file === "src/current.ts" ? [{ rule_id: "fixture.rule", assertion_id: "default", message: "current revision " + revision }] : [] })),',
 			"      } });",
 			"    }",
 			"  }",
@@ -288,7 +381,7 @@ test("native serve transport sends a batch larger than pipe capacity and stays l
 			{
 				rule_id: "fixture.rule",
 				assertion_id: "default",
-				message: "current revision 1",
+				message: "current revision 2",
 			},
 		]);
 		assert.deepEqual(client.problems(), []);
@@ -301,9 +394,8 @@ test("native serve transport sends a batch larger than pipe capacity and stays l
 });
 
 test("client cache reuses the same instance for the same resolved options", () => {
-	const child = createTestProcess();
 	const deps = createTestDependencies({
-		spawnServe: () => createTestTransport(child, () => Buffer.alloc(0)),
+		spawnServe: () => createTestTransport(() => Buffer.alloc(0)),
 		log: () => undefined,
 	});
 	const options = resolveBridgeOptions(

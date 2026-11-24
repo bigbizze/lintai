@@ -82,19 +82,6 @@ export default rule("example.modules").version(1)
 		}
 		return response
 	}
-	file := func(name string) server.FileDiagnosticsResult {
-		t.Helper()
-		response := call("diagnostics/file", map[string]any{"file": name})
-		if response.Error != nil {
-			t.Fatalf("file %s: %+v", name, response.Error)
-		}
-		var result server.FileDiagnosticsResult
-		raw, _ := json.Marshal(response.Result)
-		if err := json.Unmarshal(raw, &result); err != nil {
-			t.Fatal(err)
-		}
-		return result
-	}
 	batch := func(names ...string) server.FilesDiagnosticsResult {
 		t.Helper()
 		response := call("diagnostics/files", map[string]any{"files": names})
@@ -108,20 +95,21 @@ export default rule("example.modules").version(1)
 		}
 		return result
 	}
+	file := func(name string) server.FilesDiagnosticsResult { return batch(name) }
 
 	init := call("initialize", server.InitializeParams{RepoRoot: repo, AssetRoot: filepath.Join(repo, "packages/client"), WorkspaceRoot: root, RuleGlobs: []string{rulePath}, SetupSandbox: "off", RuleWorkers: 1, Files: "walk"})
 	if init.Error != nil || composition == nil || composition.session != nil {
 		t.Fatalf("handshake analyzed: %+v", init)
 	}
-	bad := call("diagnostics/file", map[string]any{"file": "a.ts"})
+	bad := call("diagnostics/files", map[string]any{"files": []string{"a.ts"}})
 	if bad.Error == nil || bad.Error.Code != -32010 || !strings.Contains(bad.Error.Message, "config") || composition.session != nil {
 		t.Fatalf("invalid config: %+v", bad)
 	}
 	write(configPath, config("b.ts"))
-	if got := file("a.ts"); len(got.Diagnostics) != 1 || len(got.Problems) != 0 || string(composition.settings[0].Files) != "walk" {
+	if got := file("a.ts"); len(got.Files[0].Diagnostics) != 1 || len(got.Problems) != 0 || string(composition.settings[0].Files) != "walk" {
 		t.Fatalf("initial configured result or explicit file mode: %+v settings=%+v", got, composition.settings)
 	}
-	if got := file("b.ts"); len(got.Diagnostics) != 0 {
+	if got := file("b.ts"); len(got.Files[0].Diagnostics) != 0 {
 		t.Fatalf("excluded source: %+v", got)
 	}
 	initialBatch := batch("a.ts", "b.ts", "a.ts")
@@ -131,18 +119,18 @@ export default rule("example.modules").version(1)
 	for _, projected := range initialBatch.Files {
 		individual := file(projected.File)
 		left, _ := json.Marshal(projected.Diagnostics)
-		right, _ := json.Marshal(individual.Diagnostics)
+		right, _ := json.Marshal(individual.Files[0].Diagnostics)
 		if string(left) != string(right) || initialBatch.SnapshotVersion != individual.SnapshotVersion {
 			t.Fatalf("batch/file mismatch: %s / %s", left, right)
 		}
 	}
 	initial := composition.session
 	write(configPath, config("b.ts")+"# comment only\n")
-	if got := file("a.ts"); len(got.Diagnostics) != 1 || composition.session != initial {
+	if got := file("a.ts"); len(got.Files[0].Diagnostics) != 1 || composition.session != initial {
 		t.Fatalf("equal settings replaced session: %+v", got)
 	}
 	write(configPath, config("a.ts"))
-	if got := file("b.ts"); len(got.Diagnostics) != 1 || composition.session == initial {
+	if got := file("b.ts"); len(got.Files[0].Diagnostics) != 1 || composition.session == initial {
 		t.Fatalf("scope replacement: %+v", got)
 	}
 	if _, err := initial.Current(); err == nil {
@@ -162,14 +150,14 @@ export default rule("example.modules").version(1)
 		t.Fatalf("configuration recovery: %+v", got)
 	}
 	write(ambient, "off")
-	if got := file("b.ts"); len(got.Diagnostics) != 1 {
+	if got := file("b.ts"); len(got.Files[0].Diagnostics) != 1 {
 		t.Fatalf("unobserved preparation input refreshed automatically: %+v", got)
 	}
 	forced := call("reanalyze", map[string]any{"reason": "ambient changed", "ruleWorkers": 2})
 	if forced.Error != nil {
 		t.Fatalf("reanalyze: %+v", forced.Error)
 	}
-	if got := file("b.ts"); len(got.Diagnostics) != 0 {
+	if got := file("b.ts"); len(got.Files[0].Diagnostics) != 0 {
 		t.Fatalf("forced preparation did not rerun: %+v", got)
 	}
 	write(ambient, "on")
@@ -183,7 +171,7 @@ export default rule("example.modules").version(1)
 	}
 	previous := composition.session
 	write(configPath, config("a.ts")+"source_links = \"links.json\"\n")
-	if got := file("b.ts"); len(got.Diagnostics) != 1 || composition.session == previous || composition.settings[0].SourceLinks != "links.json" {
+	if got := file("b.ts"); len(got.Files[0].Diagnostics) != 1 || composition.session == previous || composition.settings[0].SourceLinks != "links.json" {
 		t.Fatalf("source links replacement: %+v settings=%+v", got, composition.settings)
 	}
 	previous = composition.session

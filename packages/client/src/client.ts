@@ -61,13 +61,6 @@ export type ResolvedBridgeOptions = {
 	setupSandbox?: SetupSandbox;
 };
 
-type FileResult = {
-	snapshotVersion: string;
-	rulesLoaded: number;
-	diagnostics: Diagnostic[];
-	problems: string[];
-};
-
 type FilesResult = {
 	snapshotVersion: string;
 	rulesLoaded: number;
@@ -178,27 +171,12 @@ export class LintAIClient {
 	}
 
 	getDiagnostics(file: string): Diagnostic[] {
-		this.ensureStarted();
-		if (this.state === "fallback") return this.getOneshotDiagnostics(normalizeFile(file));
-		if (this.state !== "ready") return [];
-		try {
-			const result = this.requestSync<FileResult>("diagnostics/file", {
-				file: file.replace(/\\/g, "/"),
-			});
-			if (!isSummary(result) || !Array.isArray(result.diagnostics))
-				throw new Error("invalid diagnostics/file response");
-			this.setProblems(result.problems);
-			return result.diagnostics;
-		} catch (error) {
-			return this.handleRequestError(error) ? this.getOneshotDiagnostics(normalizeFile(file)) : [];
-		}
+		return this.getFileAnalysis(file).diagnostics;
 	}
 
 	// Hold diagnostics and their problem episode together for one host analysis.
 	getFileAnalysis(file: string): FileAnalysis {
-		const diagnostics = this.getDiagnostics(file);
-		const episode = this.problemEpisode;
-		return { diagnostics, problems: () => this.reportProblems(episode) };
+		return this.getFilesAnalysis([file]).files[0];
 	}
 
 	// One explicit operation; each returned file keeps this response's problem episode.
@@ -322,7 +300,7 @@ export class LintAIClient {
 				suppressionsLocation: this.options.suppressionsLocation,
 				setupSandbox: this.options.setupSandbox,
 			});
-			if (!result || result.protocolVersion !== 1)
+			if (!result || result.protocolVersion !== 2)
 				throw new Error("incompatible lintai serve protocol version");
 			this.state = "ready";
 		} catch (error) {
@@ -484,7 +462,7 @@ export class LintAIClient {
 	}
 }
 
-function isSummary(value: FileResult | FilesResult | AnalysisResult): boolean {
+function isSummary(value: FilesResult | AnalysisResult): boolean {
 	return (
 		!!value &&
 		typeof value.snapshotVersion === "string" &&
