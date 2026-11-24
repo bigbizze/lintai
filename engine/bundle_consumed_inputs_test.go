@@ -172,11 +172,11 @@ func TestBundleConsumedInputEdit(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		loaded, err := runtime.LoadPureBundle(string(code))
+		loaded, err := runtime.InspectPureBundle(string(code))
 		if err != nil {
 			t.Fatal(err)
 		}
-		message, err := loaded.Message(map[string]any{}, "violation")
+		message, err := loaded.Rule.Message(map[string]any{}, "violation")
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -359,11 +359,11 @@ func TestBundleHelperInputEdit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := runtime.LoadPureBundle(string(code))
+	loaded, err := runtime.InspectPureBundle(string(code))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if message, err := loaded.Message(nil, "violation"); err != nil || message != "B" {
+	if message, err := loaded.Rule.Message(nil, "violation"); err != nil || message != "B" {
 		t.Fatalf("stable helper B behavior: %q %v", message, err)
 	}
 	if err := os.WriteFile(helper, []byte(a), 0o600); err != nil {
@@ -380,11 +380,11 @@ func TestBundleHelperInputEdit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	capturedRule, err := runtime.LoadPureBundle(string(captured))
+	capturedRule, err := runtime.InspectPureBundle(string(captured))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if message, err := capturedRule.Message(nil, "violation"); err != nil || message != "A" {
+	if message, err := capturedRule.Rule.Message(nil, "violation"); err != nil || message != "A" {
 		t.Fatalf("captured helper behavior: %q %v", message, err)
 	}
 
@@ -505,11 +505,11 @@ func TestBundleToolInputEdit(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		loaded, err := runtime.LoadPureBundle(string(data))
+		loaded, err := runtime.InspectPureBundle(string(data))
 		if err != nil {
 			t.Fatal(err)
 		}
-		result, err := loaded.Message(nil, "violation")
+		result, err := loaded.Rule.Message(nil, "violation")
 		if err != nil {
 			t.Fatal(err)
 		}

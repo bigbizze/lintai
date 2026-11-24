@@ -502,7 +502,7 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options, mode
 		return Result{}, run, evidence, err
 	}
 	e.prepareRulePlans(ruleCatalog, producerCatalog, assembled.snapshotID)
-	jobs, requested := ruleRelationDemand(ruleCatalog, producerCatalog)
+	jobs, requested := ruleRelationDemand(ruleCatalog)
 	if len(jobs) > 0 {
 		assembled, err = producerCatalog.collect(ctx, options, requested, e.currentFacts, mode)
 		if err != nil {

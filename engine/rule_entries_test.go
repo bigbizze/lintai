@@ -138,8 +138,8 @@ export default rule("fixture.entry-b").version(1)
 		t.Fatalf("reuse after temporary cleanup: cold=%+v warm=%+v", cold, warm)
 	}
 	for path, entry := range entries {
-		if entry.plan != plans[path] || entry.plan.ruleFacts != nil || len(entry.plan.suppressionRules) != 0 {
-			t.Fatalf("rule %s did not retain an unchanged plan template", path)
+		if entry.plan != plans[path] || entry.plan.ruleFacts == nil || entry.plan.ruleFacts.EstimateFactCount() != 3 {
+			t.Fatalf("rule %s did not retain its complete unchanged plan", path)
 		}
 	}
 	oldA, oldB, oldC := entries[a].approvalHash, entries[b].approvalHash, entries[c].approvalHash
