@@ -203,22 +203,18 @@ func TestRelationCoverageInventory(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			_, isRule, err := runtime.ReadRuleMetadata(string(code))
+			inspection, err := runtime.InspectPureBundle(string(code))
 			if err != nil {
 				t.Fatalf("%s: %v", path, err)
 			}
-			if !isRule { // A shared rule module is counted through its consuming rule.
+			if !inspection.IsRule { // A shared rule module is counted through its consuming rule.
 				continue
 			}
 			ready, ok := prepared[path]
 			if !ok {
 				t.Fatalf("%s: no prepared rule", path)
 			}
-			rule, err := runtime.LoadPureBundle(string(code))
-			if err != nil {
-				t.Fatalf("%s: %v", path, err)
-			}
-			output, err := rule.Program(ready.Env, ready.Setup)
+			output, err := inspection.Rule.Program(ready.Env, ready.Setup)
 			if err != nil {
 				t.Fatalf("%s: %v", path, err)
 			}
@@ -230,7 +226,7 @@ func TestRelationCoverageInventory(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			roots := append(rule.Report(), rule.ExpectNonEmpty()...)
+			roots := append(inspection.Metadata.Report, inspection.Metadata.ExpectNonEmpty...)
 			collectRelationUsers(unit, roots, filepath.ToSlash(relative), catalog.sources, bases, byName, helpers, helperByName, users)
 		}
 	}

@@ -1,12 +1,11 @@
 package runtime
 
 import (
-	"reflect"
 	"strings"
 	"testing"
 )
 
-func TestMetadataLoaders(t *testing.T) {
+func TestInspectPureBundle(t *testing.T) {
 	base := `({
 		id: "fixture.rule", versionValue: 1, hasSetup: false, hasConfig: true,
 		programValue: {__lintaiKind: "fragment", text: "Decl violation(Entity)."},
@@ -42,28 +41,29 @@ func TestMetadataLoaders(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			code := "const base = " + base + ";\n" + test.setup
-			metadata, ok, metadataErr := ReadRuleMetadata(code)
-			loaded, loadErr := LoadPureBundle(code)
+			inspection, err := InspectPureBundle(code)
 			if test.helper {
-				if ok || metadataErr != nil || loadErr == nil {
-					t.Fatalf("helper listing/execution: ok=%v metadataErr=%v loadErr=%v", ok, metadataErr, loadErr)
+				if inspection.IsRule || inspection.Rule != nil || err != nil {
+					t.Fatalf("helper inspection: %+v %v", inspection, err)
 				}
 				return
 			}
 			if test.wantError != "" {
-				if !ok || metadataErr == nil || loadErr == nil || !strings.Contains(metadataErr.Error(), test.wantError) || metadataErr.Error() != loadErr.Error() {
-					t.Fatalf("loaders disagree: ok=%v metadataErr=%v loadErr=%v", ok, metadataErr, loadErr)
+				if !inspection.IsRule || inspection.Rule != nil || err == nil || !strings.Contains(err.Error(), test.wantError) {
+					t.Fatalf("invalid rule inspection: %+v %v", inspection, err)
 				}
-				if test.knownID && metadata.ID != "fixture.rule" {
-					t.Fatalf("known rule ID lost: %+v", metadata)
+				if test.knownID && inspection.Metadata.ID != "fixture.rule" {
+					t.Fatalf("known rule ID lost: %+v", inspection.Metadata)
 				}
 				return
 			}
-			if !ok || metadataErr != nil || loadErr != nil {
-				t.Fatalf("valid rule rejected: ok=%v metadataErr=%v loadErr=%v", ok, metadataErr, loadErr)
+			if !inspection.IsRule || inspection.Rule == nil || err != nil {
+				t.Fatalf("valid rule rejected: %+v %v", inspection, err)
 			}
-			if loaded.RuleID() != metadata.ID || loaded.RuleVersion() != metadata.Version || !reflect.DeepEqual(loaded.Report(), metadata.Report) || !reflect.DeepEqual(loaded.ExpectNonEmpty(), metadata.ExpectNonEmpty) || !reflect.DeepEqual(loaded.SuppressionDeclarations(), metadata.Suppressions) {
-				t.Fatalf("metadata differs from execution rule: %+v %+v", metadata, loaded)
+			metadata := inspection.Metadata
+			if metadata.ID != "fixture.rule" || metadata.Version != 1 || metadata.HasSetup || !metadata.HasConfig ||
+				len(metadata.Report) != 1 || metadata.Report[0] != "violation" || len(metadata.ExpectNonEmpty) != 1 || metadata.ExpectNonEmpty[0] != "violation" || len(metadata.Suppressions) != 1 || metadata.Suppressions[0].Assertion != "violation" {
+				t.Fatalf("incorrect metadata: %+v", metadata)
 			}
 		})
 	}
@@ -72,42 +72,43 @@ func TestMetadataLoaders(t *testing.T) {
 func TestPureExecutionStateAndExceptions(t *testing.T) {
 	code := `let state = "fresh";
 	globalThis.LintAIPureModule = {rule: {
-		id: "fixture.state", versionValue: 1, hasSetup: false, hasConfig: false,
-		programValue: () => { state = "ready"; return {__lintaiKind: "fragment", text: "Decl violation(Entity)."} },
+		get id() { state += ":inspected"; return "fixture.state" }, versionValue: 1, hasSetup: false, hasConfig: false,
+		factsFn: () => { state += ":facts"; return {} },
+		programValue: () => { state += ":program"; return {__lintaiKind: "fragment", text: "Decl violation(Entity)."} },
 		messageFn: () => state, reportPredicates: ["violation"], expectNonEmptyPredicates: [], suppressionDeclarations: []
 	}};`
-	first, err := LoadPureBundle(code)
+	first, err := InspectPureBundle(code)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := first.Program(nil, nil); err != nil {
+	if _, err := first.Rule.Program(nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if got, err := first.Message(nil, "violation"); err != nil || got != "ready" {
+	if got, err := first.Rule.Message(nil, "violation"); err != nil || got != "fresh:inspected:facts:program" {
 		t.Fatalf("same-run state: %q %v", got, err)
 	}
-	second, err := LoadPureBundle(code)
+	second, err := InspectPureBundle(code)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, err := second.Message(nil, "violation"); err != nil || got != "fresh" {
+	if got, err := second.Rule.Message(nil, "violation"); err != nil || got != "fresh:inspected" {
 		t.Fatalf("next-run state: %q %v", got, err)
 	}
 
 	throwing := strings.Replace(code, `return {__lintaiKind: "fragment", text: "Decl violation(Entity)."}`, `return {get __lintaiKind() { throw new Error("fragment getter failed") }}`, 1)
-	rule, err := LoadPureBundle(throwing)
+	rule, err := InspectPureBundle(throwing)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := rule.Program(nil, nil); err == nil || !strings.Contains(err.Error(), "fragment getter failed") {
+	if _, err := rule.Rule.Program(nil, nil); err == nil || !strings.Contains(err.Error(), "fragment getter failed") {
 		t.Fatalf("program getter error: %v", err)
 	}
 	throwingMessage := strings.Replace(code, `messageFn: () => state`, `messageFn: () => ({toString() {throw new Error("message conversion failed")}})`, 1)
-	rule, err = LoadPureBundle(throwingMessage)
+	rule, err = InspectPureBundle(throwingMessage)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := rule.Message(nil, "violation"); err == nil || !strings.Contains(err.Error(), "message conversion failed") {
+	if _, err := rule.Rule.Message(nil, "violation"); err == nil || !strings.Contains(err.Error(), "message conversion failed") {
 		t.Fatalf("message conversion error: %v", err)
 	}
 }

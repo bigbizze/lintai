@@ -77,12 +77,13 @@ type suppressionPolicy struct {
 	by        []string
 }
 
+// A retained plan contains immutable compilation results and read-only facts;
+// evaluation stores and accounting are created separately for each run.
 type rulePlan struct {
 	info             *mangleanalysis.ProgramInfo
 	strata           []mangleanalysis.Nodeset
 	predToStratum    map[ast.PredicateSym]int
 	ruleFacts        factstore.ReadOnlyFactStore
-	required         map[string]struct{}
 	basePredicates   map[ast.PredicateSym]struct{}
 	reportDecls      []ast.Decl
 	expectSyms       []ast.PredicateSym
@@ -242,7 +243,7 @@ func prepareProgram(catalog []parse.SourceUnit, schemaDecls map[ast.PredicateSym
 	}
 	return &rulePlan{
 		info: info, strata: strata, predToStratum: predToStratum, ruleFacts: ruleFacts,
-		required: requiredPredicates, basePredicates: basePredicates, reportDecls: reportDecls, expectSyms: expectSyms,
+		basePredicates: basePredicates, reportDecls: reportDecls, expectSyms: expectSyms,
 		suppressionRules: policies,
 	}, nil
 }
@@ -297,23 +298,6 @@ func generatedRulePlanKey(catalogIdentity string, output runtime.ProgramOutput, 
 	return hex.EncodeToString(digest[:]), nil
 }
 
-func prepareExtraFacts(output runtime.ProgramOutput, namespaces []string) (factstore.ReadOnlyFactStore, *phaseError) {
-	unit, err := parse.Unit(strings.NewReader(splitConstantTerminators(output.Text)))
-	if err != nil {
-		return nil, failPhase("program_parse", "%v", err)
-	}
-	if perr := bindRuleUnit(&unit, output.Text, namespaces); perr != nil {
-		return nil, perr
-	}
-	return ruleFactStore(unit, output.Facts)
-}
-
-func planWithExtraFacts(plan *rulePlan, extraFacts factstore.ReadOnlyFactStore) *rulePlan {
-	owned := *plan
-	owned.ruleFacts = extraFacts
-	return &owned
-}
-
 func (plan *rulePlan) evaluate(base factstore.ReadOnlyFactStore, factCounts map[ast.PredicateSym]int, anchors map[string]facts.AnchorSupport, reportable map[facts.Predicate]map[string]struct{}, options evalOptions) ([]violation, *phaseError) {
 	derived := &createdFactStore{FactStore: factstore.NewMultiIndexedArrayInMemoryStore()}
 	for _, fact := range plan.info.InitialFacts {
@@ -341,7 +325,7 @@ func (plan *rulePlan) evaluate(base factstore.ReadOnlyFactStore, factCounts map[
 	}
 	eligibleAnchors := make(map[string]struct{})
 	for predicate, eligible := range reportable {
-		if _, required := plan.required[predicate.Name]; !required {
+		if _, required := plan.basePredicates[ast.PredicateSym{Symbol: predicate.Name, Arity: predicate.Arity}]; !required {
 			continue
 		}
 		for id := range eligible {

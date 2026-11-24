@@ -21,28 +21,30 @@ func TestGeneratedProgramChangeInvalidatesCompiledPlan(t *testing.T) {
 		t.Fatal(err)
 	}
 	workspace := t.TempDir()
-	program := "Decl violation(Entity, Code). violation(Entity, Code) :- catalog.usable(Entity, Code)."
-	filtered := "Decl violation(Entity, Code). violation(Entity, Code) :- catalog.usable(Entity, Code), Code = \"a\"."
+	program := "Decl selected(Code) descr [extensional()]. Decl violation(Entity, Code). violation(Entity, Code) :- catalog.usable(Entity, Code), selected(Code)."
+	filtered := "Decl selected(Code) descr [extensional()]. Decl violation(Entity, Code). violation(Entity, Code) :- catalog.usable(Entity, Code), selected(Code), Code = \"a\"."
 	source := `import { dl, rule } from "@lintai/sdk";
 export default rule("fixture.generated-program").version(1)
+	.facts(({ env }) => ({selected: env.selection}))
 	.program(({ env }) => env.onlyFirst ? dl` + "`" + filtered + "`" + ` : dl` + "`" + program + "`" + `)
 	.report("violation").message((row) => row.Code);
 `
-	writeTestFile(t, workspace, "lintai-rules/generated.ts", source)
+	rulePath := writeTestFile(t, workspace, "lintai-rules/generated.ts", source)
 	engine := Open(Options{}, newParallelFixtureProducer())
 	defer engine.Close()
 	options := parallelFixtureOptions(repoRoot, workspace)
 	options.RuleWorkers = 1
-	options.Env = map[string]any{"onlyFirst": true}
+	allRows := []any{[]any{"a"}, []any{"b"}, []any{"c"}}
+	options.Env = map[string]any{"onlyFirst": true, "selection": allRows}
 	first, _, err := engine.analyze(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(first.Diagnostics) != 1 {
+	if len(first.Diagnostics) != 1 || first.Diagnostics[0].Message != "a" {
 		t.Fatalf("first generated program should report one row: %+v", first.Diagnostics)
 	}
 	firstObservation := engine.executionObservation()
-	options.Env = map[string]any{"onlyFirst": false}
+	options.Env = map[string]any{"onlyFirst": false, "selection": allRows}
 	second, _, err := engine.analyze(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
@@ -56,6 +58,24 @@ export default rule("fixture.generated-program").version(1)
 	}
 	if secondObservation.mangleCompiles != firstObservation.mangleCompiles+1 {
 		t.Fatalf("generated program change did not compile a new plan: first=%+v second=%+v", firstObservation, secondObservation)
+	}
+	secondPlan := engine.ruleEntries[rulePath].plan
+	options.Env = map[string]any{"onlyFirst": false, "selection": []any{[]any{"b"}, []any{"c"}}}
+	third, _, err := engine.analyze(context.Background(), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(third.Diagnostics) != 2 || third.Diagnostics[0].Message != "b" || third.Diagnostics[1].Message != "c" {
+		t.Fatalf("changed generated facts should report b and c: %+v", third.Diagnostics)
+	}
+	thirdObservation := engine.executionObservation()
+	if engine.ruleEntries[rulePath].plan == secondPlan || thirdObservation.mangleCompiles != secondObservation.mangleCompiles+1 || thirdObservation.bundleArtifacts != secondObservation.bundleArtifacts {
+		t.Fatalf("changed facts with unchanged program did not replace the plan: second=%+v third=%+v", secondObservation, thirdObservation)
+	}
+	thirdPlan := engine.ruleEntries[rulePath].plan
+	fourth, _, err := engine.analyze(context.Background(), options)
+	if err != nil || !reflect.DeepEqual(third.Diagnostics, fourth.Diagnostics) || engine.ruleEntries[rulePath].plan != thirdPlan || engine.executionObservation().mangleCompiles != thirdObservation.mangleCompiles || engine.executionObservation().programBuilds != thirdObservation.programBuilds+1 {
+		t.Fatalf("unchanged output did not reuse the complete plan after fresh generation: %+v %v", fourth.Diagnostics, err)
 	}
 }
 
@@ -470,8 +490,8 @@ func TestRuleCatalogIsolatesInvalidMetadata(t *testing.T) {
 		`globalThis.LintAIPureModule = { rule: { id: "fixture.missing", versionValue: 1 } };`,
 		`globalThis.LintAIPureModule = { rule: { id: "fixture.invalid", versionValue: 1, hasSetup: 1, hasConfig: false } };`,
 	} {
-		if _, ok, err := runtime.ReadRuleMetadata(code); !ok || err == nil {
-			t.Fatalf("missing or invalid metadata must fail to load: ok=%v err=%v", ok, err)
+		if inspection, err := runtime.InspectPureBundle(code); !inspection.IsRule || err == nil {
+			t.Fatalf("missing or invalid metadata must fail to load: isRule=%v err=%v", inspection.IsRule, err)
 		}
 	}
 	repoRoot, err := filepath.Abs("..")

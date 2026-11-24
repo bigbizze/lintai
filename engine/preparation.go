@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 
-	"codeberg.org/TauCeti/mangle-go/factstore"
 	"github.com/bigbizze/lintai/bundle"
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/facts"
@@ -179,10 +179,11 @@ func prepareRuleConfigs(ctx context.Context, catalog *ruleCatalog, options Optio
 	}
 }
 
-// Every actual check loads fresh runtimes and reruns program/fact generation.
+// Every actual check reruns program/fact generation in its inspected runtime.
 func (e *Session) generateRulePrograms(catalog *ruleCatalog, snapshot string) {
 	for _, rule := range catalog.rules {
 		if rule.disposition != rulePrepared {
+			rule.loaded = nil
 			continue
 		}
 		if _, err := canonical.Marshal(rule.preparation.Env); err != nil {
@@ -195,26 +196,14 @@ func (e *Session) generateRulePrograms(catalog *ruleCatalog, snapshot string) {
 			rule.disposition = ruleFailed
 			continue
 		}
-		e.stats.gojaRuntimes.Add(1)
-		loaded, err := runtime.LoadPureBundle(rule.retained.pureCode)
-		if err != nil {
-			rule.addError(rule.metadata.ID, "program", rule.metadata.Version, snapshot, nil, err.Error())
-			rule.disposition = ruleFailed
-			continue
-		}
-		if loaded.RuleID() != rule.metadata.ID || loaded.RuleVersion() != rule.metadata.Version {
-			rule.addError(rule.metadata.ID, "program", rule.metadata.Version, snapshot, nil, "rule metadata changed between catalog and execution load")
-			rule.disposition = ruleFailed
-			continue
-		}
 		e.stats.programBuilds.Add(1)
-		output, err := loaded.Program(rule.preparation.Env, rule.preparation.Setup)
+		output, err := rule.loaded.Program(rule.preparation.Env, rule.preparation.Setup)
 		if err != nil {
 			rule.addError(rule.metadata.ID, "program", rule.metadata.Version, snapshot, nil, err.Error())
 			rule.disposition = ruleFailed
 			continue
 		}
-		rule.loaded, rule.output, rule.disposition = loaded, output, ruleGenerated
+		rule.output, rule.disposition = output, ruleGenerated
 	}
 }
 
@@ -223,33 +212,20 @@ func (e *Session) prepareRulePlans(catalog *ruleCatalog, producers producerCatal
 		if rule.disposition != ruleGenerated {
 			continue
 		}
-		key, keyErr := generatedRulePlanKey(producers.identity, rule.output, rule.loaded.Report(), rule.loaded.ExpectNonEmpty(), rule.loaded.SuppressionDeclarations())
+		metadata := rule.metadata
+		key, keyErr := generatedRulePlanKey(producers.identity, rule.output, metadata.Report, metadata.ExpectNonEmpty, metadata.Suppressions)
 		entry := rule.retained
 		var plan *rulePlan
 		if keyErr == nil && key != "" && entry.planKey == key {
 			plan = entry.plan
 		}
 		var perr *phaseError
-		if plan != nil {
-			var policies []suppressionPolicy
-			policies, perr = validateSuppressionPolicies(rule.loaded.SuppressionDeclarations(), plan.reportDecls)
-			if perr == nil {
-				var extraFacts factstore.ReadOnlyFactStore
-				extraFacts, perr = prepareExtraFacts(rule.output, producers.namespaces)
-				if perr == nil {
-					plan = planWithExtraFacts(plan, extraFacts)
-					plan.suppressionRules = policies
-				}
-			}
-		} else {
+		if plan == nil {
 			e.stats.mangleCompiles.Add(1)
 			plan, perr = prepareProgram(producers.sources, producers.schemaDecls, producers.namespaces,
-				rule.output, rule.loaded.Report(), rule.loaded.ExpectNonEmpty(), rule.loaded.SuppressionDeclarations())
+				rule.output, metadata.Report, metadata.ExpectNonEmpty, metadata.Suppressions)
 			if perr == nil && keyErr == nil && key != "" {
-				template := *plan
-				template.ruleFacts = nil
-				template.suppressionRules = nil
-				entry.planKey, entry.plan = key, &template
+				entry.planKey, entry.plan = key, plan
 			}
 		}
 		if perr != nil {
@@ -261,23 +237,21 @@ func (e *Session) prepareRulePlans(catalog *ruleCatalog, producers producerCatal
 	}
 }
 
-func ruleRelationDemand(catalog *ruleCatalog, producers producerCatalog) ([]*ruleRecord, map[string]map[facts.Predicate]struct{}) {
+func ruleRelationDemand(catalog *ruleCatalog) ([]*ruleRecord, map[string]map[facts.Predicate]struct{}) {
 	var jobs []*ruleRecord
 	requested := make(map[string]map[facts.Predicate]struct{})
 	for _, rule := range catalog.rules {
 		if rule.disposition != rulePlanned {
 			continue
 		}
-		for _, entry := range producers.entries {
-			for _, relation := range entry.description.BaseRelations {
-				if _, needed := rule.plan.required[relation.Predicate.Name]; !needed {
-					continue
-				}
-				if requested[entry.description.Namespace] == nil {
-					requested[entry.description.Namespace] = make(map[facts.Predicate]struct{})
-				}
-				requested[entry.description.Namespace][relation.Predicate] = struct{}{}
+		// Validated catalog declarations make every base predicate a qualified
+		// producer relation with its exact arity.
+		for predicate := range rule.plan.basePredicates {
+			namespace, _, _ := strings.Cut(predicate.Symbol, ".")
+			if requested[namespace] == nil {
+				requested[namespace] = make(map[facts.Predicate]struct{})
 			}
+			requested[namespace][facts.Predicate{Name: predicate.Symbol, Arity: predicate.Arity}] = struct{}{}
 		}
 		jobs = append(jobs, rule)
 	}

@@ -11,17 +11,12 @@ import (
 )
 
 type LoadedRule struct {
-	runtime        *goja.Runtime
-	id             string
-	version        int
-	programValue   goja.Value
-	factsFn        goja.Callable
-	messageFn      goja.Callable
-	freezeFn       goja.Callable
-	strictRowFn    goja.Callable
-	report         []string
-	expectNonEmpty []string
-	suppressions   []SuppressionDeclaration
+	runtime      *goja.Runtime
+	programValue goja.Value
+	factsFn      goja.Callable
+	messageFn    goja.Callable
+	freezeFn     goja.Callable
+	strictRowFn  goja.Callable
 }
 
 // SuppressionDeclaration is raw rule metadata. Its option shape is validated
@@ -66,17 +61,12 @@ func ValidateRuleID(id string) error {
 	return nil
 }
 
-// ReadRuleMetadata executes a pure bundle once to read its identity and
-// declarations. It never runs setup(), facts(), program() or message().
-// ok is false for a helper module without a default rule export.
-func ReadRuleMetadata(code string) (metadata RuleMetadata, ok bool, err error) {
-	vm := goja.New()
-	disableAmbientCapabilities(vm)
-	if _, err := vm.RunString(code); err != nil {
-		return RuleMetadata{}, false, err
-	}
-	decoded, ok, err := readRuleMetadata(vm)
-	return decoded.metadata, ok, err
+// RuleInspection retains partial metadata on errors and a runtime only for a
+// valid rule. Helpers have IsRule false and no runtime.
+type RuleInspection struct {
+	Metadata RuleMetadata
+	IsRule   bool
+	Rule     *LoadedRule
 }
 
 type decodedRule struct {
@@ -172,9 +162,10 @@ func decodeRuleMetadata(vm *goja.Runtime, decoded *decodedRule) (ok bool, err er
 	return true, nil
 }
 
-// LoadPureBundle creates the execution VM shared by one run's program and
-// message callbacks. Callers must load again for a new run.
-func LoadPureBundle(code string) (*LoadedRule, error) {
+// InspectPureBundle loads metadata without calling setup, config, facts,
+// program or message. A valid rule's runtime is shared for that operation's
+// program and messages; callers inspect again for a new operation.
+func InspectPureBundle(code string) (RuleInspection, error) {
 	vm := goja.New()
 	disableAmbientCapabilities(vm)
 	if _, err := vm.RunString(`
@@ -197,53 +188,27 @@ func LoadPureBundle(code string) (*LoadedRule, error) {
 			});
 		}
 	`); err != nil {
-		return nil, err
+		return RuleInspection{}, err
 	}
 	freezeFn, _ := goja.AssertFunction(vm.Get("lintaiDeepFreeze"))
 	strictRowFn, _ := goja.AssertFunction(vm.Get("lintaiStrictRow"))
 	if _, err := vm.RunString(code); err != nil {
-		return nil, err
+		return RuleInspection{}, err
 	}
 	decoded, ok, err := readRuleMetadata(vm)
-	if err != nil {
-		return nil, err
+	result := RuleInspection{Metadata: decoded.metadata, IsRule: ok}
+	if err != nil || !ok {
+		return result, err
 	}
-	if !ok {
-		return nil, fmt.Errorf("pure bundle has no default rule")
+	result.Rule = &LoadedRule{
+		runtime:      vm,
+		programValue: decoded.programValue,
+		factsFn:      decoded.factsFn,
+		messageFn:    decoded.messageFn,
+		freezeFn:     freezeFn,
+		strictRowFn:  strictRowFn,
 	}
-	return &LoadedRule{
-		runtime:        vm,
-		id:             decoded.metadata.ID,
-		version:        decoded.metadata.Version,
-		programValue:   decoded.programValue,
-		factsFn:        decoded.factsFn,
-		messageFn:      decoded.messageFn,
-		freezeFn:       freezeFn,
-		strictRowFn:    strictRowFn,
-		report:         decoded.metadata.Report,
-		expectNonEmpty: decoded.metadata.ExpectNonEmpty,
-		suppressions:   decoded.metadata.Suppressions,
-	}, nil
-}
-
-func (r *LoadedRule) RuleID() string {
-	return r.id
-}
-
-func (r *LoadedRule) RuleVersion() int {
-	return r.version
-}
-
-func (r *LoadedRule) Report() []string {
-	return append([]string(nil), r.report...)
-}
-
-func (r *LoadedRule) ExpectNonEmpty() []string {
-	return append([]string(nil), r.expectNonEmpty...)
-}
-
-func (r *LoadedRule) SuppressionDeclarations() []SuppressionDeclaration {
-	return cloneSuppressionDeclarations(r.suppressions)
+	return result, nil
 }
 
 // Program runs facts() and program() and returns the program text and the
@@ -344,16 +309,6 @@ func suppressionDeclarations(vm *goja.Runtime, value goja.Value) ([]SuppressionD
 		result[index] = SuppressionDeclaration{Assertion: *item.Assertion, Options: item.Options}
 	}
 	return result, nil
-}
-
-func cloneSuppressionDeclarations(items []SuppressionDeclaration) []SuppressionDeclaration {
-	if len(items) == 0 {
-		return nil
-	}
-	raw, _ := json.Marshal(items)
-	var clone []SuppressionDeclaration
-	_ = json.Unmarshal(raw, &clone)
-	return clone
 }
 
 func (r *LoadedRule) ruleContext(env, setup any) (*goja.Object, error) {

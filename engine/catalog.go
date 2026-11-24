@@ -23,8 +23,6 @@ import (
 
 type composedFacts struct {
 	base                     factstore.ReadOnlyFactStore
-	sources                  []parse.SourceUnit
-	schemaDecls              map[ast.PredicateSym]ast.Decl
 	anchors                  map[string]facts.AnchorSupport
 	anchorOwners             map[string]string
 	producerFiles            map[string]map[string]struct{}
@@ -303,7 +301,7 @@ func (catalog producerCatalog) collect(ctx context.Context, options Options, req
 			producerFiles[namespace][file] = struct{}{}
 		}
 	}
-	return composedFacts{base: base, sources: catalog.sources, schemaDecls: catalog.schemaDecls, anchors: anchors, anchorOwners: anchorOwners, producerFiles: producerFiles, reportable: reportable, factCounts: factCounts, analyzedFiles: analyzedFiles, namespaces: namespaces, snapshotID: snapshotID, observations: captured, reusableFromObservations: reusable}, nil
+	return composedFacts{base: base, anchors: anchors, anchorOwners: anchorOwners, producerFiles: producerFiles, reportable: reportable, factCounts: factCounts, analyzedFiles: analyzedFiles, namespaces: namespaces, snapshotID: snapshotID, observations: captured, reusableFromObservations: reusable}, nil
 }
 
 func captureGenerationMetadata(metadata backend.GenerationMetadata) (backend.GenerationMetadata, error) {
@@ -337,7 +335,7 @@ func emptyComposedFacts() (composedFacts, error) {
 		return composedFacts{}, err
 	}
 	digest := sha256.Sum256(encoded)
-	return composedFacts{base: factstore.NewMultiIndexedArrayInMemoryStore(), schemaDecls: make(map[ast.PredicateSym]ast.Decl), anchors: make(map[string]facts.AnchorSupport), reportable: make(map[facts.Predicate]map[string]struct{}), factCounts: make(map[ast.PredicateSym]int), analyzedFiles: make(map[string]struct{}), snapshotID: "sha256:" + hex.EncodeToString(digest[:])}, nil
+	return composedFacts{base: factstore.NewMultiIndexedArrayInMemoryStore(), anchors: make(map[string]facts.AnchorSupport), reportable: make(map[facts.Predicate]map[string]struct{}), factCounts: make(map[ast.PredicateSym]int), analyzedFiles: make(map[string]struct{}), snapshotID: "sha256:" + hex.EncodeToString(digest[:])}, nil
 }
 
 const engineSchemaSource = `Package lintai!

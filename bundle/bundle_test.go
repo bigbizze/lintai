@@ -349,11 +349,14 @@ export default rule("fixture.local-require").version(1).program(dl` + "`" + `Dec
 		if err != nil {
 			t.Fatal(err)
 		}
-		loaded, err := runtime.LoadPureBundle(string(code))
+		inspection, err := runtime.InspectPureBundle(string(code))
 		if err != nil {
 			t.Fatal(err)
 		}
-		message, err := loaded.Message(nil, "violation")
+		if !inspection.IsRule || inspection.Rule == nil {
+			t.Fatalf("expected a pure rule bundle, got %+v", inspection)
+		}
+		message, err := inspection.Rule.Message(nil, "violation")
 		if err != nil || message != "/api|/resolve|module" {
 			t.Errorf("locally bound require changed the diagnostic: %q, %v", message, err)
 		}
