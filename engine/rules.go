@@ -235,14 +235,17 @@ func (catalog *ruleCatalog) prepareArtifact(rule *ruleRecord) (bundle.Artifacts,
 
 // Metadata is read only after the bundle-hash barrier. Partial metadata is
 // retained even on failure for duplicate and inventory checks.
-func (catalog *ruleCatalog) loadMetadata() int {
+func (catalog *ruleCatalog) loadMetadata(retainExecutable bool) int {
 	loaded := 0
 	for _, rule := range catalog.rules {
 		if !rule.bundled || rule.disposition == ruleIntegrityRejected || rule.metadataRead {
 			continue
 		}
 		inspection, err := runtime.InspectPureBundle(rule.retained.pureCode)
-		rule.metadata, rule.isRule, rule.loaded, rule.loadError = inspection.Metadata, inspection.IsRule, inspection.Rule, err
+		rule.metadata, rule.isRule, rule.loadError = inspection.Metadata, inspection.IsRule, err
+		if retainExecutable {
+			rule.loaded = inspection.Rule
+		}
 		rule.metadataRead = true
 		loaded++
 		switch {
@@ -289,7 +292,7 @@ func ListRules(ctx context.Context, options Options) (RuleList, error) {
 	if len(catalog.rules) == 0 {
 		return list, nil
 	}
-	catalog.loadMetadata()
+	catalog.loadMetadata(false)
 	type foundRule struct {
 		ListedRule
 		shapeErr error

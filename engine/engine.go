@@ -491,7 +491,7 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options, mode
 	// deliberately sees partial and unapproved IDs before eligibility is set.
 	inventory, integrityComplete := preMetadataIntegrity(ruleCatalog, lock, options.WorkspaceRoot, assembled.snapshotID)
 	run.complete = run.complete && integrityComplete
-	e.stats.gojaRuntimes.Add(int64(ruleCatalog.loadMetadata()))
+	e.stats.gojaRuntimes.Add(int64(ruleCatalog.loadMetadata(true)))
 	integrityComplete = postMetadataIntegrity(ruleCatalog, lock, options.WorkspaceRoot, assembled.snapshotID)
 	run.complete = run.complete && integrityComplete
 	knownRules, loaded := classifyRuleIDs(ruleCatalog, options.WorkspaceRoot, assembled.snapshotID)

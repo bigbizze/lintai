@@ -165,7 +165,7 @@ func BuildRulesLock(ctx context.Context, options Options) (RulesLock, []LockedRu
 		sort.Strings(messages)
 		return RulesLock{}, nil, fmt.Errorf("could not bundle rules: %s", strings.Join(messages, "; "))
 	}
-	catalog.loadMetadata()
+	catalog.loadMetadata(false)
 	lock := RulesLock{Rules: map[string]RulesLockRule{}, Suppressions: approved, target: target, targetSnapshot: targetState, source: source, sourceSnapshot: sourceState}
 	locked := []LockedRule{}
 	ids := map[string]bool{}
