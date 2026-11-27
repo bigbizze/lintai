@@ -53,8 +53,8 @@ func TestExternalNodeModulesDirectoryIsTracked(t *testing.T) {
 }
 
 func TestCompilerDecodesAndHashesTheCapturedBytes(t *testing.T) {
-	text := "export function value() { return 1; }\n"
-	utf16Bytes := func(order binary.ByteOrder) []byte {
+	text := "export function value() { return '🙂'; }\r\n"
+	utf16Bytes := func(order binary.ByteOrder, text string) []byte {
 		var result []byte
 		if order == binary.LittleEndian {
 			result = []byte{0xff, 0xfe}
@@ -69,12 +69,15 @@ func TestCompilerDecodesAndHashesTheCapturedBytes(t *testing.T) {
 		return result
 	}
 	for _, test := range []struct {
-		name string
-		raw  []byte
+		name, decoded string
+		raw           []byte
 	}{
-		{"utf8-bom", append([]byte{0xef, 0xbb, 0xbf}, []byte(text)...)},
-		{"utf16-le", utf16Bytes(binary.LittleEndian)},
-		{"utf16-be", utf16Bytes(binary.BigEndian)},
+		{"utf8", text, []byte(text)},
+		{"utf8-bom", text, []byte("\uFEFF" + text)},
+		{"utf8-double-bom", "\uFEFF" + text, []byte("\uFEFF\uFEFF" + text)},
+		{"utf16-le", text, utf16Bytes(binary.LittleEndian, text)},
+		{"utf16-be", text, utf16Bytes(binary.BigEndian, text)},
+		{"utf16-le-double-bom", "\uFEFF" + text, utf16Bytes(binary.LittleEndian, "\uFEFF"+text)},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			root, err := filepath.EvalSymlinks(t.TempDir())
@@ -89,17 +92,21 @@ func TestCompilerDecodesAndHashesTheCapturedBytes(t *testing.T) {
 			if err != nil || len(snapshot.Functions) != 1 {
 				t.Fatalf("decoded compiler facts: %+v %v", snapshot, err)
 			}
+			wantTextHash := sha256.Sum256([]byte(test.decoded))
+			if got := snapshot.SourceDigests["a.ts"]; got != hex.EncodeToString(wantTextHash[:]) {
+				t.Fatalf("source digest %s, want %x for decoded text", got, wantTextHash)
+			}
 			fsys := trackResolutionInputs(osvfs.FS())
 			path := tspath.RootedFilePathFromAbsolute(file)
 			got, ok := fsys.ReadFile(path)
-			if !ok || got != text {
+			if !ok || got != test.decoded {
 				t.Fatalf("decoded %q, ok=%v", got, ok)
 			}
 			if err := os.WriteFile(file, []byte("changed"), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			again, ok := fsys.ReadFile(path)
-			if !ok || again != text {
+			if !ok || again != test.decoded {
 				t.Fatal("repeated read did not use captured text")
 			}
 			sum := sha256.Sum256(test.raw)
@@ -160,6 +167,11 @@ func TestCompilerRealpathMemoizesTheCapturedAnswer(t *testing.T) {
 	missingPath := tspath.RootedPathFromAbsolute(missing)
 	if got := fsys.Realpath(missingPath); got != missingPath {
 		t.Fatalf("missing resolution returned %q", got.AsString())
+	}
+	if !slices.ContainsFunc(fsys.observations(), func(record CompilerObservation) bool {
+		return record.Kind == "resolved" && record.Path == missing && record.Value == "missing"
+	}) {
+		t.Fatal("failed realpath did not record its failure")
 	}
 	if err := os.Symlink(first, missing); err != nil {
 		t.Fatal(err)

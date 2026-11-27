@@ -367,24 +367,20 @@ func (e *extractor) findDeclarationMap(generated tspath.RootedFilePath, generate
 		}
 	}
 	candidates = append(candidates, normalizeSlash(generated.AppendSuffix(".map").AsString()))
-	// All candidate probes affect freshness even when an earlier map is found.
-	defer func() {
-		for _, candidate := range candidates {
-			if rooted, ok := tspath.TryRootedFilePathFromAbsolute(candidate); ok {
-				e.host.FS().FileExists(rooted)
-			}
-		}
-	}()
+	selected := ""
 	for _, candidate := range candidates {
 		rooted, ok := tspath.TryRootedFilePathFromAbsolute(candidate)
 		if !ok {
+			if selected != "" {
+				continue
+			}
 			return "", url != "", "unsupported"
 		}
-		if e.host.FS().FileExists(rooted) {
-			return candidate, true, ""
+		if exists := e.host.FS().FileExists(rooted); exists && selected == "" {
+			selected = candidate
 		}
 	}
-	return "", url != "", ""
+	return selected, selected != "" || url != "", ""
 }
 
 func declarationMapSourcePath(mapPath string, sourceRoot *string, source string) (string, bool) {

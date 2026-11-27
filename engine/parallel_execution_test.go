@@ -30,7 +30,7 @@ func TestParallelRuleExecutionContract(t *testing.T) {
 	workspace := t.TempDir()
 	producer := newParallelFixtureProducer()
 	writeParallelRules(t, workspace, 5, true)
-	engine := Open(Options{}, producer)
+	engine := openTestSession(t, Options{}, producer)
 	defer engine.Close()
 
 	var active atomic.Int64
@@ -132,7 +132,7 @@ func TestParallelRuleExecutionCancellationJoinsBeforeClose(t *testing.T) {
 	workspace := t.TempDir()
 	producer := newParallelFixtureProducer()
 	writeParallelRules(t, workspace, 5, false)
-	engine := Open(Options{}, producer)
+	engine := openTestSession(t, Options{}, producer)
 
 	started := make(chan struct{}, 8)
 	releaseWorkers := make(chan struct{})

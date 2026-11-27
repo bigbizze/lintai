@@ -16,7 +16,7 @@ func TestLockedChecksRejectChangesBeforeAnyVM(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
 	opts := Options{WorkspaceRoot: root, RulesLock: DefaultRulesLockFile}
-	session := Open(opts)
+	session := openTestSession(t, opts)
 	defer session.Close()
 	code := "var LintAIPureModule = {default:{id:'test',versionValue:1,programValue:{__lintaiKind:'fragment',text:'Decl v(M).'},reportPredicates:['v'],messageFn:()=>'test'}};"
 	pack := rulepack.Pack{Format: rulepack.Format, ABI: rulepack.ABI, Entries: []rulepack.Entry{{Entry: "rules/test.js", Code: code}}}

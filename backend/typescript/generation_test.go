@@ -146,6 +146,22 @@ func TestGenerationDemandAndFrozenEmission(t *testing.T) {
 	}
 	module := facts.Predicate{Name: "ts.module", Arity: 1}
 	fn := facts.Predicate{Name: "ts.fn", Arity: 3}
+	// The exported description is detached. Direct preparations still
+	// validate mode, predicate name and arity, and duplicate demand.
+	description.BaseRelations[0].Predicate = facts.Predicate{Name: "mutated", Arity: 1}
+	for _, invalid := range []struct {
+		mode   observe.Mode
+		demand []facts.Predicate
+	}{
+		{observe.Mode(255), []facts.Predicate{module}},
+		{observe.Full, []facts.Predicate{{Name: "ts.module", Arity: 2}}},
+		{observe.Full, []facts.Predicate{module, module}},
+		{observe.Full, []facts.Predicate{description.BaseRelations[0].Predicate}},
+	} {
+		if _, err := producer.Prepare(context.Background(), backend.CollectionRequest{Predicates: invalid.demand}, invalid.mode); err == nil {
+			t.Fatalf("accepted invalid request %+v", invalid)
+		}
+	}
 	request := backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: root, Predicates: []facts.Predicate{module}}
 	first, err := producer.Prepare(context.Background(), request, observe.Full)
 	if err != nil {

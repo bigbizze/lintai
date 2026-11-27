@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -77,7 +78,7 @@ func TestRefreshPublicationAndReuse(t *testing.T) {
 	var evaluations atomic.Int64
 	options := parallelFixtureOptions(t, repo, workspace)
 	options.beforeEvaluation = func() { evaluations.Add(1) }
-	session := Open(Options{}, producer)
+	session := openTestSession(t, Options{}, producer)
 	defer session.Close()
 
 	first, err := session.Check(context.Background(), options)
@@ -97,6 +98,9 @@ func TestRefreshPublicationAndReuse(t *testing.T) {
 	counts := func() string {
 		return fmt.Sprintf("goja=%d program=%d plan=%d describe=%d prepare=%d emit=%d eval=%d", session.stats.gojaRuntimes.Load(), session.stats.programBuilds.Load(), session.stats.mangleCompiles.Load(), producer.describes.Load(), producer.prepareCalls.Load(), producer.emitCalls.Load(), evaluations.Load())
 	}
+	if producer.describes.Load() != 1 {
+		t.Fatalf("Describe called %d times", producer.describes.Load())
+	}
 	before := counts()
 	if session.stats.gojaRuntimes.Load() == 0 || session.stats.mangleCompiles.Load() == 0 || producer.prepareCalls.Load() == 0 || producer.emitCalls.Load() == 0 || evaluations.Load() == 0 {
 		t.Fatalf("fixture did not execute all stages: %s", before)
@@ -110,6 +114,11 @@ func TestRefreshPublicationAndReuse(t *testing.T) {
 	if err != nil || len(absolute.Diagnostics) != 3 || counts() != before {
 		t.Fatalf("absolute file projection: %+v %v", absolute, err)
 	}
+	outside := filepath.Join(filepath.VolumeName(workspace)+string(filepath.Separator), "catalog", "items.sql")
+	outsideResult, err := session.Refresh(context.Background(), options, outside)
+	if err != nil || len(outsideResult.Diagnostics) != 0 {
+		t.Fatalf("outside absolute path collided: %+v %v", outsideResult, err)
+	}
 	warm.Diagnostics[0].Message = "mutated"
 	other, err := session.Refresh(context.Background(), options, "another.ts")
 	current, currentErr := session.Current()
@@ -119,7 +128,7 @@ func TestRefreshPublicationAndReuse(t *testing.T) {
 
 	files := []string{"catalog/items.sql", "another.ts", "catalog/items.sql"}
 	batch, err := session.RefreshFiles(context.Background(), options, files)
-	if err != nil || batch.SnapshotVersion != current.SnapshotVersion || len(batch.Diagnostics) != len(files) || counts() != before {
+	if err != nil || !slices.Equal(batch.Files, files) || len(batch.SourceDigests) != len(files) || batch.SnapshotVersion != current.SnapshotVersion || len(batch.Diagnostics) != len(files) || counts() != before {
 		t.Fatalf("batch refresh: %+v %v", batch, err)
 	}
 	for i, file := range files {
@@ -203,7 +212,7 @@ func TestRefreshCloseJoinsActiveWork(t *testing.T) {
 	producer := &refreshProducer{parallelFixtureProducer: newParallelFixtureProducer()}
 	producer.reusable = true
 	options := parallelFixtureOptions(t, repo, workspace)
-	session := Open(Options{}, producer)
+	session := openTestSession(t, Options{}, producer)
 	if _, err := session.Refresh(context.Background(), options, "catalog/items.sql"); err != nil {
 		t.Fatal(err)
 	}
@@ -220,6 +229,20 @@ func TestRefreshCloseJoinsActiveWork(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("evaluation did not start")
 	}
+	// Queued callers can leave while the active worker still owns the session.
+	canceled, cancel := context.WithCancel(context.Background())
+	queued := make(chan error, 1)
+	go func() { _, err := session.Facts(canceled, nil); queued <- err }()
+	cancel()
+	select {
+	case err := <-queued:
+		if err != context.Canceled {
+			t.Fatalf("queued cancellation: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("queued caller waited for the active worker")
+	}
+	go func() { _, err := session.RefreshAll(context.Background(), options); queued <- err }()
 	closeDone := make(chan error, 1)
 	go func() { closeDone <- session.Close() }()
 	select {
@@ -241,6 +264,14 @@ func TestRefreshCloseJoinsActiveWork(t *testing.T) {
 			t.Fatal("Close did not start")
 		case <-time.After(time.Millisecond):
 		}
+	}
+	select {
+	case err := <-queued:
+		if err == nil {
+			t.Fatal("queued refresh started after close")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close left queued refresh blocked")
 	}
 	close(release)
 	select {
@@ -349,7 +380,7 @@ func TestRefreshRecoversRuleAndRejectsConflictingEvidence(t *testing.T) {
 	producer := &refreshProducer{parallelFixtureProducer: newParallelFixtureProducer()}
 	producer.reusable = true
 	options := parallelFixtureOptions(t, repo, workspace)
-	session := Open(Options{}, producer)
+	session := openTestSession(t, Options{}, producer)
 	defer session.Close()
 	failed, err := session.Refresh(context.Background(), options, "catalog/items.sql")
 	if err != nil || len(failed.WorkspaceProblems) == 0 || failed.WorkspaceProblems[0].DiagnosticKind != diagnostics.KindRuleExecutionError {

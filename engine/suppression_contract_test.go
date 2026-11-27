@@ -60,7 +60,7 @@ func TestSuppressionProducerCoverage(t *testing.T) {
 	other := secondCoverageProducer()
 	writeTestFile(t, workspace, "lintai-rules/catalog.ts", parallelRuleSource("fixture.catalog", "Decl violation(Entity, Code). violation(Entity, Code) :- catalog.usable(Entity, Code).", "(row) => row.Code"))
 	writeTestFile(t, workspace, "lintai-rules/other.ts", parallelRuleSource("fixture.other", "Decl violation(Entity, Code). violation(Entity, Code) :- other.usable(Entity, Code).", "(row) => row.Code"))
-	session := Open(Options{}, catalog, other)
+	session := openTestSession(t, Options{}, catalog, other)
 	defer session.Close()
 	options := parallelFixtureOptions(t, repo, workspace)
 	options.SuppressAll = true
@@ -101,7 +101,7 @@ func TestSuppressionProducerCoverage(t *testing.T) {
 	nullSupport.Location.File = "../catalog/items.sql"
 	nullSupport.Tracking = nil
 	oneProducer.anchors["item-b"] = nullSupport
-	single := Open(Options{}, &coverageProducer{parallelFixtureProducer: oneProducer, revision: "catalog:1"}, secondCoverageProducer())
+	single := openTestSession(t, Options{}, &coverageProducer{parallelFixtureProducer: oneProducer, revision: "catalog:1"}, secondCoverageProducer())
 	oneOptions := options
 	oneOptions.RuleWorkers = 1
 	oneOptions.SuppressionsLocation = "single-suppressions.json"
@@ -218,7 +218,7 @@ func TestSavedWriteGuards(t *testing.T) {
 	}
 	workspace := t.TempDir()
 	writeTestFile(t, workspace, "lintai-rules/r.ts", parallelRuleSource("fixture.guard", "Decl violation(Entity, Code). violation(Entity, Code) :- catalog.usable(Entity, Code).", "(row) => row.Code"))
-	session := Open(Options{}, newParallelFixtureProducer())
+	session := openTestSession(t, Options{}, newParallelFixtureProducer())
 	defer session.Close()
 	options := parallelFixtureOptions(t, repo, workspace)
 	options.SuppressAll = true
@@ -349,7 +349,7 @@ func TestSuppressionPolicyValidation(t *testing.T) {
 			source := parallelRuleSource("fixture.policy", "Decl violation(Entity, Code). violation(Entity, Code) :- catalog.usable(Entity, Code).", "(row) => row.Code")
 			source = strings.Replace(source, `.report("violation").message(`, `.report("violation")`+tc.policy+`.message(`, 1)
 			writeTestFile(t, workspace, "lintai-rules/r.ts", source)
-			session := Open(Options{}, newParallelFixtureProducer())
+			session := openTestSession(t, Options{}, newParallelFixtureProducer())
 			defer session.Close()
 			result, err := session.Check(context.Background(), parallelFixtureOptions(t, repo, workspace))
 			if err != nil {
@@ -382,7 +382,7 @@ func TestSuppressionPolicyValidationOnPlanReuse(t *testing.T) {
 		paths[kind] = writeTestFile(t, rules, kind+".ts", source)
 	}
 	options := Options{RepoRoot: repo, WorkspaceRoot: testpack.Build(t, repo, workspace, filepath.Join(rules, "*.ts")), RuleWorkers: 1}
-	session := Open(options, typescript.New(typescript.Options{Files: typescript.FileScopeWalk}))
+	session := openTestSession(t, options, typescript.New(typescript.Options{Files: typescript.FileScopeWalk}))
 	defer session.Close()
 	var template *rulePlan
 	var firstCompiles int64

@@ -25,7 +25,7 @@ export default rule("fixture.generated-program").version(1)
 	.report("violation").message((row) => row.Code);
 `
 	writeTestFile(t, workspace, "lintai-rules/generated.ts", source)
-	engine := Open(Options{}, newParallelFixtureProducer())
+	engine := openTestSession(t, Options{}, newParallelFixtureProducer())
 	defer engine.Close()
 	options := parallelFixtureOptions(t, repoRoot, workspace)
 	options.RuleWorkers = 1
@@ -101,7 +101,7 @@ func TestRulesWithoutBaseDependenciesSkipProducerCollection(t *testing.T) {
 	workspace := t.TempDir()
 	producer := newParallelFixtureProducer()
 	writeTestFile(t, workspace, "lintai-rules/no-facts.ts", parallelRuleSource("fixture.no-facts", "Decl violation(Entity).", "(row) => row.Entity"))
-	engine := Open(Options{}, producer)
+	engine := openTestSession(t, Options{}, producer)
 	defer engine.Close()
 	result, err := engine.Check(context.Background(), parallelFixtureOptions(t, repoRoot, workspace))
 	if err != nil {
@@ -147,7 +147,7 @@ export default { get id() { throw new Error("metadata getter failed"); } };
 			t.Errorf("%s error = %q, want %q", path, messages[path], message)
 		}
 	}
-	engine := Open(Options{}, newParallelFixtureProducer())
+	engine := openTestSession(t, Options{}, newParallelFixtureProducer())
 	defer engine.Close()
 	result, err := engine.Check(context.Background(), options)
 	if err != nil {

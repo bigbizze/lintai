@@ -20,10 +20,6 @@ func (b *Backend) validateGeneration(ctx context.Context, generation *producerGe
 }
 
 func (b *Backend) extractSnapshot(ctx context.Context, workspaceRoot string, relations []string, previous *lintaiapi.Snapshot) (*producerGeneration, []ambient.Source, error) {
-	scope, err := ParseFileScope(string(b.settings.Files))
-	if err != nil {
-		return nil, nil, err
-	}
 	sources := ambient.Builtin()
 	options := workspace.ScopeOptions{Exclude: b.settings.WorkspaceExcludes, Include: b.settings.Includes, Sources: b.settings.Sources, InvocationExclude: b.settings.Excludes}
 	plan, err := workspace.PlanSources(workspaceRoot, options)
@@ -44,13 +40,13 @@ func (b *Backend) extractSnapshot(ctx context.Context, workspaceRoot string, rel
 	snapshot, err := lintaiapi.BuildSnapshotReusingTracking(ctx, lintaiapi.BuildSnapshotRequest{
 		WorkspaceRoot: plan.Root, Files: plan.Files, ExactFiles: plan.ExactFiles,
 		SourceLinks: sourceLinks, AmbientMatchers: convertAmbientMatchers(sources),
-		RequestedRelations: relations, TsconfigFiles: scope == FileScopeTsconfig,
+		RequestedRelations: relations, TsconfigFiles: b.settings.Files == FileScopeTsconfig,
 	}, previous)
 	if err != nil {
 		return nil, nil, err
 	}
 	generation := &producerGeneration{snapshot: snapshot, adjustments: convertAdjustments(plan.Root, snapshot.ConfigAdjustments)}
-	if err := b.finishGeneration(generation, plan, workspaceRoot, scope == FileScopeTsconfig); err != nil {
+	if err := b.finishGeneration(generation, plan, workspaceRoot, b.settings.Files == FileScopeTsconfig); err != nil {
 		return nil, nil, err
 	}
 	return generation, sources, nil

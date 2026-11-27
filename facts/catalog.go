@@ -2,6 +2,7 @@ package facts
 
 import (
 	"fmt"
+	"maps"
 	"math"
 	"path"
 	"regexp"
@@ -96,7 +97,7 @@ func ValidateDescription(description ProducerDescription) (Descriptor, error) {
 	if _, err := canonical.MarshalStructured(description.EffectiveConfiguration); err != nil {
 		return Descriptor{}, fmt.Errorf("producer %q effective configuration: %w", description.Namespace, err)
 	}
-	description = cloneDescription(description)
+	description = description.Clone()
 	all := make(map[Predicate]struct{}, len(description.BaseRelations)+len(description.Helpers))
 	locals := make(map[string]struct{}, len(all))
 	base := make(map[Predicate]RelationDescription, len(description.BaseRelations))
@@ -123,9 +124,10 @@ func ValidateDescription(description ProducerDescription) (Descriptor, error) {
 	return Descriptor{description: description, base: base}, nil
 }
 
-func (d Descriptor) Description() ProducerDescription { return cloneDescription(d.description) }
+func (d Descriptor) Description() ProducerDescription { return d.description.Clone() }
 
-func cloneDescription(d ProducerDescription) ProducerDescription {
+// Clone returns a description whose collections are independent of the original.
+func (d ProducerDescription) Clone() ProducerDescription {
 	d.EffectiveConfiguration = cloneCanonical(d.EffectiveConfiguration)
 	copyRelations := func(in []RelationDescription) []RelationDescription {
 		out := slices.Clone(in)
@@ -322,13 +324,13 @@ func cloneCanonical(value any) any {
 	case []string:
 		return slices.Clone(typed)
 	case []any:
-		result := make([]any, len(typed))
+		result := slices.Clone(typed)
 		for i, item := range typed {
 			result[i] = cloneCanonical(item)
 		}
 		return result
 	case map[string]any:
-		result := make(map[string]any, len(typed))
+		result := maps.Clone(typed)
 		for key, item := range typed {
 			result[key] = cloneCanonical(item)
 		}

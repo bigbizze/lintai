@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"maps"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -18,8 +19,11 @@ import (
 
 // Backend extracts facts from TypeScript and JavaScript files.
 type Backend struct {
-	settings  Options
-	namespace string
+	description    facts.ProducerDescription
+	descriptionErr error
+	available      map[facts.Predicate]struct{}
+	settings       Options
+	namespace      string
 
 	// Log receives one line for each tsconfig that lintai adjusted for
 	// TypeScript 7, once per config and adjustment set. Nil discards them.
@@ -49,9 +53,6 @@ func New(settings ...Options) *Backend {
 	selected := Options{Files: FileScopeTsconfig}
 	if len(settings) > 0 {
 		selected = settings[0]
-		if scope, err := ParseFileScope(string(selected.Files)); err == nil {
-			selected.Files = scope
-		}
 		selected.WorkspaceExcludes = slices.Clone(selected.WorkspaceExcludes)
 		selected.Includes = slices.Clone(selected.Includes)
 		selected.Sources = slices.Clone(selected.Sources)
@@ -60,10 +61,24 @@ func New(settings ...Options) *Backend {
 	if selected.Namespace == "" {
 		selected.Namespace = "ts"
 	}
-	return &Backend{settings: selected, namespace: selected.Namespace}
+	b := &Backend{settings: selected, namespace: selected.Namespace}
+	b.settings.Files, b.descriptionErr = ParseFileScope(string(selected.Files))
+	if b.descriptionErr != nil {
+		return b
+	}
+	b.description, b.descriptionErr = b.describe()
+	b.available = make(map[facts.Predicate]struct{}, len(b.description.BaseRelations))
+	for _, relation := range b.description.BaseRelations {
+		b.available[relation.Predicate] = struct{}{}
+	}
+	return b
 }
 
 func (b *Backend) Describe() (facts.ProducerDescription, error) {
+	return b.description.Clone(), b.descriptionErr
+}
+
+func (b *Backend) describe() (facts.ProducerDescription, error) {
 	configuration := map[string]any{
 		"workspaceExclude": sortedUnique(b.settings.WorkspaceExcludes),
 		"include":          sortedUnique(b.settings.Includes),
@@ -114,18 +129,13 @@ func (b *Backend) Prepare(ctx context.Context, request backend.CollectionRequest
 	if mode != observe.Full && mode != observe.Quick {
 		return nil, fmt.Errorf("unknown observation mode %d", mode)
 	}
-	description, err := b.Describe()
-	if err != nil {
-		return nil, err
-	}
-	available := make(map[facts.Predicate]struct{}, len(description.BaseRelations))
-	for _, relation := range description.BaseRelations {
-		available[relation.Predicate] = struct{}{}
+	if b.descriptionErr != nil {
+		return nil, b.descriptionErr
 	}
 	requested := make(map[facts.Predicate]struct{}, len(request.Predicates))
 	relations := make([]string, 0, len(request.Predicates))
 	for _, predicate := range request.Predicates {
-		if _, ok := available[predicate]; !ok {
+		if _, ok := b.available[predicate]; !ok {
 			return nil, fmt.Errorf("unknown TypeScript base predicate %s", predicate)
 		}
 		if _, ok := requested[predicate]; ok {
@@ -143,7 +153,7 @@ func (b *Backend) Prepare(ctx context.Context, request backend.CollectionRequest
 	if err != nil {
 		return nil, err
 	}
-	return b.generation(ctx, filepath.Clean(repoRoot), filepath.Clean(workspaceRoot), relations, description, mode)
+	return b.generation(ctx, filepath.Clean(repoRoot), filepath.Clean(workspaceRoot), relations, mode)
 }
 
 func (g *producerGeneration) Metadata() backend.GenerationMetadata {
@@ -151,7 +161,7 @@ func (g *producerGeneration) Metadata() backend.GenerationMetadata {
 	for _, module := range g.snapshot.Modules {
 		files = append(files, module.Path)
 	}
-	return backend.GenerationMetadata{InputRevision: g.inputRevision, Scope: cloneProducerValue(g.scope), AnalyzedFiles: files, Observations: g.observations, ReusableFromObservations: true}
+	return backend.GenerationMetadata{InputRevision: g.inputRevision, Scope: cloneProducerValue(g.scope), AnalyzedFiles: files, SourceDigests: maps.Clone(g.snapshot.SourceDigests), Observations: g.observations, ReusableFromObservations: true}
 }
 
 func (g *producerGeneration) Emit(ctx context.Context, builder *facts.Builder) error {
@@ -171,7 +181,7 @@ func (b *Backend) Close() error {
 // generation is called with collectMu held. A changed relation demand needs a
 // new extraction. The prior
 // snapshot only supplies tracking keys whose captured source bytes still match.
-func (b *Backend) generation(ctx context.Context, repoRoot, workspaceRoot string, relations []string, description facts.ProducerDescription, mode observe.Mode) (*producerGeneration, error) {
+func (b *Backend) generation(ctx context.Context, repoRoot, workspaceRoot string, relations []string, mode observe.Mode) (*producerGeneration, error) {
 	var previousSnapshot *lintaiapi.Snapshot
 	if b.current != nil && b.current.repoRoot == repoRoot && b.current.workspaceRoot == workspaceRoot {
 		previousSnapshot = b.current.snapshot
@@ -192,7 +202,7 @@ func (b *Backend) generation(ctx context.Context, repoRoot, workspaceRoot string
 		return nil, err
 	}
 	generation.sources = sources
-	generation.description = description
+	generation.description = b.description
 	b.reportAdjustments(generation.adjustments)
 	generation.repoRoot, generation.workspaceRoot = repoRoot, workspaceRoot
 	generation.relations = slices.Clone(relations)
@@ -205,13 +215,13 @@ func (b *Backend) generation(ctx context.Context, repoRoot, workspaceRoot string
 func cloneProducerValue(value any) any {
 	switch value := value.(type) {
 	case map[string]any:
-		clone := make(map[string]any, len(value))
+		clone := maps.Clone(value)
 		for key, item := range value {
 			clone[key] = cloneProducerValue(item)
 		}
 		return clone
 	case []any:
-		clone := make([]any, len(value))
+		clone := slices.Clone(value)
 		for index, item := range value {
 			clone[index] = cloneProducerValue(item)
 		}

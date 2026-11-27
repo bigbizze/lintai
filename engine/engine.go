@@ -54,6 +54,7 @@ type Options struct {
 }
 
 type Result struct {
+	workspaceRoot   string
 	Diagnostics     []diagnostics.Diagnostic
 	SnapshotVersion string
 	RulesLoaded     int
@@ -76,14 +77,13 @@ type Result struct {
 
 type Session struct {
 	defaults      Options
-	producers     []backend.Producer
-	checkMu       sync.Mutex
+	catalog       producerCatalog
+	busy          chan struct{}
+	closing       chan struct{}
+	activeCancel  context.CancelFunc
 	mu            sync.Mutex
 	ruleEntries   map[string]*ruleEntry
 	closed        bool
-	nextCheck     uint64
-	checks        map[uint64]context.CancelFunc
-	checksWG      sync.WaitGroup
 	closeOnce     sync.Once
 	closeErr      error
 	stats         executionStats
@@ -106,30 +106,35 @@ type executionObservation struct {
 	peakActiveJobs int64
 }
 
-// Open creates a session with resolved producer instances and default options.
-// An optional request passed to Check replaces the defaults for that check.
-func Open(defaults Options, producers ...backend.Producer) *Session {
-	return &Session{defaults: defaults, producers: append([]backend.Producer(nil), producers...), checks: make(map[uint64]context.CancelFunc)}
+// Open binds each producer's validated description once. On success, the
+// session owns the producers and closes them once. On error the caller retains
+// ownership of every supplied producer.
+func Open(defaults Options, producers ...backend.Producer) (*Session, error) {
+	catalog, err := bindProducers(producers)
+	if err != nil {
+		return nil, err
+	}
+	return &Session{defaults: defaults, catalog: catalog, busy: make(chan struct{}, 1), closing: make(chan struct{})}, nil
 }
 
 func (e *Session) Close() error {
 	e.closeOnce.Do(func() {
 		e.mu.Lock()
 		e.closed = true
-		cancels := make([]context.CancelFunc, 0, len(e.checks))
-		for _, cancel := range e.checks {
-			cancels = append(cancels, cancel)
+		close(e.closing)
+		if e.activeCancel != nil {
+			e.activeCancel()
 		}
 		e.mu.Unlock()
-		for _, cancel := range cancels {
-			cancel()
-		}
-		e.checksWG.Wait()
+		// Wait for the active caller to release the slot before disposing of
+		// its resources. Queued callers wake directly on closing.
+		e.busy <- struct{}{}
+		defer func() { <-e.busy }()
 		e.ruleEntries = nil
 		e.currentFacts = nil
 		e.currentResult = nil
-		for _, producer := range e.producers {
-			if err := producer.Close(); err != nil && e.closeErr == nil {
+		for _, entry := range e.catalog.entries {
+			if err := entry.producer.Close(); err != nil && e.closeErr == nil {
 				e.closeErr = err
 			}
 		}
@@ -141,26 +146,36 @@ func (e *Session) beginCheck(parent context.Context) (context.Context, func(), e
 	if parent == nil {
 		parent = context.Background()
 	}
-	ctx, cancel := context.WithCancel(parent)
+	select {
+	case e.busy <- struct{}{}:
+	default:
+		select {
+		case <-parent.Done():
+			return nil, nil, parent.Err()
+		case <-e.closing:
+			return nil, nil, fmt.Errorf("engine is closed")
+		case e.busy <- struct{}{}:
+			if err := parent.Err(); err != nil {
+				<-e.busy
+				return nil, nil, err
+			}
+		}
+	}
 	e.mu.Lock()
+	defer e.mu.Unlock()
 	if e.closed {
-		e.mu.Unlock()
-		cancel()
+		<-e.busy
 		return nil, nil, fmt.Errorf("engine is closed")
 	}
-	e.nextCheck++
-	id := e.nextCheck
-	e.checks[id] = cancel
-	e.checksWG.Add(1)
-	e.mu.Unlock()
-	finish := func() {
-		e.mu.Lock()
-		delete(e.checks, id)
-		e.mu.Unlock()
+	ctx, cancel := context.WithCancel(parent)
+	e.activeCancel = cancel
+	return ctx, func() {
 		cancel()
-		e.checksWG.Done()
-	}
-	return ctx, finish, nil
+		e.mu.Lock()
+		e.activeCancel = nil
+		e.mu.Unlock()
+		<-e.busy
+	}, nil
 }
 
 func (e *Session) executionObservation() executionObservation {
@@ -178,8 +193,6 @@ func (e *Session) Check(ctx context.Context, requests ...Options) (Result, error
 	if len(requests) == 1 {
 		options = requests[0]
 	}
-	e.checkMu.Lock()
-	defer e.checkMu.Unlock()
 	checkCtx, finish, err := e.beginCheck(ctx)
 	if err != nil {
 		return Result{}, err
@@ -214,14 +227,22 @@ func (e *Session) Refresh(ctx context.Context, options Options, file string) (Fi
 		return FileResult{}, err
 	}
 	return FileResult{Diagnostics: result.Diagnostics[0], WorkspaceProblems: result.WorkspaceProblems,
-		SnapshotVersion: result.SnapshotVersion, RulesLoaded: result.RulesLoaded, Warnings: result.Warnings}, nil
+		SourceDigest: result.SourceDigests[0], SnapshotVersion: result.SnapshotVersion, RulesLoaded: result.RulesLoaded, Warnings: result.Warnings}, nil
 }
 
 // RefreshFiles validates or reanalyzes once, then projects all files from the
 // same completed publication. The order and duplicates in files are retained.
 func (e *Session) RefreshFiles(ctx context.Context, options Options, files []string) (FilesResult, error) {
-	e.checkMu.Lock()
-	defer e.checkMu.Unlock()
+	return e.refresh(ctx, options, files, false)
+}
+
+// RefreshAll validates once and projects every analyzed or diagnostic-bearing
+// file of the resulting publication, in normalized filename order.
+func (e *Session) RefreshAll(ctx context.Context, options Options) (FilesResult, error) {
+	return e.refresh(ctx, options, nil, true)
+}
+
+func (e *Session) refresh(ctx context.Context, options Options, files []string, all bool) (FilesResult, error) {
 	checkCtx, finish, err := e.beginCheck(ctx)
 	if err != nil {
 		return FilesResult{}, err
@@ -261,7 +282,7 @@ func (e *Session) RefreshFiles(ctx context.Context, options Options, files []str
 				return FilesResult{}, err
 			}
 			success = true
-			return current.projectFiles(files), nil
+			return current.projectFiles(files, all), nil
 		}
 	}
 	e.clearPublished()
@@ -270,7 +291,7 @@ func (e *Session) RefreshFiles(ctx context.Context, options Options, files []str
 		return FilesResult{}, err
 	}
 	success = true
-	return current.projectFiles(files), nil
+	return current.projectFiles(files, all), nil
 }
 
 func (e *Session) clearPublished() {
@@ -284,7 +305,7 @@ func (e *Session) clearCurrent() {
 	e.currentFacts = nil
 }
 
-// runAndPublish is called with checkMu held and a registered active context.
+// runAndPublish is called by the active operation.
 func (e *Session) runAndPublish(checkCtx context.Context, options Options, key string, mode observe.Mode) (*publishedResult, error) {
 	state, err := loadSuppressions(options)
 	var result Result
@@ -316,7 +337,8 @@ func (e *Session) runAndPublish(checkCtx context.Context, options Options, key s
 		return nil, err
 	}
 	reusable := evidence.reusable && !options.SuppressAll && len(options.SuppressRules) == 0 && !options.PruneSuppressions
-	published := newPublishedResult(result, options.WorkspaceRoot, key, observe.Union(evidence.observations, state.observations), reusable)
+	result.workspaceRoot = options.WorkspaceRoot
+	published := newPublishedResult(result, evidence.sourceDigests, key, observe.Union(evidence.observations, state.observations), reusable)
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
@@ -354,8 +376,9 @@ func (e *Session) Current() (Result, error) {
 // DiagnosticsFor reads this completed result without performing a check.
 func (r Result) DiagnosticsFor(file string) []diagnostics.Diagnostic {
 	items := make([]diagnostics.Diagnostic, 0)
+	key := publicationFileKey(r.workspaceRoot, file)
 	for _, item := range r.Diagnostics {
-		if item.SourceLocation != nil && suppressions.NormalizePath(item.SourceLocation.File) == suppressions.NormalizePath(file) {
+		if item.SourceLocation != nil && publicationFileKey(r.workspaceRoot, item.SourceLocation.File) == key {
 			items = append(items, item)
 		}
 	}
@@ -407,10 +430,7 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options, mode
 		evidence.reusable = false
 		return Result{Diagnostics: []diagnostics.Diagnostic{errorDiagnostic("rules-lock", "integrity", 0, "", nil, err.Error())}}, run, evidence, nil
 	}
-	producerCatalog, err := e.describeProducers()
-	if err != nil {
-		return Result{}, run, evidence, err
-	}
+	producerCatalog := e.catalog
 	ruleCatalog, err := openRuleCatalog(ctx, options.WorkspaceRoot, e)
 	if err != nil {
 		if options.RulesLock != "" {
@@ -437,7 +457,7 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options, mode
 		run.lock = &lock
 		evidence.observations = observe.Union(evidence.observations, lock.observations)
 	}
-	assembled, err := emptyComposedFacts()
+	assembled, err := producerCatalog.collect(ctx, options, nil, nil, mode)
 	if err != nil {
 		return Result{}, run, evidence, err
 	}
@@ -464,16 +484,13 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options, mode
 		}
 		e.currentFacts = &assembled
 	} else {
-		assembled, err = producerCatalog.collect(ctx, options, nil, nil, mode)
-		if err != nil {
-			return Result{}, run, evidence, err
-		}
 		e.currentFacts = nil
 	}
 	evidence.observations = observe.Union(evidence.observations, assembled.observations)
 	evidence.reusable = evidence.reusable && assembled.reusableFromObservations
 	producerNames := append([]string(nil), assembled.namespaces...)
 	run.producerNames = producerNames
+	evidence.sourceDigests = assembled.sourceDigests
 	evidence.anchors = assembled.anchors
 	evidence.anchorOwners = assembled.anchorOwners
 	run.files = assembled.analyzedFiles
@@ -547,6 +564,7 @@ type ruleOutcome struct {
 }
 
 type executionEvidence struct {
+	sourceDigests     map[string]string
 	findings          []violation
 	anchors           map[string]facts.AnchorSupport
 	anchorOwners      map[string]string

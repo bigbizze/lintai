@@ -2,6 +2,8 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -26,12 +28,13 @@ func TestSessionRetainsAndReplacesCurrentGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	workspace, rules := t.TempDir(), t.TempDir()
-	a := writeTestFile(t, workspace, "src/a.ts", "export const value = 1;\n")
+	const original = "export const value = 1;\n"
+	a := writeTestFile(t, workspace, "src/a.ts", original)
 	rule := writeTestFile(t, rules, "modules.ts", parallelRuleSource("fixture.modules", "Decl violation(Entity). violation(Entity) :- ts.module(Entity).", "(row) => row.Entity"))
 	var evaluations atomic.Int64
 	options := Options{RepoRoot: repo, WorkspaceRoot: testpack.Build(t, repo, workspace, rule), RuleWorkers: 1, beforeEvaluation: func() { evaluations.Add(1) }}
 	newProducer := func() *typescript.Backend { return typescript.New(typescript.Options{Files: typescript.FileScopeWalk}) }
-	session := Open(options, newProducer())
+	session := openTestSession(t, options, newProducer())
 	defer session.Close()
 	first, err := session.Check(context.Background())
 	if err != nil {
@@ -60,7 +63,7 @@ func TestSessionRetainsAndReplacesCurrentGeneration(t *testing.T) {
 	}
 	freshOptions := options
 	freshOptions.beforeEvaluation = nil
-	freshSession := Open(freshOptions, newProducer())
+	freshSession := openTestSession(t, freshOptions, newProducer())
 	freshWarning, freshErr := freshSession.Check(context.Background())
 	if closeErr := freshSession.Close(); closeErr != nil {
 		t.Fatal(closeErr)
@@ -88,7 +91,7 @@ func TestSessionRetainsAndReplacesCurrentGeneration(t *testing.T) {
 		}
 		freshOptions := options
 		freshOptions.beforeEvaluation = nil
-		freshSession := Open(freshOptions, newProducer())
+		freshSession := openTestSession(t, freshOptions, newProducer())
 		defer freshSession.Close()
 		fresh, err := freshSession.Check(context.Background())
 		if err != nil {
@@ -109,6 +112,12 @@ func TestSessionRetainsAndReplacesCurrentGeneration(t *testing.T) {
 	if err := os.Chtimes(a, info.ModTime(), info.ModTime()); err != nil {
 		t.Fatal(err)
 	}
+	// Projection reads the completed capture after disk has changed.
+	projected := session.currentResult.projectFiles([]string{a, "src/a.ts", "src/b.ts"}, false)
+	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(original)))
+	if !slices.Equal(projected.SourceDigests, []string{digest, digest, ""}) || len(projected.Diagnostics[0]) != 1 {
+		t.Fatalf("projection after edit: %+v", projected)
+	}
 	changed := assertFresh()
 	if changed.SnapshotVersion == first.SnapshotVersion || evaluations.Load() != 5 {
 		t.Fatal("content change did not replace the generation")
@@ -117,6 +126,13 @@ func TestSessionRetainsAndReplacesCurrentGeneration(t *testing.T) {
 	added := assertFresh()
 	if len(added.Diagnostics) != 2 {
 		t.Fatalf("new source not discovered: %+v", added.Diagnostics)
+	}
+	all, err := session.RefreshAll(context.Background(), options)
+	if err != nil || !slices.Equal(all.Files, []string{"src/a.ts", "src/b.ts"}) || !slices.Equal(all.SourceDigests, []string{
+		fmt.Sprintf("%x", sha256.Sum256([]byte("export const value = 2;\n"))),
+		fmt.Sprintf("%x", sha256.Sum256([]byte("export const other = 3;\n"))),
+	}) || len(all.Diagnostics[0]) != 1 || len(all.Diagnostics[1]) != 1 || evaluations.Load() != 6 {
+		t.Fatalf("all-file projection: %+v %v", all, err)
 	}
 	if err := os.Remove(a); err != nil {
 		t.Fatal(err)
@@ -167,12 +183,9 @@ func TestSessionRetainsAndReplacesCurrentGeneration(t *testing.T) {
 // without requiring a new producer generation.
 func TestComposedFactsCaptureCurrentEligibilityWithoutReemission(t *testing.T) {
 	producer := newParallelFixtureProducer()
-	session := Open(Options{}, producer)
+	session := openTestSession(t, Options{}, producer)
 	defer session.Close()
-	catalog, err := session.describeProducers()
-	if err != nil {
-		t.Fatal(err)
-	}
+	catalog := session.catalog
 	empty, err := catalog.collect(context.Background(), Options{}, nil, nil, observe.Full)
 	if err != nil {
 		t.Fatal(err)
@@ -206,11 +219,11 @@ func TestComposedFactsCaptureCurrentEligibilityWithoutReemission(t *testing.T) {
 	if err != nil || !immutable.reusableFromObservations || len(immutable.observations.Records()) != 0 {
 		t.Fatalf("immutable empty observation promise: %v", err)
 	}
-	if _, err := captureGenerationMetadata(backend.GenerationMetadata{}); err == nil {
+	if _, err := captureGenerationMetadata(backend.GenerationMetadata{}, "", nil); err == nil {
 		t.Fatal("empty revision accepted")
 	}
 	scope := map[string]any{"items": []any{"original"}}
-	metadata, err := captureGenerationMetadata(backend.GenerationMetadata{InputRevision: "opaque", Scope: scope, AnalyzedFiles: []string{"src/./a.ts", "src/a.ts"}})
+	metadata, err := captureGenerationMetadata(backend.GenerationMetadata{InputRevision: "opaque", Scope: scope, AnalyzedFiles: []string{"src/./a.ts", "src/a.ts"}}, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,12 +241,9 @@ func TestComposedFactsCaptureCurrentEligibilityWithoutReemission(t *testing.T) {
 		demand := map[string]map[facts.Predicate]struct{}{"ts": {module: {}}}
 		collect := func(settings typescript.Options, requested map[string]map[facts.Predicate]struct{}, previous *composedFacts) composedFacts {
 			t.Helper()
-			session := Open(Options{}, typescript.New(settings))
+			session := openTestSession(t, Options{}, typescript.New(settings))
 			t.Cleanup(func() { _ = session.Close() })
-			catalog, err := session.describeProducers()
-			if err != nil {
-				t.Fatal(err)
-			}
+			catalog := session.catalog
 			result, err := catalog.collect(context.Background(), Options{RepoRoot: root, WorkspaceRoot: root}, requested, previous, observe.Full)
 			if err != nil {
 				t.Fatal(err)
@@ -270,4 +280,18 @@ func TestComposedFactsCaptureCurrentEligibilityWithoutReemission(t *testing.T) {
 			t.Fatal("unchanged observations authorized reuse across different relation demand")
 		}
 	})
+}
+
+func openTestSession(t *testing.T, options Options, producers ...backend.Producer) *Session {
+	t.Helper()
+	session, err := Open(options, producers...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := session.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	return session
 }

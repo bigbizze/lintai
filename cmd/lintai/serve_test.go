@@ -37,14 +37,14 @@ func TestServeConfigurationAndRPCRecovery(t *testing.T) {
 	write(filepath.Join(root, "b.ts"), "export const b = 2;\n")
 	write(filepath.Join(root, "links.json"), `{ "version": 1, "entries": [] }`)
 	rulePath := filepath.Join(root, "rules", "example.ts")
-	rule := `import { dl, rule } from "@lintai/sdk";
-export default rule("example.modules").version(1)
-  .program(({env}) => env.on !== false ? dl` + "`" + `Decl violation(M). violation(M) :- ts.module(M).` + "`" + ` : dl` + "`" + `Decl violation(M). violation(M) :- ts.module_path(M, "never.ts").` + "`" + `)
-  .report("violation").message(() => "module");`
+	rule := "import {dl,rule} from '@lintai/sdk'; export default rule('example.modules').version(1).program(dl`Decl violation(M). violation(M) :- ts.module(M).`).report('violation').message(() => 'module');"
 	write(rulePath, rule)
+	build := func() { testpack.Build(t, repo, root, rulePath) }
+	build()
+
 	configPath := filepath.Join(root, "lintai.toml")
 	config := func(exclude string) string {
-		return fmt.Sprintf("[workspace]\nexclude = [%q]\n[producers.ts]\nfiles = \"tsconfig\"\n", exclude)
+		return fmt.Sprintf("[workspace]\nexclude = [%q]\n[producers.ts]\nfiles = \"walk\"\n", exclude)
 	}
 	write(configPath, "[workspace\n")
 	inputR, inputW := io.Pipe()
@@ -96,7 +96,7 @@ export default rule("example.modules").version(1)
 	}
 	file := func(name string) server.FilesDiagnosticsResult { return batch(name) }
 
-	init := call("initialize", server.InitializeParams{RepoRoot: repo, WorkspaceRoot: testpack.Build(t, repo, root, rulePath), RuleWorkers: 1, Files: "walk"})
+	init := call("initialize", server.InitializeParams{ProtocolVersion: server.ProtocolVersion, WorkspaceRoot: root, RuleWorkers: 1})
 	if init.Error != nil || composition == nil || composition.session != nil {
 		t.Fatalf("handshake analyzed: %+v", init)
 	}
@@ -112,7 +112,7 @@ export default rule("example.modules").version(1)
 		t.Fatalf("excluded source: %+v", got)
 	}
 	initialBatch := batch("a.ts", "b.ts", "a.ts")
-	if len(initialBatch.Files) != 3 || len(initialBatch.Files[0].Diagnostics) != 1 || len(initialBatch.Files[1].Diagnostics) != 0 || len(initialBatch.Files[2].Diagnostics) != 1 {
+	if len(initialBatch.Files) != 3 || initialBatch.Files[0].SourceDigest == "" || initialBatch.Files[0].SourceDigest != initialBatch.Files[2].SourceDigest || len(initialBatch.Files[0].Diagnostics) != 1 || len(initialBatch.Files[1].Diagnostics) != 0 || len(initialBatch.Files[2].Diagnostics) != 1 {
 		t.Fatalf("batch projections: %+v", initialBatch)
 	}
 	for _, projected := range initialBatch.Files {
@@ -148,19 +148,21 @@ export default rule("example.modules").version(1)
 	if got := batch("a.ts", "b.ts"); len(got.Files[0].Diagnostics) != 0 || len(got.Files[1].Diagnostics) != 1 {
 		t.Fatalf("configuration recovery: %+v", got)
 	}
-	write(configPath, config("a.ts")+"[rule.\"example.modules\"]\noptions = {on = false}\n")
-	if got := file("b.ts"); len(got.Files[0].Diagnostics) != 0 {
-		t.Fatalf("options edit: %+v", got)
+	forced := call("reanalyze", map[string]any{"ruleWorkers": 2})
+	if forced.Error != nil {
+		t.Fatalf("reanalyze: %+v", forced.Error)
 	}
-	write(configPath, config("a.ts"))
-	write(rulePath, "export default {}")
-	testpack.Build(t, repo, root, rulePath)
-	if got := file("b.ts"); len(got.Problems) == 0 {
-		t.Fatalf("invalid rule: %+v", got)
+	write(rulePath, "throw new Error('invalid entry');")
+	if got := file("b.ts"); len(got.Files[0].Diagnostics) != 1 || len(got.Problems) != 0 {
+		t.Fatalf("unbuilt source edit affected publication: %+v", got)
+	}
+	build()
+	if got := batch("a.ts", "b.ts"); len(got.Problems) == 0 {
+		t.Fatalf("syntax error not reported: %+v", got)
 	}
 	write(rulePath, rule)
-	testpack.Build(t, repo, root, rulePath)
-	if got := file("b.ts"); len(got.Files[0].Diagnostics) != 1 {
+	build()
+	if got := batch("a.ts", "b.ts"); len(got.Files[1].Diagnostics) != 1 || len(got.Problems) != 0 {
 		t.Fatalf("rule recovery: %+v", got)
 	}
 	previous := composition.session

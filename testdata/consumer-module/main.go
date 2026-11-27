@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"path/filepath"
+	"strings"
 
 	"github.com/bigbizze/lintai/backend"
 	"github.com/bigbizze/lintai/backend/typescript"
@@ -45,16 +46,20 @@ func main() {
 	if err != nil || emitted.Count(predicates[0]) != 1 {
 		log.Fatalf("external producer emission: %v", err)
 	}
-	session := engine.Open(engine.Options{}, typescript.New(), producer)
+	options := engine.Options{RepoRoot: repoRoot, WorkspaceRoot: filepath.Join(repoRoot, "testdata", "fixtures", "workspace")}
+	ts := typescript.New()
+	session, err := engine.Open(options, ts, producer)
+	if err != nil {
+		_ = ts.Close()
+		_ = producer.Close()
+		log.Fatal(err)
+	}
 	defer session.Close()
-	result, err := session.Check(context.Background(), engine.Options{
-		RepoRoot:      repoRoot,
-		WorkspaceRoot: filepath.Join(repoRoot, "testdata", "fixtures", "workspace"),
-	})
+	rows, err := session.Facts(context.Background(), []string{"ts.module", "example.item"})
 	if err != nil {
 		log.Fatal(err)
 	}
-	if result.SnapshotVersion == "" {
-		log.Fatal("TypeScript backend returned an empty snapshot version")
+	if !strings.Contains(rows, "ts.module(") || !strings.Contains(rows, "example.item(") {
+		log.Fatalf("missing expected relations from bound producers: %s", rows)
 	}
 }

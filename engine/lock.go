@@ -234,8 +234,6 @@ func (lock RulesLock) verify(options Options, pack string, catalog producerCatal
 
 // BuildRulesLock inspects the published pack and the same effective policy used by Check.
 func (e *Session) BuildRulesLock(ctx context.Context, options Options) (RulesLock, error) {
-	e.checkMu.Lock()
-	defer e.checkMu.Unlock()
 	ctx, finish, err := e.beginCheck(ctx)
 	if err != nil {
 		return RulesLock{}, err
@@ -260,10 +258,7 @@ func (e *Session) BuildRulesLock(ctx context.Context, options Options) (RulesLoc
 	if target == state.path || target == filepath.Join(options.WorkspaceRoot, rulepack.Path) {
 		return RulesLock{}, fmt.Errorf("lock path conflicts with rule pack or suppressions")
 	}
-	producers, err := e.describeProducers()
-	if err != nil {
-		return RulesLock{}, err
-	}
+	producers := e.catalog
 	digest, err := policyDigest(options, producers)
 	if err != nil {
 		return RulesLock{}, err

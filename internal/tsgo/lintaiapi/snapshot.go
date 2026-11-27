@@ -336,6 +336,8 @@ type TypeRef struct {
 }
 
 type Snapshot struct {
+	// SourceDigests identifies the decoded compiler text from which locations were computed.
+	SourceDigests             map[string]string
 	Sites                     []SourceSite
 	siteConflict              string
 	Tracking                  map[string]TrackingSupport
@@ -414,7 +416,7 @@ type extractor struct {
 	tracking                    map[string]TrackingSupport
 	trackingKeyBuilds           int
 	trackingConflict            string
-	trackingSourceDigests       map[*ast.SourceFile]string
+	sourceFileDigests           map[*ast.SourceFile]string
 	callDeclarationObservations []callDeclarationObservation
 	workspaceRoot               string
 	host                        compiler.CompilerHost
@@ -481,6 +483,7 @@ type extractor struct {
 // semanticOperations are private collection families, derived from relation
 // demand; they are not user-facing configuration.
 type semanticOperations struct {
+	sourceDigests    map[string]string
 	signatures       bool
 	declarationTypes bool
 	typeStructure    bool
@@ -604,6 +607,11 @@ func BuildSnapshot(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, er
 	if snapshot.capture.captureErr != nil {
 		return nil, snapshot.capture.captureErr
 	}
+	for file, digest := range snapshot.SourceDigests {
+		if digest == "" {
+			return nil, fmt.Errorf("conflicting TypeScript source identities for %q", file)
+		}
+	}
 	snapshot.CompilerInputs = snapshot.capture.observations()
 	snapshot.capture = nil
 	return snapshot, nil
@@ -667,6 +675,8 @@ func buildSnapshotAttempt(ctx context.Context, req BuildSnapshotRequest) (*Snaps
 		host.FS().FileExists(tspath.RootedFilePathFromAbsolute(entry.SourcePath))
 	}
 	operations := operationsForRelations(req.RequestedRelations)
+	merged.SourceDigests = make(map[string]string)
+	operations.sourceDigests = merged.SourceDigests
 	operations.trackingCache = req.trackingCache
 	operations.trackingPrevious = req.trackingPrevious
 	merged.trackingCache = req.trackingCache
@@ -1033,7 +1043,6 @@ func buildSnapshotForGroup(ctx context.Context, host compiler.CompilerHost, work
 	if ex.operations.sourceRecovery {
 		ex.recoverRetainedDeclarationMaps()
 	}
-	ex.probeProgramFiles()
 
 	partial := &Snapshot{
 		Sites:                       slices.Collect(maps.Values(ex.sites)),
@@ -2894,6 +2903,7 @@ func (e *extractor) nodeLocation(file *ast.SourceFile, node *ast.Node) SourceLoc
 
 func (e *extractor) location(file *ast.SourceFile, start int, end int) SourceLocation {
 	relative := e.relativePath(file.FileName().AsString())
+	e.sourceDigest(file)
 	if start < 0 || end < 0 {
 		return SourceLocation{
 			File:        relative,

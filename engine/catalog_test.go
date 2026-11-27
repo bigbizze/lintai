@@ -1,6 +1,11 @@
 package engine
 
 import (
+	"context"
+	"github.com/bigbizze/lintai/backend"
+	"github.com/bigbizze/lintai/observe"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -175,5 +180,81 @@ func TestProducerAnchorTrackingIsExplicitAndConflictsAreRejected(t *testing.T) {
 				t.Fatalf("expected anchor validation failure containing %q, got %v", item.message, err)
 			}
 		})
+	}
+}
+
+func TestBoundProducerOwnershipAndConfigurationIdentity(t *testing.T) {
+	valid := newParallelFixtureProducer()
+	invalid := newParallelFixtureProducer()
+	invalid.description.Namespace = "invalid-namespace"
+	if session, err := Open(Options{}, valid, invalid); err == nil || session != nil || valid.closed.Load() || invalid.closed.Load() {
+		t.Fatal("failed Open took ownership of supplied producers")
+	}
+	snapshots := make(map[string]string)
+	for _, tc := range []struct {
+		kind  string
+		shape any
+	}{
+		{"null", []any(nil)}, {"null", map[string]any(nil)}, {"array", []any{}}, {"object", map[string]any{}},
+	} {
+		valid.description.EffectiveConfiguration = map[string]any{"shape": []any{tc.shape}}
+		session, err := Open(Options{}, valid)
+		if err != nil {
+			t.Fatal(err)
+		}
+		delete(valid.description.EffectiveConfiguration.(map[string]any), "shape")
+		facts, err := session.catalog.collect(context.Background(), Options{}, nil, nil, observe.Full)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if previous, exists := snapshots[facts.snapshotID]; exists && previous != tc.kind {
+			t.Fatalf("configuration shapes collapsed: %s and %s", previous, tc.kind)
+		}
+		snapshots[facts.snapshotID] = tc.kind
+		if err := session.Close(); err != nil || !valid.closed.Load() {
+			t.Fatalf("closing owned producer: %v", err)
+		}
+		valid = newParallelFixtureProducer()
+	}
+	if len(snapshots) != 3 {
+		t.Fatalf("null/array/object identity: %v", snapshots)
+	}
+}
+
+func TestSourceIdentityUsesDiagnosticFileMapping(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "item.ts")
+	inside := filepath.Join(root, "item.ts")
+	relative := strings.TrimLeft(filepath.ToSlash(outside), "/")
+	if volume := filepath.VolumeName(outside); volume != "" {
+		relative = strings.TrimLeft(strings.TrimPrefix(filepath.ToSlash(outside), volume), "/")
+	}
+	a, b := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	metadata := backend.GenerationMetadata{InputRevision: "1", SourceDigests: map[string]string{inside: a, outside: b}}
+	digests := make(map[string]string)
+	if _, err := captureGenerationMetadata(metadata, root, digests); err != nil {
+		t.Fatal(err)
+	}
+	metadata.SourceDigests[inside] = b
+	diag := func(file string) diagnostics.Diagnostic {
+		return diagnostics.Diagnostic{SourceLocation: &diagnostics.SourceLocation{File: file}, Message: file}
+	}
+	result := Result{workspaceRoot: root, AnalyzedFiles: []string{"item.ts", "no-findings.ts"}, Diagnostics: []diagnostics.Diagnostic{diag(inside), diag(filepath.ToSlash(outside))}}
+	p := newPublishedResult(result, digests, "", observe.Set{}, true)
+	files := []string{"./item.ts", outside, relative, inside}
+	projected := p.projectFiles(files, false)
+	if !slices.Equal(projected.Files, files) || !slices.Equal(projected.SourceDigests, []string{a, b, "", a}) || len(projected.Diagnostics[2]) != 0 {
+		t.Fatalf("projected: %+v", projected)
+	}
+	for i, file := range files {
+		if !slices.EqualFunc(result.DiagnosticsFor(file), projected.Diagnostics[i], func(a, b diagnostics.Diagnostic) bool { return a.Message == b.Message }) {
+			t.Fatalf("inconsistent grouping for %s", file)
+		}
+	}
+	if len(p.projectFiles(nil, true).Files) != 3 {
+		t.Fatal("all must include analyzed and diagnostic-bearing groups")
+	}
+	if _, err := captureGenerationMetadata(metadata, root, digests); err == nil {
+		t.Fatal("conflicting identity accepted")
 	}
 }

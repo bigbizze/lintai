@@ -3,6 +3,7 @@ package typescript
 import (
 	"context"
 	"fmt"
+
 	"os"
 	"path/filepath"
 	"reflect"
@@ -609,10 +610,13 @@ export default rule("test.filtered-callback").version(1)
     indeterminate(Fn, Name) :- ts.fn(Fn, _, Name), Name = "escape", ts.site_owner(Site, Fn), ts.fn_value_escape_unknown(Site).`+"`"+`)
   .report("indeterminate").message((row) => row.Name);
 `)
-	session := engine.Open(engine.Options{}, New())
+	session, err := engine.Open(engine.Options{}, New())
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer session.Close()
 	result, err := session.Check(context.Background(), engine.Options{
-		RepoRoot: repoRoot, WorkspaceRoot: testpack.Build(t, repoRoot, root, "lintai-rules/strict.ts"),
+		RepoRoot: repoRoot, WorkspaceRoot: testpack.Build(t, repoRoot, root, "lintai-rules/*.ts"),
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -38,12 +38,9 @@ func TestRelationCoverageInventory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	session := Open(Options{}, typescript.New())
+	session := openTestSession(t, Options{}, typescript.New())
 	defer session.Close()
-	catalog, err := session.describeProducers()
-	if err != nil {
-		t.Fatal(err)
-	}
+	catalog := session.catalog
 	description := catalog.entries[0].description
 	bases := make(map[ast.PredicateSym]facts.Predicate, len(description.BaseRelations))
 	byName := make(map[string]facts.Predicate, len(description.BaseRelations))
@@ -112,12 +109,9 @@ func TestRelationCoverageInventory(t *testing.T) {
 	// An explicit helper root must select its dependencies even when no rule
 	// clause references it, and package-local premises use the producer namespace.
 	t.Run("explicit helper root in custom namespace", func(t *testing.T) {
-		custom := Open(Options{}, typescript.New(typescript.Options{Namespace: "custom"}))
+		custom := openTestSession(t, Options{}, typescript.New(typescript.Options{Namespace: "custom"}))
 		defer custom.Close()
-		customCatalog, err := custom.describeProducers()
-		if err != nil {
-			t.Fatal(err)
-		}
+		customCatalog := custom.catalog
 		customDescription := customCatalog.entries[0].description
 		customBases := make(map[ast.PredicateSym]facts.Predicate)
 		customByName := make(map[string]facts.Predicate)

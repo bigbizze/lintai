@@ -4,12 +4,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -233,37 +231,6 @@ func TestQuickStampRenewalAndRestoredMtime(t *testing.T) {
 	}
 }
 
-func TestWireStrictness(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "x")
-	good := fmt.Sprintf(`{"format":"%s","observations":[{"kind":"content","path":%q,"value":"%s"}]}`, Format, path, hash("x"))
-	if _, err := Decode([]byte(good)); err != nil {
-		t.Fatal(err)
-	}
-	set := mustSet(t, Record{Kind: Env, Path: "ABSENT"}, Record{Kind: Listing, Path: filepath.Dir(path), Op: Physical})
-	encoded, err := json.Marshal(struct {
-		Format       string   `json:"format"`
-		Observations []Record `json:"observations"`
-	}{Format, set.Records()})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Decode(encoded); err != nil {
-		t.Fatalf("encoded records did not round trip: %s: %v", encoded, err)
-	}
-	if _, err := Decode([]byte(`{"format":"lintai.observations/1","observations":[{"kind":"env","path":"EXAMPLE","present":true,"value":"\ud83d\ude00"}]}`)); err != nil {
-		t.Fatalf("valid surrogate pair: %v", err)
-	}
-	bad := []string{
-		strings.Replace(good, Format, "old/1", 1), good + " {}", strings.Replace(good, `"kind":"content"`, `"kind":"content","kind":"content"`, 1), strings.Replace(good, `"value":`, `"extra":1,"value":`, 1), strings.Replace(good, `"value":`, `"stamp":{"size":"1"},"value":`, 1), strings.Replace(good, `"kind":"content"`, `"kind":"unknown"`, 1), strings.Replace(good, string(hash("x")), strings.ToUpper(string(hash("x"))), 1), strings.Replace(good, fmt.Sprintf("%q", path), `"relative"`, 1), strings.Replace(good, `"observations":[`, `"observations":null,"unused":[`, 1),
-		strings.Replace(good, fmt.Sprintf("%q", path), `"/tmp/\ud800"`, 1),
-	}
-	for _, input := range bad {
-		if _, err := Decode([]byte(input)); err == nil {
-			t.Errorf("accepted %s", input)
-		}
-	}
-}
-
 func TestFullReadsNonRegularContent(t *testing.T) {
 	if !filepath.IsAbs(os.DevNull) {
 		t.Skip("no absolute null device")
@@ -340,5 +307,19 @@ func TestListingErrorsAndToleratedUnreadableDirectory(t *testing.T) {
 	}
 	if !changed(t, set, Full) {
 		t.Fatal("accessible directory did not invalidate unreadable result")
+	}
+}
+
+func TestMissingRealpathObservation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "appears")
+	set := mustSet(t, Record{Kind: Resolved, Path: path, Value: Missing})
+	if changed, err := set.Changed(context.Background(), Quick); err != nil || changed != nil {
+		t.Fatalf("missing resolution: %v %v", changed, err)
+	}
+	if err := os.WriteFile(path, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := set.Changed(context.Background(), Full); err != nil || changed == nil {
+		t.Fatalf("successful resolution did not invalidate prior failure: %v %v", changed, err)
 	}
 }

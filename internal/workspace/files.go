@@ -71,7 +71,7 @@ func PlanSources(root string, options ScopeOptions) (*ScopePlan, error) {
 	}
 	// Normalize a copy so in-workspace absolute sources also work when the
 	// workspace root is reached through a symlink.
-	options = cloneScopeOptions(options)
+	options.Sources = slices.Clone(options.Sources)
 	for i, name := range options.Sources {
 		if filepath.IsAbs(name) {
 			if withinRoot(requestedRoot, name) {
@@ -374,13 +374,6 @@ func patternMatches(pattern, relative string) bool {
 		}
 	}
 	return false
-}
-
-func cloneScopeOptions(options ScopeOptions) ScopeOptions {
-	return ScopeOptions{
-		Exclude: slices.Clone(options.Exclude), Include: slices.Clone(options.Include),
-		Sources: slices.Clone(options.Sources), InvocationExclude: slices.Clone(options.InvocationExclude),
-	}
 }
 
 func sortedPaths(values map[string]struct{}) []string {

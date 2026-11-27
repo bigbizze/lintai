@@ -28,7 +28,7 @@ func TestMixedRuleOutcomes(t *testing.T) {
 	}
 	options := parallelFixtureOptions(t, repoRoot, workspace)
 	options.Rule = map[string]RulePolicy{"fixture.disabled": {Severity: "off"}}
-	session := Open(Options{}, newParallelFixtureProducer())
+	session := openTestSession(t, Options{}, newParallelFixtureProducer())
 	defer session.Close()
 	result, err := session.Check(context.Background(), options)
 	if err != nil {

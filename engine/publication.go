@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"maps"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -13,6 +14,7 @@ import (
 
 // FileResult is the projection of a completed workspace result for one file.
 type FileResult struct {
+	SourceDigest      string
 	Diagnostics       []diagnostics.Diagnostic
 	WorkspaceProblems []diagnostics.Diagnostic
 	SnapshotVersion   string
@@ -23,6 +25,10 @@ type FileResult struct {
 // FilesResult contains ordered projections and workspace problems from one
 // completed publication. Diagnostics[i] corresponds to the ith requested file.
 type FilesResult struct {
+	Files []string
+	// SourceDigests[i] is the SHA-256 of the analyzed logical text, in lowercase
+	// hexadecimal, or empty if the generation supplied no source identity.
+	SourceDigests     []string
 	Diagnostics       [][]diagnostics.Diagnostic
 	WorkspaceProblems []diagnostics.Diagnostic
 	SnapshotVersion   string
@@ -32,7 +38,7 @@ type FilesResult struct {
 
 type publishedResult struct {
 	result        Result
-	workspaceRoot string
+	sourceDigests map[string]string
 	requestKey    string
 	observations  observe.Set
 	reusable      bool
@@ -99,8 +105,11 @@ func effectiveOptions(options Options) (Options, string, error) {
 	return options, string(identity), nil
 }
 
-func newPublishedResult(result Result, workspaceRoot, key string, observations observe.Set, reusable bool) *publishedResult {
-	published := &publishedResult{result: result, workspaceRoot: workspaceRoot, requestKey: key, observations: observations, reusable: reusable, byFile: make(map[string][]int)}
+func newPublishedResult(result Result, sourceDigests map[string]string, key string, observations observe.Set, reusable bool) *publishedResult {
+	published := &publishedResult{result: result, sourceDigests: sourceDigests, requestKey: key, observations: observations, reusable: reusable, byFile: make(map[string][]int)}
+	for _, file := range result.AnalyzedFiles {
+		published.byFile[publicationFileKey(result.workspaceRoot, file)] = nil
+	}
 	for i, item := range result.Diagnostics {
 		if item.DiagnosticKind == diagnostics.KindRuleExecutionError {
 			published.reusable = false
@@ -108,7 +117,7 @@ func newPublishedResult(result Result, workspaceRoot, key string, observations o
 		if item.SourceLocation == nil {
 			published.unlocated = append(published.unlocated, i)
 		} else {
-			file := publicationFileKey(workspaceRoot, item.SourceLocation.File)
+			file := publicationFileKey(result.workspaceRoot, item.SourceLocation.File)
 			published.byFile[file] = append(published.byFile[file], i)
 		}
 	}
@@ -122,17 +131,26 @@ func publicationFileKey(root, file string) string {
 			file = relative
 		}
 	}
-	return strings.TrimPrefix(filepath.ToSlash(file), "/")
+	return filepath.ToSlash(file)
 }
 
-func (p *publishedResult) projectFiles(files []string) FilesResult {
+func (p *publishedResult) projectFiles(files []string, all bool) FilesResult {
+	if all {
+		files = slices.Sorted(maps.Keys(p.byFile))
+	}
 	result := FilesResult{
+		Files: append([]string{}, files...), SourceDigests: make([]string, len(files)),
 		Diagnostics:     make([][]diagnostics.Diagnostic, len(files)),
 		SnapshotVersion: p.result.SnapshotVersion, RulesLoaded: p.result.RulesLoaded,
 		Warnings: slices.Clone(p.result.Warnings),
 	}
 	for i, file := range files {
-		for _, index := range p.byFile[publicationFileKey(p.workspaceRoot, file)] {
+		key := publicationFileKey(p.result.workspaceRoot, file)
+		indexes, captured := p.byFile[key]
+		if captured {
+			result.SourceDigests[i] = p.sourceDigests[key]
+		}
+		for _, index := range indexes {
 			result.Diagnostics[i] = append(result.Diagnostics[i], p.result.Diagnostics[index])
 		}
 		result.Diagnostics[i] = cloneDiagnostics(result.Diagnostics[i])

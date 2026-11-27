@@ -143,7 +143,7 @@ func TestCatalogFakeAloneReportsProducerOwnedAnchorAndOpaqueRevision(t *testing.
 	producer := fakeProducer("catalog", "item")
 	setFakeRow(producer, "item", "users")
 	writeCatalogRule(t, workspace, `Decl violation(Entity). violation(Entity) :- catalog.present(Entity).`, "violation")
-	session := engine.Open(engine.Options{}, producer)
+	session := openTestSession(t, producer)
 	defer session.Close()
 	options := engine.Options{
 		RepoRoot: repoRoot, WorkspaceRoot: testpack.Build(t, repoRoot, workspace, "lintai-rules/*.ts")}
@@ -192,7 +192,7 @@ func TestCatalogFakeAloneReportsProducerOwnedAnchorAndOpaqueRevision(t *testing.
 	}
 
 	empty := fakeProducer("empty", "item")
-	emptyResult, err := engine.Open(engine.Options{}, empty).Check(context.Background(), engine.Options{
+	emptyResult, err := openTestSession(t, empty).Check(context.Background(), engine.Options{
 		RepoRoot: repoRoot, WorkspaceRoot: testpack.Build(t, repoRoot, t.TempDir())})
 	if err != nil {
 		t.Fatalf("present-empty relation should be successful: %v", err)
@@ -205,7 +205,7 @@ func TestCatalogFakeAloneReportsProducerOwnedAnchorAndOpaqueRevision(t *testing.
 	}
 	different := fakeProducer("empty", "item")
 	different.description.ImplementationStamp = "fixture-v2"
-	changedCatalog, err := engine.Open(engine.Options{}, different).Check(context.Background(), engine.Options{
+	changedCatalog, err := openTestSession(t, different).Check(context.Background(), engine.Options{
 		RepoRoot: repoRoot, WorkspaceRoot: testpack.Build(t, repoRoot, t.TempDir())})
 	if err != nil || changedCatalog.SnapshotVersion == emptyResult.SnapshotVersion {
 		t.Fatalf("catalog identity omitted on empty demand: %v", err)
@@ -223,14 +223,14 @@ func TestOpaqueProducerScopeContributesToResultIdentity(t *testing.T) {
 	left := fakeProducer("catalog", "item")
 	left.scope = map[string]any{"partition": "a"}
 	left.analyzed = []string{"catalog/objects.sql"}
-	leftResult, err := engine.Open(engine.Options{}, left).Check(context.Background(), options)
+	leftResult, err := openTestSession(t, left).Check(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
 	right := fakeProducer("catalog", "item")
 	right.scope = []any{[]any{"partition", "a"}}
 	right.analyzed = []string{"catalog/objects.sql"}
-	rightResult, err := engine.Open(engine.Options{}, right).Check(context.Background(), options)
+	rightResult, err := openTestSession(t, right).Check(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +254,7 @@ func TestOpaqueProducerScopeContributesToResultIdentity(t *testing.T) {
 			producer.scope = map[string]any{"selection": tc.before}
 			setFakeRow(producer, "item", "users")
 
-			session := engine.Open(engine.Options{}, producer)
+			session := openTestSession(t, producer)
 			defer session.Close()
 			options := engine.Options{
 				RepoRoot:      repoRoot,
@@ -288,7 +288,7 @@ func TestTypeScriptAndFakeComposeThroughCatalog(t *testing.T) {
 	workspace := filepath.Join(repoRoot, "testdata/fixtures/external-backend/mixed-facts")
 	fake := fakeProducer("catalog", "external_boundary")
 	setFakeRow(fake, "external_boundary", "catalog-api")
-	result, err := engine.Open(engine.Options{}, typescript.New(), fake).Check(context.Background(), engine.Options{
+	result, err := openTestSession(t, typescript.New(), fake).Check(context.Background(), engine.Options{
 		RepoRoot: repoRoot, WorkspaceRoot: testpack.Build(t, repoRoot, workspace, "lintai-rules/*.ts")})
 	if err != nil {
 		t.Fatal(err)
@@ -314,7 +314,7 @@ func TestProducerNamespacesDisambiguateCollidingLocalPredicates(t *testing.T) {
 	setFakeRow(left, "item", "same")
 	setFakeRow(right, "item", "same")
 	writeCatalogRule(t, workspace, `Decl violation(Entity). violation(Entity) :- left.item(Entity), right.item(_).`, "violation")
-	result, err := engine.Open(engine.Options{}, right, left).Check(context.Background(), engine.Options{
+	result, err := openTestSession(t, right, left).Check(context.Background(), engine.Options{
 		RepoRoot: repoRoot, WorkspaceRoot: testpack.Build(t, repoRoot, workspace, "lintai-rules/*.ts")})
 	if err != nil {
 		t.Fatal(err)
@@ -334,29 +334,29 @@ func TestCatalogRejectsMissingCoverageAndInvalidEntities(t *testing.T) {
 	options := engine.Options{
 		RepoRoot: repoRoot, WorkspaceRoot: testpack.Build(t, repoRoot, workspace, "lintai-rules/*.ts")}
 	duplicate := fakeProducer("catalog", "item")
-	if _, err := engine.Open(engine.Options{}, duplicate, duplicate).Check(context.Background(), options); err == nil || !strings.Contains(err.Error(), "registered more than once") {
+	if _, err := engine.Open(engine.Options{}, duplicate, duplicate); err == nil || !strings.Contains(err.Error(), "registered more than once") {
 		t.Fatalf("expected duplicate-namespace failure, got %v", err)
 	}
 	missing := fakeProducer("catalog", "item")
 	missing.omit = facts.Predicate{Name: "catalog.item", Arity: 1}
-	if _, err := engine.Open(engine.Options{}, missing).Check(context.Background(), options); err == nil || !strings.Contains(err.Error(), "omitted requested predicate") {
+	if _, err := openTestSession(t, missing).Check(context.Background(), options); err == nil || !strings.Contains(err.Error(), "omitted requested predicate") {
 		t.Fatalf("expected missing-coverage failure, got %v", err)
 	}
 	unlisted := fakeProducer("catalog", "item")
 	unlisted.description.Schema.Declarations += `Decl unlisted(Entity) descr [extensional(), arg(Entity, "entity id")].`
-	if _, err := engine.Open(engine.Options{}, unlisted).Check(context.Background(), options); err == nil || !strings.Contains(err.Error(), "absent from BaseRelations") {
+	if _, err := engine.Open(engine.Options{}, unlisted); err == nil || !strings.Contains(err.Error(), "absent from BaseRelations") {
 		t.Fatalf("expected catalog extensional predicate mismatch, got %v", err)
 	}
 	undeclared := fakeProducer("catalog", "item")
 	undeclaredRelation := undeclared.description.BaseRelations[0]
 	undeclaredRelation.Predicate = facts.Predicate{Name: "catalog.undeclared", Arity: 1}
 	undeclared.description.BaseRelations = append(undeclared.description.BaseRelations, undeclaredRelation)
-	if _, err := engine.Open(engine.Options{}, undeclared).Check(context.Background(), options); err == nil || !strings.Contains(err.Error(), "no extensional catalog declaration") {
+	if _, err := engine.Open(engine.Options{}, undeclared); err == nil || !strings.Contains(err.Error(), "no extensional catalog declaration") {
 		t.Fatalf("expected catalog base relation mismatch, got %v", err)
 	}
 	invalid := fakeProducer("catalog", "item")
 	invalid.rows[facts.Predicate{Name: "catalog.item", Arity: 1}] = [][]facts.Value{{facts.String("")}}
-	if _, err := engine.Open(engine.Options{}, invalid).Check(context.Background(), options); err == nil || !strings.Contains(err.Error(), "invalid entity") {
+	if _, err := openTestSession(t, invalid).Check(context.Background(), options); err == nil || !strings.Contains(err.Error(), "invalid entity") {
 		t.Fatalf("expected empty entity failure, got %v", err)
 	}
 
@@ -378,7 +378,7 @@ func TestRuleViewDoesNotBorrowAnotherRulesAnchorSupport(t *testing.T) {
 
 	badProgram := `Decl violation(Entity). violation(Entity) :- catalog.unlocated(Entity).`
 	writeCatalogRuleFile(t, workspace, "query-only.ts", "fixture.query-only", badProgram, "violation")
-	withoutOwner, err := engine.Open(engine.Options{}, producer).Check(context.Background(), engine.Options{
+	withoutOwner, err := openTestSession(t, producer).Check(context.Background(), engine.Options{
 		RepoRoot: repoRoot, WorkspaceRoot: testpack.Build(t, repoRoot, workspace, "lintai-rules/*.ts")})
 	if err != nil {
 		t.Fatal(err)
@@ -389,7 +389,7 @@ func TestRuleViewDoesNotBorrowAnotherRulesAnchorSupport(t *testing.T) {
 
 	writeCatalogRuleFile(t, workspace, "owner.ts", "fixture.anchor-owner",
 		`Decl violation(Entity). violation(Entity) :- catalog.item(Entity).`, "violation")
-	withOwner, err := engine.Open(engine.Options{}, producer).Check(context.Background(), engine.Options{
+	withOwner, err := openTestSession(t, producer).Check(context.Background(), engine.Options{
 		RepoRoot: repoRoot, WorkspaceRoot: testpack.Build(t, repoRoot, workspace, "lintai-rules/*.ts")})
 	if err != nil {
 		t.Fatal(err)
@@ -421,7 +421,7 @@ func TestLintaiGlobDoesNotNeedTypeScript(t *testing.T) {
 	producer := fakeProducer("catalog", "item")
 	setFakeRow(producer, "item", "users")
 	writeCatalogRule(t, workspace, `Decl candidate(Entity). candidate(Entity) :- catalog.item(Entity), lintai.glob("src/users/**", "src/**"). Decl violation(Entity). violation(Entity) :- candidate(Entity).`, "violation")
-	result, err := engine.Open(engine.Options{}, producer).Check(context.Background(), engine.Options{
+	result, err := openTestSession(t, producer).Check(context.Background(), engine.Options{
 		RepoRoot: repoRoot, WorkspaceRoot: testpack.Build(t, repoRoot, workspace, "lintai-rules/*.ts")})
 	if err != nil {
 		t.Fatal(err)
@@ -451,7 +451,7 @@ func TestNamespaceBindingRejectsAliasesAndRuleOwnedPackages(t *testing.T) {
 		t.Run(item.name, func(t *testing.T) {
 			workspace := t.TempDir()
 			writeCatalogRule(t, workspace, item.program, "violation")
-			result, err := engine.Open(engine.Options{}, fakeProducer("catalog", "item")).Check(context.Background(), engine.Options{
+			result, err := openTestSession(t, fakeProducer("catalog", "item")).Check(context.Background(), engine.Options{
 				RepoRoot: repoRoot, WorkspaceRoot: testpack.Build(t, repoRoot, workspace, "lintai-rules/*.ts")})
 			if err != nil {
 				t.Fatal(err)
@@ -465,7 +465,7 @@ func TestNamespaceBindingRejectsAliasesAndRuleOwnedPackages(t *testing.T) {
 	producer := fakeProducer("catalog", "item")
 	setFakeRow(producer, "item", "users")
 	writeCatalogRule(t, workspace, `Decl item(Entity). item(Entity) :- catalog.item(Entity). Decl violation(Entity). violation(Entity) :- item(Entity).`, "violation")
-	result, err := engine.Open(engine.Options{}, producer).Check(context.Background(), engine.Options{
+	result, err := openTestSession(t, producer).Check(context.Background(), engine.Options{
 		RepoRoot: repoRoot, WorkspaceRoot: testpack.Build(t, repoRoot, workspace, "lintai-rules/*.ts")})
 	if err != nil {
 		t.Fatal(err)
@@ -493,4 +493,18 @@ export default rule("` + ruleID + `").version(1)
 	if err := os.WriteFile(rulePath, []byte(source), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func openTestSession(t *testing.T, producers ...backend.Producer) *engine.Session {
+	t.Helper()
+	session, err := engine.Open(engine.Options{}, producers...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := session.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	return session
 }

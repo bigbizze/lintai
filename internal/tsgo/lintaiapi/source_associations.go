@@ -117,8 +117,6 @@ func (a *auxiliarySourcePrograms) forEntry(entry configuredSourceEntry) (*auxili
 		typeChecker, done := program.GetTypeChecker(a.ctx)
 		item = &auxiliarySourceProgram{program: program, checker: typeChecker, resolver: resolver, done: done, semanticBindingCache: newSemanticBindingCache()}
 		a.programs[cacheKey] = item
-		inputExtractor := &extractor{workspaceRoot: a.workspaceRoot, program: program, host: a.host}
-		inputExtractor.probeProgramFiles()
 		a.timing.auxiliaryProgram += time.Since(started)
 	}
 	if configPath != "" {
@@ -246,6 +244,7 @@ func (e *extractor) applyConfiguredSourceEntries(entries []configuredSourceEntry
 		if sourceOutcome == "" {
 			// Auxiliary declaration anchors use the same immutable source-key
 			// cache as the primary context, including on an unchanged check.
+			sourceProgram.ex.operations.sourceDigests = e.operations.sourceDigests
 			sourceProgram.ex.operations.trackingCache = e.operations.trackingCache
 			sourceProgram.ex.operations.trackingPrevious = e.operations.trackingPrevious
 			sourceProgram.ex.operations.sourceRecovery = e.operations.sourceRecovery
@@ -409,23 +408,6 @@ func (e *extractor) moduleBindings(file *ast.SourceFile) []moduleBinding {
 func (e *extractor) addDeclarationEndpoint(node *ast.Node, symbol *ast.Symbol, publicName string) (string, bool) {
 	id, _, supported := e.collectDeclarationMetadata(node, symbol, publicName, true)
 	return id, supported
-}
-
-func (e *extractor) probeProgramFiles() {
-	for _, file := range e.program.FilesByPath() {
-		if file == nil {
-			continue
-		}
-		path := normalizeSlash(file.FileName().AsString())
-		// Bundled compiler libraries are virtual URLs served by the bundled
-		// filesystem, and are covered by the compiler implementation stamp.
-		if tspath.IsUrl(path) || strings.HasPrefix(path, "^/") {
-			continue
-		}
-		if rooted, ok := tspath.TryRootedFilePathFromAbsolute(path); ok {
-			e.host.FS().FileExists(rooted)
-		}
-	}
 }
 
 func (e *extractor) recordSourceConfigCandidates(sourcePath string) {

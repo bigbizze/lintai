@@ -197,7 +197,7 @@ func normalize(r Record) (Record, error) {
 			return r, fmt.Errorf("invalid link observation %s", r.Path)
 		}
 	case Resolved:
-		if r.Op != "" || !noListing || r.Present || r.Stamp != nil || !validPath(string(r.Value)) {
+		if r.Op != "" || !noListing || r.Present || r.Stamp != nil || (r.Value != Missing && !validPath(string(r.Value))) {
 			return r, fmt.Errorf("invalid resolved observation %s", r.Path)
 		}
 	case Env:
@@ -315,7 +315,7 @@ func (s Set) Digest(root string) (string, error) {
 			path = r.Path
 		}
 		var value any = string(r.Value)
-		if r.Kind == Resolved || r.Kind == Link && filepath.IsAbs(string(r.Value)) {
+		if (r.Kind == Resolved || r.Kind == Link) && filepath.IsAbs(string(r.Value)) {
 			value = pathValue(string(r.Value))
 		}
 		b, err := json.Marshal(item{r.Kind, path, r.Op, value, r.Entries, r.Ignore, r.Present})

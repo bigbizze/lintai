@@ -106,6 +106,18 @@ func runBuildRules(ctx context.Context, args []string) error {
 	return rulepack.Build(ctx, *root, config.Entries)
 }
 
+// The CLI constructs these producers for this session. Release them if
+// validation fails before Open can take ownership.
+func openSession(options engine.Options, producers ...backend.Producer) (*engine.Session, error) {
+	session, err := engine.Open(options, producers...)
+	if err != nil {
+		for _, producer := range producers {
+			_ = producer.Close()
+		}
+	}
+	return session, err
+}
+
 func runSchema(ctx context.Context, args []string, stdout io.Writer) error {
 	flags := flag.NewFlagSet("lintai schema", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
@@ -126,7 +138,10 @@ func runSchema(ctx context.Context, args []string, stdout io.Writer) error {
 	for _, item := range settings {
 		producers = append(producers, newBackend(item))
 	}
-	session := engine.Open(engine.Options{RepoRoot: absoluteWorkspace, WorkspaceRoot: absoluteWorkspace}, producers...)
+	session, err := openSession(engine.Options{RepoRoot: absoluteWorkspace, WorkspaceRoot: absoluteWorkspace}, producers...)
+	if err != nil {
+		return err
+	}
 	defer session.Close()
 	schema, err := session.Schema(ctx)
 	if err != nil {
@@ -175,7 +190,10 @@ func runFacts(ctx context.Context, args []string, stdout io.Writer) error {
 	for _, item := range settings {
 		producers = append(producers, newBackend(item))
 	}
-	session := engine.Open(engine.Options{RepoRoot: absoluteWorkspace, WorkspaceRoot: absoluteWorkspace}, producers...)
+	session, err := openSession(engine.Options{RepoRoot: absoluteWorkspace, WorkspaceRoot: absoluteWorkspace}, producers...)
+	if err != nil {
+		return err
+	}
 	defer session.Close()
 	output, err := session.Facts(ctx, relations)
 	if err != nil {
@@ -225,7 +243,7 @@ func (s *serveSession) configure(ctx context.Context, force bool) (err error) {
 	}
 	var config workspace.WorkspaceConfig
 	var settings []typescript.Options
-	settings, config, err = captureTypeScriptSettings(s.params.WorkspaceRoot, "", s.params.Files, s.params.Files != "", s.params.SourceLinks, s.params.SourceLinks != "", s.params.Excludes, nil)
+	settings, config, err = captureTypeScriptSettings(s.params.WorkspaceRoot, "", "", false, "", false, nil, nil)
 	if err != nil {
 		return fmt.Errorf("load workspace configuration: %w", err)
 	}
@@ -244,7 +262,10 @@ func (s *serveSession) configure(ctx context.Context, force bool) (err error) {
 		for _, item := range settings {
 			producers = append(producers, newBackend(item))
 		}
-		s.session = engine.Open(engine.Options{}, producers...)
+		s.session, err = openSession(engine.Options{}, producers...)
+		if err != nil {
+			return err
+		}
 		s.settings = settings
 	}
 	s.config, s.receipt = config, true
@@ -276,6 +297,14 @@ func (s *serveSession) RefreshFiles(ctx context.Context, options engine.Options,
 	}
 	options.Rule = s.config.Rule
 	return s.session.RefreshFiles(ctx, options, files)
+}
+
+func (s *serveSession) RefreshAll(ctx context.Context, options engine.Options) (engine.FilesResult, error) {
+	if err := s.configure(ctx, false); err != nil {
+		return engine.FilesResult{}, err
+	}
+	options.Rule = s.config.Rule
+	return s.session.RefreshAll(ctx, options)
 }
 
 func (s *serveSession) Close() error {
@@ -357,9 +386,9 @@ func captureTypeScriptSettings(workspaceRoot, explicitConfig, filesOverride stri
 		}
 		sources := append(slices.Clone(config.Sources), invocationSources...)
 		settings = append(settings, typescript.Options{
-			Namespace: namespace, WorkspaceExcludes: slices.Clone(config.Exclude),
-			Includes: slices.Clone(config.Include), Sources: sources,
-			Excludes: slices.Clone(invocationExcludes), Files: scope, SourceLinks: sourceLinks,
+			Namespace: namespace, WorkspaceExcludes: config.Exclude,
+			Includes: config.Include, Sources: sources,
+			Excludes: invocationExcludes, Files: scope, SourceLinks: sourceLinks,
 		})
 	}
 	return settings, config, nil
@@ -491,7 +520,8 @@ func (p *projectFlags) open() (*engine.Session, engine.Options, error) {
 	for _, setting := range settings {
 		producers = append(producers, newBackend(setting))
 	}
-	return engine.Open(options, producers...), options, nil
+	session, err := openSession(options, producers...)
+	return session, options, err
 }
 
 func runOnce(ctx context.Context, args []string, stdout io.Writer) error {

@@ -244,7 +244,7 @@ func (s Set) matches(index int, r Record, mode Mode) (bool, error) {
 		value, err := filepath.EvalSymlinks(r.Path)
 		if err != nil {
 			if missing(err) {
-				return false, nil
+				return r.Value == Missing, nil
 			}
 			return false, err
 		}

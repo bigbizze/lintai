@@ -122,7 +122,10 @@ func TestPortableTypeScriptApproval(t *testing.T) {
 	}
 	opts := engine.Options{WorkspaceRoot: b, RulesLock: engine.DefaultRulesLockFile}
 	producer := typescript.New(typescript.Options{Sources: []string{"./src/a.ts"}, SourceLinks: "links.json"})
-	s := engine.Open(opts, producer)
+	s, err := engine.Open(opts, producer)
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer s.Close()
 	result, err := s.Check(ctx)
 	if err != nil || len(result.Diagnostics) != 1 || result.Diagnostics[0].Message != "finding" {
