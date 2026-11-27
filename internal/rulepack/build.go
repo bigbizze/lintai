@@ -14,6 +14,8 @@ import (
 	"github.com/bigbizze/lintai/internal/atomicfile"
 	"github.com/dop251/goja"
 	"github.com/evanw/esbuild/pkg/api"
+	"golang.org/x/text/cases"
+	"golang.org/x/text/unicode/norm"
 )
 
 const Path = ".lintai/rules.json"
@@ -30,12 +32,21 @@ type Entry struct {
 	Code  string `json:"code"`
 }
 
-func validateName(name string) error {
+type entryNames map[string]struct{}
+
+func (names entryNames) add(name string) error {
 	if !fs.ValidPath(name) || name == "." || strings.ContainsAny(name, "\\:\x00") || strings.EqualFold(strings.Split(name, "/")[0], ".lintai") {
 		return fmt.Errorf("invalid rule entry %q: expected a portable workspace-relative file name", name)
 	}
-	_, err := filepath.Localize(name)
-	return err
+	if _, err := filepath.Localize(name); err != nil {
+		return err
+	}
+	key := cases.Fold().String(norm.NFC.String(name))
+	if _, exists := names[key]; exists {
+		return fmt.Errorf("duplicate or case-colliding rule entry %q", name)
+	}
+	names[key] = struct{}{}
+	return nil
 }
 
 func Build(ctx context.Context, root string, names []string) error {
@@ -58,19 +69,16 @@ func Build(ctx context.Context, root string, names []string) error {
 	}
 	pack := Pack{Format: Format, ABI: ABI, Entries: make([]Entry, 0, len(names))}
 	names = slices.Sorted(slices.Values(names))
-	seen := make(map[string]bool)
+	seen := make(entryNames)
+	for _, name := range names {
+		if err := seen.add(name); err != nil {
+			return err
+		}
+	}
 	for _, name := range names {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := validateName(name); err != nil {
-			return err
-		}
-		key := strings.ToLower(name)
-		if seen[key] {
-			return fmt.Errorf("duplicate or case-colliding rule entry %q", name)
-		}
-		seen[key] = true
 		if info, err := workspace.Stat(filepath.FromSlash(name)); err != nil {
 			return fmt.Errorf("rule entry %s: %w", name, err)
 		} else if !info.Mode().IsRegular() {

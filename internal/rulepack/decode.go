@@ -28,7 +28,7 @@ func Decode(data []byte) (Pack, error) {
 				return err
 			}
 			pack.Entries = []Entry{}
-			seen := make(map[string]bool)
+			seen := make(entryNames)
 			for d.More() {
 				var record Entry
 				err := object(d, func(key string) error {
@@ -44,16 +44,12 @@ func Decode(data []byte) (Pack, error) {
 				if err != nil {
 					return err
 				}
-				if err := validateName(record.Entry); err != nil {
+				if err := seen.add(record.Entry); err != nil {
 					return err
 				}
 				if record.Code == "" {
 					return fmt.Errorf("missing executable code for %s", record.Entry)
 				}
-				if seen[strings.ToLower(record.Entry)] {
-					return fmt.Errorf("duplicate rule entry %q", record.Entry)
-				}
-				seen[strings.ToLower(record.Entry)] = true
 				pack.Entries = append(pack.Entries, record)
 			}
 			return delimiter(d, ']')
