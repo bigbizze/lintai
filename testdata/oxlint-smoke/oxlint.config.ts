@@ -8,7 +8,6 @@ export default defineConfig({
 		{
 			files: ["lintai-rules/**/*.ts"],
 			rules: {
-				"lintai/require-rule-shape": "error",
 				"lintai/no-ambient-in-pure-phase": "error",
 				"lintai/no-top-level-node-imports": "error",
 			},

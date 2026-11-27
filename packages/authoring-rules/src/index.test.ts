@@ -16,10 +16,6 @@ type AuthoringCases = {
 	invalid: Array<{ code: string; errors: Array<{ message: string }> }>;
 };
 
-const ruleShape = `import { dl, rule } from "@lintai/sdk";
-export default rule("arch.x").version(1).program(dl\`Decl violation(Fn). violation(Fn) :- ts.fn_async(Fn).\`).report("violation").message(() => "x");
-`;
-
 const authoringCases: Record<keyof typeof authoringRules, AuthoringCases> = {
 	"no-ambient-in-pure-phase": {
 		valid: [
@@ -55,15 +51,6 @@ const authoringCases: Record<keyof typeof authoringRules, AuthoringCases> = {
 						message: 'Top-level Node built-in import "node:fs" is not allowed in pure rule modules',
 					},
 				],
-			},
-		],
-	},
-	"require-rule-shape": {
-		valid: [ruleShape],
-		invalid: [
-			{
-				code: ruleShape.replace('.message(() => "x")', ""),
-				errors: [{ message: "Rule default export must include .message(" }],
 			},
 		],
 	},

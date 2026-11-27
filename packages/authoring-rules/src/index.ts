@@ -53,32 +53,6 @@ const noAmbientInPurePhase: Rule.RuleModule = {
 	},
 };
 
-const requireRuleShape: Rule.RuleModule = {
-	meta: {
-		type: "problem",
-		docs: {
-			description: "require default rule exports to define version/program/report/message",
-		},
-		schema: [],
-	},
-	create(context) {
-		return {
-			ExportDefaultDeclaration(node) {
-				const source = context.sourceCode.getText(node.declaration as never);
-				for (const requiredCall of [".version(", ".program(", ".report(", ".message("]) {
-					if (source.includes(requiredCall)) {
-						continue;
-					}
-					context.report({
-						node,
-						message: `Rule default export must include ${requiredCall}`,
-					});
-				}
-			},
-		};
-	},
-};
-
 const noTopLevelNodeImports: Rule.RuleModule = {
 	meta: {
 		type: "problem",
@@ -106,5 +80,4 @@ const noTopLevelNodeImports: Rule.RuleModule = {
 export const rules = {
 	"no-ambient-in-pure-phase": noAmbientInPurePhase,
 	"no-top-level-node-imports": noTopLevelNodeImports,
-	"require-rule-shape": requireRuleShape,
 };
