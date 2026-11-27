@@ -17,6 +17,7 @@ import (
 // settings remain keyed by namespace so the command composition root can
 // select the appropriate implementation.
 type WorkspaceConfig struct {
+	Entries      []string
 	Exclude      []string
 	Include      []string
 	Sources      []string
@@ -111,6 +112,9 @@ func ResolveConfigPath(workspaceRoot, invocationDir, explicit string) (string, b
 
 func decodeWorkspaceTOML(input string, result *WorkspaceConfig) error {
 	var document struct {
+		Rules struct {
+			Entries []string `toml:"entries"`
+		} `toml:"rules"`
 		Workspace struct {
 			Exclude []string `toml:"exclude"`
 			Include []string `toml:"include"`
@@ -126,6 +130,8 @@ func decodeWorkspaceTOML(input string, result *WorkspaceConfig) error {
 	// accepts case-insensitive struct field matches and ignores unknown keys.
 	for _, key := range metadata.Keys() {
 		switch {
+		case len(key) == 1 && key[0] == "rules" && metadata.Type(key...) == "Hash":
+		case len(key) == 2 && key[0] == "rules" && key[1] == "entries":
 		case len(key) == 1 && (key[0] == "workspace" || key[0] == "producers"):
 		case len(key) == 2 && key[0] == "workspace" && metadata.Type(key...) != "Hash":
 			switch key[1] {
@@ -160,6 +166,7 @@ func decodeWorkspaceTOML(input string, result *WorkspaceConfig) error {
 			return fmt.Errorf("producer %q must state implementation", namespace)
 		}
 	}
+	result.Entries = document.Rules.Entries
 	result.Exclude = document.Workspace.Exclude
 	result.Include = document.Workspace.Include
 	result.Sources = document.Workspace.Sources

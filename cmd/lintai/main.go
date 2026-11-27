@@ -19,6 +19,7 @@ import (
 	"github.com/bigbizze/lintai/bundle"
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/engine"
+	"github.com/bigbizze/lintai/internal/rulepack"
 	"github.com/bigbizze/lintai/internal/workspace"
 	"github.com/bigbizze/lintai/observe"
 	"github.com/bigbizze/lintai/server"
@@ -67,6 +68,8 @@ func exitCode(err error, stderr io.Writer) int {
 func run(ctx context.Context, args []string, stdout io.Writer) error {
 	if len(args) > 0 {
 		switch args[0] {
+		case "build-rules":
+			return runBuildRules(ctx, args[1:])
 		case "check":
 			return runOnce(ctx, args[1:], stdout)
 		case "serve":
@@ -84,6 +87,22 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 		}
 	}
 	return runOnce(ctx, args, stdout)
+}
+
+func runBuildRules(ctx context.Context, args []string) error {
+	flags := flag.NewFlagSet("lintai build-rules", flag.ContinueOnError)
+	root := flags.String("workspace-root", ".", "workspace containing lintai.toml")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected build-rules arguments: %v", flags.Args())
+	}
+	config, err := workspace.LoadWorkspaceConfig(filepath.Join(*root, "lintai.toml"), false)
+	if err != nil {
+		return err
+	}
+	return rulepack.Build(ctx, *root, config.Entries)
 }
 
 func runSchema(ctx context.Context, args []string, stdout io.Writer) error {
