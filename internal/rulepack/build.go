@@ -46,6 +46,11 @@ func Build(ctx context.Context, root string, names []string) error {
 	if err != nil {
 		return err
 	}
+	workspace, err := os.OpenRoot(root)
+	if err != nil {
+		return err
+	}
+	defer workspace.Close()
 	output := filepath.Join(root, Path)
 	previous, err := atomicfile.Read(output)
 	if err != nil {
@@ -66,7 +71,7 @@ func Build(ctx context.Context, root string, names []string) error {
 			return fmt.Errorf("duplicate or case-colliding rule entry %q", name)
 		}
 		seen[key] = true
-		if info, err := os.Stat(filepath.Join(root, name)); err != nil {
+		if info, err := workspace.Stat(filepath.FromSlash(name)); err != nil {
 			return fmt.Errorf("rule entry %s: %w", name, err)
 		} else if !info.Mode().IsRegular() {
 			return fmt.Errorf("rule entry %s must be a regular file", name)
@@ -98,13 +103,34 @@ func compile(root, name string) (string, error) {
 		Target: api.ES2022, TsconfigRaw: `{"compilerOptions":{"useDefineForClassFields":true}}`,
 		Charset: api.CharsetASCII, LegalComments: api.LegalCommentsNone, MinifyWhitespace: true,
 		PreserveSymlinks: true, LogLevel: api.LogLevelSilent,
-		LogOverride: map[string]api.LogLevel{"indirect-require": api.LogLevelError, "require-resolve-not-external": api.LogLevelError, "unsupported-require-call": api.LogLevelError, "unsupported-dynamic-import": api.LogLevelError, "unhandled-require": api.LogLevelError, "unhandled-dynamic-import": api.LogLevelError},
+		Metafile:    true,
+		LogOverride: map[string]api.LogLevel{"indirect-require": api.LogLevelError, "require-resolve-not-external": api.LogLevelError, "unsupported-require-call": api.LogLevelError, "unsupported-dynamic-import": api.LogLevelError},
 	})
 	if len(result.Errors) > 0 {
 		return "", fmt.Errorf("build %s: %s", name, strings.Join(api.FormatMessages(result.Errors, api.FormatMessagesOptions{Kind: api.ErrorMessage}), ""))
 	}
 	if len(result.OutputFiles) != 1 {
 		return "", fmt.Errorf("build %s: expected one JavaScript output", name)
+	}
+	// esbuild can leave optional imports unresolved (for example a literal
+	// require inside a try block) without issuing a build error.
+	var meta struct {
+		Outputs map[string]struct {
+			Imports []struct {
+				Path     string
+				External bool
+			}
+		}
+	}
+	if err := json.Unmarshal([]byte(result.Metafile), &meta); err != nil {
+		return "", err
+	}
+	for _, out := range meta.Outputs {
+		for _, imp := range out.Imports {
+			if imp.External {
+				return "", fmt.Errorf("build %s: unsupported runtime import %q", name, imp.Path)
+			}
+		}
 	}
 	code := string(result.OutputFiles[0].Contents)
 	if _, err := goja.Compile(name, code, false); err != nil {

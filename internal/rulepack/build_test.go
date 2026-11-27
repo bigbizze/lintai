@@ -50,7 +50,7 @@ func TestBuildPublishesCompletePortablePack(t *testing.T) {
 		if err != nil || v.String() != "a\r\nb" {
 			t.Fatalf("JSON import %v %v", v, err)
 		}
-		for _, source := range []string{"import 'missing-dependency'", "export default name=>require(name)", "export default name=>import(name)", "import fs from 'node:fs'; export default fs"} {
+		for _, source := range []string{"import 'missing-dependency'", "export default name=>require(name)", "export default name=>import(name)", "export default () => { try {return require('missing')} catch { return {} } }", "import fs from 'node:fs'; export default fs"} {
 			write(t, root, "a.ts", source)
 			if err := Build(t.Context(), root, entries); err == nil || !strings.Contains(err.Error(), "a.ts") {
 				t.Fatalf("expected named build failure: %s: %v", source, err)
@@ -80,5 +80,16 @@ func TestRejectsMalformedEnvelopes(t *testing.T) {
 		if _, err := Decode(data); err == nil {
 			t.Errorf("accepted %s", data)
 		}
+	}
+}
+
+func TestBuildIgnoresApplicationResolutionSettings(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, "tsconfig.json", `{"compilerOptions":{"baseUrl":".","paths":{"policy":["local.ts"]}}}`)
+	write(t, root, "local.ts", "export default 42")
+	write(t, root, "entry.ts", "export { default } from 'policy'")
+	err := Build(t.Context(), root, []string{"entry.ts"})
+	if err == nil || !strings.Contains(err.Error(), "policy") {
+		t.Fatalf("ambient tsconfig alias was accepted: %v", err)
 	}
 }
