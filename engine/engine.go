@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	goruntime "runtime"
 	"sort"
 	"strings"
@@ -11,40 +10,25 @@ import (
 	"sync/atomic"
 
 	"github.com/bigbizze/lintai/backend"
-	"github.com/bigbizze/lintai/bundle"
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/facts"
+	"github.com/bigbizze/lintai/internal/workspace"
 	"github.com/bigbizze/lintai/observe"
 	"github.com/bigbizze/lintai/suppressions"
-	"github.com/bmatcuk/doublestar/v4"
 )
+
+type RulePolicy = workspace.RulePolicy
 
 type Options struct {
 	RepoRoot      string
-	AssetRoot     string
 	WorkspaceRoot string
-	RuleGlobs     []string
-	Env           map[string]any
-	// Severity is the severity of a violation of a rule that RuleSeverity
-	// does not name. The default is error.
-	Severity diagnostics.Severity
-	// RuleSeverity maps a rule id to error, warning or off. A rule with off
-	// is not evaluated. An id that matches no rule is a rule error with
-	// phase config, so a typo does not go unnoticed.
-	RuleSeverity map[string]diagnostics.Severity
-	FactLimit    int
+	Rule          map[string]RulePolicy
+	FactLimit     int
 	// RuleWorkers bounds concurrent rule jobs. Zero selects GOMAXPROCS.
 	RuleWorkers int
 	Explain     bool
-	// RulesLock is the path of a rules lock file. When it is set, a rule
-	// whose bundle inputs differ from the lock, a rule that is not in the
-	// lock and a locked rule that no longer exists are rule errors with
-	// phase integrity, and setup() does not run for them. require() in
-	// setup() is then limited to Node built-ins other than module and vm.
+	// RulesLock selects an approved pack, effective policy and suppression ceiling.
 	RulesLock string
-	// SetupSandbox selects whether setup() runs under the Node permission
-	// model. The default is on.
-	SetupSandbox bundle.SetupSandbox
 	// SuppressionsLocation is the path of the suppressions file, relative
 	// to the workspace root when it is not absolute. The default is
 	// lintai-suppressions.json at the workspace root. A missing file at
@@ -108,20 +92,18 @@ type Session struct {
 }
 
 type executionStats struct {
-	bundleArtifacts atomic.Int64
-	gojaRuntimes    atomic.Int64
-	programBuilds   atomic.Int64
-	mangleCompiles  atomic.Int64
-	activeJobs      atomic.Int64
-	peakActiveJobs  atomic.Int64
+	gojaRuntimes   atomic.Int64
+	programBuilds  atomic.Int64
+	mangleCompiles atomic.Int64
+	activeJobs     atomic.Int64
+	peakActiveJobs atomic.Int64
 }
 
 type executionObservation struct {
-	bundleArtifacts int64
-	gojaRuntimes    int64
-	programBuilds   int64
-	mangleCompiles  int64
-	peakActiveJobs  int64
+	gojaRuntimes   int64
+	programBuilds  int64
+	mangleCompiles int64
+	peakActiveJobs int64
 }
 
 // Open creates a session with resolved producer instances and default options.
@@ -183,11 +165,10 @@ func (e *Session) beginCheck(parent context.Context) (context.Context, func(), e
 
 func (e *Session) executionObservation() executionObservation {
 	return executionObservation{
-		bundleArtifacts: e.stats.bundleArtifacts.Load(),
-		gojaRuntimes:    e.stats.gojaRuntimes.Load(),
-		programBuilds:   e.stats.programBuilds.Load(),
-		mangleCompiles:  e.stats.mangleCompiles.Load(),
-		peakActiveJobs:  e.stats.peakActiveJobs.Load(),
+		gojaRuntimes:   e.stats.gojaRuntimes.Load(),
+		programBuilds:  e.stats.programBuilds.Load(),
+		mangleCompiles: e.stats.mangleCompiles.Load(),
+		peakActiveJobs: e.stats.peakActiveJobs.Load(),
 	}
 }
 
@@ -306,17 +287,31 @@ func (e *Session) clearCurrent() {
 // runAndPublish is called with checkMu held and a registered active context.
 func (e *Session) runAndPublish(checkCtx context.Context, options Options, key string, mode observe.Mode) (*publishedResult, error) {
 	state, err := loadSuppressions(options)
+	var result Result
+	var run runInfo
+	var evidence executionEvidence
 	if err != nil {
-		return nil, err
-	}
-	result, run, evidence, err := e.analyzeWithEvidence(checkCtx, options, mode)
-	if err != nil {
-		return nil, err
+		if options.RulesLock == "" {
+			return nil, err
+		}
+		if usage := validateSuppressionsOptions(options); usage != nil {
+			return nil, usage
+		}
+		result.Diagnostics = []diagnostics.Diagnostic{errorDiagnostic("rules-lock", "integrity", 0, "", nil, err.Error())}
+		err = nil
+	} else {
+		result, run, evidence, err = e.analyzeWithEvidence(checkCtx, options, mode, state)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if err := checkCtx.Err(); err != nil {
 		return nil, err
 	}
-	write, err := applySuppressions(options, state, run, evidence, &result)
+	var write *suppressionWrite
+	if run.lock != nil || options.RulesLock == "" {
+		write, err = applySuppressions(options, state, run, evidence, &result)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -396,7 +391,7 @@ func cloneResult(result Result) Result {
 	return result
 }
 
-func (e *Session) analyzeWithEvidence(ctx context.Context, options Options, mode observe.Mode) (Result, runInfo, executionEvidence, error) {
+func (e *Session) analyzeWithEvidence(ctx context.Context, options Options, mode observe.Mode, state suppressionsState) (Result, runInfo, executionEvidence, error) {
 	run := runInfo{
 		evaluated:  make(map[string]struct{}),
 		completed:  make(map[string]struct{}),
@@ -408,99 +403,57 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options, mode
 	if err := ctx.Err(); err != nil {
 		return Result{}, run, evidence, err
 	}
-	sandboxMode, err := bundle.ParseSetupSandbox(string(options.SetupSandbox))
+	integrity := func(err error) (Result, runInfo, executionEvidence, error) {
+		evidence.reusable = false
+		return Result{Diagnostics: []diagnostics.Diagnostic{errorDiagnostic("rules-lock", "integrity", 0, "", nil, err.Error())}}, run, evidence, nil
+	}
+	producerCatalog, err := e.describeProducers()
 	if err != nil {
 		return Result{}, run, evidence, err
 	}
-	sandbox := sandboxMode == bundle.SetupSandboxOn
-	var lock *RulesLock
-	if options.RulesLock != "" {
-		loaded, err := ReadRulesLock(ResolveRulesLockPath(options.WorkspaceRoot, options.RulesLock))
-		if err != nil {
-			return Result{}, run, evidence, err
+	ruleCatalog, err := openRuleCatalog(ctx, options.WorkspaceRoot, e)
+	if err != nil {
+		if options.RulesLock != "" {
+			return integrity(err)
 		}
-		lock = &loaded
-		run.lock = lock
-		evidence.observations = observe.Union(evidence.observations, lock.observations)
-	}
-	ruleCatalog, catalogErr := openRuleCatalogWithEntries(ctx, options, e, lock, mode)
-	if catalogErr != nil && ruleCatalog == nil {
-		return Result{}, run, evidence, catalogErr
-	}
-	if ruleCatalog == nil {
-		return Result{}, run, evidence, fmt.Errorf("could not create rule catalog")
+		return Result{}, run, evidence, err
 	}
 	defer ruleCatalog.close()
-	inputSets := []observe.Set{evidence.observations, ruleCatalog.observations}
-	bundled := 0
-	for _, rule := range ruleCatalog.rules {
-		if rule.bundled {
-			bundled++
-			inputSets = append(inputSets, rule.artifact.Observations)
-		}
-	}
-	evidence.observations = observe.Union(inputSets...)
-	evidence.reusable = bundled == len(ruleCatalog.rules)
-	e.stats.bundleArtifacts.Add(int64(ruleCatalog.bundleBuilds))
-	if len(ruleCatalog.rules) == 0 {
-		e.currentFacts = nil
-		catalog, err := e.describeProducers()
+	evidence.observations = ruleCatalog.observations
+	if options.RulesLock != "" {
+		lock, err := ReadRulesLock(ResolveRulesLockPath(options.WorkspaceRoot, options.RulesLock))
 		if err != nil {
-			return Result{}, run, evidence, err
+			return integrity(err)
 		}
-		assembled, emptyErr := catalog.collect(ctx, options, nil, nil, mode)
-		if emptyErr != nil {
-			return Result{}, run, evidence, emptyErr
+		if err := lock.verify(options, ruleCatalog.digest, producerCatalog); err != nil {
+			return integrity(err)
 		}
-		evidence.observations = observe.Union(evidence.observations, assembled.observations)
-		evidence.reusable = evidence.reusable && assembled.reusableFromObservations
-		inventory, complete := preMetadataIntegrity(ruleCatalog, lock, options.WorkspaceRoot, assembled.snapshotID)
-		run.complete = complete
-		run.files = make(map[string]struct{})
-		run.snapshotVersion = assembled.snapshotID
-		result := Result{Diagnostics: append([]diagnostics.Diagnostic{}, inventory...), SnapshotVersion: assembled.snapshotID}
-		sortDiagnostics(result.Diagnostics)
-		return result, run, evidence, nil
+		if _, failures := suppressions.Limit(state.file, lock.Suppressions); len(failures) > 0 {
+			evidence.reusable = false
+			items := allowanceDiagnostics(state.path, failures, "", nil)
+			sortDiagnostics(items)
+			return Result{Diagnostics: items}, run, evidence, nil
+		}
+		run.lock = &lock
+		evidence.observations = observe.Union(evidence.observations, lock.observations)
 	}
 	assembled, err := emptyComposedFacts()
 	if err != nil {
 		return Result{}, run, evidence, err
 	}
 	result := Result{Diagnostics: []diagnostics.Diagnostic{}, SnapshotVersion: assembled.snapshotID}
-	if catalogErr != nil {
-		for _, rule := range ruleCatalog.rules {
-			failure := rule.bundleError
-			if failure == nil {
-				failure = catalogErr
-			}
-			bundleDiagnostic(rule, failure, assembled.snapshotID)
-		}
-		result.Diagnostics = catalogDiagnostics(ruleCatalog, nil)
-		sortDiagnostics(result.Diagnostics)
-		return result, run, evidence, nil
-	}
 	run.complete = true
+	e.stats.gojaRuntimes.Add(int64(len(ruleCatalog.rules)))
+	if err := ruleCatalog.loadMetadata(ctx, true); err != nil {
+		return Result{}, run, evidence, err
+	}
+	knownRules, loaded := classifyRuleIDs(ruleCatalog, assembled.snapshotID)
+	result.RulesLoaded = loaded
+	e.generateRulePrograms(ruleCatalog, options, assembled.snapshotID)
 	for _, rule := range ruleCatalog.rules {
-		if rule.bundleError != nil {
-			bundleDiagnostic(rule, rule.bundleError, assembled.snapshotID)
+		if rule.loadError != nil {
 			run.complete = false
 		}
-	}
-
-	// The two integrity barriers surround metadata loading; duplicate analysis
-	// deliberately sees partial and unapproved IDs before eligibility is set.
-	inventory, integrityComplete := preMetadataIntegrity(ruleCatalog, lock, options.WorkspaceRoot, assembled.snapshotID)
-	run.complete = run.complete && integrityComplete
-	e.stats.gojaRuntimes.Add(int64(ruleCatalog.loadMetadata(true)))
-	integrityComplete = postMetadataIntegrity(ruleCatalog, lock, options.WorkspaceRoot, assembled.snapshotID)
-	run.complete = run.complete && integrityComplete
-	knownRules, loaded := classifyRuleIDs(ruleCatalog, options.WorkspaceRoot, assembled.snapshotID)
-	result.RulesLoaded = loaded
-	prepareRuleConfigs(ctx, ruleCatalog, options, sandbox, lock != nil, assembled.snapshotID, &run)
-	e.generateRulePrograms(ruleCatalog, assembled.snapshotID)
-	producerCatalog, err := e.describeProducers()
-	if err != nil {
-		return Result{}, run, evidence, err
 	}
 	e.prepareRulePlans(ruleCatalog, producerCatalog, assembled.snapshotID)
 	jobs, requested := ruleRelationDemand(ruleCatalog)
@@ -546,10 +499,8 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options, mode
 			rule.disposition = ruleFailed
 		}
 	}
-	allDiagnostics := catalogDiagnostics(ruleCatalog, inventory)
-	if run.complete {
-		allDiagnostics = append(allDiagnostics, unknownSeverityRules(options, knownRules, assembled.snapshotID, producerNames)...)
-	}
+	allDiagnostics := catalogDiagnostics(ruleCatalog, nil)
+	allDiagnostics = append(allDiagnostics, unknownPolicyRules(options, knownRules, assembled.snapshotID, producerNames)...)
 	restampDiagnostics(allDiagnostics, assembled.snapshotID, producerNames)
 	sortDiagnostics(allDiagnostics)
 	result.Diagnostics = allDiagnostics
@@ -577,7 +528,11 @@ func assembleSeverity(options Options, result *Result, run *runInfo) {
 // analyze remains a small package-private convenience for the tests that
 // exercise diagnostics and run eligibility without inspecting typed outcomes.
 func (e *Session) analyze(ctx context.Context, options Options) (Result, runInfo, error) {
-	result, run, _, err := e.analyzeWithEvidence(ctx, options, observe.Full)
+	state, err := loadSuppressions(options)
+	if err != nil {
+		return Result{}, runInfo{}, err
+	}
+	result, run, _, err := e.analyzeWithEvidence(ctx, options, observe.Full, state)
 	return result, run, err
 }
 
@@ -601,7 +556,10 @@ type executionEvidence struct {
 }
 
 func (rule *ruleRecord) release() {
-	rule.loaded = nil
+	if rule.loaded != nil {
+		rule.loaded.Close()
+		rule.loaded = nil
+	}
 	rule.plan = nil
 }
 
@@ -741,7 +699,7 @@ func ruleIDOrPath(ruleID, rulePath string) string {
 	if ruleID != "" {
 		return ruleID
 	}
-	return filepath.Base(rulePath)
+	return rulePath
 }
 
 func restampDiagnostics(items []diagnostics.Diagnostic, snapshotID string, namespaces []string) {
@@ -751,23 +709,16 @@ func restampDiagnostics(items []diagnostics.Diagnostic, snapshotID string, names
 	}
 }
 
-// severityOf returns the configured severity of a rule: its RuleSeverity
-// entry, else Options.Severity, else error.
-func severityOf(options Options, ruleID string) diagnostics.Severity {
-	if severity, ok := options.RuleSeverity[ruleID]; ok {
-		return severity
-	}
-	if options.Severity != "" {
-		return options.Severity
+func severityOf(options Options, id string) diagnostics.Severity {
+	if level := options.Rule[id].Severity; level != "" {
+		return diagnostics.Severity(level)
 	}
 	return diagnostics.SeverityError
 }
 
-// unknownSeverityRules reports each RuleSeverity id that names no loaded
-// rule, so that a misspelled id does not leave a rule at its default.
-func unknownSeverityRules(options Options, known map[string]struct{}, snapshotVersion string, producers []string) []diagnostics.Diagnostic {
+func unknownPolicyRules(options Options, known map[string]struct{}, snapshotVersion string, producers []string) []diagnostics.Diagnostic {
 	ids := make([]string, 0)
-	for id := range options.RuleSeverity {
+	for id := range options.Rule {
 		if _, ok := known[id]; !ok {
 			ids = append(ids, id)
 		}
@@ -775,7 +726,7 @@ func unknownSeverityRules(options Options, known map[string]struct{}, snapshotVe
 	sort.Strings(ids)
 	result := make([]diagnostics.Diagnostic, 0, len(ids))
 	for _, id := range ids {
-		result = append(result, errorDiagnostic(id, "config", 0, snapshotVersion, producers, fmt.Sprintf("severity is configured for rule %q, but no loaded rule has this id", id)))
+		result = append(result, errorDiagnostic(id, "config", 0, snapshotVersion, producers, fmt.Sprintf("policy is configured for rule %q, but no loaded rule has this id", id)))
 	}
 	return result
 }
@@ -842,57 +793,4 @@ func errorDiagnostic(ruleID, phase string, ruleVersion int, snapshotVersion stri
 			ProducerNamespaces: append([]string(nil), producers...),
 		},
 	}
-}
-
-func discoverRulePaths(root string, patterns []string, allowEmptyForLock bool) ([]string, observe.Set, error) {
-	discovered := make(map[string]struct{})
-	// Defer an unmatched-glob error only to compare a wholly empty inventory
-	// with the existing lock; mixed matching and unmatched globs still fail.
-	var unmatched error
-	var records []observe.Record
-	for _, pattern := range patterns {
-		pattern = strings.TrimSpace(pattern)
-		if pattern == "" {
-			continue
-		}
-		prefix := root
-		glob := pattern
-		if filepath.IsAbs(pattern) {
-			prefix = "/"
-			glob = strings.TrimPrefix(filepath.ToSlash(pattern), "/")
-		}
-		capture := &discoveryFS{root: prefix, records: &records}
-		matches, err := doublestar.Glob(capture, glob, doublestar.WithFailOnIOErrors())
-		if err != nil {
-			if unmatched != nil {
-				return nil, observe.Set{}, unmatched
-			}
-			return nil, observe.Set{}, err
-		}
-		if len(matches) == 0 {
-			if unmatched == nil {
-				unmatched = fmt.Errorf("rule glob %q matched no files (relative globs resolve from the workspace root %s)", pattern, root)
-			}
-			if !allowEmptyForLock {
-				return nil, observe.Set{}, unmatched
-			}
-			continue
-		}
-		for _, match := range matches {
-			discovered[filepath.Join(prefix, filepath.FromSlash(match))] = struct{}{}
-		}
-	}
-	if unmatched != nil && len(discovered) > 0 {
-		return nil, observe.Set{}, unmatched
-	}
-	results := make([]string, 0, len(discovered))
-	for path := range discovered {
-		results = append(results, path)
-	}
-	sort.Strings(results)
-	observations, err := observe.New(records)
-	if err != nil {
-		return nil, observe.Set{}, err
-	}
-	return results, observations, nil
 }

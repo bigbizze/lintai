@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/bigbizze/lintai/internal/testpack"
 )
 
 // The goldens pin the facts and diagnostics that the TypeScript extraction
@@ -30,8 +32,7 @@ func TestGoldenParity(t *testing.T) {
 		{"npm-smoke-facts-tsconfig.txt", []string{"facts", "--workspace-root", smoke}, exitClean, nil},
 		{"npm-smoke-facts-walk.txt", []string{"facts", "--workspace-root", smoke, "--files", "walk"}, exitClean, nil},
 		{"workspace-diagnostics.json", []string{
-			"--json", "--repo-root", repoRoot, "--workspace-root", workspace,
-			"--rules", filepath.Join(repoRoot, "testdata/fixtures/rules/*.ts"),
+			"--json", "--repo-root", repoRoot, "--workspace-root", testpack.Build(t, repoRoot, workspace, filepath.Join(repoRoot, "testdata/fixtures/rules/*.ts")),
 		}, exitViolations, stripSnapshotVersions},
 	}
 	update := os.Getenv("LINTAI_UPDATE_GOLDEN") == "1"

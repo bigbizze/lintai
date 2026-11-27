@@ -11,6 +11,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bigbizze/lintai/internal/testpack"
 	"github.com/bigbizze/lintai/jsonrpc"
 	"github.com/bigbizze/lintai/server"
 )
@@ -22,7 +23,7 @@ func TestServeConfigurationAndRPCRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root, ambient := t.TempDir(), filepath.Join(t.TempDir(), "prepare.txt")
+	root := t.TempDir()
 	write := func(path, contents string) {
 		t.Helper()
 		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -35,13 +36,11 @@ func TestServeConfigurationAndRPCRecovery(t *testing.T) {
 	write(filepath.Join(root, "a.ts"), "export const a = 1;\n")
 	write(filepath.Join(root, "b.ts"), "export const b = 2;\n")
 	write(filepath.Join(root, "links.json"), `{ "version": 1, "entries": [] }`)
-	write(ambient, "on")
 	rulePath := filepath.Join(root, "rules", "example.ts")
-	rule := fmt.Sprintf(`import { dl, rule } from "@lintai/sdk";
+	rule := `import { dl, rule } from "@lintai/sdk";
 export default rule("example.modules").version(1)
-  .setup(() => ({ on: require("node:fs").readFileSync(%q, "utf8") === "on" }))
-  .program(({setup}) => setup.on ? dl`+"`"+`Decl violation(M). violation(M) :- ts.module(M).`+"`"+` : dl`+"`"+`Decl violation(M). violation(M) :- ts.module_path(M, "never.ts").`+"`"+`)
-  .report("violation").message(() => "module");`, ambient)
+  .program(({env}) => env.on !== false ? dl` + "`" + `Decl violation(M). violation(M) :- ts.module(M).` + "`" + ` : dl` + "`" + `Decl violation(M). violation(M) :- ts.module_path(M, "never.ts").` + "`" + `)
+  .report("violation").message(() => "module");`
 	write(rulePath, rule)
 	configPath := filepath.Join(root, "lintai.toml")
 	config := func(exclude string) string {
@@ -97,7 +96,7 @@ export default rule("example.modules").version(1)
 	}
 	file := func(name string) server.FilesDiagnosticsResult { return batch(name) }
 
-	init := call("initialize", server.InitializeParams{RepoRoot: repo, AssetRoot: filepath.Join(repo, "packages/client"), WorkspaceRoot: root, RuleGlobs: []string{rulePath}, SetupSandbox: "off", RuleWorkers: 1, Files: "walk"})
+	init := call("initialize", server.InitializeParams{RepoRoot: repo, WorkspaceRoot: testpack.Build(t, repo, root, rulePath), RuleWorkers: 1, Files: "walk"})
 	if init.Error != nil || composition == nil || composition.session != nil {
 		t.Fatalf("handshake analyzed: %+v", init)
 	}
@@ -149,24 +148,19 @@ export default rule("example.modules").version(1)
 	if got := batch("a.ts", "b.ts"); len(got.Files[0].Diagnostics) != 0 || len(got.Files[1].Diagnostics) != 1 {
 		t.Fatalf("configuration recovery: %+v", got)
 	}
-	write(ambient, "off")
-	if got := file("b.ts"); len(got.Files[0].Diagnostics) != 1 {
-		t.Fatalf("unobserved preparation input refreshed automatically: %+v", got)
-	}
-	forced := call("reanalyze", map[string]any{"reason": "ambient changed", "ruleWorkers": 2})
-	if forced.Error != nil {
-		t.Fatalf("reanalyze: %+v", forced.Error)
-	}
+	write(configPath, config("a.ts")+"[rule.\"example.modules\"]\noptions = {on = false}\n")
 	if got := file("b.ts"); len(got.Files[0].Diagnostics) != 0 {
-		t.Fatalf("forced preparation did not rerun: %+v", got)
+		t.Fatalf("options edit: %+v", got)
 	}
-	write(ambient, "on")
-	write(rulePath, "export default (\n")
-	if got := batch("a.ts", "b.ts"); len(got.Problems) == 0 {
-		t.Fatalf("syntax error not reported: %+v", got)
+	write(configPath, config("a.ts"))
+	write(rulePath, "export default {}")
+	testpack.Build(t, repo, root, rulePath)
+	if got := file("b.ts"); len(got.Problems) == 0 {
+		t.Fatalf("invalid rule: %+v", got)
 	}
 	write(rulePath, rule)
-	if got := batch("a.ts", "b.ts"); len(got.Files[1].Diagnostics) != 1 || len(got.Problems) != 0 {
+	testpack.Build(t, repo, root, rulePath)
+	if got := file("b.ts"); len(got.Files[0].Diagnostics) != 1 {
 		t.Fatalf("rule recovery: %+v", got)
 	}
 	previous := composition.session

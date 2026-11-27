@@ -2,6 +2,20 @@
   {
     "assertion_id": "default",
     "diagnostic_kind": "rule_execution_error",
+    "message": "invalid options",
+    "phase": "config",
+    "provenance": {
+      "producer_namespaces": [
+        "catalog"
+      ],
+      "rule_version": 1
+    },
+    "rule_id": "fixture.config",
+    "severity": "error"
+  },
+  {
+    "assertion_id": "default",
+    "diagnostic_kind": "rule_execution_error",
     "message": "rule id \"fixture.duplicate\" is used by more than one rule file (lintai-rules/duplicate.ts, lintai-rules/partial.ts); each rule needs its own id",
     "phase": "config",
     "provenance": {
@@ -16,8 +30,8 @@
   {
     "assertion_id": "default",
     "diagnostic_kind": "rule_execution_error",
-    "message": "rule is missing program()",
-    "phase": "setup",
+    "message": "rule id \"fixture.duplicate\" is used by more than one rule file (lintai-rules/duplicate.ts, lintai-rules/partial.ts); each rule needs its own id",
+    "phase": "config",
     "provenance": {
       "producer_namespaces": [
         "catalog"
@@ -30,43 +44,29 @@
   {
     "assertion_id": "default",
     "diagnostic_kind": "rule_execution_error",
-    "message": "fixture setup failure",
-    "phase": "setup",
+    "message": "lintai-rules/partial.ts: rule is missing program()",
+    "phase": "load",
     "provenance": {
       "producer_namespaces": [
         "catalog"
       ],
       "rule_version": 1
     },
-    "rule_id": "fixture.setup",
+    "rule_id": "fixture.duplicate",
     "severity": "error"
   },
   {
     "assertion_id": "default",
     "diagnostic_kind": "rule_execution_error",
-    "message": "rule lintai-rules/partial.ts is not in the rules lock; review it and run lintai lock",
-    "phase": "integrity",
+    "message": "lintai-rules/broken.ts: initialization failed",
+    "phase": "load",
     "provenance": {
       "producer_namespaces": [
         "catalog"
       ],
       "rule_version": 0
     },
-    "rule_id": "lintai-rules/partial.ts",
-    "severity": "error"
-  },
-  {
-    "assertion_id": "default",
-    "diagnostic_kind": "rule_execution_error",
-    "message": "rule lintai-rules/rejected.ts is not in the rules lock; review it and run lintai lock",
-    "phase": "integrity",
-    "provenance": {
-      "producer_namespaces": [
-        "catalog"
-      ],
-      "rule_version": 0
-    },
-    "rule_id": "lintai-rules/rejected.ts",
+    "rule_id": "lintai-rules/broken.ts",
     "severity": "error"
   },
   {

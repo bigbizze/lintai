@@ -248,6 +248,14 @@ func covered(run runInfo, entry suppressions.Entry) bool {
 	schema, ok := run.assertions[entry.Rule][entry.Assertion.Name]
 	return ok && schema.arity == entry.Assertion.Arity
 }
+func allowanceDiagnostics(path string, failures []suppressions.LimitFailure, snapshot string, producers []string) []diagnostics.Diagnostic {
+	var items []diagnostics.Diagnostic
+	for _, failure := range failures {
+		items = append(items, errorDiagnostic(failure.RuleID, "integrity", 0, snapshot, producers, fmt.Sprintf("%s %s; review and run lintai lock", filepath.Base(path), failure.Message)))
+	}
+	return items
+}
+
 func applySuppressions(options Options, state suppressionsState, run runInfo, evidence executionEvidence, result *Result) (*suppressionWrite, error) {
 	result.SuppressionsPath = state.path
 	unknown := unknownSuppressRules(options, run)
@@ -322,11 +330,9 @@ func applySuppressions(options Options, state suppressionsState, run runInfo, ev
 	if err := suppressions.Validate(file); err != nil {
 		return nil, err
 	}
-	if run.lock != nil {
+	if writing && !blocked && run.lock != nil {
 		limited, failures := suppressions.Limit(file, run.lock.Suppressions)
-		for _, failure := range failures {
-			result.Diagnostics = append(result.Diagnostics, errorDiagnostic(failure.RuleID, "integrity", 0, run.snapshotVersion, run.producerNames, fmt.Sprintf("%s %s; review and run lintai lock", filepath.Base(state.path), failure.Message)))
-		}
+		result.Diagnostics = append(result.Diagnostics, allowanceDiagnostics(state.path, failures, run.snapshotVersion, run.producerNames)...)
 		if len(failures) > 0 {
 			blocked = true
 		}

@@ -16,9 +16,8 @@ import (
 	"codeberg.org/TauCeti/mangle-go/ast"
 	"codeberg.org/TauCeti/mangle-go/parse"
 	"github.com/bigbizze/lintai/backend/typescript"
-	"github.com/bigbizze/lintai/bundle"
 	"github.com/bigbizze/lintai/facts"
-	"github.com/bigbizze/lintai/runtime"
+	"github.com/bigbizze/lintai/internal/testpack"
 )
 
 type relationUsers struct {
@@ -171,7 +170,7 @@ func TestRelationCoverageInventory(t *testing.T) {
 	if len(groups) == 0 {
 		t.Fatal("no fixture rule files found")
 	}
-	assetRoot := filepath.Join(root, "packages", "client")
+
 	users := make(map[facts.Predicate]*relationUsers)
 	workspaces := make([]string, 0, len(groups))
 	for workspace := range groups {
@@ -180,41 +179,24 @@ func TestRelationCoverageInventory(t *testing.T) {
 	slices.Sort(workspaces)
 	for _, workspace := range workspaces {
 		paths := groups[workspace]
-		artifacts, buildFailures, err := bundle.BuildAll(context.Background(), assetRoot, root, workspace, t.TempDir(), paths)
+		packRoot := testpack.Build(t, root, t.TempDir(), paths...)
+		rules, err := openRuleCatalog(context.Background(), packRoot, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if len(buildFailures) != 0 {
-			t.Fatalf("bundle fixture rules in %s: %v", workspace, buildFailures)
-		}
-		prepared, prepareFailures, err := bundle.PrepareAll(context.Background(), assetRoot, root, workspace, artifacts, map[string]any{}, bundle.PrepareOptions{Sandbox: true})
-		if err != nil {
+		if err := rules.loadMetadata(context.Background(), true); err != nil {
 			t.Fatal(err)
 		}
-		if len(prepareFailures) != 0 {
-			t.Fatalf("prepare fixture rules in %s: %v", workspace, prepareFailures)
-		}
-		for _, path := range paths {
-			artifact, ok := artifacts[path]
-			if !ok {
-				t.Fatalf("no bundle for %s", path)
+		defer rules.close()
+		for _, entry := range rules.rules {
+			path := filepath.Join(filepath.Dir(paths[0]), filepath.Base(entry.path))
+			if entry.loadError != nil {
+				t.Fatalf("%s: %v", path, entry.loadError)
 			}
-			code, err := os.ReadFile(artifact.PureBundlePath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			inspection, err := runtime.InspectPureBundle(string(code))
-			if err != nil {
+			if err := entry.loaded.Configure(nil); err != nil {
 				t.Fatalf("%s: %v", path, err)
 			}
-			if !inspection.IsRule { // A shared rule module is counted through its consuming rule.
-				continue
-			}
-			ready, ok := prepared[path]
-			if !ok {
-				t.Fatalf("%s: no prepared rule", path)
-			}
-			output, err := inspection.Rule.Program(ready.Env, ready.Setup)
+			output, err := entry.loaded.Program()
 			if err != nil {
 				t.Fatalf("%s: %v", path, err)
 			}
@@ -226,7 +208,7 @@ func TestRelationCoverageInventory(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			roots := append(inspection.Metadata.Report, inspection.Metadata.ExpectNonEmpty...)
+			roots := append(entry.metadata.Report, entry.metadata.ExpectNonEmpty...)
 			collectRelationUsers(unit, roots, filepath.ToSlash(relative), catalog.sources, bases, byName, helpers, helperByName, users)
 		}
 	}

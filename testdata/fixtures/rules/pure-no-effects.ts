@@ -6,7 +6,7 @@ export const config = z.object({
 	pureDir: z.string().default("src/pure"),
 });
 
-export default rule("arch.pure-no-effects")
+export default rule<z.infer<typeof config>>("arch.pure-no-effects")
 	.version(1)
 	.program(
 		({ env }) => dl`

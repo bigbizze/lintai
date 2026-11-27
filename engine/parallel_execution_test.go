@@ -15,6 +15,7 @@ import (
 	"github.com/bigbizze/lintai/backend"
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/facts"
+	"github.com/bigbizze/lintai/internal/testpack"
 	"github.com/bigbizze/lintai/observe"
 )
 
@@ -37,7 +38,7 @@ func TestParallelRuleExecutionContract(t *testing.T) {
 	var entered atomic.Int64
 	releaseOverlap := make(chan struct{})
 	var releaseOnce sync.Once
-	parallelOptions := parallelFixtureOptions(repoRoot, workspace)
+	parallelOptions := parallelFixtureOptions(t, repoRoot, workspace)
 	parallelOptions.RuleWorkers = 2
 	parallelOptions.FactLimit = 8
 	parallelOptions.Explain = true
@@ -59,7 +60,7 @@ func TestParallelRuleExecutionContract(t *testing.T) {
 		}
 		active.Add(-1)
 	}
-	parallelResult, parallelRun, parallelEvidence, err := engine.analyzeWithEvidence(context.Background(), parallelOptions, observe.Full)
+	parallelResult, parallelRun, parallelEvidence, err := engine.analyzeWithEvidence(context.Background(), parallelOptions, observe.Full, suppressionsState{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,16 +69,16 @@ func TestParallelRuleExecutionContract(t *testing.T) {
 	}
 	assertParallelFixtureOutcomes(t, parallelResult, parallelRun, parallelEvidence)
 	firstObservation := engine.executionObservation()
-	if firstObservation.bundleArtifacts != 8 || firstObservation.gojaRuntimes != 8 || firstObservation.programBuilds != 7 || firstObservation.mangleCompiles != 7 || firstObservation.peakActiveJobs != 2 {
+	if firstObservation.gojaRuntimes != 8 || firstObservation.programBuilds != 7 || firstObservation.mangleCompiles != 7 || firstObservation.peakActiveJobs != 2 {
 		t.Fatalf("unexpected first-run execution observation: %+v", firstObservation)
 	}
-	t.Logf("R5 cold observation: bundle builds=%d, program builds=%d, Mangle plan compiles=%d, created facts=%v, peak active jobs=%d",
-		firstObservation.bundleArtifacts, firstObservation.programBuilds, firstObservation.mangleCompiles,
+	t.Logf("R5 cold observation: program builds=%d, Mangle plan compiles=%d, created facts=%v, peak active jobs=%d",
+		firstObservation.programBuilds, firstObservation.mangleCompiles,
 		parallelEvidence.createdFactCounts, firstObservation.peakActiveJobs)
 
 	var sequentialActive atomic.Int64
 	var sequentialPeak atomic.Int64
-	sequentialOptions := parallelFixtureOptions(repoRoot, workspace)
+	sequentialOptions := parallelFixtureOptions(t, repoRoot, workspace)
 	sequentialOptions.RuleWorkers = 1
 	sequentialOptions.FactLimit = 8
 	sequentialOptions.Explain = true
@@ -90,7 +91,7 @@ func TestParallelRuleExecutionContract(t *testing.T) {
 		}
 		sequentialActive.Add(-1)
 	}
-	sequentialResult, sequentialRun, sequentialEvidence, err := engine.analyzeWithEvidence(context.Background(), sequentialOptions, observe.Full)
+	sequentialResult, sequentialRun, sequentialEvidence, err := engine.analyzeWithEvidence(context.Background(), sequentialOptions, observe.Full, suppressionsState{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,14 +112,13 @@ func TestParallelRuleExecutionContract(t *testing.T) {
 		t.Fatalf("one-worker and multi-worker created-fact counts differ: parallel=%+v sequential=%+v", parallelEvidence.createdFactCounts, sequentialEvidence.createdFactCounts)
 	}
 	secondObservation := engine.executionObservation()
-	if secondObservation.bundleArtifacts != firstObservation.bundleArtifacts || secondObservation.mangleCompiles != firstObservation.mangleCompiles {
-		t.Fatalf("unchanged bundle artifacts or generated plans were rebuilt: first=%+v second=%+v", firstObservation, secondObservation)
+	if secondObservation.mangleCompiles != firstObservation.mangleCompiles {
+		t.Fatalf("unchanged generated plans were rebuilt: first=%+v second=%+v", firstObservation, secondObservation)
 	}
 	if secondObservation.gojaRuntimes != firstObservation.gojaRuntimes+8 || secondObservation.programBuilds != firstObservation.programBuilds+7 {
 		t.Fatalf("each run must generate programs in fresh rule runtimes: first=%+v second=%+v", firstObservation, secondObservation)
 	}
-	t.Logf("R5 unchanged observation delta: bundle builds=%d, program builds=%d, Mangle plan compiles=%d, peak active jobs=%d",
-		secondObservation.bundleArtifacts-firstObservation.bundleArtifacts,
+	t.Logf("R5 unchanged observation delta: program builds=%d, Mangle plan compiles=%d, peak active jobs=%d",
 		secondObservation.programBuilds-firstObservation.programBuilds,
 		secondObservation.mangleCompiles-firstObservation.mangleCompiles,
 		secondObservation.peakActiveJobs)
@@ -139,7 +139,7 @@ func TestParallelRuleExecutionCancellationJoinsBeforeClose(t *testing.T) {
 	dispatchFinished := make(chan struct{})
 	var active atomic.Int64
 	var peak atomic.Int64
-	options := parallelFixtureOptions(repoRoot, workspace)
+	options := parallelFixtureOptions(t, repoRoot, workspace)
 	options.RuleWorkers = 2
 	options.SuppressionsLocation = filepath.Join(t.TempDir(), "suppression-state.json")
 	options.SuppressAll = true
@@ -248,7 +248,7 @@ func assertParallelFixtureOutcomes(t *testing.T, result Result, run runInfo, evi
 	if got := byRule["fixture.message-failure"]; len(got) != 1 || got[0].Phase != "message" || !strings.Contains(got[0].Message, "second row failed") {
 		t.Fatalf("message failure did not discard that rule's partial findings: %+v", got)
 	}
-	if got := byRule["init-failure.ts"]; len(got) != 1 || got[0].DiagnosticKind != diagnostics.KindRuleExecutionError || got[0].Phase != "setup" || !strings.Contains(got[0].Message, "initialization failed") {
+	if got := byRule["lintai-rules/init-failure.ts"]; len(got) != 1 || got[0].DiagnosticKind != diagnostics.KindRuleExecutionError || got[0].Phase != "load" || !strings.Contains(got[0].Message, "initialization failed") {
 		t.Fatalf("module initialization failure did not produce an explicit rule error: %+v", got)
 	}
 	if len(evidence.findings) != 15 {
@@ -274,11 +274,9 @@ func assertParallelFixtureOutcomes(t *testing.T, result Result, run runInfo, evi
 	}
 }
 
-func parallelFixtureOptions(repoRoot, workspace string) Options {
+func parallelFixtureOptions(t *testing.T, repoRoot, workspace string) Options {
 	return Options{
-		RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages", "client"),
-		WorkspaceRoot: workspace, RuleGlobs: []string{"lintai-rules/**/*.ts"},
-		Env: map[string]any{}, Severity: diagnostics.SeverityError,
+		RepoRoot: repoRoot, WorkspaceRoot: testpack.Build(t, repoRoot, workspace, "lintai-rules/*.ts"),
 	}
 }
 

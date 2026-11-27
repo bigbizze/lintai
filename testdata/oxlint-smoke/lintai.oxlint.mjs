@@ -2,5 +2,5 @@ import { createLintaiPlugin } from "@lintai/oxlint-plugin";
 
 export default createLintaiPlugin({
 	workspaceRoot: import.meta.dirname,
-	rules: ["lintai-rules/**/*.ts"],
+	operation: process.env.LINTAI_HOST_OPERATION === "invocation" ? "invocation" : "live",
 });

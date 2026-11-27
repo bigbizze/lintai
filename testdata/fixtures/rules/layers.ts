@@ -1,17 +1,11 @@
 import { dl, rule } from "@lintai/sdk";
+import layers from "./layers.json";
 
 export default rule("arch.layers")
 	.version(1)
 	.facts(() => ({
-		layer_glob: [
-			[dl.name("pure"), "src/pure/**"],
-			[dl.name("services"), "src/services/**"],
-			[dl.name("server"), "src/server/**"],
-		],
-		allowed: [
-			[dl.name("server"), dl.name("services")],
-			[dl.name("server"), dl.name("pure")],
-		],
+		layer_glob: layers.globs.map(([layer, pattern]) => [dl.name(layer), pattern]),
+		allowed: layers.allowed.map(([from, to]) => [dl.name(from), dl.name(to)]),
 	}))
 	.program(dl`
 		Decl layer_glob(Layer, Pattern) descr [extensional()].

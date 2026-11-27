@@ -15,6 +15,7 @@ import (
 	"github.com/bigbizze/lintai/backend/typescript"
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/engine"
+	"github.com/bigbizze/lintai/internal/testpack"
 	"github.com/bigbizze/lintai/server"
 )
 
@@ -29,8 +30,7 @@ func TestFixtureRulesReportPlantedViolations(t *testing.T) {
 	args := []string{
 		"--json", "--explain",
 		"--repo-root", repoRoot,
-		"--workspace-root", filepath.Join(repoRoot, "testdata/fixtures/workspace"),
-		"--rules", filepath.Join(repoRoot, "testdata/fixtures/rules/*.ts"),
+		"--workspace-root", testpack.Build(t, repoRoot, filepath.Join(repoRoot, "testdata/fixtures/workspace"), filepath.Join(repoRoot, "testdata/fixtures/rules/*.ts")),
 	}
 	first := runJSON(t, args)
 	second := runJSON(t, args)
@@ -213,8 +213,7 @@ func TestRelationExamples(t *testing.T) {
 			args := []string{
 				"--json", "--explain",
 				"--repo-root", repoRoot,
-				"--workspace-root", filepath.Join(base, "workspace"),
-				"--rules", ruleGlob,
+				"--workspace-root", testpack.Build(t, repoRoot, filepath.Join(base, "workspace"), ruleGlob),
 			}
 			if family.sourceLinks != "" {
 				args = append(args, "--source-links", family.sourceLinks)
@@ -269,8 +268,7 @@ func TestServeSessionReplacesChangedProducerConfiguration(t *testing.T) {
 		}
 	}
 	setConfig("b.ts")
-	options := engine.Options{RepoRoot: repo, AssetRoot: filepath.Join(repo, "packages/client"), WorkspaceRoot: root,
-		RuleGlobs: []string{filepath.Join(repo, "testdata/fixtures/rules/layers.ts")}, RuleWorkers: 2}
+	options := engine.Options{RepoRoot: repo, WorkspaceRoot: testpack.Build(t, repo, root, filepath.Join(repo, "testdata/fixtures/rules/layers.ts")), RuleWorkers: 2}
 	instance := &serveSession{params: server.InitializeParams{WorkspaceRoot: root}}
 	defer instance.Close()
 	first, err := instance.Check(context.Background(), options)
@@ -312,26 +310,21 @@ func TestExitCodes(t *testing.T) {
 		t.Fatal(err)
 	}
 	workspace := filepath.Join(repoRoot, "testdata/fixtures/workspace")
-	rule := func(name string) string { return filepath.Join(repoRoot, "testdata/fixtures/rules", name) }
+	workspace = testpack.Build(t, repoRoot, workspace, filepath.Join(repoRoot, "testdata/fixtures/rules/layers.ts"))
 	cases := []struct {
 		name string
 		args []string
 		want int
 	}{
-		{"violations", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--rules", rule("layers.ts")}, exitViolations},
-		{"parallel check", []string{"check", "--workspace-root", workspace, "--repo-root", repoRoot, "--rules", rule("layers.ts"), "--rule-workers", "1", "--rule-workers", "2"}, exitViolations},
+		{"violations", []string{"--workspace-root", workspace, "--repo-root", repoRoot}, exitViolations},
+		{"parallel check", []string{"check", "--workspace-root", workspace, "--repo-root", repoRoot, "--rule-workers", "1", "--rule-workers", "2"}, exitViolations},
 		{"negative workers", []string{"--rule-workers", "-1"}, exitUsage},
 		{"noninteger workers", []string{"--rule-workers", "1.5"}, exitUsage},
-		{"clean", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--rules", rule("layers.ts"), "--exclude", "src/pure/**"}, exitClean},
-		{"warnings do not fail", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--rules", rule("layers.ts"), "--severity", "arch.layers=warning"}, exitClean},
-		{"rule off", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--rules", rule("layers.ts"), "--severity", "arch.layers=off"}, exitClean},
-		{"severity for unknown rule", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--rules", rule("layers.ts"), "--severity", "arch.layer=off"}, exitRuleError},
-		{"bad severity", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--rules", rule("layers.ts"), "--severity", "arch.layers=info"}, exitUsage},
+		{"clean", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--exclude", "src/pure/**"}, exitClean},
 		{"unknown flag", []string{"--no-such-flag"}, exitUsage},
-		{"bad file scope", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--rules", rule("layers.ts"), "--files", "all"}, exitUsage},
-		{"glob matches nothing", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--rules", "missing/*.ts"}, exitUsage},
+		{"bad file scope", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--files", "all"}, exitUsage},
+		{"obsolete rule glob flag", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--rules", "missing/*.ts"}, exitUsage},
 		{"unknown relation", []string{"facts", "--workspace-root", workspace, "--relation", "no_such_relation"}, exitUsage},
-		{"facts accepts --asset-root", []string{"facts", "--workspace-root", workspace, "--relation", "ts.module", "--asset-root", repoRoot}, exitClean},
 	}
 	for _, item := range cases {
 		t.Run(item.name, func(t *testing.T) {
@@ -491,7 +484,7 @@ files = "tsconfig"
 	write("src/loose.ts", "export const loose = 3;\n")
 	for _, mode := range []string{"tsconfig", "walk"} {
 		t.Run(mode, func(t *testing.T) {
-			args := []string{"--asset-root", "x", "--explain", "--workspace-root", root, "--files", mode}
+			args := []string{"--explain", "--workspace-root", root, "--files", mode}
 			var output bytes.Buffer
 			if err := run(context.Background(), append([]string{"scope", "--json"}, args...), &output); err != nil {
 				t.Fatal(err)
@@ -575,7 +568,6 @@ func TestAuthoringErrors(t *testing.T) {
 	}
 	rulesDir := t.TempDir()
 	rules := map[string]string{
-		"helper.ts": `export const shared = "src/**";`,
 		"no-version.ts": `import { dl, rule } from "@lintai/sdk";
 export default rule("t.no-version").program(dl` + "`Decl v(F). v(F) :- ts.module(F).`" + `).report("v").message((row) => String(row.F));`,
 		"negated-wildcard.ts": `import { dl, rule } from "@lintai/sdk";
@@ -593,8 +585,7 @@ export default rule("t.expect-all").version(1).program(dl` + "`Decl a(M). a(M) :
 	var stdout bytes.Buffer
 	err = run(context.Background(), []string{
 		"--json", "--repo-root", repoRoot,
-		"--workspace-root", filepath.Join(repoRoot, "testdata/fixtures/workspace"),
-		"--rules", filepath.Join(rulesDir, "*.ts"),
+		"--workspace-root", testpack.Build(t, repoRoot, filepath.Join(repoRoot, "testdata/fixtures/workspace"), filepath.Join(rulesDir, "*.ts")),
 	}, &stdout)
 	if code := exitCode(err, io.Discard); code != exitRuleError {
 		t.Fatalf("exit code %d, want %d: %v", code, exitRuleError, err)
@@ -611,7 +602,7 @@ export default rule("t.expect-all").version(1).program(dl` + "`Decl a(M). a(M) :
 		got[item.RuleID] = item.Phase + ": " + item.Message
 	}
 	want := map[string]string{
-		"t.no-version":       "setup: rule t.no-version must call .version(n)",
+		"t.no-version":       "rule t.no-version must call .version(n)",
 		"t.negated-wildcard": "program_analysis: _ cannot be used in the negated atom",
 		"t.unknown-column":   "message() read row.Nope, but the reported predicate has no argument Nope. Its arguments are: F",
 		"t.expect-all":       "premise: expectNonEmpty: these predicates have no facts: a, b",
@@ -626,10 +617,7 @@ export default rule("t.expect-all").version(1).program(dl` + "`Decl a(M). a(M) :
 	}
 }
 
-// lintai rules lists the rule ids that the linter plugins create rules
-// for. A broken rule, a duplicate id and an invalid id are errors, and the
-// command still exits 0. A normal run reports the duplicate and the invalid
-// id as rule errors and still runs the other rules.
+// List valid entries and report malformed entries and duplicate IDs in pack order.
 func TestRulesCommand(t *testing.T) {
 	repoRoot, err := filepath.Abs("../..")
 	if err != nil {
@@ -648,7 +636,6 @@ export default rule(` + strconvQuote(id) + `).version(1).program(dl` + "`Decl v(
 		"lintai-rules/nested/b.ts": ruleSource("arch/nested.b"),
 		"lintai-rules/metadata.ts": `import { rule } from "@lintai/sdk";
 export default rule("arch.metadata").version(7)
-	.setup(() => { throw new Error("setup callback ran"); })
 	.facts(() => { throw new Error("facts callback ran"); })
 	.program(() => { throw new Error("program callback ran"); })
 	.report("reported_b", "reported_a")
@@ -657,14 +644,12 @@ export default rule("arch.metadata").version(7)
 `,
 		"lintai-rules/dup-one.ts": ruleSource("arch.dup"),
 		"lintai-rules/dup-two.ts": ruleSource("arch.dup"),
-		"lintai-rules/dup-setup.ts": `import { dl, rule } from "@lintai/sdk";
-export default rule("arch.dup-setup").version(1).setup(() => { throw new Error("setup failed"); }).program(dl` + "`Decl v(M). v(M) :- ts.module_path(M, F), lintai.glob(F, \"src/**\").`" + `).report("v").message(() => "x");
+		"lintai-rules/dup-config.ts": `import { dl, rule } from "@lintai/sdk";
+export default rule("arch.dup-config").version(1).program(dl` + "`Decl v(M). v(M) :- ts.module_path(M, F), lintai.glob(F, \"src/**\").`" + `).report("v").message(() => "x");
 `,
-		"lintai-rules/dup-setup-ok.ts":       ruleSource("arch.dup-setup"),
+		"lintai-rules/dup-config-ok.ts":      ruleSource("arch.dup-config"),
 		"lintai-rules/bad-id.ts":             "export default { id: \"Arch.Bad\", versionValue: 1 };\n",
 		"lintai-rules/no-program.ts":         "export default { id: \"arch.no-program\", versionValue: 1 };\n",
-		"lintai-rules/broken.ts":             "export default rule(\n",
-		"lintai-rules/helper.ts":             "export const shared = 1;\n",
 		"lintai-rules/no-version.ts":         strings.Replace(ruleSource("arch.no-version"), ".version(1)", "", 1),
 		"lintai-rules/fractional-version.ts": strings.Replace(ruleSource("arch.fractional-version"), ".version(1)", ".version(1.75)", 1),
 	}
@@ -679,7 +664,7 @@ export default rule("arch.dup-setup").version(1).setup(() => { throw new Error("
 	}
 
 	var stdout bytes.Buffer
-	err = run(context.Background(), []string{"rules", "--json", "--repo-root", repoRoot, "--workspace-root", workspace}, &stdout)
+	err = run(context.Background(), []string{"rules", "--json", "--workspace-root", testpack.Build(t, repoRoot, workspace, "lintai-rules/*.ts", "lintai-rules/nested/*.ts")}, &stdout)
 	if code := exitCode(err, io.Discard); code != exitClean {
 		t.Fatalf("exit code %d, want %d: %v", code, exitClean, err)
 	}
@@ -721,10 +706,9 @@ export default rule("arch.dup-setup").version(1).setup(() => { throw new Error("
 	}
 	wantErrors := []struct{ path, id, message string }{
 		{"lintai-rules/bad-id.ts", "", `rule id "Arch.Bad" is not valid`},
-		{"lintai-rules/broken.ts", "", "Unexpected end of file"},
+		{"lintai-rules/dup-config-ok.ts", "arch.dup-config", `rule id "arch.dup-config" is used by more than one rule file`},
+		{"lintai-rules/dup-config.ts", "arch.dup-config", `rule id "arch.dup-config" is used by more than one rule file`},
 		{"lintai-rules/dup-one.ts", "arch.dup", `rule id "arch.dup" is used by more than one rule file (lintai-rules/dup-one.ts, lintai-rules/dup-two.ts)`},
-		{"lintai-rules/dup-setup-ok.ts", "arch.dup-setup", `rule id "arch.dup-setup" is used by more than one rule file`},
-		{"lintai-rules/dup-setup.ts", "arch.dup-setup", `rule id "arch.dup-setup" is used by more than one rule file`},
 		{"lintai-rules/dup-two.ts", "arch.dup", `rule id "arch.dup" is used by more than one rule file`},
 		{"lintai-rules/fractional-version.ts", "arch.fractional-version", "must call .version(n) with a positive integer"},
 		{"lintai-rules/no-program.ts", "arch.no-program", "rule is missing program()"},
@@ -741,7 +725,7 @@ export default rule("arch.dup-setup").version(1).setup(() => { throw new Error("
 	}
 
 	stdout.Reset()
-	err = run(context.Background(), []string{"rules", "--repo-root", repoRoot, "--workspace-root", workspace, "--rules", "lintai-rules/alpha.ts,lintai-rules/metadata.ts"}, &stdout)
+	err = run(context.Background(), []string{"rules", "--workspace-root", testpack.Build(t, repoRoot, workspace, "lintai-rules/alpha.ts", "lintai-rules/metadata.ts")}, &stdout)
 	if code := exitCode(err, io.Discard); code != exitClean {
 		t.Fatalf("text listing exit code %d, want %d: %v", code, exitClean, err)
 	}
@@ -750,7 +734,7 @@ export default rule("arch.dup-setup").version(1).setup(() => { throw new Error("
 	}
 
 	stdout.Reset()
-	err = run(context.Background(), []string{"--json", "--repo-root", repoRoot, "--workspace-root", workspace, "--rules", "lintai-rules/alpha.ts,lintai-rules/dup-*.ts,lintai-rules/bad-id.ts"}, &stdout)
+	err = run(context.Background(), []string{"--json", "--repo-root", repoRoot, "--workspace-root", testpack.Build(t, repoRoot, workspace, "lintai-rules/alpha.ts", "lintai-rules/dup-*.ts", "lintai-rules/bad-id.ts")}, &stdout)
 	if code := exitCode(err, io.Discard); code != exitRuleError {
 		t.Fatalf("exit code %d, want %d: %v", code, exitRuleError, err)
 	}
@@ -764,12 +748,12 @@ export default rule("arch.dup-setup").version(1).setup(() => { throw new Error("
 	}
 	slices.Sort(got)
 	want := []string{
-		"Arch.Bad rule_execution_error setup",
+		"Arch.Bad rule_execution_error load",
 		"arch.alpha architecture_violation ",
 		"arch.dup rule_execution_error config",
 		"arch.dup rule_execution_error config",
-		"arch.dup-setup rule_execution_error config",
-		"arch.dup-setup rule_execution_error config",
+		"arch.dup-config rule_execution_error config",
+		"arch.dup-config rule_execution_error config",
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("normal run:\ngot  %q\nwant %q", got, want)

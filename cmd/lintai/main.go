@@ -16,14 +16,12 @@ import (
 
 	"github.com/bigbizze/lintai/backend"
 	"github.com/bigbizze/lintai/backend/typescript"
-	"github.com/bigbizze/lintai/bundle"
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/engine"
 	"github.com/bigbizze/lintai/internal/rulepack"
 	"github.com/bigbizze/lintai/internal/workspace"
 	"github.com/bigbizze/lintai/observe"
 	"github.com/bigbizze/lintai/server"
-	"github.com/bigbizze/lintai/suppressions"
 )
 
 // Exit codes. CI can tell "the rules found violations" apart from "lintai
@@ -73,6 +71,9 @@ func run(ctx context.Context, args []string, stdout io.Writer) error {
 		case "check":
 			return runOnce(ctx, args[1:], stdout)
 		case "serve":
+			if len(args) != 1 {
+				return fmt.Errorf("unexpected serve arguments: %v", args[1:])
+			}
 			return runServe(ctx)
 		case "schema":
 			return runSchema(ctx, args[1:], stdout)
@@ -110,7 +111,6 @@ func runSchema(ctx context.Context, args []string, stdout io.Writer) error {
 	flags.SetOutput(os.Stderr)
 	workspaceRoot := flags.String("workspace-root", ".", "workspace root whose configured producer catalog to print")
 	configPath := flags.String("config", "", "lintai.toml file (relative to the invocation directory)")
-	flags.String("asset-root", "", "ignored; the npm launcher passes it to every command")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -147,29 +147,10 @@ func (l *stringList) Set(value string) error {
 	return nil
 }
 
-// parseRuleSeverity parses --severity values of the form rule-id=level.
-func parseRuleSeverity(values []string) (map[string]diagnostics.Severity, error) {
-	result := make(map[string]diagnostics.Severity, len(values))
-	for _, value := range values {
-		ruleID, level, ok := strings.Cut(value, "=")
-		ruleID = strings.TrimSpace(ruleID)
-		if !ok || ruleID == "" {
-			return nil, fmt.Errorf("invalid --severity value %q: use <rule-id>=error|warning|off", value)
-		}
-		severity, err := diagnostics.ParseSeverity(strings.TrimSpace(level))
-		if err != nil {
-			return nil, fmt.Errorf("invalid --severity value %q: %w", value, err)
-		}
-		result[ruleID] = severity
-	}
-	return result, nil
-}
-
 func runFacts(ctx context.Context, args []string, stdout io.Writer) error {
 	flags := flag.NewFlagSet("lintai facts", flag.ContinueOnError)
 	flags.SetOutput(os.Stderr)
 	workspaceRoot := flags.String("workspace-root", ".", "workspace root to analyze")
-	flags.String("asset-root", "", "ignored; the npm launcher passes it to every command")
 	configPath := flags.String("config", "", "lintai.toml file (relative to the invocation directory)")
 	var excludes stringList
 	flags.Var(&excludes, "exclude", "glob of workspace files to leave out of the snapshot (repeatable)")
@@ -278,6 +259,10 @@ func (s *serveSession) Check(ctx context.Context, requests ...engine.Options) (e
 		_ = s.Close()
 		return engine.Result{}, err
 	}
+	if len(requests) == 0 {
+		requests = []engine.Options{{WorkspaceRoot: s.params.WorkspaceRoot}}
+	}
+	requests[0].Rule = s.config.Rule
 	return s.session.Check(ctx, requests...)
 }
 
@@ -289,6 +274,7 @@ func (s *serveSession) RefreshFiles(ctx context.Context, options engine.Options,
 		_ = s.Close()
 		return engine.FilesResult{}, err
 	}
+	options.Rule = s.config.Rule
 	return s.session.RefreshFiles(ctx, options, files)
 }
 
@@ -384,7 +370,6 @@ func runScope(ctx context.Context, args []string, stdout io.Writer) error {
 	flags.SetOutput(os.Stderr)
 	workspaceRoot := flags.String("workspace-root", ".", "workspace root to inspect")
 	configPath := flags.String("config", "", "lintai.toml file (relative to the invocation directory)")
-	flags.String("asset-root", "", "ignored; the npm launcher passes it to every command")
 	explain := flags.Bool("explain", false, "explain the production source and compiler scope")
 	jsonOutput := flags.Bool("json", false, "print the scope explanation as JSON")
 	var excludes stringList
@@ -465,101 +450,78 @@ func runScope(ctx context.Context, args []string, stdout io.Writer) error {
 	return nil
 }
 
+type projectFlags struct {
+	flags                                                *flag.FlagSet
+	repo, root, config, files, sourceLinks, suppressions *string
+	factLimit                                            *int
+	excludes, sources                                    stringList
+}
+
+func newProjectFlags(flags *flag.FlagSet) *projectFlags {
+	p := &projectFlags{flags: flags}
+	p.root = flags.String("workspace-root", ".", "workspace to analyze")
+	p.repo = flags.String("repo-root", "", "producer repository root (defaults to workspace)")
+	p.config = flags.String("config", "", "lintai.toml file relative to invocation directory")
+	p.files = flags.String("files", "", "source selection mode: tsconfig or walk")
+	p.sourceLinks = flags.String("source-links", "", "source-entry associations relative to workspace")
+	p.suppressions = flags.String("suppressions-location", "", "suppressions file relative to workspace")
+	p.factLimit = flags.Int("fact-limit", engine.DefaultFactLimit, "maximum derived facts per rule")
+	flags.Var(&p.excludes, "exclude", "exclude a workspace pattern (repeatable)")
+	flags.Var(&p.sources, "source", "select an exact workspace source file (repeatable)")
+	return p
+}
+func (p *projectFlags) open() (*engine.Session, engine.Options, error) {
+	if *p.factLimit <= 0 {
+		return nil, engine.Options{}, fmt.Errorf("--fact-limit must be positive")
+	}
+	root, err := filepath.Abs(*p.root)
+	if err != nil {
+		return nil, engine.Options{}, err
+	}
+	settings, config, err := captureTypeScriptSettings(root, *p.config, *p.files, flagProvided(p.flags, "files"), *p.sourceLinks, flagProvided(p.flags, "source-links"), p.excludes, p.sources)
+	if err != nil {
+		return nil, engine.Options{}, err
+	}
+	repo := *p.repo
+	if repo == "" {
+		repo = root
+	}
+	options := engine.Options{RepoRoot: repo, WorkspaceRoot: root, Rule: config.Rule, FactLimit: *p.factLimit, SuppressionsLocation: *p.suppressions}
+	producers := make([]backend.Producer, 0, len(settings))
+	for _, setting := range settings {
+		producers = append(producers, newBackend(setting))
+	}
+	return engine.Open(options, producers...), options, nil
+}
+
 func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 	flags := flag.NewFlagSet("lintai", flag.ContinueOnError)
-	flags.SetOutput(os.Stderr)
-
-	workspaceRoot := flags.String("workspace-root", ".", "workspace root to analyze")
-	repoRoot := flags.String("repo-root", ".", "repository root containing scripts and packages")
-	assetRoot := flags.String("asset-root", "", "asset root containing lintai helper scripts")
-	configPath := flags.String("config", "", "lintai.toml file (relative to the invocation directory)")
-	rules := flags.String("rules", "lintai-rules/**/*.ts", "comma-separated list of rule globs, relative to --workspace-root")
-	envJSON := flags.String("env-json", "{}", "JSON object passed to every rule as env")
+	project := newProjectFlags(flags)
 	jsonOutput := flags.Bool("json", false, "emit diagnostics as JSON")
 	explain := flags.Bool("explain", false, "attach the proof of each violation to JSON diagnostics (requires --json)")
-	factLimit := flags.Int("fact-limit", engine.DefaultFactLimit, "maximum number of facts a rule may derive")
 	ruleWorkers := flags.Int("rule-workers", 0, "maximum concurrent rule jobs (0 uses GOMAXPROCS)")
-	var excludes stringList
-	flags.Var(&excludes, "exclude", "glob of workspace files to leave out of the snapshot (repeatable)")
-	var sources stringList
-	flags.Var(&sources, "source", "exact workspace source file to select (repeatable)")
-	files := flags.String("files", "", "files in the snapshot: tsconfig (files that tsc compiles) or walk (every walked file)")
-	sourceLinks := flags.String("source-links", "", "JSON source-entry associations, relative to --workspace-root")
-	var severities stringList
-	flags.Var(&severities, "severity", "rule severity as <rule-id>=error|warning|off (repeatable; default: error)")
 	rulesLock := flags.String("rules-lock", "", "rules lock file to enforce (see lintai lock); a changed, new or removed rule is a rule error with phase integrity")
-	setupSandbox := flags.String("setup-sandbox", string(bundle.SetupSandboxOn), "run setup() under the Node permission model: on or off (default on)")
 	suppressAll := flags.Bool("suppress-all", false, "record every error-severity violation in the suppressions file")
 	var suppressRules stringList
 	flags.Var(&suppressRules, "suppress-rule", "record the error-severity violations of this rule in the suppressions file (repeatable)")
 	pruneSuppressions := flags.Bool("prune-suppressions", false, "lower or remove the suppressions that allow more violations than the run found")
-	suppressionsLocation := flags.String("suppressions-location", "", "suppressions file, relative to --workspace-root (default "+suppressions.DefaultFile+")")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	ruleSeverity, err := parseRuleSeverity(severities)
-	if err != nil {
-		return err
-	}
-	sandbox, err := bundle.ParseSetupSandbox(*setupSandbox)
-	if err != nil {
-		return err
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected arguments: %v", flags.Args())
 	}
 	if *explain && !*jsonOutput {
 		return fmt.Errorf("--explain requires --json")
 	}
-	if *factLimit <= 0 {
-		return fmt.Errorf("--fact-limit must be positive")
-	}
-	if *ruleWorkers < 0 {
-		return fmt.Errorf("--rule-workers must be zero or a positive integer")
-	}
-	absoluteWorkspace, err := filepath.Abs(*workspaceRoot)
+	runner, options, err := project.open()
 	if err != nil {
 		return err
 	}
-	absoluteRepo, err := filepath.Abs(*repoRoot)
-	if err != nil {
-		return err
-	}
-	absoluteAssetRoot, err := resolveAssetRoot(*assetRoot, absoluteRepo)
-	if err != nil {
-		return err
-	}
-	env := map[string]any{}
-	if err := json.Unmarshal([]byte(*envJSON), &env); err != nil {
-		return fmt.Errorf("invalid --env-json value: %w", err)
-	}
-	ruleGlobs := strings.Split(*rules, ",")
-	producerSettings, err := loadTypeScriptSettings(absoluteWorkspace, *configPath, *files, flagProvided(flags, "files"), *sourceLinks, flagProvided(flags, "source-links"), excludes, sources)
-	if err != nil {
-		return err
-	}
-	producers := make([]backend.Producer, 0, len(producerSettings))
-	for _, settings := range producerSettings {
-		producers = append(producers, newBackend(settings))
-	}
-	runner := engine.Open(engine.Options{}, producers...)
 	defer runner.Close()
-	result, err := runner.Check(ctx, engine.Options{
-		RepoRoot:      absoluteRepo,
-		AssetRoot:     absoluteAssetRoot,
-		WorkspaceRoot: absoluteWorkspace,
-		RuleGlobs:     ruleGlobs,
-		Env:           env,
-		Severity:      diagnostics.SeverityError,
-		RuleSeverity:  ruleSeverity,
-		FactLimit:     *factLimit,
-		RuleWorkers:   *ruleWorkers,
-		Explain:       *explain,
-		RulesLock:     *rulesLock,
-		SetupSandbox:  sandbox,
-
-		SuppressionsLocation: *suppressionsLocation,
-		SuppressAll:          *suppressAll,
-		SuppressRules:        suppressRules,
-		PruneSuppressions:    *pruneSuppressions,
-	})
+	options.RuleWorkers, options.Explain, options.RulesLock = *ruleWorkers, *explain, *rulesLock
+	options.SuppressAll, options.SuppressRules, options.PruneSuppressions = *suppressAll, suppressRules, *pruneSuppressions
+	result, err := runner.Check(ctx, options)
 	if err != nil {
 		return err
 	}
@@ -629,86 +591,30 @@ func suppressionsOutcome(result engine.Result) error {
 	return &exitError{code: exitViolations, message: strings.Join(lines, "\n")}
 }
 
-func resolveAssetRoot(explicit, repoRoot string) (string, error) {
-	if explicit != "" {
-		return filepath.Abs(explicit)
-	}
-	candidates := []string{
-		filepath.Join(repoRoot, "node_modules", "@lintai", "client"),
-		// pnpm does not link transitive dependencies into the root
-		// node_modules. It links them here.
-		filepath.Join(repoRoot, "node_modules", ".pnpm", "node_modules", "@lintai", "client"),
-		filepath.Join(repoRoot, "packages", "client"),
-		repoRoot,
-	}
-	for _, candidate := range candidates {
-		if hasHelperScripts(candidate) {
-			return candidate, nil
-		}
-	}
-	return "", fmt.Errorf("could not find lintai asset root under %s", strings.Join(candidates[:len(candidates)-1], ", "))
-}
-
-func hasHelperScripts(root string) bool {
-	required := []string{
-		filepath.Join(root, "scripts", "bundle-rule.mjs"),
-		filepath.Join(root, "scripts", "prepare-rule.mjs"),
-	}
-	for _, item := range required {
-		if _, err := os.Stat(item); err != nil {
-			return false
-		}
-	}
-	return true
-}
-
-// runLock bundles the rules and writes the rules lock.
 func runLock(ctx context.Context, args []string, stdout io.Writer) error {
 	flags := flag.NewFlagSet("lintai lock", flag.ContinueOnError)
-	flags.SetOutput(os.Stderr)
-	workspaceRoot := flags.String("workspace-root", ".", "workspace root that contains the rules")
-	repoRoot := flags.String("repo-root", ".", "repository root containing scripts and packages")
-	assetRoot := flags.String("asset-root", "", "asset root containing lintai helper scripts")
-	rules := flags.String("rules", "lintai-rules/**/*.ts", "comma-separated list of rule globs, relative to --workspace-root")
-	lockFile := flags.String("lock-file", engine.DefaultRulesLockFile, "rules lock file to write, relative to --workspace-root")
-	suppressionsLocation := flags.String("suppressions-location", "", "suppressions file to lock, relative to --workspace-root (default "+suppressions.DefaultFile+")")
+	project := newProjectFlags(flags)
+	path := flags.String("lock-file", engine.DefaultRulesLockFile, "approval file relative to the workspace root")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	absoluteWorkspace, err := filepath.Abs(*workspaceRoot)
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected arguments: %v", flags.Args())
+	}
+	session, options, err := project.open()
 	if err != nil {
 		return err
 	}
-	absoluteRepo, err := filepath.Abs(*repoRoot)
+	defer session.Close()
+	options.RulesLock = *path
+	lock, err := session.BuildRulesLock(ctx, options)
 	if err != nil {
 		return err
 	}
-	absoluteAssetRoot, err := resolveAssetRoot(*assetRoot, absoluteRepo)
-	if err != nil {
+	if _, err := fmt.Fprintf(stdout, "pack %s\npolicy %s\n", lock.PackDigest, lock.PolicyDigest); err != nil {
 		return err
 	}
-	lock, locked, err := engine.BuildRulesLock(ctx, engine.Options{
-		RepoRoot:             absoluteRepo,
-		AssetRoot:            absoluteAssetRoot,
-		WorkspaceRoot:        absoluteWorkspace,
-		RuleGlobs:            strings.Split(*rules, ","),
-		SuppressionsLocation: *suppressionsLocation,
-		RulesLock:            *lockFile,
-	})
-	if err != nil {
-		return err
-	}
-	path := engine.ResolveRulesLockPath(absoluteWorkspace, *lockFile)
-	if err := engine.WriteRulesLock(ctx, path, lock); err != nil {
-		return err
-	}
-	for _, item := range locked {
-		fmt.Fprintf(stdout, "%s %s\n", item.Hash, item.Path)
-	}
-	if entries := lock.Suppressions.Entries(); entries > 0 {
-		fmt.Fprintf(stdout, "%d suppressions entries\n", entries)
-	}
-	return nil
+	return engine.WriteRulesLock(ctx, engine.ResolveRulesLockPath(options.WorkspaceRoot, *path), lock)
 }
 
 // newBackend returns the TypeScript backend that reports adjusted tsconfigs
@@ -719,38 +625,18 @@ func newBackend(settings ...typescript.Options) *typescript.Backend {
 	return producer
 }
 
-// runRules prints the id and path of each rule. A rule that does not bundle
-// or load is in the errors, and the exit code is still 0, so that a linter
-// plugin can create the other rules.
+// runRules prints the metadata of the published pack.
 func runRules(ctx context.Context, args []string, stdout io.Writer) error {
 	flags := flag.NewFlagSet("lintai rules", flag.ContinueOnError)
-	flags.SetOutput(os.Stderr)
-	workspaceRoot := flags.String("workspace-root", ".", "workspace root that contains the rules")
-	repoRoot := flags.String("repo-root", ".", "repository root containing scripts and packages")
-	assetRoot := flags.String("asset-root", "", "asset root containing lintai helper scripts")
-	rules := flags.String("rules", "lintai-rules/**/*.ts", "comma-separated list of rule globs, relative to --workspace-root")
-	jsonOutput := flags.Bool("json", false, "print the rules and the errors as JSON")
+	root := flags.String("workspace-root", ".", "workspace containing the built pack")
+	jsonOutput := flags.Bool("json", false, "print rules and errors as JSON")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	absoluteWorkspace, err := filepath.Abs(*workspaceRoot)
-	if err != nil {
-		return err
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected arguments: %v", flags.Args())
 	}
-	absoluteRepo, err := filepath.Abs(*repoRoot)
-	if err != nil {
-		return err
-	}
-	absoluteAssetRoot, err := resolveAssetRoot(*assetRoot, absoluteRepo)
-	if err != nil {
-		return err
-	}
-	list, err := engine.ListRules(ctx, engine.Options{
-		RepoRoot:      absoluteRepo,
-		AssetRoot:     absoluteAssetRoot,
-		WorkspaceRoot: absoluteWorkspace,
-		RuleGlobs:     strings.Split(*rules, ","),
-	})
+	list, err := engine.ListRules(ctx, *root)
 	if err != nil {
 		return err
 	}

@@ -74,10 +74,8 @@ func (e *Session) describeProducers() (producerCatalog, error) {
 
 	var sourceUnits []parse.SourceUnit
 	schemaDecls := make(map[ast.PredicateSym]ast.Decl)
-	identityRecords := make([]any, 0, len(entries)+1)
 	for _, entry := range entries {
 		description := entry.description
-		identityRecords = append(identityRecords, description)
 		declarations, err := namespacedUnit(description.Schema.Declarations, description.Namespace)
 		if err != nil {
 			return producerCatalog{}, fmt.Errorf("producer %q declarations: %w", description.Namespace, err)
@@ -117,25 +115,47 @@ func (e *Session) describeProducers() (producerCatalog, error) {
 		copy.DeclaredAtom.Predicate = key
 		schemaDecls[key] = copy
 	}
-	engineSchemaRaw, err := json.Marshal(engineSchemaSource)
+	identity, err := catalogIdentity(entries, "")
 	if err != nil {
-		return producerCatalog{}, fmt.Errorf("engine schema identity: %w", err)
+		return producerCatalog{}, err
 	}
-	identityRecords = append(identityRecords, string(engineSchemaRaw))
-	identityRaw, err := json.Marshal(identityRecords)
-	if err != nil {
-		return producerCatalog{}, fmt.Errorf("producer catalog identity: %w", err)
-	}
-	identityHash := sha256.Sum256(identityRaw)
-
 	namespaces := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		namespaces = append(namespaces, entry.description.Namespace)
 	}
 	return producerCatalog{
 		entries: entries, sources: sourceUnits, schemaDecls: schemaDecls, namespaces: namespaces,
-		identity: hex.EncodeToString(identityHash[:]),
+		identity: identity,
 	}, nil
+}
+
+// The compiled plan uses the bound descriptions. Approval additionally resolves
+// project path settings relative to the workspace owning the operation.
+func catalogIdentity(entries []producerEntry, approvalRoot string) (string, error) {
+	identityRecords := make([]any, 0, len(entries)+1)
+	for _, entry := range entries {
+		description := entry.description
+		if approvalRoot != "" && description.ImplementationID == "lintai.typescript" {
+			config, err := typeScriptPolicyConfig(approvalRoot, description.EffectiveConfiguration)
+			if err != nil {
+				return "", err
+			}
+			description.EffectiveConfiguration = config
+		}
+		identityRecords = append(identityRecords, description)
+	}
+	engineSchemaRaw, err := json.Marshal(engineSchemaSource)
+	if err != nil {
+		return "", fmt.Errorf("engine schema identity: %w", err)
+	}
+	identityRecords = append(identityRecords, string(engineSchemaRaw))
+	identityRaw, err := json.Marshal(identityRecords)
+	if err != nil {
+		return "", fmt.Errorf("producer catalog identity: %w", err)
+	}
+	identityHash := sha256.Sum256(identityRaw)
+
+	return hex.EncodeToString(identityHash[:]), nil
 }
 
 // Schema renders the configured catalog descriptions and engine helpers

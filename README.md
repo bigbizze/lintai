@@ -78,17 +78,15 @@ For formatting, unused variables, or a simple banned import, an existing linter 
 
 Rules are TypeScript files containing small [Datalog](https://codeberg.org/TauCeti/mangle-go) queries. Datalog lets a rule say which combinations of facts constitute a violation, including recursive relationships such as “calls something that eventually reads the clock.” You will need to learn some of that syntax to write rules; the example below is a starting point.
 
-Rule bundles identify their captured source and resolution inputs. If those inputs change while a bundle is being made, lintai reports the failure instead of using an incomplete artifact. Each rule run gets a fresh pure runtime; its program and messages share that run's state.
+Build rule entries and their static dependencies with `lintai build-rules`. Each execution reads the published pack and gives each rule a fresh pure JavaScript runtime.
 
 ## Try it
 
-The Node-based packages and rule execution require stable Node 26.13.1 or later in the 26.x LTS line. They support Linux and macOS on x64 and arm64. You do not need Go to use them.
+The npm launcher and host adapters require stable Node 26.13.1 or later in the 26.x LTS line. They support Linux and macOS on x64 and arm64. You do not need Go to use them.
 
 ```sh
 pnpm add -D @lintai/cli @lintai/sdk
 ```
-
-With pnpm 10 or later, allow the `esbuild` install step as described in the [installation guide](docs/install.md#pnpm-caveat).
 
 Create this file:
 
@@ -110,13 +108,18 @@ export default rule("arch.no-service-imports")
 
 This rule reports an import when its source is under `src/pure/` and its destination is under `src/services/`. `Imp` identifies the import so the diagnostic points to it. `From` and `To` are file paths; `_` ignores a field this rule does not need. The conditions after `:-` must all hold for a violation to be reported.
 
-Run it:
+Declare the entry in `lintai.toml` at the workspace root.
 
-```sh
-pnpm exec lintai --workspace-root . --rules 'lintai-rules/**/*.ts'
+```toml
+[rules]
+entries = ["lintai-rules/no-service-imports.ts"]
 ```
 
-An error violation gives exit code 1, so the same command can run in CI. A rule execution failure also gives a nonzero exit code. Start with a small rule and deliberately break it to confirm that it reports what you expect.
+```sh
+pnpm exec lintai build-rules && pnpm exec lintai check
+```
+
+**Rebuild after editing a rule or an imported dependency.** Checks and editors continue to use the previous `.lintai/rules.json` until a build succeeds. Plant a violation to confirm the rule produces an error and exit code 1. For locked CI, approve the reviewed build with `lintai lock` and commit its lock. CI runs `lintai build-rules && lintai check --rules-lock lintai-rules.lock.json`.
 
 To inspect the import facts behind this example:
 

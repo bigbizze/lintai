@@ -1,0 +1,8 @@
+[rules]
+entries = ["lintai-rules/actions-return-action-result.ts", "lintai-rules/no-async.ts"]
+
+[rule."arch.actions-return-action-result"]
+severity = "warning"
+
+[rule."arch.no-async"]
+options = { directory = "src" }

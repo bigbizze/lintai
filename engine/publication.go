@@ -6,7 +6,6 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/bigbizze/lintai/bundle"
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/internal/canonical"
 	"github.com/bigbizze/lintai/observe"
@@ -55,15 +54,6 @@ func effectiveOptions(options Options) (Options, string, error) {
 	if options.WorkspaceRoot, err = filepath.Abs(options.WorkspaceRoot); err != nil {
 		return Options{}, "", err
 	}
-	if options.AssetRoot == "" {
-		options.AssetRoot = options.RepoRoot
-	}
-	if options.AssetRoot, err = filepath.Abs(options.AssetRoot); err != nil {
-		return Options{}, "", err
-	}
-	options.RepoRoot = filepath.Clean(options.RepoRoot)
-	options.WorkspaceRoot = filepath.Clean(options.WorkspaceRoot)
-	options.AssetRoot = filepath.Clean(options.AssetRoot)
 	if options.RulesLock != "" {
 		options.RulesLock = filepath.Clean(ResolveRulesLockPath(options.WorkspaceRoot, options.RulesLock))
 	}
@@ -73,37 +63,34 @@ func effectiveOptions(options Options) (Options, string, error) {
 	if options.SuppressionsLocation != "" {
 		options.SuppressionsLocation = filepath.Clean(options.SuppressionsLocation)
 	}
-	options.RuleGlobs = slices.Clone(options.RuleGlobs)
 	options.SuppressRules = slices.Clone(options.SuppressRules)
-	if options.Env == nil {
-		options.Env = map[string]any{}
-	}
-	environment, err := canonical.NormalizeStructured(options.Env)
-	if err != nil {
-		return Options{}, "", fmt.Errorf("environment: %w", err)
-	}
-	options.Env = environment.(map[string]any)
-	if options.Severity == "" {
-		options.Severity = diagnostics.SeverityError
-	}
 	if options.FactLimit <= 0 {
 		options.FactLimit = DefaultFactLimit
 	}
-	options.SetupSandbox, err = bundle.ParseSetupSandbox(string(options.SetupSandbox))
-	if err != nil {
-		return Options{}, "", err
+	policies := make(map[string]RulePolicy, len(options.Rule))
+	identityRules := map[string]any{}
+	for id, policy := range options.Rule {
+		if policy.Severity == "" {
+			policy.Severity = "error"
+		}
+		if _, err := diagnostics.ParseSeverity(policy.Severity); err != nil {
+			return Options{}, "", fmt.Errorf("rule %s: %w", id, err)
+		}
+		if policy.Options == nil {
+			policy.Options = map[string]any{}
+		}
+		raw, err := canonical.NormalizeStructured(policy.Options)
+		if err != nil {
+			return Options{}, "", fmt.Errorf("rule %s options: %w", id, err)
+		}
+		policy.Options = raw.(map[string]any)
+		policies[id] = policy
+		identityRules[id] = []any{policy.Severity, policy.Options}
 	}
-	severity := make(map[string]any, len(options.RuleSeverity))
-	copiedSeverity := make(map[string]diagnostics.Severity, len(options.RuleSeverity))
-	for id, value := range options.RuleSeverity {
-		severity[id] = string(value)
-		copiedSeverity[id] = value
-	}
-	options.RuleSeverity = copiedSeverity
+	options.Rule = policies
 	identity, err := canonical.MarshalStructured([]any{
-		"lintai-request-v1", options.RepoRoot, options.AssetRoot, options.WorkspaceRoot,
-		options.RuleGlobs, options.Env, string(options.Severity), severity, options.FactLimit,
-		options.Explain, options.RulesLock, string(options.SetupSandbox), options.SuppressionsLocation,
+		"lintai-request-v2", options.RepoRoot, options.WorkspaceRoot, identityRules, options.FactLimit,
+		options.Explain, options.RulesLock, options.SuppressionsLocation,
 		options.SuppressAll, options.SuppressRules, options.PruneSuppressions,
 	})
 	if err != nil {

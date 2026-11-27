@@ -2,6 +2,7 @@ package server
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,7 +10,6 @@ import (
 	"strings"
 
 	"github.com/bigbizze/lintai/backend/typescript"
-	"github.com/bigbizze/lintai/bundle"
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/engine"
 	"github.com/bigbizze/lintai/jsonrpc"
@@ -42,20 +42,15 @@ type Server struct {
 }
 
 type InitializeParams struct {
-	RepoRoot             string            `json:"repoRoot"`
-	AssetRoot            string            `json:"assetRoot"`
-	WorkspaceRoot        string            `json:"workspaceRoot"`
-	RuleGlobs            []string          `json:"ruleGlobs"`
-	Excludes             []string          `json:"excludes,omitempty"`
-	Files                string            `json:"files,omitempty"`
-	SourceLinks          string            `json:"sourceLinks,omitempty"`
-	Env                  map[string]any    `json:"env"`
-	FactLimit            int               `json:"factLimit,omitempty"`
-	RuleWorkers          int               `json:"ruleWorkers,omitempty"`
-	Severity             map[string]string `json:"severity,omitempty"`
-	RulesLock            string            `json:"rulesLock,omitempty"`
-	SetupSandbox         string            `json:"setupSandbox,omitempty"`
-	SuppressionsLocation string            `json:"suppressionsLocation,omitempty"`
+	RepoRoot             string   `json:"repoRoot"`
+	WorkspaceRoot        string   `json:"workspaceRoot"`
+	Excludes             []string `json:"excludes,omitempty"`
+	Files                string   `json:"files,omitempty"`
+	SourceLinks          string   `json:"sourceLinks,omitempty"`
+	FactLimit            int      `json:"factLimit,omitempty"`
+	RuleWorkers          int      `json:"ruleWorkers,omitempty"`
+	RulesLock            string   `json:"rulesLock,omitempty"`
+	SuppressionsLocation string   `json:"suppressionsLocation,omitempty"`
 }
 
 type FilesDiagnosticsParams struct {
@@ -160,28 +155,8 @@ func (s *Server) handleInitialize(rawParams json.RawMessage) (InitializeResult, 
 	if _, err := typescript.ParseFileScope(params.Files); err != nil {
 		return InitializeResult{}, invalidParams(err.Error())
 	}
-	if params.Env == nil {
-		params.Env = map[string]any{}
-	}
-	ruleSeverity := make(map[string]diagnostics.Severity, len(params.Severity))
-	for ruleID, level := range params.Severity {
-		severity, err := diagnostics.ParseSeverity(level)
-		if err != nil {
-			return InitializeResult{}, invalidParams(fmt.Sprintf("severity of rule %q: %v", ruleID, err))
-		}
-		ruleSeverity[ruleID] = severity
-	}
-	sandbox, err := bundle.ParseSetupSandbox(params.SetupSandbox)
-	if err != nil {
-		return InitializeResult{}, invalidParams(err.Error())
-	}
-	options := engine.Options{
-		RepoRoot: params.RepoRoot, AssetRoot: params.AssetRoot, WorkspaceRoot: params.WorkspaceRoot,
-		RuleGlobs: append([]string(nil), params.RuleGlobs...), Env: params.Env,
-		Severity: diagnostics.SeverityError, RuleSeverity: ruleSeverity, FactLimit: params.FactLimit,
-		RuleWorkers: params.RuleWorkers, RulesLock: params.RulesLock, SetupSandbox: sandbox,
-		SuppressionsLocation: params.SuppressionsLocation,
-	}
+	options := engine.Options{RepoRoot: params.RepoRoot, WorkspaceRoot: params.WorkspaceRoot, FactLimit: params.FactLimit,
+		RuleWorkers: params.RuleWorkers, RulesLock: params.RulesLock, SuppressionsLocation: params.SuppressionsLocation}
 	if s.factory != nil {
 		if s.engine != nil {
 			_ = s.engine.Close()
@@ -279,7 +254,9 @@ func decodeParams(raw json.RawMessage, target any) error {
 	if len(raw) == 0 || string(raw) == "null" {
 		return invalidParams("params are required")
 	}
-	if err := json.Unmarshal(raw, target); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
 		return invalidParams(err.Error())
 	}
 	return nil

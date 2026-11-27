@@ -70,7 +70,7 @@ func TestProtocolHandshakeRecoveryAndForcedReanalysis(t *testing.T) {
 	if response := call(1, "diagnostics/files", FilesDiagnosticsParams{Files: []string{"a.ts"}}); response.Error == nil || response.Error.Code != errCodeNotInitialized {
 		t.Fatalf("not initialized: %+v", response)
 	}
-	params := InitializeParams{WorkspaceRoot: "/workspace", RuleWorkers: 2, SourceLinks: "links.json", SetupSandbox: "off"}
+	params := InitializeParams{WorkspaceRoot: "/workspace", RuleWorkers: 2, SourceLinks: "links.json"}
 	response := call(2, "initialize", params)
 	if response.Error != nil || !reflect.DeepEqual(response.Result, InitializeResult{ProtocolVersion: 2}) || len(first.refreshCalls) != 0 || len(first.checkCalls) != 0 {
 		t.Fatalf("handshake: %+v %+v", response, first)
@@ -91,7 +91,7 @@ func TestProtocolHandshakeRecoveryAndForcedReanalysis(t *testing.T) {
 		t.Fatalf("summary: %+v", forced)
 	}
 	call(6, "diagnostics/files", FilesDiagnosticsParams{Files: []string{"src/b.ts"}})
-	if len(first.checkCalls) != 1 || first.checkCalls[0].RuleWorkers != 1 || first.refreshCalls[2].RuleWorkers != 2 || first.refreshCalls[2].SetupSandbox != "off" {
+	if len(first.checkCalls) != 1 || first.checkCalls[0].RuleWorkers != 1 || first.refreshCalls[2].RuleWorkers != 2 {
 		t.Fatalf("worker override: %+v %+v", first.checkCalls, first.refreshCalls)
 	}
 	if warnings.String() != "warning\n" {
@@ -126,11 +126,8 @@ func TestProtocolHandshakeRecoveryAndForcedReanalysis(t *testing.T) {
 	if first.closed != 1 || len(second.refreshCalls) != 0 || len(second.checkCalls) != 0 {
 		t.Fatalf("replacement: first=%+v second=%+v", first, second)
 	}
-	for _, params := range []InitializeParams{
-		{RuleWorkers: -1},
-		{SetupSandbox: "auto"},
-		{Files: "invalid"},
-		{Severity: map[string]string{"rule": "invalid"}},
+	for _, params := range []any{
+		InitializeParams{RuleWorkers: -1}, InitializeParams{Files: "invalid"}, map[string]any{"severity": map[string]string{"id": "off"}}, map[string]any{"env": map[string]any{}}, map[string]any{"setupSandbox": "off"},
 	} {
 		invalid := call(8, "initialize", params)
 		if invalid.Error == nil || invalid.Error.Code != errCodeInvalidParams || second.closed != 0 {

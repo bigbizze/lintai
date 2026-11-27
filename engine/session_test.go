@@ -12,9 +12,9 @@ import (
 	"codeberg.org/TauCeti/mangle-go/ast"
 	"github.com/bigbizze/lintai/backend"
 	"github.com/bigbizze/lintai/backend/typescript"
-	"github.com/bigbizze/lintai/bundle"
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/facts"
+	"github.com/bigbizze/lintai/internal/testpack"
 	"github.com/bigbizze/lintai/observe"
 )
 
@@ -29,8 +29,7 @@ func TestSessionRetainsAndReplacesCurrentGeneration(t *testing.T) {
 	a := writeTestFile(t, workspace, "src/a.ts", "export const value = 1;\n")
 	rule := writeTestFile(t, rules, "modules.ts", parallelRuleSource("fixture.modules", "Decl violation(Entity). violation(Entity) :- ts.module(Entity).", "(row) => row.Entity"))
 	var evaluations atomic.Int64
-	options := Options{RepoRoot: repo, AssetRoot: filepath.Join(repo, "packages/client"), WorkspaceRoot: workspace,
-		RuleGlobs: []string{rule}, RuleWorkers: 1, beforeEvaluation: func() { evaluations.Add(1) }}
+	options := Options{RepoRoot: repo, WorkspaceRoot: testpack.Build(t, repo, workspace, rule), RuleWorkers: 1, beforeEvaluation: func() { evaluations.Add(1) }}
 	newProducer := func() *typescript.Backend { return typescript.New(typescript.Options{Files: typescript.FileScopeWalk}) }
 	session := Open(options, newProducer())
 	defer session.Close()
@@ -50,10 +49,10 @@ func TestSessionRetainsAndReplacesCurrentGeneration(t *testing.T) {
 	}
 	warmObservation := session.executionObservation()
 	if !reflect.DeepEqual(first, warm) || session.currentFacts.base != index || evaluations.Load() != 2 ||
-		warmObservation.bundleArtifacts != observation.bundleArtifacts || warmObservation.mangleCompiles != observation.mangleCompiles {
+		warmObservation.mangleCompiles != observation.mangleCompiles {
 		t.Fatalf("unchanged check did not reuse facts/plans and dispatch rules: first=%+v warm=%+v", first, warm)
 	}
-	options.RuleSeverity = map[string]diagnostics.Severity{"fixture.modules": diagnostics.SeverityWarning}
+	options.Rule = map[string]RulePolicy{"fixture.modules": {Severity: "warning"}}
 	warning, err := session.Check(context.Background(), options)
 	if err != nil || len(warning.Diagnostics) != 1 || warning.Diagnostics[0].Severity != diagnostics.SeverityWarning ||
 		evaluations.Load() != 3 {
@@ -69,7 +68,7 @@ func TestSessionRetainsAndReplacesCurrentGeneration(t *testing.T) {
 	if freshErr != nil || !reflect.DeepEqual(warning, freshWarning) {
 		t.Fatalf("reassembled warning differs from fresh result: %+v %+v %v", warning, freshWarning, freshErr)
 	}
-	options.RuleSeverity = nil
+	options.Rule = nil
 	errorResult, err := session.Check(context.Background(), options)
 	if err != nil || !reflect.DeepEqual(errorResult, first) || evaluations.Load() != 4 {
 		t.Fatalf("error check did not evaluate rules: %+v %v", errorResult, err)
@@ -131,7 +130,7 @@ func TestSessionRetainsAndReplacesCurrentGeneration(t *testing.T) {
 	}
 	otherWorkspace := t.TempDir()
 	writeTestFile(t, otherWorkspace, "src/other.ts", "export const value = 4;\n")
-	options.WorkspaceRoot = otherWorkspace
+	options.WorkspaceRoot = testpack.Build(t, repo, otherWorkspace, rule)
 	switched := assertFresh()
 	if len(switched.DiagnosticsFor("src/other.ts")) != 1 || slices.Contains(switched.AnalyzedFiles, "src/b.ts") {
 		t.Fatalf("workspace replacement retained old facts: %+v", switched)
@@ -165,63 +164,7 @@ func TestSessionRetainsAndReplacesCurrentGeneration(t *testing.T) {
 	}
 }
 
-// V20: arbitrary setup runs on every check and can change a generated program
 // without requiring a new producer generation.
-func TestSessionRefreshesSetupWithRetainedFacts(t *testing.T) {
-	repo, err := filepath.Abs("..")
-	if err != nil {
-		t.Fatal(err)
-	}
-	workspace := t.TempDir()
-	program := `Decl violation(Entity, Code). violation(Entity, Code) :- catalog.usable(Entity, Code).`
-	filtered := `Decl violation(Entity, Code). violation(Entity, Code) :- catalog.usable(Entity, Code), Code = "a".`
-	source := `import { dl, rule } from "@lintai/sdk";
-export default rule("fixture.setup-refresh").version(1)
-  .setup(({ workspaceRoot }) => {
-    const fs = require("node:fs"); const path = require("node:path");
-    const counter = path.join(workspaceRoot, "setup-count");
-    const count = fs.existsSync(counter) ? Number(fs.readFileSync(counter, "utf8")) : 0;
-    fs.writeFileSync(counter, String(count + 1));
-    return { onlyFirst: fs.readFileSync(path.join(workspaceRoot, "setup-value"), "utf8") === "first" };
-  })
-  .program(({ setup }) => setup.onlyFirst ? dl` + "`" + filtered + "`" + ` : dl` + "`" + program + "`" + `)
-  .report("violation").message((row) => row.Code);`
-	writeTestFile(t, workspace, "lintai-rules/setup.ts", source)
-	value := writeTestFile(t, workspace, "setup-value", "first")
-	options := parallelFixtureOptions(repo, workspace)
-	options.SetupSandbox = bundle.SetupSandboxOff
-	producer := newParallelFixtureProducer()
-	producer.reusable = true
-	session := Open(options, producer)
-	defer session.Close()
-	for i := 0; i < 2; i++ {
-		result, err := session.Check(context.Background())
-		if err != nil || len(result.Diagnostics) != 1 {
-			t.Fatalf("setup result: %+v %v", result, err)
-		}
-	}
-	count, err := os.ReadFile(filepath.Join(workspace, "setup-count"))
-	if err != nil || string(count) != "2" {
-		t.Fatalf("setup counts: setup=%q err=%v", count, err)
-	}
-	index := session.currentFacts.base
-	if err := os.WriteFile(value, []byte("all"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	projected, err := session.Refresh(context.Background(), options, "catalog/items.sql")
-	if err != nil || len(projected.Diagnostics) != 1 {
-		t.Fatalf("unobserved setup input should not invalidate refresh: %+v %v", projected, err)
-	}
-	count, err = os.ReadFile(filepath.Join(workspace, "setup-count"))
-	if err != nil || string(count) != "2" {
-		t.Fatalf("unchanged refresh reran setup: setup=%q err=%v", count, err)
-	}
-	result, err := session.Check(context.Background())
-	if err != nil || len(result.Diagnostics) != 3 || session.currentFacts.base != index {
-		t.Fatalf("changed setup did not re-execute on the retained facts: %+v %v", result, err)
-	}
-}
-
 func TestComposedFactsCaptureCurrentEligibilityWithoutReemission(t *testing.T) {
 	producer := newParallelFixtureProducer()
 	session := Open(Options{}, producer)

@@ -50,10 +50,10 @@ npm install -D @lintai/cli @lintai/sdk @lintai/eslint-plugin eslint@^10.15.0 @ty
 `@lintai/sdk` does not depend on Zod. If your rules export `config` schemas using Zod, add it yourself:
 
 ```sh
-pnpm add -D zod
+pnpm add -D zod@3
 ```
 
-Any schema object with `parse` or `safeParse` works.
+A named `config` export supplies a synchronous `parse(value)` method. The parser runs in the pure runtime. See the [SDK example](../packages/sdk/README.md).
 
 ### CLI + SDK + oxlint integration
 
@@ -64,22 +64,6 @@ npm install -D @lintai/cli @lintai/sdk @lintai/oxlint-plugin oxlint
 ```
 
 This does not install ESLint. The plugin needs oxlint 1.90.0 or later. See [Oxlint plugin reference](api.md#oxlint-plugin-reference-and-caveats).
-
-### pnpm caveat
-
-If your repo uses `pnpm` 10+, allow `esbuild` to run its postinstall/build step:
-
-```json
-{
-  "pnpm": {
-    "onlyBuiltDependencies": ["esbuild"]
-  }
-}
-```
-
-Without that, rule bundling will fail because the helper scripts rely on `esbuild`.
-
-With npm, rule bundling works without extra settings.
 
 ## Quick consumer setup and caveats
 
@@ -105,13 +89,18 @@ export default rule("arch.no-async")
 	.message((row) => `${row.Name} in ${row.File} must not be async`);
 ```
 
-Run it:
+Create `lintai.toml` in the workspace root.
+
+```toml
+[rules]
+entries = ["lintai-rules/no-async.ts"]
+```
 
 ```sh
-pnpm exec lintai \
-  --workspace-root . \
-  --rules 'lintai-rules/**/*.ts'
+pnpm exec lintai build-rules && pnpm exec lintai check
 ```
+
+The native builder resolves installed rule dependencies and publishes `.lintai/rules.json`. Checks keep using the last successful build until you rebuild. The native executable can check the pack with Node absent from `PATH`.
 
 With npm, use `npm exec -- lintai` in place of `pnpm exec lintai`.
 
@@ -122,12 +111,6 @@ Each selected file has one compiler owner. Starting in its directory, lintai fin
 For eligible modules, root membership is drawn from the bounded set of original config roots built from all selected files' nearest configs and their references. It is separate from the one effective owner and does not include files that are only visible through imports. Calls use the caller's owner; derived types and declarations keep the context of the root that requested them. Public config paths use one normalized representation, which supports joins from `module_owner_config` to `config_adjusted` and from `source_entry_tsconfig` to `source_config_adjusted`.
 
 For shared scope settings, put `exclude`, `include` and exact `sources` under `[workspace]` in `lintai.toml` at the workspace root. Repeat `--source <file>` to add exact files, including files otherwise excluded. Use `--config <file>` to choose a different config, relative to the invocation directory. See [Snapshot scope](api.md#snapshot-scope) for precedence, `--files`, and how to inspect the selection.
-
-Useful caveats:
-
-- relative rule globs are resolved from `workspaceRoot`
-- the CLI is one-shot and deterministic
-- the ESLint plugin may use persistent `serve` mode in long-lived editor sessions
 
 ## ESLint setup and caveats
 
@@ -248,21 +231,9 @@ Reinstall `@lintai/cli` on a supported platform and architecture. The launcher r
 - `@lintai/lintai-linux-arm64`
 - `@lintai/lintai-linux-x64`
 
-### `could not find lintai asset root`
+### Missing rule pack
 
-The asset root is the directory that contains `scripts/bundle-rule.mjs` and `scripts/prepare-rule.mjs`. lintai looks for `node_modules/@lintai/client`, then `node_modules/.pnpm/node_modules/@lintai/client` (pnpm), then `packages/client`, then the repository root. Pass `--asset-root` explicitly if you are running the Go binary directly outside the npm package layout.
-
-### Rule bundles fail unexpectedly
-
-The artifact identity covers the coherent inputs consumed by both bundle outputs: rule and generated-entry source, tool identity, configuration, package metadata and module-resolution observations. The bundler rejects an incoherent or escaping captured view. A later file edit does not change the captured identity; the next check validates the evidence before reuse. Retry after the edit is complete if the captured view could not be built.
-
-Each rule execution uses a fresh pure JavaScript runtime. Its program and message callbacks share state during that run, and the next execution starts with fresh module state. Metadata listing uses a separate runtime and does not invoke rule callbacks. See [the rules-lock reference](api.md#rules-lock) for artifact identity and integrity checks.
-
-Check:
-
-- `esbuild` install/build permissions in pnpm
-- `zod` is installed if your rules import it
-- your rule file is included by the configured `rules` glob
+Run `pnpm exec lintai build-rules` from the workspace root. Each path in `[rules].entries` must name a rule entry. Install the SDK and any packages the rule imports. A build error names the failing entry and leaves the previous pack readable.
 
 ### ESLint does not pick up a rule change immediately
 

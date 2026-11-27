@@ -71,7 +71,7 @@ func detach(value any, preserveNull bool) (any, error) {
 	case json.Number:
 		return typed, nil
 	default:
-		return nil, fmt.Errorf("setup value contains unsupported type %T", value)
+		return nil, fmt.Errorf("value contains unsupported type %T", value)
 	}
 }
 

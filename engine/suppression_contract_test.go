@@ -12,6 +12,7 @@ import (
 	"github.com/bigbizze/lintai/backend"
 	"github.com/bigbizze/lintai/backend/typescript"
 	"github.com/bigbizze/lintai/diagnostics"
+	"github.com/bigbizze/lintai/internal/testpack"
 	"github.com/bigbizze/lintai/observe"
 	"github.com/bigbizze/lintai/suppressions"
 )
@@ -61,7 +62,7 @@ func TestSuppressionProducerCoverage(t *testing.T) {
 	writeTestFile(t, workspace, "lintai-rules/other.ts", parallelRuleSource("fixture.other", "Decl violation(Entity, Code). violation(Entity, Code) :- other.usable(Entity, Code).", "(row) => row.Code"))
 	session := Open(Options{}, catalog, other)
 	defer session.Close()
-	options := parallelFixtureOptions(repo, workspace)
+	options := parallelFixtureOptions(t, repo, workspace)
 	options.SuppressAll = true
 	options.RuleWorkers = 2
 	result, err := session.Check(context.Background(), options)
@@ -152,7 +153,7 @@ func TestSuppressionProducerCoverage(t *testing.T) {
 		t.Fatalf("dependency finding was not matched by its saved allowance: %+v", matched.Suppressed)
 	}
 	options.SuppressAll = false
-	options.Severity = diagnostics.SeverityWarning
+	options.Rule = map[string]RulePolicy{"fixture.catalog": {Severity: "warning"}, "fixture.other": {Severity: "warning"}}
 	warningResult, err := session.Check(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
@@ -165,7 +166,7 @@ func TestSuppressionProducerCoverage(t *testing.T) {
 			t.Fatalf("unexpected severity: %+v", item)
 		}
 	}
-	options.Severity = diagnostics.SeverityError
+	options.Rule = nil
 	catalog.rows = nil
 	catalog.revision = "catalog:2"
 	options.SuppressAll = false
@@ -219,7 +220,7 @@ func TestSavedWriteGuards(t *testing.T) {
 	writeTestFile(t, workspace, "lintai-rules/r.ts", parallelRuleSource("fixture.guard", "Decl violation(Entity, Code). violation(Entity, Code) :- catalog.usable(Entity, Code).", "(row) => row.Code"))
 	session := Open(Options{}, newParallelFixtureProducer())
 	defer session.Close()
-	options := parallelFixtureOptions(repo, workspace)
+	options := parallelFixtureOptions(t, repo, workspace)
 	options.SuppressAll = true
 	if _, err := session.Check(context.Background(), options); err != nil {
 		t.Fatal(err)
@@ -254,7 +255,7 @@ func TestSavedWriteGuards(t *testing.T) {
 	}
 	options.afterDispatch = nil
 	options.SuppressAll = false
-	lock, _, err := BuildRulesLock(context.Background(), options)
+	lock, err := session.BuildRulesLock(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,7 +271,7 @@ func TestSavedWriteGuards(t *testing.T) {
 	if err := WriteRulesLock(context.Background(), lockPath, lock); err != nil {
 		t.Fatal(err)
 	}
-	lock, _, err = BuildRulesLock(context.Background(), options)
+	lock, err = session.BuildRulesLock(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -307,7 +308,7 @@ func TestSavedWriteGuards(t *testing.T) {
 	options.SuppressAll = false
 	options.RulesLock = ""
 	options.afterDispatch = nil
-	lock, _, err = BuildRulesLock(context.Background(), options)
+	lock, err = session.BuildRulesLock(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -320,8 +321,8 @@ func TestSavedWriteGuards(t *testing.T) {
 	if err := os.WriteFile(lockPath, []byte(`{"version":2,"rules":{}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := BuildRulesLock(context.Background(), options); err == nil {
-		t.Fatal("accepted unknown lock format")
+	if _, err := session.BuildRulesLock(context.Background(), options); err != nil {
+		t.Fatal("explicit approval should replace obsolete format")
 	}
 }
 
@@ -350,7 +351,7 @@ func TestSuppressionPolicyValidation(t *testing.T) {
 			writeTestFile(t, workspace, "lintai-rules/r.ts", source)
 			session := Open(Options{}, newParallelFixtureProducer())
 			defer session.Close()
-			result, err := session.Check(context.Background(), parallelFixtureOptions(repo, workspace))
+			result, err := session.Check(context.Background(), parallelFixtureOptions(t, repo, workspace))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -380,8 +381,7 @@ func TestSuppressionPolicyValidationOnPlanReuse(t *testing.T) {
 			`.report("violation").suppression("violation", `+policy+`).message(`, 1)
 		paths[kind] = writeTestFile(t, rules, kind+".ts", source)
 	}
-	options := Options{RepoRoot: repo, AssetRoot: filepath.Join(repo, "packages", "client"),
-		WorkspaceRoot: workspace, RuleGlobs: []string{filepath.Join(rules, "*.ts")}, RuleWorkers: 1}
+	options := Options{RepoRoot: repo, WorkspaceRoot: testpack.Build(t, repo, workspace, filepath.Join(rules, "*.ts")), RuleWorkers: 1}
 	session := Open(options, typescript.New(typescript.Options{Files: typescript.FileScopeWalk}))
 	defer session.Close()
 	var template *rulePlan
@@ -405,11 +405,11 @@ func TestSuppressionPolicyValidationOnPlanReuse(t *testing.T) {
 		if valid := byRule["fixture.policy-valid"]; valid.AssertionID != "violation" || valid.Message != "finding" || valid.Phase != "" {
 			t.Errorf("check %d: valid finding was lost: %+v", check, valid)
 		}
-		entry := session.ruleEntries[paths["valid"]]
+		entry := session.ruleEntries["rules/valid.ts"]
 		if entry.plan == nil || entry.plan.ruleFacts == nil || len(entry.plan.suppressionRules) != 1 {
 			t.Fatal("retained plan is missing facts or the validated suppression policy")
 		}
-		if session.ruleEntries[paths["invalid"]].plan != nil {
+		if session.ruleEntries["rules/invalid.ts"].plan != nil {
 			t.Fatal("invalid suppression policy retained a plan")
 		}
 		compiles := session.executionObservation().mangleCompiles
@@ -430,6 +430,7 @@ func TestSuppressionPolicyValidationOnPlanReuse(t *testing.T) {
 	if err := os.WriteFile(paths["valid"], []byte(invalidSource), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	testpack.Build(t, repo, workspace, filepath.Join(rules, "*.ts"))
 	result, err := session.Check(context.Background())
 	if err != nil || len(result.Diagnostics) != 2 || session.executionObservation().mangleCompiles != firstCompiles+3 {
 		t.Fatalf("changed suppression declaration did not compile and fail independently: %+v %v", result.Diagnostics, err)
@@ -439,7 +440,7 @@ func TestSuppressionPolicyValidationOnPlanReuse(t *testing.T) {
 			t.Fatalf("invalid declaration was accepted: %+v", diagnostic)
 		}
 	}
-	if session.ruleEntries[paths["valid"]].plan != template {
+	if session.ruleEntries["rules/valid.ts"].plan != template {
 		t.Fatal("failed compilation replaced the last valid template")
 	}
 }

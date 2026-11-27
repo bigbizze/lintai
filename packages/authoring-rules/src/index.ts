@@ -16,45 +16,35 @@ const noAmbientInPurePhase: Rule.RuleModule = {
 	meta: {
 		type: "problem",
 		docs: {
-			description: "forbid ambient APIs inside program()/facts()/message() callbacks",
+			description: "forbid ambient API references in pure rule modules",
 		},
 		schema: [],
 	},
 	create(context) {
-		let pureDepth = 0;
 		return {
-			"CallExpression[callee.property.name=/^(program|facts|message)$/] > :matches(FunctionExpression, ArrowFunctionExpression)"() {
-				pureDepth += 1;
-			},
-			":matches(FunctionExpression, ArrowFunctionExpression):exit"() {
-				if (pureDepth > 0) {
-					pureDepth -= 1;
-				}
-			},
 			Identifier(node) {
-				if (pureDepth === 0) {
-					return;
-				}
-				if (!forbiddenIdentifiers.has(node.name)) {
-					return;
-				}
-				context.report({
-					node,
-					message: `Ambient API "${node.name}" is not allowed inside the pure runtime`,
-				});
-			},
-			MemberExpression(node) {
-				if (pureDepth === 0) {
-					return;
-				}
-				if (
-					node.object.type === "Identifier" &&
-					node.object.name === "Math" &&
-					node.property.type === "Identifier" &&
-					node.property.name === "random"
-				) {
+				if (!forbiddenIdentifiers.has(node.name) && node.name !== "Math") return;
+				const { references } = context.sourceCode.getScope(node);
+				const reference = references.find((item) => item.identifier === node);
+				if (!reference || reference.resolved?.defs.length) return;
+
+				if (node.name !== "Math") {
 					context.report({
 						node,
+						message: `Ambient API "${node.name}" is not allowed inside the pure runtime`,
+					});
+					return;
+				}
+
+				const member = node.parent;
+				if (member.type !== "MemberExpression" || member.object !== node) return;
+				const property = member.property;
+				const random = member.computed
+					? property.type === "Literal" && property.value === "random"
+					: property.type === "Identifier" && property.name === "random";
+				if (random) {
+					context.report({
+						node: member,
 						message: "Math.random is not allowed inside the pure runtime",
 					});
 				}
@@ -106,7 +96,7 @@ const noTopLevelNodeImports: Rule.RuleModule = {
 				}
 				context.report({
 					node: node.source,
-					message: `Top-level Node built-in import "${specifier}" is not allowed in rule modules; load it inside setup() with require()`,
+					message: `Top-level Node built-in import "${specifier}" is not allowed in pure rule modules`,
 				});
 			},
 		};

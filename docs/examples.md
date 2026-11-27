@@ -1,8 +1,8 @@
 # Examples and Caveats
 
-These examples use the 0.2 rule API. A rule is a Datalog program that LintAI evaluates with mangle-go over the base facts of the workspace. Each row of a reported predicate is one violation. Run `lintai schema` to see configured producer relations and helpers under their namespaces, plus engine helpers.
+A rule is a Datalog program that LintAI evaluates with mangle-go over the base facts of the workspace. Each row of a reported predicate is one violation. Run `lintai schema` to see configured producer relations and helpers under their namespaces, plus engine helpers.
 
-Each execution creates a fresh pure runtime for the rule. Its program and messages share that runtime for the duration of the execution.
+List rule entries in the workspace-root `lintai.toml` and run `lintai build-rules` after editing rules or their dependencies. Until a build succeeds, checks and editors use the previous pack. On each actual execution the rule initializes, parses options, generates its program and formats findings in one fresh pure runtime.
 
 Ownership-sensitive examples use one compiler owner per selected file. The nearest `tsconfig.json` wins when its original roots contain the file; otherwise references are searched depth first in resolver order, then the nearest config is the fallback. `tsconfig` mode excludes an unavailable file, while `walk` mode uses a synthetic fallback; without a nearest config, the initial synthetic program is used. The API reference explains the bounded `module_config` inventory, how it differs from ownership and import visibility, and how root-owned derived type/declaration views can retain real conflicts.
 
@@ -18,7 +18,7 @@ import { z } from "zod";
 
 export const config = z.object({ pureDir: z.string().default("src/pure") });
 
-export default rule("arch.pure-no-effects")
+export default rule<z.infer<typeof config>>("arch.pure-no-effects")
 	.version(1)
 	.program(({ env }) => dl`
 		Decl reaches_suspension(Fn).
@@ -79,7 +79,7 @@ export default rule("scorecard.suspension")
   .message((row, ctx) => `Scorecard review: ${ctx.assertion_id}`);
 ```
 
-Start this rule as a warning, for example with `--severity scorecard.suspension=warning`. An unresolved call or unsupported owner is indeterminate. Following a function value can report a callback that is never called, while a returned promise by itself creates no suspension site. Calls into packages, composition and currying, and callbacks returned by factories can hide dependencies. This rule does not prove which code runs or provide complete async-effect analysis.
+To start this rule as a warning, set `severity = "warning"` under `[rule."scorecard.suspension"]` in `lintai.toml`. An unresolved call or unsupported owner is indeterminate. Following a function value can report a callback that is never called, while a returned promise by itself creates no suspension site. Calls into packages, composition and currying, and callbacks returned by factories can hide dependencies. This rule does not prove which code runs or provide complete async-effect analysis.
 
 ## 2. Import boundary
 
@@ -94,7 +94,7 @@ export const config = z.object({
 	serviceDir: z.string().default("src/services"),
 });
 
-export default rule("arch.pure-no-service-imports")
+export default rule<z.infer<typeof config>>("arch.pure-no-service-imports")
 	.version(1)
 	.program(({ env }) => dl`
 		Decl violation(Imp, From, To).
@@ -124,23 +124,33 @@ Caveats:
 
 ## 3. Layer table
 
-One rule enforces every layer pair. The layer table comes from `.facts()`, so it can also come from `setup()` or config:
+One rule enforces every layer pair. Store the policy alongside the rule in `layers.json`.
+
+```json
+{
+	"globs": [
+		["pure", "src/pure/**"],
+		["services", "src/services/**"],
+		["server", "src/server/**"]
+	],
+	"allowed": [
+		["server", "services"],
+		["server", "pure"]
+	]
+}
+```
+
+Import the table and convert its layer names to Datalog name constants. Changes to the JSON take effect on the next successful build.
 
 ```ts
 import { dl, rule } from "@lintai/sdk";
+import layers from "./layers.json";
 
 export default rule("arch.layers")
 	.version(1)
 	.facts(() => ({
-		layer_glob: [
-			[dl.name("pure"), "src/pure/**"],
-			[dl.name("services"), "src/services/**"],
-			[dl.name("server"), "src/server/**"],
-		],
-		allowed: [
-			[dl.name("server"), dl.name("services")],
-			[dl.name("server"), dl.name("pure")],
-		],
+		layer_glob: layers.globs.map(([layer, pattern]) => [dl.name(layer), pattern]),
+		allowed: layers.allowed.map(([from, to]) => [dl.name(from), dl.name(to)]),
 	}))
 	.program(dl`
 		Decl layer_glob(Layer, Pattern) descr [extensional()].
@@ -261,30 +271,27 @@ Caveats:
 - to express "not in a directory", use `!lintai.glob(File, "src/dir/**")`. Both arguments must be bound by earlier premises.
 - `.expectNonEmpty("server_module")` produces a `premise` error if the glob matches no module, so the rule cannot pass because of a wrong path
 
-## 6. Config and setup
+## 6. Configurable policy
 
-`setup()` runs in Node and can read the workspace. Its output goes to `.facts()` and `.program()` as `setup`:
+Each semantic rule ID has its own options. For a list maintained with the rule, import the static JSON as in the layer example. To let the project owner choose the banned functions, put their names in `lintai.toml`.
+
+```toml
+[rules]
+entries = ["lintai-rules/no-banned-functions.ts"]
+
+[rule."arch.no-banned-functions"]
+options = { names = ["legacySave", "unsafeWrite"] }
+```
 
 ```ts
+import { dl, rule } from "@lintai/sdk";
 import { z } from "zod";
 
-import { dl, rule } from "@lintai/sdk";
+export const config = z.object({ names: z.array(z.string()) });
 
-export const config = z.object({
-	denyListFile: z.string().default("lintai-deny-list.json"),
-});
-
-export default rule("arch.no-banned-functions")
+export default rule<z.infer<typeof config>>("arch.no-banned-functions")
 	.version(1)
-	.setup(({ env, workspaceRoot }) => {
-		const fs = require("node:fs");
-		const path = require("node:path");
-		const file = path.join(workspaceRoot, env.denyListFile);
-		return JSON.parse(fs.readFileSync(file, "utf8")) as string[];
-	})
-	.facts(({ setup }) => ({
-		banned: setup.map((name) => [name]),
-	}))
+	.facts(({ env }) => ({ banned: env.names.map((name) => [name]) }))
 	.program(dl`
 		Decl banned(Name) descr [extensional()].
 		Decl violation(Fn, Name).
@@ -294,13 +301,7 @@ export default rule("arch.no-banned-functions")
 	.message((row) => `${row.Name} is banned by repository policy`);
 ```
 
-Caveats:
-
-- `config` is validated before `setup()` runs
-- `setup()` output must be JSON-serializable
-- `setup()` is the place for filesystem reads. `.facts()`, `.program()` and `.message()` run in the pure runtime.
-- keep top-level rule-module imports pure-safe, and load setup-only Node built-ins with `require(...)`
-- send data to the program through `.facts()`, not through string interpolation of many values
+Install `zod@3` with the SDK. Its synchronous `parse` method validates the options. The rule receives a frozen copy of the resulting JSON value. Application data that changes between operations comes from a fact producer.
 
 ## 7. Direct `import.meta` access
 
@@ -387,18 +388,13 @@ Caveats:
 
 ## 10. Test a rule with planted violations
 
-Put a small workspace next to your rules that contains each violation that you want to catch, and assert the exact set of diagnostics. If a change to a rule, to the prelude or to extraction adds or loses a violation, the test fails. `cmd/lintai/main_test.go` uses this pattern for the fixture rules in `testdata/fixtures/rules/`:
+Put a small workspace next to your rules that contains each violation that you want to catch, and assert the exact set of diagnostics. If a change to a rule, to the prelude or to extraction adds or loses a violation, the test fails. For a fixture with its own `lintai.toml`, run the following commands in the fixture workspace.
 
-```go
-args := []string{
-	"--json", "--explain",
-	"--repo-root", repoRoot,
-	"--workspace-root", filepath.Join(repoRoot, "testdata/fixtures/workspace"),
-	"--rules", filepath.Join(repoRoot, "testdata/fixtures/rules/*.ts"),
-}
+```sh
+lintai build-rules && lintai check --json --explain
 ```
 
-The test compares a sorted list of `rule_id assertion_id file:line` strings with an exact expected list. It also runs the CLI two times and requires byte-identical output.
+Compare the reported rule IDs, assertion IDs and source locations against the planted violations. An error-severity violation gives exit code 1.
 
 To see the facts that a rule sees, use `lintai facts`:
 

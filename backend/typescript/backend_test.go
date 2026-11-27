@@ -14,6 +14,7 @@ import (
 	"github.com/bigbizze/lintai/engine"
 	"github.com/bigbizze/lintai/facts"
 	"github.com/bigbizze/lintai/internal/ambient"
+	"github.com/bigbizze/lintai/internal/testpack"
 	"github.com/bigbizze/lintai/internal/tsgo/lintaiapi"
 	"github.com/bigbizze/lintai/internal/workspace"
 	"github.com/bigbizze/lintai/observe"
@@ -611,8 +612,7 @@ export default rule("test.filtered-callback").version(1)
 	session := engine.Open(engine.Options{}, New())
 	defer session.Close()
 	result, err := session.Check(context.Background(), engine.Options{
-		RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: root,
-		RuleGlobs: []string{"lintai-rules/*.ts"},
+		RepoRoot: repoRoot, WorkspaceRoot: testpack.Build(t, repoRoot, root, "lintai-rules/strict.ts"),
 	})
 	if err != nil {
 		t.Fatal(err)
