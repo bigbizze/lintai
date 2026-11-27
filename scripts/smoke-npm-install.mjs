@@ -213,11 +213,21 @@ await largeResult(repoDir, (file) => lint(file).map((item) => item.message));
 		const failed = installed(
 			repoDir,
 			"eslint",
-			["--no-cache", "--concurrency", "off", "-f", "json", "src/local-off.ts", "src/core/result.ts"],
+			[
+				"--no-cache",
+				"--concurrency",
+				"off",
+				"-f",
+				"json",
+				"src/local-off.ts",
+				"src/core/result.ts",
+			],
 			{ env: { ...process.env, LINTAI_HOST_OPERATION: "invocation" } },
 		);
 		assert.equal(failed.status, 1, failed.stdout);
-		assert.match(failed.stdout, /invocation problem/);
+		const reports = JSON.parse(failed.stdout);
+		const enabled = reports.find((report) => report.filePath.endsWith("src/core/result.ts"));
+		assert.match(enabled.messages.map((item) => item.message).join("\n"), /invocation problem/);
 		await fs.rm(brokenPath);
 		await fs.writeFile(configPath, configText);
 		await fs.rm(offPath);
@@ -281,7 +291,12 @@ try {
 		);
 		assert.equal(mismatched.filter((item) => item.message.includes("batch problem")).length, 1);
 		assert.equal(mismatched.filter((item) => item.message.includes("Save the file")).length, 1);
-		assert.match(verify(original).map((item) => item.message).join("\n"), /\[arch.no-async\/violation\]/);
+		assert.match(
+			verify(original)
+				.map((item) => item.message)
+				.join("\n"),
+			/\[arch.no-async\/violation\]/,
+		);
 		assert.throws(() => verify(original, "src/extra.ts"), /was not supplied/);
 
 		// A nested capture sees the saved edit. Reverting on disk during this
@@ -292,9 +307,19 @@ try {
 				verify(edited).map((item) => item.message),
 				problems,
 			);
-			assert.match(verify(original).map((item) => item.message).join("\n"), /Save the file/);
+			assert.match(
+				verify(original)
+					.map((item) => item.message)
+					.join("\n"),
+				/Save the file/,
+			);
 		});
-		assert.match(verify(original).map((item) => item.message).join("\n"), /\[arch.no-async\/violation\]/);
+		assert.match(
+			verify(original)
+				.map((item) => item.message)
+				.join("\n"),
+			/\[arch.no-async\/violation\]/,
+		);
 	});
 	await plugin.withFileBatch([], ({ problems }) => assert.match(problems[0], /batch problem/));
 	await fs.writeFile(config, configText);
@@ -302,7 +327,9 @@ try {
 	const gate = Promise.withResolvers();
 	const first = plugin.withFileBatch([filename], async () => {
 		await gate.promise;
-		assert.match(verify(original).map((item) => item.message).join("\n"), /\[arch.no-async\/violation\]/);
+		const findings = verify(original);
+		assert.equal(findings.length, 1);
+		assert.match(findings[0].message, /\[arch.no-async\/violation\]/);
 	});
 	try {
 		await fs.writeFile(sourcePath, edited);

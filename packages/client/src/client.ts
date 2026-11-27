@@ -1,4 +1,4 @@
-import { accessSync, constants, existsSync, readFileSync, statSync } from "node:fs";
+import { constants, accessSync, existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
 import { FrameDecoder, encodeFrame } from "./frames.js";
