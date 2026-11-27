@@ -219,11 +219,11 @@ func TestComposedFactsCaptureCurrentEligibilityWithoutReemission(t *testing.T) {
 	if err != nil || !immutable.reusableFromObservations || len(immutable.observations.Records()) != 0 {
 		t.Fatalf("immutable empty observation promise: %v", err)
 	}
-	if _, err := captureGenerationMetadata(backend.GenerationMetadata{}, "", nil); err == nil {
+	if _, err := captureGenerationMetadata(backend.GenerationMetadata{}, "", "p", nil, nil); err == nil {
 		t.Fatal("empty revision accepted")
 	}
 	scope := map[string]any{"items": []any{"original"}}
-	metadata, err := captureGenerationMetadata(backend.GenerationMetadata{InputRevision: "opaque", Scope: scope, AnalyzedFiles: []string{"src/./a.ts", "src/a.ts"}}, "", nil)
+	metadata, err := captureGenerationMetadata(backend.GenerationMetadata{InputRevision: "opaque", Scope: scope, AnalyzedFiles: []string{"src/./a.ts", "src/a.ts"}}, "", "p", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

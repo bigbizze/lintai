@@ -71,6 +71,7 @@ func (b *Backend) finishGeneration(generation *producerGeneration, plan *workspa
 		return fmt.Errorf("compiler observations: %w", err)
 	}
 	generation.observations = observe.Union(compilerSet, plan.Observations)
+	generation.aliases = plan.ExactAliases
 	requestedRoot, err := filepath.Abs(workspaceRoot)
 	if err != nil {
 		return err

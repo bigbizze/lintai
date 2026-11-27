@@ -108,7 +108,7 @@ func effectiveOptions(options Options) (Options, string, error) {
 func newPublishedResult(result Result, sourceDigests map[string]string, key string, observations observe.Set, reusable bool) *publishedResult {
 	published := &publishedResult{result: result, sourceDigests: sourceDigests, requestKey: key, observations: observations, reusable: reusable, byFile: make(map[string][]int)}
 	for _, file := range result.AnalyzedFiles {
-		published.byFile[publicationFileKey(result.workspaceRoot, file)] = nil
+		published.byFile[result.files.key(file)] = nil
 	}
 	for i, item := range result.Diagnostics {
 		if item.DiagnosticKind == diagnostics.KindRuleExecutionError {
@@ -117,11 +117,62 @@ func newPublishedResult(result Result, sourceDigests map[string]string, key stri
 		if item.SourceLocation == nil {
 			published.unlocated = append(published.unlocated, i)
 		} else {
-			file := publicationFileKey(result.workspaceRoot, item.SourceLocation.File)
+			file := result.files.key(item.SourceLocation.File)
 			published.byFile[file] = append(published.byFile[file], i)
 		}
 	}
 	return published
+}
+
+// verifiedSourceDigests keeps a file's digest only when every producer that
+// owns a reported range in that file captured the same text. Otherwise the
+// host receives no digest and treats the group as unverified.
+func verifiedSourceDigests(result Result, evidence *executionEvidence) map[string]string {
+	verified := maps.Clone(evidence.sourceDigests)
+	for _, item := range result.Diagnostics {
+		if item.SourceLocation == nil || item.EntityIdentity == nil {
+			continue
+		}
+		owner, anchored := evidence.anchorOwners[item.EntityIdentity.SemanticKey]
+		if !anchored {
+			continue
+		}
+		key := result.files.key(item.SourceLocation.File)
+		if _, captured := evidence.digestOwners[key][owner]; !captured {
+			delete(verified, key)
+		}
+	}
+	return verified
+}
+
+// fileKeys maps every accepted spelling of a published file to one key:
+// workspace-relative through the requested or physical root, then through an
+// exact-source alias. A path outside the workspace stays absolute.
+type fileKeys struct {
+	root, physical string
+	aliases        map[string]string
+}
+
+func newFileKeys(root string, aliases map[string]string) fileKeys {
+	physical, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		physical = root
+	}
+	return fileKeys{root: root, physical: filepath.Clean(physical), aliases: aliases}
+}
+
+func (k fileKeys) key(file string) string {
+	clean := filepath.Clean(filepath.FromSlash(file))
+	if filepath.IsAbs(clean) && k.physical != k.root {
+		if relative, err := filepath.Rel(k.physical, clean); err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			clean = relative
+		}
+	}
+	key := publicationFileKey(k.root, clean)
+	if canonical, ok := k.aliases[key]; ok {
+		return canonical
+	}
+	return key
 }
 
 func publicationFileKey(root, file string) string {
@@ -137,6 +188,12 @@ func publicationFileKey(root, file string) string {
 func (p *publishedResult) projectFiles(files []string, all bool) FilesResult {
 	if all {
 		files = slices.Sorted(maps.Keys(p.byFile))
+		for alias, file := range p.result.files.aliases {
+			if _, published := p.byFile[file]; published {
+				files = append(files, alias)
+			}
+		}
+		slices.Sort(files)
 	}
 	result := FilesResult{
 		Files: append([]string{}, files...), SourceDigests: make([]string, len(files)),
@@ -145,7 +202,7 @@ func (p *publishedResult) projectFiles(files []string, all bool) FilesResult {
 		Warnings: slices.Clone(p.result.Warnings),
 	}
 	for i, file := range files {
-		key := publicationFileKey(p.result.workspaceRoot, file)
+		key := p.result.files.key(file)
 		indexes, captured := p.byFile[key]
 		if captured {
 			result.SourceDigests[i] = p.sourceDigests[key]

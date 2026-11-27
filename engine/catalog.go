@@ -25,6 +25,8 @@ import (
 
 type composedFacts struct {
 	sourceDigests            map[string]string
+	digestOwners             map[string]map[string]struct{}
+	fileAliases              map[string]string
 	base                     factstore.ReadOnlyFactStore
 	anchors                  map[string]facts.AnchorSupport
 	anchorOwners             map[string]string
@@ -227,6 +229,8 @@ func (catalog producerCatalog) collect(ctx context.Context, options Options, req
 	preparedGenerations := make([]prepared, 0, len(catalog.entries))
 	records := make([]any, 0, len(catalog.entries))
 	sourceDigests := make(map[string]string)
+	digestOwners := make(map[string]map[string]struct{})
+	fileAliases := make(map[string]string)
 	var observations []observe.Set
 	reusable := true
 	for _, entry := range catalog.entries {
@@ -257,11 +261,18 @@ func (catalog producerCatalog) collect(ctx context.Context, options Options, req
 		if nilImplementation(generation) {
 			return composedFacts{}, fmt.Errorf("producer %q returned a nil generation", description.Namespace)
 		}
-		metadata, err := captureGenerationMetadata(generation.Metadata(), options.WorkspaceRoot, sourceDigests)
+		metadata, err := captureGenerationMetadata(generation.Metadata(), options.WorkspaceRoot, description.Namespace, sourceDigests, digestOwners)
 		if err != nil {
 			return composedFacts{}, fmt.Errorf("producer %q generation metadata: %w", description.Namespace, err)
 		}
 		observations = append(observations, metadata.Observations)
+		for alias, file := range metadata.FileAliases {
+			alias, file = publicationFileKey(options.WorkspaceRoot, alias), publicationFileKey(options.WorkspaceRoot, file)
+			if previous, exists := fileAliases[alias]; exists && previous != file {
+				return composedFacts{}, fmt.Errorf("producer %q names %q as both %q and %q", description.Namespace, alias, previous, file)
+			}
+			fileAliases[alias] = file
+		}
 		reusable = reusable && metadata.ReusableFromObservations
 		predicates := make([]any, len(requested))
 		for i, predicate := range requested {
@@ -279,7 +290,7 @@ func (catalog producerCatalog) collect(ctx context.Context, options Options, req
 	captured := observe.Union(observations...)
 	if current != nil && current.snapshotID == snapshotID {
 		reused := *current
-		reused.sourceDigests = sourceDigests
+		reused.sourceDigests, reused.digestOwners, reused.fileAliases = sourceDigests, digestOwners, fileAliases
 		reused.observations, reused.reusableFromObservations = captured, reusable
 		return reused, nil
 	}
@@ -325,10 +336,13 @@ func (catalog producerCatalog) collect(ctx context.Context, options Options, req
 			producerFiles[namespace][file] = struct{}{}
 		}
 	}
-	return composedFacts{sourceDigests: sourceDigests, base: base, anchors: anchors, anchorOwners: anchorOwners, producerFiles: producerFiles, reportable: reportable, factCounts: factCounts, analyzedFiles: analyzedFiles, namespaces: namespaces, snapshotID: snapshotID, observations: captured, reusableFromObservations: reusable}, nil
+	return composedFacts{sourceDigests: sourceDigests, digestOwners: digestOwners, fileAliases: fileAliases, base: base, anchors: anchors, anchorOwners: anchorOwners, producerFiles: producerFiles, reportable: reportable, factCounts: factCounts, analyzedFiles: analyzedFiles, namespaces: namespaces, snapshotID: snapshotID, observations: captured, reusableFromObservations: reusable}, nil
 }
 
-func captureGenerationMetadata(metadata backend.GenerationMetadata, root string, sourceDigests map[string]string) (backend.GenerationMetadata, error) {
+// captureGenerationMetadata records each source digest together with the
+// producer that captured it, so projection can verify a range only against
+// text its own producer observed.
+func captureGenerationMetadata(metadata backend.GenerationMetadata, root, namespace string, sourceDigests map[string]string, digestOwners map[string]map[string]struct{}) (backend.GenerationMetadata, error) {
 	if metadata.InputRevision == "" {
 		return backend.GenerationMetadata{}, fmt.Errorf("input revision is empty")
 	}
@@ -350,6 +364,10 @@ func captureGenerationMetadata(metadata backend.GenerationMetadata, root string,
 			return backend.GenerationMetadata{}, fmt.Errorf("conflicting source identities for %q", key)
 		}
 		sourceDigests[key] = digest
+		if digestOwners[key] == nil {
+			digestOwners[key] = make(map[string]struct{})
+		}
+		digestOwners[key][namespace] = struct{}{}
 	}
 	// Digests now belong to the composition. Drop the producer-owned map.
 	metadata.SourceDigests = nil

@@ -39,6 +39,9 @@ type ScopePlan struct {
 	Pruned       []string
 	Observations observe.Set
 	Matches      []ScopeMatch
+	// ExactAliases maps each accepted exact-source spelling that differs from
+	// its canonical file to that file, both workspace-relative.
+	ExactAliases map[string]string
 }
 
 // PlanSources applies built-in, configured and invocation selection layers,
@@ -87,6 +90,15 @@ func PlanSources(root string, options ScopeOptions) (*ScopePlan, error) {
 		return nil, err
 	}
 	plan.ExactFiles = exact
+	for _, name := range options.Sources {
+		requested := filepath.Clean(filepath.Join(absoluteRoot, filepath.FromSlash(name)))
+		if resolved, err := filepath.EvalSymlinks(requested); err == nil && filepath.Clean(resolved) != requested {
+			if plan.ExactAliases == nil {
+				plan.ExactAliases = make(map[string]string)
+			}
+			plan.ExactAliases[relativeSlash(absoluteRoot, requested)] = relativeSlash(absoluteRoot, filepath.Clean(resolved))
+		}
+	}
 	exactRelative := make([]string, 0, len(exact))
 	for _, path := range exact {
 		exactRelative = append(exactRelative, relativeSlash(absoluteRoot, path))

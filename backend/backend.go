@@ -27,7 +27,10 @@ type GenerationMetadata struct {
 	// SourceDigests optionally identifies the immutable text used for file
 	// coordinates. Values are lowercase hex SHA-256 of decoded UTF-8 text
 	// after removing one leading BOM. Preserve line endings.
-	SourceDigests            map[string]string
+	SourceDigests map[string]string
+	// FileAliases maps an accepted workspace-relative spelling of a source
+	// to the analyzed file it names, for lookup by that spelling.
+	FileAliases              map[string]string
 	Observations             observe.Set
 	ReusableFromObservations bool
 }
