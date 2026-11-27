@@ -88,12 +88,12 @@ export default rule<z.infer<typeof config>>("arch.pure-no-effects")
 | Method | Phase | Required | Contract |
 |---|---|---|---|
 | `.version(n)` | — | yes | Rule version, a positive integer. It appears in diagnostic provenance. An invalid or missing version produces a load error. |
-| `.facts(fn)` | pure | no | Receives `{ env }`. Returns `Record<string, Array<Array<string \| number \| Name>>>`: extra extensional relations for this rule. Declare each relation in the program with `descr [extensional()]`. Each tuple must match the declared arity. Booleans are not allowed; use the presence of a fact. |
+| `.facts(fn)` | pure | no | Receives `{ env }`. Returns `Record<string, Array<Array<string \| number \| Name>>>`: extra extensional relations for this rule. Declare each relation in the program with `descr [extensional()]`. Each tuple must match the declared arity. Booleans are not allowed; use the presence of a fact. The callback must be synchronous; returning a Promise is a rule error. |
 | `.program(p)` | pure | yes | A `dl` fragment, or a function `({ env }) => Fragment`. |
 | `.report(...predicates)` | — | yes | One or more predicates defined in the program. Each one needs a `Decl` that names its arguments. Each row is one violation. The first argument is the anchor. |
 | `.suppression(assertion, { by: [...] })` | — | no | Select stable non-anchor column names whose typed values distinguish suppression groups for this reported predicate. No declaration or `{}` selects none. |
 | `.expectNonEmpty(...predicates)` | — | no | After evaluation, each listed predicate (base, prelude or rule-defined) must have at least one fact. If one is empty, the rule reports a `rule_execution_error` with phase `premise` and no violations. Use this to catch a glob or layer table that stopped matching. |
-| `.message(fn)` | pure | yes | Receives `(row, ctx)`. `row` is keyed by the argument names in the reported predicate's `Decl`. Reading a key that is not an argument name throws, and the error lists the argument names. `ctx.assertion_id` is the reported predicate's name. |
+| `.message(fn)` | pure | yes | Receives `(row, ctx)`. `row` is keyed by the argument names in the reported predicate's `Decl`. Reading a key that is not an argument name throws, and the error lists the argument names. `ctx.assertion_id` is the reported predicate's name. Must synchronously return a string; a Promise or other value is a rule error. |
 
 ### The anchor
 
@@ -479,6 +479,8 @@ lintai rules [--workspace-root <dir>] [--json]
 lintai serve
 ```
 
+`lintai lock` creates the lock file or replaces an existing lintai rules lock, including an obsolete format. It refuses to overwrite any other existing file.
+
 `lintai rules` lists the rules and the settings each one declares. It initializes each packed entry to read its declarations and discards the runtime. Configuration parsing, callbacks and analysis run during checks. Without `--json`, it prints one `<id> <path>` line per rule and sends errors to stderr. With `--json`, it prints:
 
 ```json
@@ -550,7 +552,7 @@ files = "tsconfig" # or "walk"
 source_links = "source-links.json" # optional; the file must exist
 ```
 
-The workspace `include` patterns restore eligible source files excluded by built-in defaults or workspace `exclude`; they are not a whitelist and do not add `.d.ts` files. Invocation `--exclude` takes priority over those patterns. Exact `sources` and `--source` take priority over all of these exclusions and are added to the compiler roots even in `tsconfig` mode. Exact sources must be existing regular `.ts`, `.tsx`, `.js`, `.jsx` or `.d.ts` files inside the workspace; `.git` is never eligible. The walk does not follow symlinks, while exact paths may resolve through symlinks that stay inside the workspace and outside `.git`.
+The workspace `include` patterns restore eligible source files excluded by built-in defaults or workspace `exclude`; they are not a whitelist and do not add `.d.ts` files. Invocation `--exclude` takes priority over those patterns. Exact `sources` and `--source` take priority over all of these exclusions and are added to the compiler roots even in `tsconfig` mode. Exact sources must be existing regular `.ts`, `.tsx`, `.js`, `.jsx` or `.d.ts` files inside the workspace; `.git` is never eligible. The walk does not follow symlinks, while exact paths may resolve through symlinks that stay inside the workspace and outside `.git`. Findings for such a file are available under both the configured spelling and the resolved path.
 
 `--files` and `--source-links` override their configured producer values. With multiple TypeScript producers those scalar CLI overrides are ambiguous and rejected; configure each producer instead. Workspace settings and repeatable `--exclude` and `--source` apply to each producer.
 
@@ -695,7 +697,7 @@ const results = await lintai.withFileBatch(files, async ({ problems }) => {
 
 A host may open the workspace through a directory symlink while its plugin config uses the physical workspace root. The adapter recognizes an absolute file under either spelling by resolving parent directories to the same workspace root. Each operation retains the aliases it verifies. An unrelated absolute path stays distinct from a workspace-relative name.
 
-Each invocation or batch freezes its file set. Looking up an uncaptured file in an invocation yields no findings. Files added after capture join the next operation. The adapter compares the host text with the captured SHA-256 digest of the analyzed logical text, encoded as UTF-8 with exactly one leading BOM removed and line endings preserved. A matching earlier buffer can display findings after the saved file changes. A mismatch or unverifiable range produces a save/rerun notice through `lintai/error`. ESLint 10 can strip two leading BOMs from the buffer it exposes to plugins. A saved file that starts with two BOMs therefore gets the source-mismatch notice in that host. Workspace failures still appear once per operation on the first visit with the error adapter enabled. A transport failure surfaces on the failing operation and the next live operation can reconnect.
+Each invocation or batch freezes its file set. Looking up an uncaptured file in an invocation yields no findings. Files added after capture join the next operation. The adapter compares the host text with the captured SHA-256 digest of the analyzed logical text, encoded as UTF-8 with exactly one leading BOM removed and line endings preserved. A matching earlier buffer can display findings after the saved file changes. A mismatch or unverifiable range produces a save/rerun notice through `lintai/error`. ESLint 10 can strip two leading BOMs from the buffer it exposes to plugins. A saved file that starts with two BOMs therefore gets the source-mismatch notice in that host. Workspace failures appear on every file the operation visits with the error adapter enabled, so a file-local suppression cannot hide a failure of the whole analysis. A transport failure surfaces on the failing operation and the next live operation can reconnect.
 
 A host that visits zero files has nowhere to display workspace failures. For enforcement, CI can run `lintai build-rules && lintai check --rules-lock lintai-rules.lock.json`. The native check reports workspace failures even with zero host callbacks.
 
