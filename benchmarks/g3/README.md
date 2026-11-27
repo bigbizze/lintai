@@ -16,6 +16,9 @@ mkdir -p "$g3/tmp"
 pair=$(mktemp -d "$g3/tmp/pair-XXXXXXXX")
 mkdir "$pair/parent-src" "$pair/temp"
 export TMPDIR="$pair/temp" GOCACHE="$pair/go-cache" GOTELEMETRY=off
+cached_modules=$(go env GOMODCACHE)
+export GOPROXY="file://$cached_modules/cache/download,$(go env GOPROXY)"
+export GOMODCACHE="$pair/go-mod"
 export npm_config_cache="$pair/npm-cache" XDG_CACHE_HOME="$pair/cache"
 
 git archive a77b2a70bcf29f0e5d8afc40d35f984a9641752e | tar -x -C "$pair/parent-src"
