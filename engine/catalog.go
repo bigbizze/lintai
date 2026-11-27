@@ -26,7 +26,7 @@ import (
 type composedFacts struct {
 	sourceDigests            map[string]string
 	digestOwners             map[string]map[string]struct{}
-	fileAliases              map[string]string
+	files                    fileKeys
 	base                     factstore.ReadOnlyFactStore
 	anchors                  map[string]facts.AnchorSupport
 	anchorOwners             map[string]string
@@ -226,11 +226,11 @@ func (catalog producerCatalog) collect(ctx context.Context, options Options, req
 		generation backend.Generation
 		metadata   backend.GenerationMetadata
 	}
+	initialKeys := newFileKeys(options.WorkspaceRoot, nil)
 	preparedGenerations := make([]prepared, 0, len(catalog.entries))
 	records := make([]any, 0, len(catalog.entries))
 	sourceDigests := make(map[string]string)
 	digestOwners := make(map[string]map[string]struct{})
-	fileAliases := make(map[string]string)
 	var observations []observe.Set
 	reusable := true
 	for _, entry := range catalog.entries {
@@ -261,25 +261,39 @@ func (catalog producerCatalog) collect(ctx context.Context, options Options, req
 		if nilImplementation(generation) {
 			return composedFacts{}, fmt.Errorf("producer %q returned a nil generation", description.Namespace)
 		}
-		metadata, err := captureGenerationMetadata(generation.Metadata(), options.WorkspaceRoot, description.Namespace, sourceDigests, digestOwners)
-		if err != nil {
-			return composedFacts{}, fmt.Errorf("producer %q generation metadata: %w", description.Namespace, err)
-		}
-		observations = append(observations, metadata.Observations)
-		for alias, file := range metadata.FileAliases {
-			alias, file = publicationFileKey(options.WorkspaceRoot, alias), publicationFileKey(options.WorkspaceRoot, file)
-			if previous, exists := fileAliases[alias]; exists && previous != file {
-				return composedFacts{}, fmt.Errorf("producer %q names %q as both %q and %q", description.Namespace, alias, previous, file)
+		preparedGenerations = append(preparedGenerations, prepared{entry, requested, generation, generation.Metadata()})
+	}
+	keys, err := operationFileKeys(initialKeys, preparedGenerations, func(item prepared) observe.Set { return item.metadata.Observations })
+	if err != nil {
+		return composedFacts{}, err
+	}
+	for _, item := range preparedGenerations {
+		for alias, file := range item.metadata.FileAliases {
+			alias, file = keys.key(alias), keys.key(file)
+			if alias == file {
+				continue
 			}
-			fileAliases[alias] = file
+			if previous, exists := keys.aliases[alias]; exists && previous != file {
+				return composedFacts{}, fmt.Errorf("producer %q names %q as both %q and %q", item.entry.description.Namespace, alias, previous, file)
+			}
+			keys.aliases[alias] = file
 		}
+	}
+	for i := range preparedGenerations {
+		item := &preparedGenerations[i]
+		namespace := item.entry.description.Namespace
+		metadata, err := captureGenerationMetadata(item.metadata, keys, namespace, sourceDigests, digestOwners)
+		if err != nil {
+			return composedFacts{}, fmt.Errorf("producer %q generation metadata: %w", namespace, err)
+		}
+		item.metadata = metadata
+		observations = append(observations, metadata.Observations)
 		reusable = reusable && metadata.ReusableFromObservations
-		predicates := make([]any, len(requested))
-		for i, predicate := range requested {
-			predicates[i] = []any{predicate.Name, predicate.Arity}
+		predicates := make([]any, len(item.requested))
+		for j, predicate := range item.requested {
+			predicates[j] = []any{predicate.Name, predicate.Arity}
 		}
-		records = append(records, []any{description.Namespace, metadata.InputRevision, metadata.Scope, predicates})
-		preparedGenerations = append(preparedGenerations, prepared{entry, requested, generation, metadata})
+		records = append(records, []any{namespace, metadata.InputRevision, metadata.Scope, predicates})
 	}
 	encoded, err := canonical.MarshalStructured([]any{"lintai-facts-v4", catalog.identity, records})
 	if err != nil {
@@ -290,7 +304,7 @@ func (catalog producerCatalog) collect(ctx context.Context, options Options, req
 	captured := observe.Union(observations...)
 	if current != nil && current.snapshotID == snapshotID {
 		reused := *current
-		reused.sourceDigests, reused.digestOwners, reused.fileAliases = sourceDigests, digestOwners, fileAliases
+		reused.sourceDigests, reused.digestOwners, reused.files = sourceDigests, digestOwners, keys
 		reused.observations, reused.reusableFromObservations = captured, reusable
 		return reused, nil
 	}
@@ -336,13 +350,13 @@ func (catalog producerCatalog) collect(ctx context.Context, options Options, req
 			producerFiles[namespace][file] = struct{}{}
 		}
 	}
-	return composedFacts{sourceDigests: sourceDigests, digestOwners: digestOwners, fileAliases: fileAliases, base: base, anchors: anchors, anchorOwners: anchorOwners, producerFiles: producerFiles, reportable: reportable, factCounts: factCounts, analyzedFiles: analyzedFiles, namespaces: namespaces, snapshotID: snapshotID, observations: captured, reusableFromObservations: reusable}, nil
+	return composedFacts{sourceDigests: sourceDigests, digestOwners: digestOwners, files: keys, base: base, anchors: anchors, anchorOwners: anchorOwners, producerFiles: producerFiles, reportable: reportable, factCounts: factCounts, analyzedFiles: analyzedFiles, namespaces: namespaces, snapshotID: snapshotID, observations: captured, reusableFromObservations: reusable}, nil
 }
 
-// captureGenerationMetadata records each source digest together with the
-// producer that captured it, so projection can verify a range only against
-// text its own producer observed.
-func captureGenerationMetadata(metadata backend.GenerationMetadata, root, namespace string, sourceDigests map[string]string, digestOwners map[string]map[string]struct{}) (backend.GenerationMetadata, error) {
+// captureGenerationMetadata records each source digest under the operation's
+// file key together with the producer that captured it, so projection can
+// verify a range only against text its own producer observed.
+func captureGenerationMetadata(metadata backend.GenerationMetadata, keys fileKeys, namespace string, sourceDigests map[string]string, digestOwners map[string]map[string]struct{}) (backend.GenerationMetadata, error) {
 	if metadata.InputRevision == "" {
 		return backend.GenerationMetadata{}, fmt.Errorf("input revision is empty")
 	}
@@ -359,7 +373,7 @@ func captureGenerationMetadata(metadata backend.GenerationMetadata, root, namesp
 		if _, err := hex.DecodeString(digest); err != nil || len(digest) != 2*sha256.Size || digest != strings.ToLower(digest) {
 			return backend.GenerationMetadata{}, fmt.Errorf("invalid source digest for %q", file)
 		}
-		key := publicationFileKey(root, file)
+		key := keys.key(file)
 		if previous, exists := sourceDigests[key]; exists && previous != digest {
 			return backend.GenerationMetadata{}, fmt.Errorf("conflicting source identities for %q", key)
 		}
@@ -382,6 +396,34 @@ func captureGenerationMetadata(metadata backend.GenerationMetadata, root, namesp
 	sort.Strings(files)
 	metadata.AnalyzedFiles = slices.Compact(files)
 	return metadata, nil
+}
+
+// operationFileKeys uses the workspace-root resolution the producers recorded,
+// so publication keys name the physical files the producers actually read.
+// Without a recorded resolution it keeps the root resolved before producers
+// ran. Producers that resolved the root differently cannot share one result.
+func operationFileKeys[T any](initial fileKeys, items []T, observations func(T) observe.Set) (fileKeys, error) {
+	requested := filepath.Clean(initial.root)
+	if absolute, err := filepath.Abs(initial.root); err == nil {
+		requested = filepath.Clean(absolute)
+	}
+	physical := ""
+	for _, item := range items {
+		for _, record := range observations(item).Records() {
+			if record.Kind != observe.Resolved || record.Path != requested {
+				continue
+			}
+			value := filepath.Clean(string(record.Value))
+			if physical != "" && physical != value {
+				return fileKeys{}, fmt.Errorf("producers resolved workspace root %q to both %q and %q", requested, physical, value)
+			}
+			physical = value
+		}
+	}
+	if physical == "" {
+		physical = initial.physical
+	}
+	return fileKeys{root: initial.root, physical: physical, aliases: make(map[string]string)}, nil
 }
 
 func generationFilePath(file string) (string, error) {

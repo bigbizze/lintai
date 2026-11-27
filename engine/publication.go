@@ -146,8 +146,9 @@ func verifiedSourceDigests(result Result, evidence *executionEvidence) map[strin
 }
 
 // fileKeys maps every accepted spelling of a published file to one key:
-// workspace-relative through the requested or physical root, then through an
-// exact-source alias. A path outside the workspace stays absolute.
+// workspace-relative through the requested root or the physical root captured
+// once for the operation, then through an exact-source alias. A path outside
+// the workspace stays absolute.
 type fileKeys struct {
 	root, physical string
 	aliases        map[string]string
@@ -194,6 +195,7 @@ func (p *publishedResult) projectFiles(files []string, all bool) FilesResult {
 			}
 		}
 		slices.Sort(files)
+		files = slices.Compact(files)
 	}
 	result := FilesResult{
 		Files: append([]string{}, files...), SourceDigests: make([]string, len(files)),

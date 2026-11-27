@@ -25,3 +25,17 @@ func TestExactSourceAliasesKeepTheConfiguredSpelling(t *testing.T) {
 		t.Fatalf("files %v aliases %v", plan.Files, plan.ExactAliases)
 	}
 }
+
+func TestExactSourceAliasNamesTheSelectedTarget(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.ts"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := PlanSources(root, ScopeOptions{Sources: []string{"a.ts"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.ExactAliases) != 0 {
+		t.Fatalf("identity alias recorded: %v", plan.ExactAliases)
+	}
+}

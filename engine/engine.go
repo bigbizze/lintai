@@ -337,7 +337,10 @@ func (e *Session) runAndPublish(checkCtx context.Context, options Options, key s
 		return nil, err
 	}
 	reusable := evidence.reusable && !options.SuppressAll && len(options.SuppressRules) == 0 && !options.PruneSuppressions
-	result.files = newFileKeys(options.WorkspaceRoot, evidence.fileAliases)
+	result.files = evidence.files
+	if result.files.root == "" {
+		result.files = newFileKeys(options.WorkspaceRoot, nil)
+	}
 	published := newPublishedResult(result, verifiedSourceDigests(result, &evidence), key, observe.Union(evidence.observations, state.observations), reusable)
 	e.mu.Lock()
 	if e.closed {
@@ -492,7 +495,7 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, options Options, mode
 	run.producerNames = producerNames
 	evidence.sourceDigests = assembled.sourceDigests
 	evidence.digestOwners = assembled.digestOwners
-	evidence.fileAliases = assembled.fileAliases
+	evidence.files = assembled.files
 	evidence.anchors = assembled.anchors
 	evidence.anchorOwners = assembled.anchorOwners
 	run.files = assembled.analyzedFiles
@@ -568,7 +571,7 @@ type ruleOutcome struct {
 type executionEvidence struct {
 	sourceDigests     map[string]string
 	digestOwners      map[string]map[string]struct{}
-	fileAliases       map[string]string
+	files             fileKeys
 	findings          []violation
 	anchors           map[string]facts.AnchorSupport
 	anchorOwners      map[string]string
