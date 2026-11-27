@@ -139,3 +139,16 @@ func TestConfigObservationsCaptureBytesAndMissingDefault(t *testing.T) {
 		t.Fatalf("retargeted config alias: %v %v", changed, err)
 	}
 }
+
+func TestRuleBuildConfiguration(t *testing.T) {
+	var cfg WorkspaceConfig
+	err := decodeWorkspaceTOML(`[rules]
+entries = []
+[rule."arch.layers"]
+options = { enabled = true, layers = ["domain", "service"] }
+[rule."arch.other"]
+severity = "off"`, &cfg)
+	if err != nil || cfg.Entries == nil || cfg.Rule["arch.layers"].Severity != "error" || cfg.Rule["arch.other"].Options == nil {
+		t.Fatalf("parsed %+v: %v", cfg, err)
+	}
+}

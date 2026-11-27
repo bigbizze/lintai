@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/bigbizze/lintai/internal/atomicfile"
+	"github.com/dop251/goja"
 	"github.com/evanw/esbuild/pkg/api"
 )
 
@@ -80,6 +81,9 @@ func Build(ctx context.Context, root string, names []string) error {
 	if err != nil {
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(output), 0755); err != nil {
 		return err
 	}
@@ -90,14 +94,21 @@ func compile(root, name string) (string, error) {
 	result := api.Build(api.BuildOptions{
 		AbsWorkingDir: root, EntryPoints: []string{"./" + name}, Bundle: true, Write: false,
 		Format: api.FormatIIFE, GlobalName: "LintAIPureModule", Platform: api.PlatformNeutral,
-		MainFields: []string{"module", "main"}, Conditions: []string{"import", "default"},
+		MainFields: []string{"module", "main"}, Conditions: []string{"default"},
 		Target: api.ES2022, TsconfigRaw: `{"compilerOptions":{"useDefineForClassFields":true}}`,
 		Charset: api.CharsetASCII, LegalComments: api.LegalCommentsNone, MinifyWhitespace: true,
 		PreserveSymlinks: true, LogLevel: api.LogLevelSilent,
-		LogOverride: map[string]api.LogLevel{"unsupported-require-call": api.LogLevelError, "unsupported-dynamic-import": api.LogLevelError, "unhandled-require": api.LogLevelError, "unhandled-dynamic-import": api.LogLevelError},
+		LogOverride: map[string]api.LogLevel{"indirect-require": api.LogLevelError, "require-resolve-not-external": api.LogLevelError, "unsupported-require-call": api.LogLevelError, "unsupported-dynamic-import": api.LogLevelError, "unhandled-require": api.LogLevelError, "unhandled-dynamic-import": api.LogLevelError},
 	})
 	if len(result.Errors) > 0 {
 		return "", fmt.Errorf("build %s: %s", name, strings.Join(api.FormatMessages(result.Errors, api.FormatMessagesOptions{Kind: api.ErrorMessage}), ""))
 	}
-	return string(result.OutputFiles[0].Contents), nil
+	if len(result.OutputFiles) != 1 {
+		return "", fmt.Errorf("build %s: expected one JavaScript output", name)
+	}
+	code := string(result.OutputFiles[0].Contents)
+	if _, err := goja.Compile(name, code, false); err != nil {
+		return "", fmt.Errorf("build %s: unsupported pure JavaScript: %w", name, err)
+	}
+	return code, nil
 }
