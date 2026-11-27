@@ -60,6 +60,16 @@ func TestLockedChecksRejectChangesBeforeAnyVM(t *testing.T) {
 	if data, _ := os.ReadFile(filepath.Join(root, "lintai.toml")); string(data) != unrelated {
 		t.Fatalf("unrelated file changed: %q", data)
 	}
+	policy := `{"version":1,"rules":[{"id":"approval","enabled":true}],"owner":"operations"}`
+	writeTestFile(t, root, "app-policy.json", policy)
+	policyTarget := opts
+	policyTarget.RulesLock = "app-policy.json"
+	if _, err := session.BuildRulesLock(ctx, policyTarget); err == nil || !strings.Contains(err.Error(), "not a lintai rules lock") {
+		t.Fatalf("application policy lock target: %v", err)
+	}
+	if data, _ := os.ReadFile(filepath.Join(root, "app-policy.json")); string(data) != policy {
+		t.Fatalf("application policy changed: %q", data)
+	}
 	writeTestFile(t, root, DefaultRulesLockFile, `{"format":"lintai.rules-lock/4"}`)
 	if relock, err := session.BuildRulesLock(ctx, opts); err != nil {
 		t.Fatalf("obsolete lock reapproval: %v", err)

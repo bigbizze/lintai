@@ -318,7 +318,7 @@ func TestSavedWriteGuards(t *testing.T) {
 	if err := WriteRulesLock(context.Background(), lockPath, lock); err == nil || !strings.Contains(err.Error(), "suppression_changed") {
 		t.Fatalf("suppression edit must block lock write: %v", err)
 	}
-	if err := os.WriteFile(lockPath, []byte(`{"version":2,"rules":{}}`), 0o644); err != nil {
+	if err := os.WriteFile(lockPath, []byte(`{"format":"lintai.rules-lock/2","rules":{}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := session.BuildRulesLock(context.Background(), options); err != nil {
