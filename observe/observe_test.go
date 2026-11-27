@@ -141,7 +141,7 @@ func TestIdentityAndConflicts(t *testing.T) {
 	b := filepath.Join(root, "other", "project")
 	externalA := filepath.Join(root, "shared")
 	externalB := filepath.Join(root, "other", "shared")
-	records := []Record{{Kind: Content, Path: filepath.Join(a, "a"), Value: hash("a"), Stamp: &Stamp{"1", "1", "3"}}, {Kind: Link, Path: filepath.Join(a, "link"), Value: Value(filepath.Join(a, "a"))}, {Kind: Resolved, Path: filepath.Join(a, "alias"), Value: Value(externalA)}, {Kind: Env, Path: "VAR", Present: true, Value: "/opaque/value"}}
+	records := []Record{{Kind: Content, Path: filepath.Join(a, "a"), Value: hash("a"), Stamp: &Stamp{1, 1, 3}}, {Kind: Link, Path: filepath.Join(a, "link"), Value: Value(filepath.Join(a, "a"))}, {Kind: Resolved, Path: filepath.Join(a, "alias"), Value: Value(externalA)}, {Kind: Env, Path: "VAR", Present: true, Value: "/opaque/value"}}
 	first := mustSet(t, records...)
 	records[0].Stamp = nil
 	reordered := mustSet(t, records[3], records[2], records[1], records[0], records[0])
@@ -171,7 +171,7 @@ func TestIdentityAndConflicts(t *testing.T) {
 	}
 	// Separate captures of same-sized A and B can both have certified hints
 	// if a writer restores the old timestamp between them.
-	stamp := &Stamp{"1", fmt.Sprint(mtime.UnixNano()), fmt.Sprint(mtime.Add(3 * time.Second).UnixNano())}
+	stamp := &Stamp{1, mtime.UnixNano(), mtime.Add(3 * time.Second).UnixNano()}
 	set := Union(mustSet(t, Record{Kind: Content, Path: file, Value: hash("a"), Stamp: stamp}), mustSet(t, Record{Kind: Content, Path: file, Value: hash("b"), Stamp: stamp}))
 	conflict, err := set.Changed(context.Background(), Quick)
 	if err != nil || conflict == nil || conflict.Value != hash("b") || len(set.Records()) != 2 || !changed(t, set, Full) {
@@ -195,7 +195,7 @@ func TestQuickStampRenewalAndRestoredMtime(t *testing.T) {
 	if err := os.Chtimes(file, mtime, mtime); err != nil {
 		t.Fatal(err)
 	}
-	stamp := &Stamp{"3", fmt.Sprint(mtime.UnixNano()), fmt.Sprint(clock.UnixNano())}
+	stamp := &Stamp{3, mtime.UnixNano(), clock.UnixNano()}
 	set := mustSet(t, Record{Kind: Content, Path: file, Value: hash("aaa"), Stamp: stamp})
 	before, _ := set.Digest(filepath.Dir(file))
 	write(t, file, "bbb")
