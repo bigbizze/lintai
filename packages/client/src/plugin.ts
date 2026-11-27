@@ -28,7 +28,6 @@ type Operation = {
 	key: (file: string) => string;
 	files: Map<string, FileAnalysis>;
 	problems: readonly string[];
-	reported: boolean;
 };
 
 // A host can report an absolute path through another spelling of the same
@@ -115,7 +114,7 @@ export function createLintaiRules(options: LintaiOptions, linuxSpawner = false) 
 				];
 			}
 		}
-		return { key, files: groups, problems, reported: false };
+		return { key, files: groups, problems };
 	}
 
 	function visit(context: FileContext): Visit {
@@ -158,11 +157,10 @@ export function createLintaiRules(options: LintaiOptions, linuxSpawner = false) 
 					Program() {
 						const { operation, group, mismatch } = visit(context);
 						if (severity === "error") {
-							if (!operation.reported) {
-								for (const message of operation.problems)
-									context.report({ loc: programLocation, message });
-								operation.reported = true;
-							}
+							// Repeat operation-wide problems on every file: a file-local
+							// host suppression must not hide a failure of the whole analysis.
+							for (const message of operation.problems)
+								context.report({ loc: programLocation, message });
 							if (mismatch) context.report({ loc: programLocation, message: mismatchMessage });
 						}
 						for (const item of group?.diagnostics ?? []) {

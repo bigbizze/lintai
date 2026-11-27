@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { accessSync, constants, existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
 import { FrameDecoder, encodeFrame } from "./frames.js";
@@ -203,17 +203,27 @@ export function findWorkspaceRoot(from: string): string {
 	}
 }
 
-function findBinary(workspaceRoot: string): string {
+function isExecutableFile(file: string): boolean {
+	try {
+		if (!statSync(file).isFile()) return false;
+		if (process.platform !== "win32") accessSync(file, constants.X_OK);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+export function findBinary(workspaceRoot: string): string {
 	// 1. Local binary in workspace root
 	const local = path.join(workspaceRoot, "lintai");
-	if (existsSync(local)) {
+	if (isExecutableFile(local)) {
 		return local;
 	}
 	// 2. Closest node_modules/.bin in or above the workspace root.
 	let current = workspaceRoot;
 	while (true) {
 		const nmBin = path.join(current, "node_modules", ".bin", "lintai");
-		if (existsSync(nmBin)) {
+		if (isExecutableFile(nmBin)) {
 			return nmBin;
 		}
 		const parent = path.dirname(current);
@@ -227,7 +237,7 @@ function findBinary(workspaceRoot: string): string {
 	if (pathValue) {
 		for (const entry of pathValue.split(path.delimiter)) {
 			const candidate = path.join(entry, "lintai");
-			if (existsSync(candidate)) {
+			if (isExecutableFile(candidate)) {
 				return candidate;
 			}
 		}

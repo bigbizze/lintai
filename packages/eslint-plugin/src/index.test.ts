@@ -3,7 +3,7 @@ import test from "node:test";
 import { Linter } from "eslint";
 import { createLintaiPlugin } from "./index.js";
 
-test("an unavailable server reports once per operation, including an empty batch", async () => {
+test("an unavailable server reports on every file of an operation, including an empty batch", async () => {
 	const plugin = createLintaiPlugin({ binary: "/absent/lintai" });
 	const verify = (file: string) => new Linter().verify("const a = 1;", plugin.configs.all, file);
 	try {
@@ -12,7 +12,7 @@ test("an unavailable server reports once per operation, including an empty batch
 		);
 		await plugin.withFileBatch(["a.js", "b.js"], async ({ problems }) => {
 			assert.equal(verify("a.js")[0]?.message, problems[0]);
-			assert.deepEqual(verify("b.js"), []);
+			assert.equal(verify("b.js")[0]?.message, problems[0]);
 			assert.throws(() => verify("c.js"), /was not supplied/);
 			await assert.rejects(
 				plugin.withFileBatch(["c.js"], () => {

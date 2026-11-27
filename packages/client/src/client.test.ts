@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
-import { LintAIClient } from "./client.js";
+import { LintAIClient, findBinary } from "./client.js";
 import { FrameDecoder, encodeFrame } from "./frames.js";
 import { NativeServeTransport } from "./transport.js";
 
@@ -85,4 +88,14 @@ test("consume a partial frame already buffered by Node before reading the pipe",
 		transport.close();
 		await closed;
 	}
+});
+
+test("a lintai directory does not shadow the installed binary", () => {
+	const root = mkdtempSync(path.join(tmpdir(), "lintai-bin-"));
+	mkdirSync(path.join(root, "lintai"));
+	const installed = path.join(root, "node_modules", ".bin", "lintai");
+	mkdirSync(path.dirname(installed), { recursive: true });
+	writeFileSync(installed, "#!/bin/sh\n");
+	chmodSync(installed, 0o755);
+	assert.equal(findBinary(root), installed);
 });

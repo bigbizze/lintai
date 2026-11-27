@@ -192,6 +192,63 @@ await assertStopped(requests[0].pid);
 await encodedSources(repoDir, (file) => lint(file).map((item) => item.message), "eslint");
 await largeResult(repoDir, (file) => lint(file).map((item) => item.message));
 
+// A file-local disable on one file must not hide an invocation-wide failure,
+// and an exact source reached through a symlink keeps its configured spelling.
+{
+	const configPath = path.join(repoDir, "lintai.toml");
+	const eslintPath = path.join(repoDir, "eslint.config.mjs");
+	const configText = await fs.readFile(configPath, "utf8");
+	const eslintText = await fs.readFile(eslintPath, "utf8");
+	const offPath = path.join(repoDir, "src/local-off.ts");
+	const brokenPath = path.join(repoDir, "lintai-rules/broken.ts");
+	const alias = path.join(repoDir, "alias");
+	try {
+		await fs.writeFile(offPath, "/* eslint-disable lintai/error */\nexport const off = 1;\n");
+		await fs.writeFile(brokenPath, "throw new Error('invocation problem');");
+		await fs.writeFile(
+			configPath,
+			configText.replace("entries = [", 'entries = ["lintai-rules/broken.ts", '),
+		);
+		build(repoDir);
+		const failed = installed(
+			repoDir,
+			"eslint",
+			["--no-cache", "--concurrency", "off", "-f", "json", "src/local-off.ts", "src/core/result.ts"],
+			{ env: { ...process.env, LINTAI_HOST_OPERATION: "invocation" } },
+		);
+		assert.equal(failed.status, 1, failed.stdout);
+		assert.match(failed.stdout, /invocation problem/);
+		await fs.rm(brokenPath);
+		await fs.writeFile(configPath, configText);
+		await fs.rm(offPath);
+
+		await fs.symlink("src", alias);
+		await fs.writeFile(
+			configPath,
+			`${configText}\n[workspace]\nsources = ["alias/example.ts"]\nexclude = ["src/**"]\n`,
+		);
+		await fs.writeFile(eslintPath, eslintText.replace('"src/**/*.ts"', '"{src,alias}/**/*.ts"'));
+		build(repoDir);
+		for (const operation of ["live", "invocation"]) {
+			const aliased = installed(
+				repoDir,
+				"eslint",
+				["--no-cache", "--concurrency", "off", "-f", "json", "alias/example.ts"],
+				{ env: { ...process.env, LINTAI_HOST_OPERATION: operation } },
+			);
+			assert.equal(aliased.status, 1, `${operation}: ${aliased.stdout}${aliased.stderr}`);
+			assert.match(aliased.stdout, /\[arch.no-async\/violation\] example/);
+		}
+	} finally {
+		await fs.rm(offPath, { force: true });
+		await fs.rm(brokenPath, { force: true });
+		await fs.rm(alias, { force: true });
+		await fs.writeFile(configPath, configText);
+		await fs.writeFile(eslintPath, eslintText);
+		build(repoDir);
+	}
+}
+
 const { createLintaiPlugin } = await load("@lintai/eslint-plugin");
 const { Linter } = await load("eslint");
 const plugin = createLintaiPlugin({ workspaceRoot: repoDir });
@@ -224,7 +281,7 @@ try {
 		);
 		assert.equal(mismatched.filter((item) => item.message.includes("batch problem")).length, 1);
 		assert.equal(mismatched.filter((item) => item.message.includes("Save the file")).length, 1);
-		assert.match(verify(original)[0]?.message, /\[arch.no-async\/violation\]/);
+		assert.match(verify(original).map((item) => item.message).join("\n"), /\[arch.no-async\/violation\]/);
 		assert.throws(() => verify(original, "src/extra.ts"), /was not supplied/);
 
 		// A nested capture sees the saved edit. Reverting on disk during this
@@ -235,9 +292,9 @@ try {
 				verify(edited).map((item) => item.message),
 				problems,
 			);
-			assert.match(verify(original)[0]?.message, /Save the file/);
+			assert.match(verify(original).map((item) => item.message).join("\n"), /Save the file/);
 		});
-		assert.match(verify(original)[0]?.message, /\[arch.no-async\/violation\]/);
+		assert.match(verify(original).map((item) => item.message).join("\n"), /\[arch.no-async\/violation\]/);
 	});
 	await plugin.withFileBatch([], ({ problems }) => assert.match(problems[0], /batch problem/));
 	await fs.writeFile(config, configText);
@@ -245,7 +302,7 @@ try {
 	const gate = Promise.withResolvers();
 	const first = plugin.withFileBatch([filename], async () => {
 		await gate.promise;
-		assert.match(verify(original)[0]?.message, /\[arch.no-async\/violation\]/);
+		assert.match(verify(original).map((item) => item.message).join("\n"), /\[arch.no-async\/violation\]/);
 	});
 	try {
 		await fs.writeFile(sourcePath, edited);
