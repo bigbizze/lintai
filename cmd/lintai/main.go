@@ -20,6 +20,7 @@ import (
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/engine"
 	"github.com/bigbizze/lintai/internal/workspace"
+	"github.com/bigbizze/lintai/observe"
 	"github.com/bigbizze/lintai/server"
 	"github.com/bigbizze/lintai/suppressions"
 )
@@ -194,23 +195,49 @@ func runServe(ctx context.Context) error {
 	return instance.Serve(ctx, os.Stdin, os.Stdout)
 }
 
-// Configuration belongs to this TypeScript composition root, not the session.
-// Re-resolve it before each check and replace producer instances when it changes.
+// serveSession owns the configuration receipt and the producers made from it.
 type serveSession struct {
 	params   server.InitializeParams
+	config   workspace.WorkspaceConfig
+	receipt  bool
 	settings []typescript.Options
 	session  *engine.Session
 }
 
-func (s *serveSession) Check(ctx context.Context, requests ...engine.Options) (engine.Result, error) {
-	settings, err := loadTypeScriptSettings(s.params.WorkspaceRoot, "", s.params.Files, s.params.Files != "", s.params.SourceLinks, s.params.SourceLinks != "", s.params.Excludes, nil)
+func (s *serveSession) configure(ctx context.Context, force bool) (err error) {
+	defer func() {
+		if err != nil {
+			_ = s.Close()
+		}
+	}()
+	if err = ctx.Err(); err != nil {
+		return err
+	}
+	if !force && s.receipt && s.session != nil && len(s.config.Observations.Records()) != 0 {
+		var changed *observe.Record
+		changed, err = s.config.Observations.Changed(ctx, observe.Quick)
+		if err != nil {
+			return fmt.Errorf("validate workspace configuration: %w", err)
+		}
+		if changed == nil {
+			return ctx.Err()
+		}
+	}
+	var config workspace.WorkspaceConfig
+	var settings []typescript.Options
+	settings, config, err = captureTypeScriptSettings(s.params.WorkspaceRoot, "", s.params.Files, s.params.Files != "", s.params.SourceLinks, s.params.SourceLinks != "", s.params.Excludes, nil)
 	if err != nil {
-		return engine.Result{}, err
+		return fmt.Errorf("load workspace configuration: %w", err)
+	}
+	if err = ctx.Err(); err != nil {
+		return err
 	}
 	if s.session == nil || !reflect.DeepEqual(settings, s.settings) {
 		if s.session != nil {
-			if err := s.session.Close(); err != nil {
-				return engine.Result{}, err
+			err = s.session.Close()
+			s.session = nil
+			if err != nil {
+				return err
 			}
 		}
 		producers := make([]backend.Producer, 0, len(settings))
@@ -220,12 +247,51 @@ func (s *serveSession) Check(ctx context.Context, requests ...engine.Options) (e
 		s.session = engine.Open(engine.Options{}, producers...)
 		s.settings = settings
 	}
+	s.config, s.receipt = config, true
+	return nil
+}
+
+func (s *serveSession) Check(ctx context.Context, requests ...engine.Options) (engine.Result, error) {
+	if err := s.configure(ctx, true); err != nil {
+		return engine.Result{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		_ = s.Close()
+		return engine.Result{}, err
+	}
 	return s.session.Check(ctx, requests...)
 }
 
+func (s *serveSession) Refresh(ctx context.Context, options engine.Options, file string) (engine.FileResult, error) {
+	if err := s.configure(ctx, false); err != nil {
+		return engine.FileResult{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		_ = s.Close()
+		return engine.FileResult{}, err
+	}
+	return s.session.Refresh(ctx, options, file)
+}
+
+func (s *serveSession) RefreshFiles(ctx context.Context, options engine.Options, files []string) (engine.FilesResult, error) {
+	if err := s.configure(ctx, false); err != nil {
+		return engine.FilesResult{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		_ = s.Close()
+		return engine.FilesResult{}, err
+	}
+	return s.session.RefreshFiles(ctx, options, files)
+}
+
 func (s *serveSession) Close() error {
+	s.receipt = false
+	s.config = workspace.WorkspaceConfig{}
+	s.settings = nil
 	if s.session != nil {
-		return s.session.Close()
+		session := s.session
+		s.session = nil
+		return session.Close()
 	}
 	return nil
 }
@@ -241,17 +307,22 @@ func flagProvided(flags *flag.FlagSet, name string) bool {
 }
 
 func loadTypeScriptSettings(workspaceRoot, explicitConfig, filesOverride string, filesSet bool, sourceLinksOverride string, sourceLinksSet bool, invocationExcludes, invocationSources []string) ([]typescript.Options, error) {
+	settings, _, err := captureTypeScriptSettings(workspaceRoot, explicitConfig, filesOverride, filesSet, sourceLinksOverride, sourceLinksSet, invocationExcludes, invocationSources)
+	return settings, err
+}
+
+func captureTypeScriptSettings(workspaceRoot, explicitConfig, filesOverride string, filesSet bool, sourceLinksOverride string, sourceLinksSet bool, invocationExcludes, invocationSources []string) ([]typescript.Options, workspace.WorkspaceConfig, error) {
 	invocationDir, err := os.Getwd()
 	if err != nil {
-		return nil, err
+		return nil, workspace.WorkspaceConfig{}, err
 	}
 	configPath, optional, err := workspace.ResolveConfigPath(workspaceRoot, invocationDir, explicitConfig)
 	if err != nil {
-		return nil, err
+		return nil, workspace.WorkspaceConfig{}, err
 	}
 	config, err := workspace.LoadWorkspaceConfig(configPath, optional)
 	if err != nil {
-		return nil, err
+		return nil, workspace.WorkspaceConfig{}, err
 	}
 	producers := config.Producers
 	if len(producers) == 0 {
@@ -263,7 +334,7 @@ func loadTypeScriptSettings(workspaceRoot, explicitConfig, filesOverride string,
 	}
 	sort.Strings(namespaces)
 	if len(namespaces) > 1 && (filesSet || sourceLinksSet) {
-		return nil, fmt.Errorf("TypeScript command-line scope flags are ambiguous with multiple TypeScript producers; configure them in lintai.toml")
+		return nil, workspace.WorkspaceConfig{}, fmt.Errorf("TypeScript command-line scope flags are ambiguous with multiple TypeScript producers; configure them in lintai.toml")
 	}
 	settings := make([]typescript.Options, 0, len(namespaces))
 	for _, namespace := range namespaces {
@@ -273,7 +344,7 @@ func loadTypeScriptSettings(workspaceRoot, explicitConfig, filesOverride string,
 			implementation = "lintai.typescript"
 		}
 		if implementation != "lintai.typescript" {
-			return nil, fmt.Errorf("unknown implementation %q for producer %q", implementation, namespace)
+			return nil, workspace.WorkspaceConfig{}, fmt.Errorf("unknown implementation %q for producer %q", implementation, namespace)
 		}
 		fileMode := producerConfig.Files
 		if fileMode == "" {
@@ -284,7 +355,7 @@ func loadTypeScriptSettings(workspaceRoot, explicitConfig, filesOverride string,
 		}
 		scope, err := typescript.ParseFileScope(fileMode)
 		if err != nil {
-			return nil, err
+			return nil, workspace.WorkspaceConfig{}, err
 		}
 		sourceLinks := producerConfig.SourceLinks
 		if sourceLinksSet {
@@ -295,10 +366,9 @@ func loadTypeScriptSettings(workspaceRoot, explicitConfig, filesOverride string,
 			Namespace: namespace, WorkspaceExcludes: slices.Clone(config.Exclude),
 			Includes: slices.Clone(config.Include), Sources: sources,
 			Excludes: slices.Clone(invocationExcludes), Files: scope, SourceLinks: sourceLinks,
-			ConfigPath: configPath, ConfigDigest: config.Digest, ConfigPresent: config.Path != "",
 		})
 	}
-	return settings, nil
+	return settings, config, nil
 }
 
 func runScope(ctx context.Context, args []string, stdout io.Writer) error {

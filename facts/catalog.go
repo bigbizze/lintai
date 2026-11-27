@@ -6,9 +6,9 @@ import (
 	"path"
 	"regexp"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"codeberg.org/TauCeti/mangle-go/parse"
 	"codeberg.org/TauCeti/mangle-go/symbols"
@@ -77,244 +77,124 @@ type AnchorSupport struct {
 	Tracking    *TrackingKey
 }
 
-type Row []Value
-
-// Batch contains only the relations named by Collect's request. A nil or
-// empty relation row set still represents successful production of that
-// predicate.
-type Batch struct {
-	Relations     map[Predicate][]Row
-	Anchors       map[string]AnchorSupport
-	AnalyzedFiles []string
-	InputRevision string
-	Scope         any
-	// WatchHints request future checks; they do not establish validity.
-	WatchHints []string
-}
-
-// ValidatedFacts owns a defensive copy of a producer batch. Callers can only
-// obtain copies, so a producer cannot mutate rows after publication.
-type ValidatedFacts struct {
-	relations     map[Predicate][]Row
-	anchors       map[string]AnchorSupport
-	analyzedFiles []string
-	inputRevision string
-	scope         any
-	namespace     string
-}
-
-func (v ValidatedFacts) Namespace() string { return v.namespace }
-
-func (v ValidatedFacts) Relations() []Predicate {
-	result := make([]Predicate, 0, len(v.relations))
-	for predicate := range v.relations {
-		result = append(result, predicate)
-	}
-	sort.Slice(result, func(i, j int) bool {
-		if result[i].Name != result[j].Name {
-			return result[i].Name < result[j].Name
-		}
-		return result[i].Arity < result[j].Arity
-	})
-	return result
-}
-
-func (v ValidatedFacts) Rows(predicate Predicate) []Row {
-	rows := v.relations[predicate]
-	result := make([]Row, len(rows))
-	for i, row := range rows {
-		result[i] = slices.Clone(row)
-	}
-	return result
-}
-
-func (v ValidatedFacts) Anchors() map[string]AnchorSupport {
-	result := make(map[string]AnchorSupport, len(v.anchors))
-	for id, support := range v.anchors {
-		result[id] = cloneAnchor(support)
-	}
-	return result
-}
-
-func (v ValidatedFacts) AnalyzedFiles() []string { return slices.Clone(v.analyzedFiles) }
-func (v ValidatedFacts) InputRevision() string   { return v.inputRevision }
-func (v ValidatedFacts) Scope() any              { return cloneCanonical(v.scope) }
-
-func (v ValidatedFacts) Facts() []Fact {
-	result := make([]Fact, 0)
-	for _, predicate := range v.Relations() {
-		for _, row := range v.relations[predicate] {
-			result = append(result, Fact{Relation: predicate.Name, Values: slices.Clone(row)})
-		}
-	}
-	return result
-}
-
 var namespacePattern = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 
-// ValidateBatch checks a producer description and an exact requested
-// relation set, then freezes the producer-owned values behind ValidatedFacts.
-func ValidateBatch(description ProducerDescription, requested []Predicate, batch Batch) (ValidatedFacts, error) {
-	if !namespacePattern.MatchString(description.Namespace) || description.Namespace == "lintai" {
-		return ValidatedFacts{}, fmt.Errorf("invalid or reserved producer namespace %q", description.Namespace)
-	}
-	if description.ImplementationID == "" || description.ImplementationStamp == "" || description.ContractVersion == "" {
-		return ValidatedFacts{}, fmt.Errorf("producer %q must declare implementation id, stamp, and contract version", description.Namespace)
-	}
-	if _, err := canonical.Marshal(description.EffectiveConfiguration); err != nil {
-		return ValidatedFacts{}, fmt.Errorf("producer %q effective configuration: %w", description.Namespace, err)
-	}
-	if _, err := canonical.Marshal(batch.Scope); err != nil {
-		return ValidatedFacts{}, fmt.Errorf("producer %q scope: %w", description.Namespace, err)
-	}
+// Descriptor is a validated, detached producer description.
+type Descriptor struct {
+	description ProducerDescription
+	base        map[Predicate]RelationDescription
+}
 
-	metadata := make(map[Predicate]RelationDescription, len(description.BaseRelations)+len(description.Helpers))
-	localNames := make(map[string]struct{}, len(description.BaseRelations)+len(description.Helpers))
+// ValidateDescription validates the producer contract once for a catalog.
+func ValidateDescription(description ProducerDescription) (Descriptor, error) {
+	if !namespacePattern.MatchString(description.Namespace) || description.Namespace == "lintai" {
+		return Descriptor{}, fmt.Errorf("invalid or reserved producer namespace %q", description.Namespace)
+	}
+	if description.ImplementationID == "" || description.ImplementationStamp == "" || description.ContractVersion == "" || !utf8.ValidString(description.ImplementationID) || !utf8.ValidString(description.ImplementationStamp) || !utf8.ValidString(description.ContractVersion) {
+		return Descriptor{}, fmt.Errorf("producer %q must declare implementation id, stamp, and contract version", description.Namespace)
+	}
+	if _, err := canonical.MarshalStructured(description.EffectiveConfiguration); err != nil {
+		return Descriptor{}, fmt.Errorf("producer %q effective configuration: %w", description.Namespace, err)
+	}
+	description = cloneDescription(description)
+	all := make(map[Predicate]struct{}, len(description.BaseRelations)+len(description.Helpers))
+	locals := make(map[string]struct{}, len(all))
+	base := make(map[Predicate]RelationDescription, len(description.BaseRelations))
 	for _, relation := range append(slices.Clone(description.BaseRelations), description.Helpers...) {
 		if err := validateRelation(description.Namespace, relation); err != nil {
-			return ValidatedFacts{}, err
+			return Descriptor{}, err
 		}
-		if _, exists := metadata[relation.Predicate]; exists {
-			return ValidatedFacts{}, fmt.Errorf("producer %q declares %s more than once", description.Namespace, relation.Predicate)
+		if _, exists := all[relation.Predicate]; exists {
+			return Descriptor{}, fmt.Errorf("producer %q declares %s more than once", description.Namespace, relation.Predicate)
 		}
 		local := strings.TrimPrefix(relation.Predicate.Name, description.Namespace+".")
-		if _, exists := localNames[local]; exists {
-			return ValidatedFacts{}, fmt.Errorf("producer %q declares multiple arities for %q", description.Namespace, local)
+		if _, exists := locals[local]; exists {
+			return Descriptor{}, fmt.Errorf("producer %q declares multiple arities for %q", description.Namespace, local)
 		}
-		localNames[local] = struct{}{}
-		metadata[relation.Predicate] = relation
+		locals[local] = struct{}{}
+		all[relation.Predicate] = struct{}{}
+	}
+	for _, relation := range description.BaseRelations {
+		base[relation.Predicate] = relation
 	}
 	if err := validateExtensionalCatalog(description); err != nil {
-		return ValidatedFacts{}, err
+		return Descriptor{}, err
 	}
-	wanted := make(map[Predicate]struct{}, len(requested))
-	for _, predicate := range requested {
-		if _, ok := metadata[predicate]; !ok {
-			return ValidatedFacts{}, fmt.Errorf("producer %q was asked for unknown predicate %s", description.Namespace, predicate)
-		}
-		if _, duplicate := wanted[predicate]; duplicate {
-			return ValidatedFacts{}, fmt.Errorf("producer %q request repeats %s", description.Namespace, predicate)
-		}
-		wanted[predicate] = struct{}{}
-	}
-	result := ValidatedFacts{
-		relations:     make(map[Predicate][]Row, len(wanted)),
-		anchors:       make(map[string]AnchorSupport, len(batch.Anchors)),
-		analyzedFiles: slices.Clone(batch.AnalyzedFiles),
-		inputRevision: batch.InputRevision,
-		scope:         cloneCanonical(batch.Scope),
-		namespace:     description.Namespace,
-	}
-	for predicate := range batch.Relations {
-		if _, ok := wanted[predicate]; !ok {
-			return ValidatedFacts{}, fmt.Errorf("producer %q returned unrequested predicate %s", description.Namespace, predicate)
-		}
-	}
-	for predicate := range wanted {
-		rows, present := batch.Relations[predicate]
-		if !present {
-			return ValidatedFacts{}, fmt.Errorf("producer %q omitted requested predicate %s", description.Namespace, predicate)
-		}
-		descriptor := metadata[predicate]
-		frozen := make([]Row, 0, len(rows))
-		rowKeys := make(map[string]struct{}, len(rows))
-		for rowIndex, row := range rows {
-			if len(row) != predicate.Arity {
-				return ValidatedFacts{}, fmt.Errorf("producer %q row %d of %s has arity %d, want %d", description.Namespace, rowIndex, predicate, len(row), predicate.Arity)
+	return Descriptor{description: description, base: base}, nil
+}
+
+func (d Descriptor) Description() ProducerDescription { return cloneDescription(d.description) }
+
+func cloneDescription(d ProducerDescription) ProducerDescription {
+	d.EffectiveConfiguration = cloneCanonical(d.EffectiveConfiguration)
+	copyRelations := func(in []RelationDescription) []RelationDescription {
+		out := slices.Clone(in)
+		for i := range out {
+			out[i].Arguments = slices.Clone(out[i].Arguments)
+			for j := range out[i].Arguments {
+				out[i].Arguments[j].Representations = slices.Clone(out[i].Arguments[j].Representations)
+				out[i].Arguments[j].AllowedNames = slices.Clone(out[i].Arguments[j].AllowedNames)
 			}
-			for index, value := range row {
-				argument := descriptor.Arguments[index]
-				if !slices.Contains(argument.Representations, value.Kind) {
-					return ValidatedFacts{}, fmt.Errorf("producer %q row %d of %s argument %s has unaccepted representation %d", description.Namespace, rowIndex, predicate, argument.Name, value.Kind)
-				}
-				if argument.Role == PathRole && value.Kind != StringKind {
-					return ValidatedFacts{}, fmt.Errorf("producer %q row %d of %s path argument %s is not a string", description.Namespace, rowIndex, predicate, argument.Name)
-				}
-				if _, err := value.constant(); err != nil {
-					return ValidatedFacts{}, fmt.Errorf("producer %q row %d of %s: %w", description.Namespace, rowIndex, predicate, err)
-				}
-				if value.Kind == NameKind && len(argument.AllowedNames) > 0 && !slices.Contains(argument.AllowedNames, value.String) {
-					return ValidatedFacts{}, fmt.Errorf("producer %q row %d of %s argument %s has unaccepted name %q", description.Namespace, rowIndex, predicate, argument.Name, "/"+value.String)
-				}
-				if argument.Role == EntityRole {
-					if value.Kind != StringKind || !ownsEntity(description.Namespace, value.String) {
-						return ValidatedFacts{}, fmt.Errorf("producer %q row %d of %s argument %s has foreign or invalid entity %q", description.Namespace, rowIndex, predicate, argument.Name, value.String)
-					}
-				}
-				if argument.ReportSupport == ReportRequired {
-					if value.Kind != StringKind {
-						return ValidatedFacts{}, fmt.Errorf("producer %q required report argument %s of %s is not an entity string", description.Namespace, argument.Name, predicate)
-					}
-					if _, present := batch.Anchors[value.String]; !present {
-						return ValidatedFacts{}, fmt.Errorf("producer %q omitted required location support for %q in %s", description.Namespace, value.String, predicate)
-					}
-				}
-			}
-			key, err := canonicalRowKey(row)
-			if err != nil {
-				return ValidatedFacts{}, err
-			}
-			if _, duplicate := rowKeys[key]; duplicate {
-				continue
-			}
-			rowKeys[key] = struct{}{}
-			frozen = append(frozen, slices.Clone(row))
 		}
-		sort.Slice(frozen, func(i, j int) bool {
-			left, _ := canonicalRowKey(frozen[i])
-			right, _ := canonicalRowKey(frozen[j])
-			return left < right
-		})
-		result.relations[predicate] = frozen
+		return out
 	}
-	for id, support := range batch.Anchors {
-		if !ownsEntity(description.Namespace, id) {
-			return ValidatedFacts{}, fmt.Errorf("producer %q supplied anchor with foreign or invalid entity %q", description.Namespace, id)
-		}
-		if err := validateAnchor(support); err != nil {
-			return ValidatedFacts{}, fmt.Errorf("producer %q anchor %q: %w", description.Namespace, id, err)
-		}
-		result.anchors[id] = cloneAnchor(support)
-	}
-	for _, file := range result.analyzedFiles {
-		if !normalizedPath(file) {
-			return ValidatedFacts{}, fmt.Errorf("producer %q has non-normalized analyzed path %q", description.Namespace, file)
-		}
-	}
-	sort.Strings(result.analyzedFiles)
-	result.analyzedFiles = slices.Compact(result.analyzedFiles)
-	return result, nil
+	d.BaseRelations, d.Helpers = copyRelations(d.BaseRelations), copyRelations(d.Helpers)
+	return d
 }
 
 func validateExtensionalCatalog(description ProducerDescription) error {
-	declarations, err := parse.Unit(strings.NewReader(description.Schema.Declarations))
-	if err != nil {
-		return fmt.Errorf("producer %q catalog declarations: %w", description.Namespace, err)
-	}
 	extensional := make(map[Predicate]struct{})
-	for _, declaration := range declarations.Decls {
-		if declaration.DeclaredAtom.Predicate == symbols.Package || declaration.DeclaredAtom.Predicate == symbols.Use || !declaration.IsExtensional() {
-			continue
+	helpers := make(map[Predicate]struct{})
+	for _, source := range []string{description.Schema.Declarations, description.Schema.Prelude} {
+		unit, err := parse.Unit(strings.NewReader(source))
+		if err != nil {
+			return fmt.Errorf("producer %q catalog declarations: %w", description.Namespace, err)
 		}
-		local := declaration.DeclaredAtom.Predicate
-		predicate := Predicate{Name: description.Namespace + "." + local.Symbol, Arity: local.Arity}
-		if _, duplicate := extensional[predicate]; duplicate {
-			return fmt.Errorf("producer %q catalog declares extensional predicate %s more than once", description.Namespace, predicate)
+		for _, declaration := range unit.Decls {
+			if declaration.DeclaredAtom.Predicate == symbols.Package || declaration.DeclaredAtom.Predicate == symbols.Use {
+				continue
+			}
+			local := declaration.DeclaredAtom.Predicate
+			predicate := Predicate{Name: description.Namespace + "." + local.Symbol, Arity: local.Arity}
+			if _, exists := extensional[predicate]; exists {
+				return fmt.Errorf("producer %q catalog declares predicate %s more than once", description.Namespace, predicate)
+			}
+			if _, exists := helpers[predicate]; exists {
+				return fmt.Errorf("producer %q catalog declares predicate %s more than once", description.Namespace, predicate)
+			}
+			if declaration.IsExtensional() {
+				extensional[predicate] = struct{}{}
+			} else {
+				helpers[predicate] = struct{}{}
+			}
 		}
-		extensional[predicate] = struct{}{}
 	}
 	baseRelations := make(map[Predicate]struct{}, len(description.BaseRelations))
 	for _, relation := range description.BaseRelations {
 		baseRelations[relation.Predicate] = struct{}{}
 	}
 	for predicate := range extensional {
-		if _, exists := baseRelations[predicate]; !exists {
+		if _, ok := baseRelations[predicate]; !ok {
 			return fmt.Errorf("producer %q catalog declares extensional predicate %s absent from BaseRelations", description.Namespace, predicate)
 		}
 	}
 	for predicate := range baseRelations {
-		if _, exists := extensional[predicate]; !exists {
+		if _, ok := extensional[predicate]; !ok {
 			return fmt.Errorf("producer %q BaseRelations predicate %s has no extensional catalog declaration", description.Namespace, predicate)
+		}
+	}
+	describedHelpers := make(map[Predicate]struct{}, len(description.Helpers))
+	for _, relation := range description.Helpers {
+		describedHelpers[relation.Predicate] = struct{}{}
+	}
+	for predicate := range helpers {
+		if _, ok := describedHelpers[predicate]; !ok {
+			return fmt.Errorf("producer %q catalog helper %s absent from Helpers", description.Namespace, predicate)
+		}
+	}
+	for predicate := range describedHelpers {
+		if _, ok := helpers[predicate]; !ok {
+			return fmt.Errorf("producer %q helper %s has no non-extensional catalog declaration", description.Namespace, predicate)
 		}
 	}
 	return nil
@@ -328,14 +208,33 @@ func validateRelation(namespace string, relation RelationDescription) error {
 	if len(relation.Arguments) != relation.Predicate.Arity {
 		return fmt.Errorf("producer %q relation %s has %d argument descriptors, want %d", namespace, relation.Predicate, len(relation.Arguments), relation.Predicate.Arity)
 	}
+	names := make(map[string]bool, len(relation.Arguments))
 	for _, argument := range relation.Arguments {
-		if argument.Name == "" || len(argument.Representations) == 0 {
+		if argument.Name == "" || !utf8.ValidString(argument.Name) || names[argument.Name] || len(argument.Representations) == 0 {
 			return fmt.Errorf("producer %q relation %s has incomplete argument metadata", namespace, relation.Predicate)
+		}
+		names[argument.Name] = true
+		seenKinds := make(map[ValueKind]bool)
+		for _, kind := range argument.Representations {
+			if kind < StringKind || kind > FloatKind || seenKinds[kind] {
+				return fmt.Errorf("producer %q relation %s argument %s has invalid representation %d", namespace, relation.Predicate, argument.Name, kind)
+			}
+			seenKinds[kind] = true
+		}
+		seenNames := make(map[string]bool)
+		for _, name := range argument.AllowedNames {
+			if !seenKinds[NameKind] || seenNames[name] {
+				return fmt.Errorf("producer %q relation %s argument %s has invalid allowed name %q", namespace, relation.Predicate, argument.Name, name)
+			}
+			if _, err := Name(name).constant(); err != nil {
+				return fmt.Errorf("producer %q relation %s argument %s: %w", namespace, relation.Predicate, argument.Name, err)
+			}
+			seenNames[name] = true
 		}
 		if argument.Role != ValueRole && argument.Role != PathRole && argument.Role != EntityRole {
 			return fmt.Errorf("producer %q relation %s argument %s has invalid role %q", namespace, relation.Predicate, argument.Name, argument.Role)
 		}
-		if argument.Role != ValueRole && !slices.Contains(argument.Representations, StringKind) {
+		if argument.Role != ValueRole && (len(argument.Representations) != 1 || argument.Representations[0] != StringKind) {
 			return fmt.Errorf("producer %q relation %s argument %s must accept strings for its %s role", namespace, relation.Predicate, argument.Name, argument.Role)
 		}
 		if argument.ReportSupport != ReportNone && argument.ReportSupport != ReportRequired && argument.ReportSupport != ReportOptional {
@@ -348,14 +247,9 @@ func validateRelation(namespace string, relation RelationDescription) error {
 	return nil
 }
 
-func ownsEntity(namespace, id string) bool {
-	owner, key, ok := strings.Cut(id, ":")
-	return ok && owner == namespace && key != ""
-}
-
 func validateAnchor(support AnchorSupport) error {
 	location := support.Location
-	if strings.TrimSpace(support.Description) == "" {
+	if strings.TrimSpace(support.Description) == "" || !utf8.ValidString(support.Description) || strings.ContainsRune(support.Description, 0) {
 		return fmt.Errorf("description is empty")
 	}
 	if !normalizedPath(location.File) || location.StartLine < 1 || location.StartColumn < 1 || location.EndLine < 1 || location.EndColumn < 1 {
@@ -411,7 +305,7 @@ func validateCanonicalData(value any) error {
 }
 
 func normalizedPath(value string) bool {
-	return value != "" && value != "." && value != "/" && !strings.Contains(value, `\`) && path.Clean(value) == value
+	return value != "" && value != "." && value != "/" && utf8.ValidString(value) && !strings.ContainsRune(value, 0) && !strings.Contains(value, `\`) && path.Clean(value) == value
 }
 
 func cloneAnchor(support AnchorSupport) AnchorSupport {
@@ -446,7 +340,7 @@ func cloneCanonical(value any) any {
 
 func validFiniteFloat(value float64) bool { return !math.IsNaN(value) && !math.IsInf(value, 0) }
 
-func canonicalRowKey(row Row) (string, error) {
+func canonicalRowKey(row []Value) (string, error) {
 	values := make([]any, len(row))
 	for index, value := range row {
 		switch value.Kind {

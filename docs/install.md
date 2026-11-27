@@ -178,11 +178,11 @@ Plugin caveats:
 
 - if `mode` is omitted, plain `eslint` CLI runs default to `oneshot`
 - long-lived editor/language-server use defaults to `serve`
-- rule-file edits trigger cache invalidation and a fresh analysis on the next lint pass
-- source-file edits refresh in the background; editor diagnostics may lag briefly. When the editor lints a file that was saved after the last analysis started, the plugin runs a new analysis first, so the diagnostics of a saved file are current, except for a second save in the same second on a file system that stores modification times in whole seconds
+- an ESLint API caller with a complete file list can opt into one validation for the operation with [`plugin.withFileBatch`](api.md#explicit-eslint-multi-file-operations). Ordinary editor callbacks validate each file request; ESLint CLI one-shot behavior is unchanged
+- each file request checks recorded inputs and configuration. Source and rule edits are picked up on the next lint pass, without a background watcher. Quick validation can miss a same-size edit with a deliberately restored modification time; forced reanalysis performs a Full check
 - lintai reads saved files, not the editor buffer. While a file has unsaved changes, `lintai/analysis` shows one message on line 1 that asks you to save the file, and the other lintai rules report nothing for that file.
 - when lintai cannot produce diagnostics, `lintai/analysis` reports the reason on line 1 of each linted file, so a broken setup does not look like a clean workspace. This covers a failed analysis, a `serve` process that failed and fell back to one `oneshot` run, a rule that could not run (a `rule_execution_error`) and a rule file that did not load. In an `eslint` CLI run, these messages appear on the first linted file only.
-- the rule list is read when ESLint loads the config. After you add a rule file or change a rule id, restart ESLint or the editor's ESLint server
+- the rule list is read when ESLint loads the config. Newly discovered IDs report through `lintai/analysis` with restart guidance; restart ESLint or its language server to register a dedicated rule. Existing rule implementation edits do not require a restart
 
 ## Build from source and caveats
 
@@ -254,7 +254,7 @@ The asset root is the directory that contains `scripts/bundle-rule.mjs` and `scr
 
 ### Rule bundles fail unexpectedly
 
-The artifact identity covers the coherent inputs consumed by both bundle outputs: rule and generated-entry source, tool identity, configuration, package metadata and module-resolution observations. An input that changes, disappears, or cannot be accounted for during bundling produces a per-rule bundle error; lintai does not publish or reuse an incomplete artifact. Retry after the edit is complete.
+The artifact identity covers the coherent inputs consumed by both bundle outputs: rule and generated-entry source, tool identity, configuration, package metadata and module-resolution observations. The bundler rejects an incoherent or escaping captured view. A later file edit does not change the captured identity; the next check validates the evidence before reuse. Retry after the edit is complete if the captured view could not be built.
 
 Each rule execution uses a fresh pure JavaScript runtime. Its program and message callbacks share state during that run, and the next execution starts with fresh module state. Metadata listing uses a separate runtime and does not invoke rule callbacks. See [the rules-lock reference](api.md#rules-lock) for artifact identity and integrity checks.
 
@@ -266,7 +266,7 @@ Check:
 
 ### ESLint does not pick up a rule change immediately
 
-Rule-file edits should invalidate the cache automatically now. If they do not:
+In serve mode, the next file request checks rule inputs for changes. If an edit does not appear:
 
 - make sure the changed file is inside the configured `rules` glob
 - lint a target source file again, not just the rule file

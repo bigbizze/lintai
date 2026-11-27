@@ -1,15 +1,27 @@
+import {
+	createFramedResponse,
+	createTestDependencies,
+	createTestProcess,
+	createTestTransport,
+	getClient,
+	resetClientsForTest,
+} from "../../client/dist/test-support.test.js";
 import assert from "node:assert/strict";
+import {
+	cpSync,
+	mkdtempSync,
+	mkdirSync,
+	readFileSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import test, { afterEach } from "node:test";
 
-import {
-	type Diagnostic,
-	type LintaiOptions,
-	createTestDependencies,
-	getClient,
-	loadRuleIds,
-	resetClientsForTest,
-	resolveBridgeOptions,
-} from "@lintai/client";
+import { type Diagnostic, type LintaiOptions, resolveBridgeOptions } from "@lintai/client";
 import { Linter } from "eslint";
 
 import { createLintaiPlugin, eslintHostDefaults } from "./index.js";
@@ -114,7 +126,6 @@ function stubLintai(
 		},
 		log: () => undefined,
 	});
-	loadRuleIds(resolved, dependencies);
 	getClient(resolved, dependencies);
 	return runs;
 }
@@ -177,19 +188,18 @@ test("each lintai rule is its own ESLint rule with the configured level; analysi
 	});
 	assert.deepEqual(messages, [
 		"lintai/analysis 2 1 [lintai] rule arch.off could not run (phase evaluation): fact limit",
-		"lintai/analysis 2 1 [lintai] rule file lintai-rules/broken.ts could not be loaded: Unexpected end of file",
 		"lintai/analysis 2 3 [lintai] rule arch.renamed has no linter rule lintai/arch.renamed, because the linter read the rule list when it loaded the plugin. Restart the linter or the editor's language server. [arch.renamed/v] renamed",
 		"lintai/arch.hard 2 1 [arch.hard/v] hard",
 		"lintai/arch.soft 1 2 [arch.soft/v] soft",
 	]);
-	// One lintai rules run and one analysis serve every rule, and the plugin
+	// Each construction discovers rules; one analysis serves every rule, and the plugin
 	// does not pass --severity.
 	assert.deepEqual(
 		runs.map((args) => args[0]),
-		["rules", "--json"],
+		["rules", "rules", "--json"],
 	);
 	assert.ok(!runs.some((args) => args.includes("--severity")));
-	assert.equal(runs[1]?.[runs[1].indexOf("--rule-workers") + 1], "2");
+	assert.equal(runs[2]?.[runs[2].indexOf("--rule-workers") + 1], "2");
 });
 
 test("configs.all enables every lintai rule, and a later config overrides one rule or one file", () => {
@@ -334,4 +344,237 @@ test("rules: [] creates only analysis and the authoring rules and starts no lint
 		[],
 	);
 	assert.equal(spawned, 0);
+});
+
+// Exercise ESLint's actual SourceCode lifetime: a reused SourceCode must
+// revalidate, while enabled rules share one response even with analysis off.
+test("plugin discovery and ESLint analysis follow their current lifetimes", () => {
+	const root = mkdtempSync(path.join(os.tmpdir(), "lintai-eslint-lifetime-"));
+	mkdirSync(path.join(root, "src"));
+	const filename = path.join(root, "src/a.js");
+	const code = "export const a = 1;\n";
+	writeFileSync(filename, code);
+	const hostOptions: LintaiOptions = {
+		mode: "serve",
+		binary: "/fixture/lintai",
+		repoRoot: root,
+		workspaceRoot: root,
+	};
+	const resolved = resolveBridgeOptions(hostOptions, process.cwd(), eslintHostDefaults());
+	const child = createTestProcess();
+	let requestID = 0;
+	let fileRequests = 0;
+	let listings = 0;
+	let recovered = false;
+	const stderr: string[] = [];
+	const originalError = console.error;
+	const dependencies = createTestDependencies({
+		spawnSync: () => {
+			listings++;
+			return {
+				status: 0,
+				stderr: "",
+				stdout: JSON.stringify({
+					rules: (recovered ? ["alpha", "gamma"] : ["alpha", "beta"]).map((id) => ({
+						id,
+						path: `${id}.ts`,
+					})),
+					errors: recovered ? [] : [{ path: "broken.ts", message: "syntax error" }],
+				}),
+			};
+		},
+		spawnServe: () =>
+			createTestTransport(child, () => {
+				const id = ++requestID;
+				if (id === 1)
+					return createFramedResponse({ jsonrpc: "2.0", id, result: { protocolVersion: 1 } });
+				fileRequests++;
+				return createFramedResponse({
+					jsonrpc: "2.0",
+					id,
+					result: {
+						snapshotVersion: String(fileRequests),
+						rulesLoaded: 2,
+						diagnostics: ["alpha", "beta"].map((rule_id) => ({
+							...located(rule_id, recovered ? "repaired" : "initial", 1),
+							source_location: {
+								file: "src/a.js",
+								startLine: 1,
+								startColumn: 1,
+								endLine: 1,
+								endColumn: 2,
+							},
+						})),
+						problems: recovered ? [] : ["[lintai] current syntax error"],
+					},
+				});
+			}),
+	});
+	try {
+		getClient(resolved, dependencies);
+		console.error = (message) => {
+			stderr.push(String(message));
+		};
+		const plugin = createLintaiPlugin(hostOptions);
+		assert.deepEqual(stderr, ["[lintai] rule file broken.ts could not be loaded: syntax error"]);
+		const linter = new Linter({ configType: "flat", cwd: root });
+		const verify = () =>
+			linter
+				.verify(code, [plugin.configs.all], filename)
+				.map((item) => item.message)
+				.sort();
+		assert.deepEqual(
+			verify(),
+			["[alpha/v] initial", "[beta/v] initial", "[lintai] current syntax error"].sort(),
+		);
+		assert.equal(fileRequests, 1);
+		const previousSourceCode = linter.getSourceCode();
+		recovered = true;
+		const analysisDisabled: Linter.Config[] = [
+			{
+				...plugin.configs.all,
+				rules: { ...plugin.configs.all.rules, "lintai/analysis": "off" },
+			},
+		];
+		assert.deepEqual(
+			linter
+				.verify(previousSourceCode, analysisDisabled, filename)
+				.map((item) => item.message)
+				.sort(),
+			["[alpha/v] repaired", "[beta/v] repaired"].sort(),
+		);
+		assert.equal(fileRequests, 2);
+		const rebuilt = createLintaiPlugin(hostOptions);
+		assert.ok(rebuilt.rules.alpha && rebuilt.rules.gamma);
+		assert.equal(rebuilt.rules.beta, undefined);
+		assert.equal(listings, 2);
+		assert.equal(stderr.length, 1);
+	} finally {
+		console.error = originalError;
+		resetClientsForTest();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+// Exercise the real ESLint host, client, framed server and engine with the
+// repository workspace and rule fixture, including overlapping operations.
+test("explicit batches isolate operations and recover after workspace changes", async () => {
+	const repo = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+	const tmp = mkdtempSync(path.join(os.tmpdir(), "lintai-eslint-batch-"));
+	const root = path.join(tmp, "workspace");
+	cpSync(path.join(repo, "testdata/fixtures/workspace"), root, { recursive: true });
+	const rule = path.join(tmp, "pure-no-service-imports.ts");
+	cpSync(path.join(repo, "testdata/fixtures/rules/pure-no-service-imports.ts"), rule);
+	mkdirSync(path.join(tmp, "node_modules"));
+	symlinkSync(path.join(repo, "node_modules/zod"), path.join(tmp, "node_modules/zod"), "dir");
+	const originalRule = readFileSync(rule, "utf8");
+	const files = ["src/pure/helper.ts", "src/pure/math.ts"].map((f) => path.join(root, f));
+	const originalSource = readFileSync(files[0], "utf8");
+	const options: LintaiOptions = {
+		mode: "serve",
+		binary: path.join(repo, "lintai"),
+		repoRoot: repo,
+		workspaceRoot: root,
+		rules: [rule],
+		files: "walk",
+		ruleWorkers: 1,
+	};
+	const plugin = createLintaiPlugin(options);
+	const resolved = resolveBridgeOptions(options, process.cwd(), eslintHostDefaults());
+	// Register the real shared client for cleanup; this does not replace its lifecycle.
+	getClient(resolved);
+	const linter = new Linter({ configType: "flat", cwd: root });
+	const config: Linter.Config[] = [{ files: ["**/*.ts"], ...plugin.configs.all }];
+	const verify = (input: string | ReturnType<typeof linter.getSourceCode>, name = files[0]) =>
+		linter.verify(input, config, name).map((message) => message.message);
+	try {
+		const ordinary = verify(originalSource);
+		assert.equal(ordinary.length, 1);
+		assert.match(ordinary[0], /Pure module/);
+		const sourceCode = linter.getSourceCode();
+		const first = await plugin.withFileBatch(files, ({ problems }) => {
+			assert.deepEqual(problems, []);
+			assert.deepEqual(verify(sourceCode), ordinary);
+			return verify(readFileSync(files[1], "utf8"), files[1]);
+		});
+		assert.deepEqual(first, []);
+
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const outer = plugin.withFileBatch(files, async () => {
+			await gate;
+			return verify(sourceCode);
+		});
+		writeFileSync(rule, originalRule.replace("Pure module", "Changed module"));
+		const inner = await plugin.withFileBatch(files, () => verify(sourceCode));
+		assert.match(inner[0], /Changed module/);
+		release();
+		assert.deepEqual(await outer, ordinary);
+		assert.match(verify(sourceCode)[0], /Changed module/);
+
+		writeFileSync(
+			files[0],
+			originalSource.replace(
+				'import { fetchData } from "../services/fetch-data";',
+				"const fetchData = () => 1;",
+			),
+		);
+		await plugin.withFileBatch(files, () =>
+			assert.deepEqual(verify(readFileSync(files[0], "utf8")), []),
+		);
+		writeFileSync(files[0], originalSource);
+		writeFileSync(rule, "export default (\n");
+		await plugin.withFileBatch(files, ({ problems }) => {
+			assert.ok(problems.length > 0);
+			assert.match(verify(sourceCode).join("\n"), /could not run/);
+		});
+		writeFileSync(rule, originalRule);
+		assert.deepEqual(await plugin.withFileBatch(files, () => verify(sourceCode)), ordinary);
+
+		let releaseBeforeFailure!: () => void;
+		const failureGate = new Promise<void>((resolve) => {
+			releaseBeforeFailure = resolve;
+		});
+		const beforeFailure = plugin.withFileBatch(files, async () => {
+			await failureGate;
+			return verify(sourceCode);
+		});
+		const configPath = path.join(root, "lintai.toml");
+		writeFileSync(configPath, "[workspace\n");
+		await plugin.withFileBatch(files, ({ problems }) => {
+			assert.match(problems.join("\n"), /could not analyze.*config/);
+			assert.match(verify(sourceCode).join("\n"), /could not analyze.*config/);
+		});
+		await plugin.withFileBatch([], ({ problems }) => {
+			assert.match(problems.join("\n"), /could not analyze.*config/);
+		});
+		releaseBeforeFailure();
+		assert.deepEqual(await beforeFailure, ordinary);
+		rmSync(configPath);
+		await assert.rejects(
+			plugin.withFileBatch(files, () => {
+				throw new Error("caller failed");
+			}),
+			/caller failed/,
+		);
+		assert.deepEqual(verify(sourceCode), ordinary);
+		let releaseLate!: () => void;
+		let late!: Promise<string[]>;
+		await plugin.withFileBatch(files, () => {
+			late = new Promise<void>((resolve) => {
+				releaseLate = resolve;
+			}).then(() => verify(sourceCode));
+		});
+		writeFileSync(rule, originalRule.replace("Pure module", "Changed module"));
+		releaseLate();
+		assert.match((await late)[0], /Changed module/);
+		await plugin.withFileBatch([files[0]], () => {
+			assert.throws(() => verify(readFileSync(files[1], "utf8"), files[1]), /was not supplied/);
+		});
+	} finally {
+		resetClientsForTest();
+		rmSync(tmp, { recursive: true, force: true });
+	}
 });

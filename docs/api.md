@@ -27,7 +27,7 @@ Rules can identify the checked signature and lexical contract member at a call s
 
 This release adds public export and declaration inventories, checked-to-source declaration associations, explicit type-opacity facts, and suspension sites for `await`, `for await`, and module-scope suspension. Shared lexical ownership keeps call, reference, and suspension facts attached to the correct function or module. Rule listings expose validated versions, reported predicates, and `expectNonEmpty` declarations.
 
-Source associations report incomplete or ambiguous evidence instead of guessing. The session validates producer inputs before reusing analysis; clients request checks when watched inputs change. Library-type opacity remains explicit; accepting it also trusts any merged augmentations. See the predicate reference below and [examples.md](examples.md) for rule-author guidance.
+Source associations report incomplete or ambiguous evidence instead of guessing. The session validates producer inputs before reusing analysis; the server validates captured inputs on each independent file or explicit multi-file request. Library-type opacity remains explicit; accepting it also trusts any merged augmentations. See the predicate reference below and [examples.md](examples.md) for rule-author guidance.
 
 ## Linear reachability predicates (0.6.4)
 
@@ -135,6 +135,7 @@ Current caveats:
 For each rule:
 
 1. `setup()` runs in Node, under the setup sandbox when it is active (see [trust.md](trust.md)). Errors use phase `setup`. When a rules lock is given, each rule is checked against it before its `setup()` runs. A mismatch uses phase `integrity`, and the rule does not run.
+
 2. `facts()` and `program()` run in Goja. Errors use phase `program`.
 3. Go parses the prelude and the program. Parse errors use phase `program_parse`.
 4. Go analyzes and stratifies the program, with the base relations and the `facts()` relations as extensional predicates. Errors use phase `program_analysis`. This includes: a redefined base or prelude predicate, a `.report()` or `.expectNonEmpty()` name that does not exist, a reported predicate without `Decl`, a `facts()` relation without an `extensional()` declaration, a wrong tuple arity, and unsafe negation.
@@ -142,6 +143,8 @@ For each rule:
 6. `expectNonEmpty` predicates are checked. Errors use phase `premise`.
 7. Each row of each reported predicate becomes a diagnostic. Anchor errors use phase `report`.
 8. `message()` runs for each row. Errors use phase `message`.
+
+File requests in serve mode and Go callers using `Session.Refresh` may reuse a successful result without rerunning setup. Ambient reads made by config transforms or setup are not automatically observed; use `reanalyze` or `Session.Check` to force preparation after those inputs change.
 
 A failing rule contributes only its error diagnostic. Other rules still run. Diagnostics are sorted by file, start line, start column, rule id, assertion id and anchor, so the output is identical across runs.
 
@@ -614,7 +617,7 @@ Rules lock:
 }
 ```
 
-The artifact hash covers captured rule source, configuration and resolution inputs, including imported `@lintai/sdk` code, the suppression policy, and the bundler and generated-entry identity. The prepare and pure bundles use the same captured view. A changed, missing or incomplete input causes a bundle error instead of publishing or reusing that artifact. The lock also approves the current suppression groups and counts. New groups or increased counts require approval; reduced counts and removed groups do not. A recording under an enforced lock that would exceed approval fails without writing. To approve changes, record without the prior lock, review the suppression file, and explicitly regenerate the lock.
+The artifact hash covers captured rule source, configuration and resolution inputs, including imported `@lintai/sdk` code, the suppression policy, and the bundler and generated-entry identity. The prepare and pure bundles use the same captured view, and the bundler rejects an incoherent or escaping view. A result retains the captured evidence even if a file changes after capture; a later check validates that evidence before reuse. The lock also approves the current suppression groups and counts. New groups or increased counts require approval; reduced counts and removed groups do not. A recording under an enforced lock that would exceed approval fails without writing. To approve changes, record without the prior lock, review the suppression file, and explicitly regenerate the lock.
 
 With `--rules-lock`, lintai checks each rule against the lock after bundling and before `setup()`. These are `rule_execution_error` diagnostics with phase `integrity`, and exit code 3:
 
@@ -647,7 +650,7 @@ Exit codes:
 | 0 | No error diagnostics. |
 | 1 | At least one error-severity violation or unused suppression remains, and no execution failure took priority. |
 | 2 | Invalid arguments, configuration, saved format or suppression policy, including `suppression_policy_mismatch`. |
-| 3 | Integrity, setup, rule, producer, cancellation or input-instability failure. Violations from other rules may still be in the output. |
+| 3 | Integrity, setup, rule, producer, cancellation or incoherent bundle input failure. Violations from other rules may still be in the output. |
 
 CLI caveats:
 
@@ -659,10 +662,10 @@ CLI caveats:
 
 The ESLint plugin and the oxlint plugin give each lintai rule its own linter rule, `lintai/<rule-id>`. You set its level, `"off"`, `"warn"` or `"error"` (or `0`, `1`, `2`), in the linter config, as for any other rule. Per-file overrides, disable comments (`// eslint-disable-next-line lintai/arch.legacy-imports`, `// oxlint-disable-next-line lintai/arch.legacy-imports`) and the linter CLI all work per lintai rule.
 
-Each plugin package exports `createLintaiPlugin(options)`. It runs `lintai rules` once to read the rule ids, and returns a plugin with these rules:
+Each plugin package exports `createLintaiPlugin(options)`. Each construction runs `lintai rules` to discover the current rule IDs and returns a plugin with these rules:
 
 - `lintai/<rule-id>` for each rule that `lintai rules` lists. It reports the violations of that rule. It has no options.
-- `lintai/analysis`: everything that is not a violation of a configured rule. This is every `rule_execution_error` (any phase), a failed analysis, a `serve` process that fell back to one `oneshot` run, each rule file that `lintai rules` could not load, the "save this file" message in `serve` mode, and a violation of a rule that has no linter rule in the plugin (see the caveats). Keep `lintai/analysis` at `"error"`.
+- `lintai/analysis`: everything that is not a violation of a configured rule. This is every `rule_execution_error` (any phase), a failed analysis, a `serve` process that fell back to one `oneshot` run, current rule-loading problems, the "save this file" message in `serve` mode, and a violation of a rule that has no linter rule in the plugin (see the caveats). Keep `lintai/analysis` at `"error"`.
 - the authoring rules `lintai/no-ambient-in-pure-phase` (forbids ambient APIs in callbacks passed to `.program(`, `.facts(` and `.message(`), `lintai/no-top-level-node-imports` and `lintai/require-rule-shape` (requires `.version(`, `.program(`, `.report(` and `.message(`).
 
 The plugin object also has two configs:
@@ -670,7 +673,7 @@ The plugin object also has two configs:
 - `configs.all`: every `lintai/<rule-id>` and `lintai/analysis` at `"error"`. In the ESLint plugin it is a flat config object with `plugins` and `rules`. In the oxlint plugin it has `rules` only, to spread in `oxlint.config.ts`.
 - `configs.authoring`: the three authoring rules at `"error"`, in the same form.
 
-All generated rules and `lintai/analysis` share one client, so one lintai process serves every rule in a lint run. `createLintaiPlugin({ rules: [] })` creates only `lintai/analysis` and the authoring rules and never starts lintai, for a repository that only lints rule files.
+All generated rules and `lintai/analysis` share one client. Rules in the same host file analysis share its diagnostics and problems; a later file analysis makes a new request in serve mode. `createLintaiPlugin({ rules: [] })` creates only `lintai/analysis` and the authoring rules and never starts lintai, for a repository that only lints rule files.
 
 Options:
 
@@ -705,14 +708,43 @@ type LintaiOptions = {
 
 Linter rule caveats:
 
-- the rule list is fixed when the linter loads the plugin. After you add a rule file or change a rule id, restart the linter or the editor's language server. Until then, the violations of the new id appear under `lintai/analysis`, with a message that says to restart.
+- the rule list is fixed for each plugin instance. Construct and register a new plugin, or restart the linter or language server, after adding a rule file or changing an ID. Until then, violations of the new ID appear under `lintai/analysis`, with restart guidance.
 - a lintai rule that is not in the linter config does not run, and neither linter has a wildcard such as `"lintai/*"`. Spread `configs.all` to enable every rule, then override single rules.
 - a misspelled rule name in the config, such as `"lintai/arch.no-servce-imports"`, fails the lint run, as for any unknown rule
-- a rule file that does not load has no linter rule, so a config that names its rule fails as an unknown rule. The plugin writes the load error to stderr when the linter loads it, and `lintai/analysis` reports it too. A rule whose id is known (a duplicate id or an incomplete rule) keeps its linter rule, so the config loads, and `lintai/analysis` reports the problem as a rule error.
-- when `lintai rules` itself fails, for example because the binary is missing, the plugin has no lintai rules and writes the cause to stderr. The plugin does not keep this result, so a reload of the linter config tries again.
+- a rule file that does not load has no linter rule, so a config that names its rule fails as an unknown rule. The plugin writes the load error to stderr during construction. `lintai/analysis` reports current execution problems from the analysis response, so the old error disappears after recovery. A rule whose id is known (a duplicate id or an incomplete rule) keeps its linter rule, so the config loads, and `lintai/analysis` reports the problem as a rule error.
+- when `lintai rules` itself fails, for example because the binary is missing, the plugin has no lintai rules and writes the cause to stderr. A new plugin construction tries again.
 - a rule set to `"off"` in the linter is still evaluated by lintai; only its output is dropped. To skip the evaluation, remove the rule file from the `rules` globs.
 - rule errors always appear under `lintai/analysis` at the level of `lintai/analysis`, whatever level the rule has, so a broken rule cannot pass as a warning or be hidden by `"off"`
-- `lintai rules` takes about 0.1 to 0.3 s for 1 to 20 rules. It runs once when the linter loads the plugin.
+- `lintai rules` takes about 0.1 to 0.3 s for 1 to 20 rules. It runs once for each plugin construction.
+
+### Explicit ESLint multi-file operations
+
+ESLint's rule callbacks do not expose the `lintFiles()` boundary or its complete file list. A caller that has the exact concrete files can wrap the operation on the same plugin instance:
+
+```js
+import { ESLint } from "eslint";
+import { createLintaiPlugin } from "@lintai/eslint-plugin";
+
+const plugin = createLintaiPlugin({ mode: "serve" });
+const files = ["src/a.js", "src/b.js"]; // Complete list of concrete paths, not globs.
+const eslint = new ESLint({
+  overrideConfigFile: true,
+  overrideConfig: [plugin.configs.all],
+  concurrency: "off",
+  cache: false,
+});
+const results = await plugin.withFileBatch(files, async ({ problems }) => {
+  // Available even if analysis failed or files is empty. lintai/analysis also reports them.
+  if (problems.length) console.error(problems.join("\n"));
+  return eslint.lintFiles(files);
+});
+```
+
+Add the application's normal language/parser configuration to `overrideConfig` as needed. Relative paths resolve from the lintai workspace root. Supply every physical file whose enabled lintai rule can run; a file omitted from the list throws instead of silently appearing clean. In serve mode the wrapper makes one `diagnostics/files` request, resolving configuration and validating or reanalyzing once, then uses its ordered file projections and current workspace problems for the callback. A request failure is present in `problems` and is reported by `lintai/analysis`; the callback still runs so the caller can handle it. Throw from the callback if the caller prefers to stop. Existing one-shot mode keeps its one-shot behavior.
+
+The response belongs only to that invocation and is discarded when the callback's returned promise settles, including on a throw. Each later invocation requests a fresh result. Nested or overlapping calls have separate async contexts and retain their own results, even if ESLint reuses a `SourceCode`. The wrapper covers callbacks running in its async context in the same process and using that plugin instance; ESLint worker processes do not inherit it. Work left running after the callback settles and ordinary editor callbacks outside the wrapper use independent file requests, each with workspace validation. Unsaved-buffer handling is unchanged. The batch is a completed publication, not a filesystem transaction: edits during the operation can be reflected by the next operation.
+
+Keep ESLint's result cache disabled for lintai runs (`cache: false` in the API or do not pass CLI `--cache`). ESLint can return a cached result without invoking the lintai rule callback, so the batch wrapper cannot refresh that result when lintai's workspace, rules, configuration, or suppressions change. Enable ESLint caching only if its cache identity accounts for those lintai inputs.
 
 ## ESLint plugin reference and caveats
 
@@ -758,10 +790,11 @@ Plugin caveats:
 - ESLint 10 finds flat config from each linted file; pass `--config` to select one explicitly, and use Node 26 for the editor integration
 - `serve` is the default in editor-like long-lived processes
 - `oneshot` is the default under plain ESLint CLI detection
-- lintai reads the saved files on disk, not the editor buffer. In `serve` mode, when the editor text of a file is different from the saved file, `lintai/analysis` shows one message on line 1 that asks you to save the file, and the other lintai rules report nothing for that file. When the editor lints a file that was saved after the last analysis started, the plugin runs a new analysis first, so the diagnostics of the saved file are current. On a file system that stores modification times in whole seconds, a second save in the same second can show the diagnostics of the first save until the next background refresh.
-- rule-file edits force invalidation on the next lint pass. A new rule id still needs a restart (see "Linter rules").
-- in `serve` mode, the plugin also watches the extra files that the last analysis depended on: the source-links file, declaration maps, source entries, auxiliary tsconfig files and resolution candidates. Some of these files may not exist yet, because creating one, such as a new `.d.ts.map`, can change the facts. For a missing file or directory the plugin watches the nearest existing parent directory, without watching its subfolders. It also checks parent directories for replacement, so rebuilding a `dist` folder does not leave it watching the old folder. When one of these files changes, the plugin clears its diagnostics and the next lint pass runs a fresh analysis. After a check it updates the watches from producer-provided hints, including relevant source-membership directories. Events request another check; the producer validates captured contents and membership when that check runs. A newly discovered hint does not reject the completed result. If an input watcher fails, the plugin reports the problem and falls back to one-shot analysis.
+- lintai reads saved files, not the editor buffer. In `serve` mode, an unsaved buffer shows a save message through `lintai/analysis` and hides other lintai findings for that file.
+- each file request validates the recorded inputs and reloads changed configuration; source and rule changes are picked up on the next lint pass. There is no background refresh. Quick validation can miss a same-size edit whose modification time was deliberately restored; forced `reanalyze` performs a Full check.
+- a newly discovered rule's findings appear through `lintai/analysis` with restart guidance until the linter reloads its plugin and registers the ID. Changes to an existing rule implementation need no restart.
 - when lintai cannot produce diagnostics, `lintai/analysis` reports the reason on line 1 of each linted file, so a broken setup does not look like a clean workspace. In an `eslint` CLI run, these messages appear on the first linted file only.
+- Outside an explicit `withFileBatch` callback, each ESLint verification that runs an enabled lintai rule starts a fresh file request, including when `Linter.verify` receives a previously used `SourceCode` object. Enabled lintai rules in that verification share the response, even when `lintai/analysis` is disabled.
 - the ESLint path never computes `explanation`
 
 ## Oxlint plugin reference and caveats
@@ -825,7 +858,8 @@ Options: the same `LintaiOptions` as the ESLint plugin.
 Modes:
 
 - `oxlint` CLI: `oneshot`. The plugin runs lintai once, and reports workspace problems on the first linted file only.
-- `oxlint --lsp`: `serve`. The plugin keeps one `lintai serve` process and reports workspace problems on each lint. When the editor text of a file is different from the saved file, `lintai/analysis` shows one message on line 1 that asks you to save the file. When the language server lints a file that was saved after the last analysis started, the plugin runs a new analysis first.
+- `oxlint --lsp`: `serve`. The plugin keeps one `lintai serve` process and reports workspace problems on each lint. When the editor text of a file is different from the saved file, `lintai/analysis` shows one message on line 1 that asks you to save the file. Each file request validates captured inputs and refreshes the analysis when needed.
+- In serve mode, each oxlint file analysis that runs an enabled lintai rule makes a fresh file request; its enabled lintai rules share the response, including when `lintai/analysis` is disabled.
 - The plugin detects the language server from the `--lsp` argument of the oxlint process. An explicit `mode` option always wins.
 - The plugin resolves relative paths in its options from the directory that the oxlint process runs in. An editor can start `oxlint --lsp` in a different directory, so set `workspaceRoot: import.meta.dirname` in `lintai.oxlint.mjs`, as in the example.
 
@@ -835,7 +869,7 @@ Plugin caveats:
 - the plugin needs stable Node 26.13.1 or later in the 26.x LTS line
 - line and column values are the same as under ESLint. A lintai diagnostic at line 3, column 5 is shown by the oxlint CLI at line 3, column 5
 - the plugin reports only. It gives no fixes and no suggestions
-- oxlint 1.90.0 runs JS plugins on one thread of one Node.js process, in the CLI and in the language server, so one lintai analysis serves all files
+- oxlint 1.90.0 runs JS plugins on one thread of one Node.js process, in the CLI and in the language server, so one shared client serves all files
 - on Linux, the plugin starts a small Node.js process (the spawner) when oxlint loads it, and starts lintai (also `lintai rules`) through that process. After it loads JS plugins, oxlint 1.90.0 reserves 6 GiB of address space for each lint thread. Then Node cannot start a child process from the oxlint process when the system does not allow that much memory to be committed, and the start fails with `ENOMEM` (see [oxc#20331](https://github.com/oxc-project/oxc/issues/20331)). This occurs, for example, with 4 threads on a machine with 16 GiB of RAM and 4 GiB of swap, such as a GitHub Actions `ubuntu-latest` runner
 
 ## Diagnostic shape and caveats

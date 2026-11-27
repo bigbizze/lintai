@@ -1,10 +1,13 @@
 package workspace
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/bigbizze/lintai/observe"
 )
 
 func TestWorkspaceConfigStrictSchemaAndResolution(t *testing.T) {
@@ -28,7 +31,7 @@ source_links = ""
 		t.Fatal(err)
 	}
 	if len(config.Exclude) != 1 || config.Exclude[0] != "tmp/**" || len(config.Include) != 1 || config.Include[0] != "dist/contracts/**" ||
-		len(config.Sources) != 1 || config.Sources[0] != "generated/contracts.d.ts" || config.Producers["ts"].Files != "walk" || config.Digest == "" {
+		len(config.Sources) != 1 || config.Sources[0] != "generated/contracts.d.ts" || config.Producers["ts"].Files != "walk" || len(config.Observations.Records()) == 0 {
 		t.Fatalf("unexpected effective config: %+v", config)
 	}
 	invocationDir := t.TempDir()
@@ -82,5 +85,57 @@ source_links = ""
 				t.Fatalf("error %q does not identify %s", err, want)
 			}
 		})
+	}
+}
+
+func TestConfigObservationsCaptureBytesAndMissingDefault(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, "lintai.toml")
+	config, err := LoadWorkspaceConfig(path, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("[workspace]\nexclude = []\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := config.Observations.Changed(context.Background(), observe.Full); err != nil || changed == nil {
+		t.Fatalf("missing config creation: %v %v", changed, err)
+	}
+	config, err = LoadWorkspaceConfig(path, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := config.Observations.Changed(context.Background(), observe.Full); err != nil || changed != nil {
+		t.Fatalf("unchanged config: %v %v", changed, err)
+	}
+	if err := os.WriteFile(path, []byte("[workspace]\nexclude = [\"a\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := config.Observations.Changed(context.Background(), observe.Full); err != nil || changed == nil {
+		t.Fatalf("changed config: %v %v", changed, err)
+	}
+	other := filepath.Join(root, "other.toml")
+	if err := os.WriteFile(other, []byte("[workspace]\nexclude = [\"a\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "selected.toml")
+	if err := os.Symlink(path, alias); err != nil {
+		t.Skip(err)
+	}
+	config, err = LoadWorkspaceConfig(alias, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(other, alias); err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := config.Observations.Changed(context.Background(), observe.Full); err != nil || changed == nil {
+		t.Fatalf("retargeted config alias: %v %v", changed, err)
 	}
 }

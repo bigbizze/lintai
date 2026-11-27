@@ -3,23 +3,25 @@ package workspace
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 
 	"github.com/BurntSushi/toml"
+	"github.com/bigbizze/lintai/observe"
 )
 
 // WorkspaceConfig is the supported lintai.toml input. Producer-specific
 // settings remain keyed by namespace so the command composition root can
 // select the appropriate implementation.
 type WorkspaceConfig struct {
-	Exclude   []string
-	Include   []string
-	Sources   []string
-	Producers map[string]ProducerConfig
-	Path      string
-	Digest    string
+	Exclude      []string
+	Include      []string
+	Sources      []string
+	Producers    map[string]ProducerConfig
+	Observations observe.Set
 }
 
 type ProducerConfig struct {
@@ -32,20 +34,61 @@ type ProducerConfig struct {
 // empty config; an explicitly selected file must exist.
 func LoadWorkspaceConfig(path string, optional bool) (WorkspaceConfig, error) {
 	result := WorkspaceConfig{Producers: make(map[string]ProducerConfig)}
-	contents, err := os.ReadFile(path)
+	absolute, err := filepath.Abs(path)
 	if err != nil {
-		if optional && os.IsNotExist(err) {
-			return result, nil
+		return WorkspaceConfig{}, fmt.Errorf("resolve config %s: %w", path, err)
+	}
+	absolute = filepath.Clean(absolute)
+	var records []observe.Record
+	resolved, resolveErr := filepath.EvalSymlinks(absolute)
+	if resolveErr == nil {
+		records = append(records, observe.Record{Kind: observe.Resolved, Path: absolute, Value: observe.Value(filepath.Clean(resolved))})
+	} else if !configMissing(resolveErr) {
+		return WorkspaceConfig{}, fmt.Errorf("resolve config %s: %w", path, resolveErr)
+	}
+	// The closest existing parent covers an alias even when the default file
+	// (or one of its parent directories) is absent.
+	for parent := filepath.Dir(absolute); ; parent = filepath.Dir(parent) {
+		info, statErr := os.Stat(parent)
+		if statErr == nil && info.IsDir() {
+			resolvedParent, err := filepath.EvalSymlinks(parent)
+			if err != nil {
+				return WorkspaceConfig{}, err
+			}
+			records = append(records, observe.Record{Kind: observe.State, Path: parent, Op: observe.Directory, Value: observe.True}, observe.Record{Kind: observe.Resolved, Path: parent, Value: observe.Value(filepath.Clean(resolvedParent))})
+			break
+		}
+		if statErr != nil && !configMissing(statErr) {
+			return WorkspaceConfig{}, fmt.Errorf("stat config parent %s: %w", parent, statErr)
+		}
+		records = append(records, observe.Record{Kind: observe.State, Path: parent, Op: observe.Directory, Value: observe.False})
+		if parent == filepath.Dir(parent) {
+			break
+		}
+	}
+	contents, err := os.ReadFile(absolute)
+	if err != nil {
+		if optional && configMissing(err) {
+			records = append(records, observe.Record{Kind: observe.State, Path: absolute, Op: observe.ReadFile, Value: observe.Missing})
+			result.Observations, err = observe.New(records)
+			return result, err
 		}
 		return WorkspaceConfig{}, fmt.Errorf("read config %s: %w", path, err)
 	}
-	result.Path = filepath.Clean(path)
 	digest := sha256.Sum256(contents)
-	result.Digest = hex.EncodeToString(digest[:])
+	records = append(records, observe.Record{Kind: observe.Content, Path: absolute, Value: observe.Value(hex.EncodeToString(digest[:]))})
+	result.Observations, err = observe.New(records)
+	if err != nil {
+		return WorkspaceConfig{}, err
+	}
 	if err := decodeWorkspaceTOML(string(contents), &result); err != nil {
 		return WorkspaceConfig{}, fmt.Errorf("config %s: %w", path, err)
 	}
 	return result, nil
+}
+
+func configMissing(err error) bool {
+	return errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)
 }
 
 // ResolveConfigPath applies the CLI rule: an explicit relative path is based

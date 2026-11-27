@@ -205,14 +205,14 @@ export const result = parse("value");`,
 		}
 	}
 	for _, path := range []string{checkedPath, filepath.Join(root, "packages/contracts/src/options.ts")} {
-		if !slices.ContainsFunc(snapshot.Inputs, func(input SnapshotInput) bool { return input.Path == path && input.Exists }) {
-			t.Fatalf("checked entry or auxiliary program file %s is missing from snapshot inputs: %+v", path, snapshot.Inputs)
+		if !slices.ContainsFunc(snapshot.CompilerInputs, func(input CompilerObservation) bool { return input.Path == path && observationExists(input) }) {
+			t.Fatalf("checked entry or auxiliary program file %s is missing from snapshot inputs: %+v", path, snapshot.CompilerInputs)
 		}
 	}
-	if !slices.ContainsFunc(snapshot.Inputs, func(input SnapshotInput) bool {
-		return input.Path == filepath.Join(root, "packages/contracts/dist/index.d.ts.map") && !input.Exists
+	if !slices.ContainsFunc(snapshot.CompilerInputs, func(input CompilerObservation) bool {
+		return input.Path == filepath.Join(root, "packages/contracts/dist/index.d.ts.map") && observationMissing(input)
 	}) {
-		t.Fatalf("absent declaration map is missing from snapshot inputs: %+v", snapshot.Inputs)
+		t.Fatalf("absent declaration map is missing from snapshot inputs: %+v", snapshot.CompilerInputs)
 	}
 	ordinary, err := BuildSnapshot(context.Background(), BuildSnapshotRequest{
 		WorkspaceRoot: root,
@@ -303,9 +303,9 @@ func TestDeclarationMapCreatesOnlyAnExactValidatedLink(t *testing.T) {
 	if checked.Location.File != "packages/contracts/dist/index.d.ts" || sourceDecl.Location.File != "packages/contracts/src/index.ts" {
 		t.Fatalf("declaration endpoints or source type retention: checked=%+v source=%+v", checked, sourceDecl)
 	}
-	if !slices.ContainsFunc(snapshot.Inputs, func(input SnapshotInput) bool { return input.Path == mapPath && input.Exists }) ||
-		!slices.ContainsFunc(snapshot.Inputs, func(input SnapshotInput) bool { return input.Path == sourcePath && input.Exists }) {
-		t.Fatalf("mapped source inputs were not retained: %+v", snapshot.Inputs)
+	if !slices.ContainsFunc(snapshot.CompilerInputs, func(input CompilerObservation) bool { return input.Path == mapPath && observationExists(input) }) ||
+		!slices.ContainsFunc(snapshot.CompilerInputs, func(input CompilerObservation) bool { return input.Path == sourcePath && observationExists(input) }) {
+		t.Fatalf("mapped source inputs were not retained: %+v", snapshot.CompilerInputs)
 	}
 }
 
@@ -516,11 +516,11 @@ func TestProjectReferenceRedirectControlsTheCheckedDeclaration(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			sourcePresent := slices.ContainsFunc(snapshot.Inputs, func(input SnapshotInput) bool {
-				return input.Exists && strings.HasSuffix(filepath.ToSlash(input.Path), "/contracts/src/index.ts")
+			sourcePresent := slices.ContainsFunc(snapshot.CompilerInputs, func(input CompilerObservation) bool {
+				return input.Kind == "content" && strings.HasSuffix(filepath.ToSlash(input.Path), "/contracts/src/index.ts")
 			})
-			generatedPresent := slices.ContainsFunc(snapshot.Inputs, func(input SnapshotInput) bool {
-				return input.Exists && strings.HasSuffix(filepath.ToSlash(input.Path), "/contracts/dist/index.d.ts")
+			generatedPresent := slices.ContainsFunc(snapshot.CompilerInputs, func(input CompilerObservation) bool {
+				return input.Kind == "content" && strings.HasSuffix(filepath.ToSlash(input.Path), "/contracts/dist/index.d.ts")
 			})
 			if sourcePresent == disabled || generatedPresent {
 				t.Fatalf("source presence=%t, generated declaration presence=%t, redirects disabled=%t", sourcePresent, generatedPresent, disabled)

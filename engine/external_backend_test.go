@@ -2,6 +2,7 @@ package engine_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,32 +13,77 @@ import (
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/engine"
 	"github.com/bigbizze/lintai/facts"
+	"github.com/bigbizze/lintai/observe"
 )
 
 // FX1 covers V01, V02, V03, V05, V16, V24 and R1's fake-only, mixed,
 // colliding-name, opaque-revision, empty-coverage, and invalid-batch cases.
 type catalogFake struct {
-	description facts.ProducerDescription
-	rows        map[facts.Predicate][]facts.Row
-	anchors     map[string]facts.AnchorSupport
-	revision    string
-	scope       any
-	analyzed    []string
-	omit        facts.Predicate
+	description                    facts.ProducerDescription
+	rows                           map[facts.Predicate][][]facts.Value
+	anchors                        map[string]facts.AnchorSupport
+	revision                       string
+	scope                          any
+	analyzed                       []string
+	omit                           facts.Predicate
+	prepares, emits, metadataCalls int
+	failEmit                       bool
 }
 
 func (p *catalogFake) Describe() (facts.ProducerDescription, error) { return p.description, nil }
 
-func (p *catalogFake) Collect(_ context.Context, request backend.CollectionRequest) (facts.Batch, error) {
-	batch := facts.Batch{Relations: make(map[facts.Predicate][]facts.Row), Anchors: p.anchors, InputRevision: p.revision, Scope: p.scope, AnalyzedFiles: p.analyzed}
+func (p *catalogFake) Prepare(_ context.Context, request backend.CollectionRequest, _ observe.Mode) (backend.Generation, error) {
+	p.prepares++
+	rows := make(map[facts.Predicate][][]facts.Value, len(request.Predicates))
 	for _, predicate := range request.Predicates {
-		if predicate == p.omit {
+		for _, row := range p.rows[predicate] {
+			rows[predicate] = append(rows[predicate], append([]facts.Value(nil), row...))
+		}
+	}
+	anchors := make(map[string]facts.AnchorSupport, len(p.anchors))
+	for id, support := range p.anchors {
+		anchors[id] = support
+	}
+	return &catalogGeneration{producer: p, description: p.description, requested: append([]facts.Predicate(nil), request.Predicates...), rows: rows, anchors: anchors, omit: p.omit, failEmit: p.failEmit, metadata: backend.GenerationMetadata{InputRevision: p.revision, Scope: p.scope, AnalyzedFiles: append([]string(nil), p.analyzed...)}}, nil
+}
+
+type catalogGeneration struct {
+	producer    *catalogFake
+	description facts.ProducerDescription
+	requested   []facts.Predicate
+	rows        map[facts.Predicate][][]facts.Value
+	anchors     map[string]facts.AnchorSupport
+	omit        facts.Predicate
+	failEmit    bool
+	metadata    backend.GenerationMetadata
+}
+
+func (g *catalogGeneration) Metadata() backend.GenerationMetadata {
+	g.producer.metadataCalls++
+	return g.metadata
+}
+func (g *catalogGeneration) Emit(ctx context.Context, builder *facts.Builder) error {
+	g.producer.emits++
+	namespace := g.description.Namespace
+	for _, predicate := range g.requested {
+		if predicate == g.omit {
 			continue
 		}
-		rows := p.rows[predicate]
-		batch.Relations[predicate] = rows
+		handle, err := builder.Relation(strings.TrimPrefix(predicate.Name, namespace+"."), predicate.Arity)
+		if err != nil {
+			return err
+		}
+		for _, row := range g.rows[predicate] {
+			builder.Add(handle, row...)
+		}
 	}
-	return batch, nil
+	for id, support := range g.anchors {
+		builder.Anchor(id, support)
+	}
+	if g.failEmit {
+		return errors.New("fixture emit failed after adding rows")
+	}
+	return ctx.Err()
 }
 
 func (p *catalogFake) Close() error { return nil }
@@ -49,7 +95,7 @@ func fakeProducer(namespace string, predicates ...string) *catalogFake {
 		EffectiveConfiguration: map[string]any{"kind": "catalog-fixture"},
 	}
 	var schema strings.Builder
-	rows := make(map[facts.Predicate][]facts.Row)
+	rows := make(map[facts.Predicate][][]facts.Value)
 	for _, local := range predicates {
 		predicate := facts.Predicate{Name: namespace + "." + local, Arity: 1}
 		relation := facts.RelationDescription{
@@ -58,7 +104,7 @@ func fakeProducer(namespace string, predicates ...string) *catalogFake {
 			Documentation: "A fixture entity.",
 		}
 		description.BaseRelations = append(description.BaseRelations, relation)
-		rows[predicate] = []facts.Row{}
+		rows[predicate] = [][]facts.Value{}
 		schema.WriteString("Decl " + local + "(Entity) descr [extensional(), arg(Entity, \"entity id\")].\n")
 	}
 	var prelude strings.Builder
@@ -80,11 +126,11 @@ func fakeProducer(namespace string, predicates ...string) *catalogFake {
 
 func setFakeRow(producer *catalogFake, local, entity string) {
 	predicate := facts.Predicate{Name: producer.description.Namespace + "." + local, Arity: 1}
-	producer.rows[predicate] = []facts.Row{{facts.String(entity)}}
+	producer.rows[predicate] = [][]facts.Value{{facts.String(entity)}}
 	producer.anchors[entity] = facts.AnchorSupport{
 		Location:    diagnostics.SourceLocation{File: "catalog/object.sql", StartLine: 2, StartColumn: 1, EndLine: 2, EndColumn: 8},
-		Description: "catalog object " + entity,
-		Tracking:    &facts.TrackingKey{Scheme: "fixture.object/1", Data: map[string]any{"name": strings.TrimPrefix(entity, producer.description.Namespace+":")}},
+		Description: "catalog object " + producer.description.Namespace + ":" + entity,
+		Tracking:    &facts.TrackingKey{Scheme: "fixture.object/1", Data: map[string]any{"name": entity}},
 	}
 }
 
@@ -94,7 +140,7 @@ func TestCatalogFakeAloneReportsProducerOwnedAnchorAndOpaqueRevision(t *testing.
 	repoRoot, _ := filepath.Abs("..")
 	workspace := t.TempDir()
 	producer := fakeProducer("catalog", "item")
-	setFakeRow(producer, "item", "catalog:users")
+	setFakeRow(producer, "item", "users")
 	writeCatalogRule(t, workspace, `Decl violation(Entity). violation(Entity) :- catalog.present(Entity).`, "violation")
 	session := engine.Open(engine.Options{}, producer)
 	defer session.Close()
@@ -119,16 +165,31 @@ func TestCatalogFakeAloneReportsProducerOwnedAnchorAndOpaqueRevision(t *testing.
 	if len(item.Provenance.ProducerNamespaces) != 1 || item.Provenance.ProducerNamespaces[0] != "catalog" || !strings.HasPrefix(item.Provenance.SnapshotVersion, "sha256:") {
 		t.Fatalf("unexpected composed provenance: %+v", item.Provenance)
 	}
-	// V18/V20: an opaque revision is the producer's own validity claim.
+	if producer.prepares != 1 || producer.emits != 1 || producer.metadataCalls != 1 {
+		t.Fatalf("first generation counts: %+v", producer)
+	}
+	// An opaque revision is the producer's own validity claim.
 	unchanged, err := session.Check(context.Background(), options)
 	if err != nil || unchanged.SnapshotVersion != result.SnapshotVersion {
 		t.Fatalf("opaque revision not reused: %+v %v", unchanged, err)
+	}
+	if producer.prepares != 2 || producer.emits != 1 || producer.metadataCalls != 2 {
+		t.Fatalf("unchanged check should prepare but not emit: prepares=%d emits=%d metadata=%d", producer.prepares, producer.emits, producer.metadataCalls)
 	}
 	producer.revision = "opaque-revision-v2"
 	producer.rows[facts.Predicate{Name: "catalog.item", Arity: 1}] = nil
 	retracted, err := session.Check(context.Background(), options)
 	if err != nil || len(retracted.Diagnostics) != 0 || retracted.SnapshotVersion == result.SnapshotVersion {
 		t.Fatalf("opaque producer change did not retract its result: %+v %v", retracted, err)
+	}
+	producer.revision = "opaque-revision-v3"
+	setFakeRow(producer, "item", "partial")
+	producer.failEmit = true
+	if _, err := session.Check(context.Background(), options); err == nil || !strings.Contains(err.Error(), "fixture emit failed") {
+		t.Fatalf("expected emission error: %v", err)
+	}
+	if _, err := session.Current(); err == nil {
+		t.Fatal("failed emission left a published result")
 	}
 
 	empty := fakeProducer("empty", "item")
@@ -141,6 +202,17 @@ func TestCatalogFakeAloneReportsProducerOwnedAnchorAndOpaqueRevision(t *testing.
 	}
 	if len(emptyResult.AnalyzedFiles) != 0 {
 		t.Fatalf("no-rule run claimed analyzed-file coverage: %v", emptyResult.AnalyzedFiles)
+	}
+	if empty.prepares != 0 || empty.emits != 0 {
+		t.Fatal("empty demand invoked producer work")
+	}
+	different := fakeProducer("empty", "item")
+	different.description.ImplementationStamp = "fixture-v2"
+	changedCatalog, err := engine.Open(engine.Options{}, different).Check(context.Background(), engine.Options{
+		RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: t.TempDir(), RuleGlobs: []string{}, Env: map[string]any{},
+	})
+	if err != nil || changedCatalog.SnapshotVersion == emptyResult.SnapshotVersion {
+		t.Fatalf("catalog identity omitted on empty demand: %v", err)
 	}
 }
 
@@ -155,14 +227,14 @@ func TestOpaqueProducerScopeContributesToResultIdentity(t *testing.T) {
 		RuleGlobs: []string{"lintai-rules/**/*.ts"}, Env: map[string]any{},
 	}
 	left := fakeProducer("catalog", "item")
-	left.scope = "partition-a"
+	left.scope = map[string]any{"partition": "a"}
 	left.analyzed = []string{"catalog/objects.sql"}
 	leftResult, err := engine.Open(engine.Options{}, left).Check(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
 	right := fakeProducer("catalog", "item")
-	right.scope = "partition-b"
+	right.scope = []any{[]any{"partition", "a"}}
 	right.analyzed = []string{"catalog/objects.sql"}
 	rightResult, err := engine.Open(engine.Options{}, right).Check(context.Background(), options)
 	if err != nil {
@@ -170,6 +242,50 @@ func TestOpaqueProducerScopeContributesToResultIdentity(t *testing.T) {
 	}
 	if leftResult.SnapshotVersion == rightResult.SnapshotVersion {
 		t.Fatalf("producer scope did not affect identity: %s", leftResult.SnapshotVersion)
+	}
+	cases := []struct {
+		name          string
+		before, after any
+	}{
+		{"slice", []any(nil), []any{}},
+		{"map", map[string]any(nil), map[string]any{}},
+	}
+	for _, tc := range cases {
+		t.Run("forced-check/"+tc.name, func(t *testing.T) {
+			workspace := t.TempDir()
+			writeCatalogRule(t, workspace,
+				"Decl violation(Entity). violation(Entity) :- catalog.item(Entity).",
+				"violation")
+			producer := fakeProducer("catalog", "item")
+			producer.scope = map[string]any{"selection": tc.before}
+			setFakeRow(producer, "item", "users")
+
+			session := engine.Open(engine.Options{}, producer)
+			defer session.Close()
+			options := engine.Options{
+				RepoRoot:      repoRoot,
+				AssetRoot:     filepath.Join(repoRoot, "packages/client"),
+				WorkspaceRoot: workspace,
+				RuleGlobs:     []string{"lintai-rules/**/*.ts"},
+			}
+			first, err := session.Check(context.Background(), options)
+			if err != nil || len(first.Diagnostics) != 1 {
+				t.Fatalf("first: diagnostics=%d err=%v", len(first.Diagnostics), err)
+			}
+
+			producer.scope = map[string]any{"selection": tc.after}
+			producer.rows[facts.Predicate{Name: "catalog.item", Arity: 1}] = nil
+			second, err := session.Check(context.Background(), options)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if first.SnapshotVersion == second.SnapshotVersion ||
+				len(second.Diagnostics) != 0 || producer.prepares != 2 || producer.emits != 2 {
+				t.Fatalf("scope change reused old facts: sameIdentity=%v diagnostics=%d prepares=%d emits=%d",
+					first.SnapshotVersion == second.SnapshotVersion,
+					len(second.Diagnostics), producer.prepares, producer.emits)
+			}
+		})
 	}
 }
 
@@ -179,7 +295,7 @@ func TestTypeScriptAndFakeComposeThroughCatalog(t *testing.T) {
 	repoRoot, _ := filepath.Abs("..")
 	workspace := filepath.Join(repoRoot, "testdata/fixtures/external-backend/mixed-facts")
 	fake := fakeProducer("catalog", "external_boundary")
-	setFakeRow(fake, "external_boundary", "catalog:catalog-api")
+	setFakeRow(fake, "external_boundary", "catalog-api")
 	result, err := engine.Open(engine.Options{}, typescript.New(), fake).Check(context.Background(), engine.Options{
 		RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: workspace,
 		RuleGlobs: []string{"lintai-rules/**/*.ts"}, Env: map[string]any{}, Severity: diagnostics.SeverityError,
@@ -205,8 +321,8 @@ func TestProducerNamespacesDisambiguateCollidingLocalPredicates(t *testing.T) {
 	repoRoot, _ := filepath.Abs("..")
 	workspace := t.TempDir()
 	left, right := fakeProducer("left", "item"), fakeProducer("right", "item")
-	setFakeRow(left, "item", "left:same")
-	setFakeRow(right, "item", "right:same")
+	setFakeRow(left, "item", "same")
+	setFakeRow(right, "item", "same")
 	writeCatalogRule(t, workspace, `Decl violation(Entity). violation(Entity) :- left.item(Entity), right.item(_).`, "violation")
 	result, err := engine.Open(engine.Options{}, right, left).Check(context.Background(), engine.Options{
 		RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: workspace,
@@ -220,7 +336,7 @@ func TestProducerNamespacesDisambiguateCollidingLocalPredicates(t *testing.T) {
 	}
 }
 
-func TestCatalogRejectsMissingCoverageAndForeignOwnership(t *testing.T) {
+func TestCatalogRejectsMissingCoverageAndInvalidEntities(t *testing.T) {
 	// V01/V03: duplicate namespaces, omitted coverage, and foreign entity
 	// ownership fail before rule evaluation; an empty relation entry remains
 	// successful empty coverage.
@@ -252,17 +368,12 @@ func TestCatalogRejectsMissingCoverageAndForeignOwnership(t *testing.T) {
 	if _, err := engine.Open(engine.Options{}, undeclared).Check(context.Background(), options); err == nil || !strings.Contains(err.Error(), "no extensional catalog declaration") {
 		t.Fatalf("expected catalog base relation mismatch, got %v", err)
 	}
-	foreign := fakeProducer("catalog", "item")
-	foreign.rows[facts.Predicate{Name: "catalog.item", Arity: 1}] = []facts.Row{{facts.String("other:foreign")}}
-	foreign.anchors["other:foreign"] = facts.AnchorSupport{Location: diagnostics.SourceLocation{File: "src/file.ts", StartLine: 1, StartColumn: 1, EndLine: 1, EndColumn: 2}, Description: "foreign"}
-	if _, err := engine.Open(engine.Options{}, foreign).Check(context.Background(), options); err == nil || !strings.Contains(err.Error(), "foreign or invalid entity") {
-		t.Fatalf("expected ownership failure, got %v", err)
+	invalid := fakeProducer("catalog", "item")
+	invalid.rows[facts.Predicate{Name: "catalog.item", Arity: 1}] = [][]facts.Value{{facts.String("")}}
+	if _, err := engine.Open(engine.Options{}, invalid).Check(context.Background(), options); err == nil || !strings.Contains(err.Error(), "invalid entity") {
+		t.Fatalf("expected empty entity failure, got %v", err)
 	}
-	foreignAnchor := fakeProducer("catalog", "item")
-	foreignAnchor.anchors["other:foreign"] = facts.AnchorSupport{Location: diagnostics.SourceLocation{File: "src/file.ts", StartLine: 1, StartColumn: 1, EndLine: 1, EndColumn: 2}, Description: "foreign"}
-	if _, err := engine.Open(engine.Options{}, foreignAnchor).Check(context.Background(), options); err == nil || !strings.Contains(err.Error(), "supplied anchor with foreign or invalid entity") {
-		t.Fatalf("expected foreign-anchor failure, got %v", err)
-	}
+
 }
 
 func TestRuleViewDoesNotBorrowAnotherRulesAnchorSupport(t *testing.T) {
@@ -276,8 +387,8 @@ func TestRuleViewDoesNotBorrowAnotherRulesAnchorSupport(t *testing.T) {
 		Name: "Entity", Representations: []facts.ValueKind{facts.StringKind}, Role: facts.ValueRole,
 		ReportSupport: facts.ReportNone,
 	}
-	setFakeRow(producer, "item", "catalog:users")
-	producer.rows[queryOnly] = []facts.Row{{facts.String("catalog:users")}}
+	setFakeRow(producer, "item", "users")
+	producer.rows[queryOnly] = [][]facts.Value{{facts.String("catalog:users")}}
 
 	badProgram := `Decl violation(Entity). violation(Entity) :- catalog.unlocated(Entity).`
 	writeCatalogRuleFile(t, workspace, "query-only.ts", "fixture.query-only", badProgram, "violation")
@@ -326,7 +437,7 @@ func TestLintaiGlobDoesNotNeedTypeScript(t *testing.T) {
 	repoRoot, _ := filepath.Abs("..")
 	workspace := t.TempDir()
 	producer := fakeProducer("catalog", "item")
-	setFakeRow(producer, "item", "catalog:users")
+	setFakeRow(producer, "item", "users")
 	writeCatalogRule(t, workspace, `Decl candidate(Entity). candidate(Entity) :- catalog.item(Entity), lintai.glob("src/users/**", "src/**"). Decl violation(Entity). violation(Entity) :- candidate(Entity).`, "violation")
 	result, err := engine.Open(engine.Options{}, producer).Check(context.Background(), engine.Options{
 		RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: workspace,
@@ -374,7 +485,7 @@ func TestNamespaceBindingRejectsAliasesAndRuleOwnedPackages(t *testing.T) {
 	}
 	workspace := t.TempDir()
 	producer := fakeProducer("catalog", "item")
-	setFakeRow(producer, "item", "catalog:users")
+	setFakeRow(producer, "item", "users")
 	writeCatalogRule(t, workspace, `Decl item(Entity). item(Entity) :- catalog.item(Entity). Decl violation(Entity). violation(Entity) :- item(Entity).`, "violation")
 	result, err := engine.Open(engine.Options{}, producer).Check(context.Background(), engine.Options{
 		RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: workspace,

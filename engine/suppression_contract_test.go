@@ -3,7 +3,6 @@ package engine
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -13,7 +12,7 @@ import (
 	"github.com/bigbizze/lintai/backend"
 	"github.com/bigbizze/lintai/backend/typescript"
 	"github.com/bigbizze/lintai/diagnostics"
-	"github.com/bigbizze/lintai/facts"
+	"github.com/bigbizze/lintai/observe"
 	"github.com/bigbizze/lintai/suppressions"
 )
 
@@ -23,18 +22,15 @@ type coverageProducer struct {
 	revision string
 }
 
-func (p *coverageProducer) Collect(ctx context.Context, request backend.CollectionRequest) (facts.Batch, error) {
-	if p.description.Namespace == "other" {
-		rows := map[facts.Predicate][]facts.Row{}
-		for _, pred := range request.Predicates {
-			rows[pred] = p.rows
-		}
-		return facts.Batch{Relations: rows, Anchors: p.anchors, AnalyzedFiles: append([]string(nil), p.files...), InputRevision: p.revision}, nil
+func (p *coverageProducer) Prepare(ctx context.Context, request backend.CollectionRequest, mode observe.Mode) (backend.Generation, error) {
+	generation, err := p.parallelFixtureProducer.Prepare(ctx, request, mode)
+	if err != nil {
+		return nil, err
 	}
-	batch, err := p.parallelFixtureProducer.Collect(ctx, request)
-	batch.AnalyzedFiles = append([]string(nil), p.files...)
-	batch.InputRevision = p.revision
-	return batch, err
+	g := generation.(*parallelGeneration)
+	g.metadata.AnalyzedFiles = append([]string(nil), p.files...)
+	g.metadata.InputRevision = p.revision
+	return g, nil
 }
 func secondCoverageProducer() *coverageProducer {
 	p := newParallelFixtureProducer()
@@ -43,14 +39,6 @@ func secondCoverageProducer() *coverageProducer {
 	p.description.Schema.Prelude = strings.ReplaceAll(p.description.Schema.Prelude, "catalog.", "other.")
 	p.description.BaseRelations[0].Predicate.Name = "other.item"
 	p.description.Helpers[0].Predicate.Name = "other.usable"
-	for _, row := range p.rows {
-		row[0].String = strings.Replace(row[0].String, "catalog:", "other:", 1)
-	}
-	anchors := map[string]facts.AnchorSupport{}
-	for id, support := range p.anchors {
-		anchors[strings.Replace(id, "catalog:", "other:", 1)] = support
-	}
-	p.anchors = anchors
 	return &coverageProducer{parallelFixtureProducer: p, files: []string{"catalog/items.sql"}, revision: "other:1"}
 }
 
@@ -63,10 +51,10 @@ func TestSuppressionProducerCoverage(t *testing.T) {
 	}
 	workspace := t.TempDir()
 	p := newParallelFixtureProducer()
-	support := p.anchors["catalog:item-b"]
+	support := p.anchors["item-b"]
 	support.Location.File = "../catalog/items.sql"
 	support.Tracking = nil
-	p.anchors["catalog:item-b"] = support
+	p.anchors["item-b"] = support
 	catalog := &coverageProducer{parallelFixtureProducer: p, revision: "catalog:1"}
 	other := secondCoverageProducer()
 	writeTestFile(t, workspace, "lintai-rules/catalog.ts", parallelRuleSource("fixture.catalog", "Decl violation(Entity, Code). violation(Entity, Code) :- catalog.usable(Entity, Code).", "(row) => row.Code"))
@@ -83,16 +71,35 @@ func TestSuppressionProducerCoverage(t *testing.T) {
 	if len(result.Suppressed) != 6 {
 		t.Fatalf("recording: %+v", result.Diagnostics)
 	}
+	wantEntities := map[string]bool{
+		"catalog:item-a": false, "catalog:item-b": false, "catalog:item-c": false,
+		"other:item-a": false, "other:item-b": false, "other:item-c": false,
+	}
+	for _, item := range result.Suppressed {
+		if item.EntityIdentity == nil {
+			t.Fatalf("missing producer-qualified entity: %+v", item)
+		}
+		id := item.EntityIdentity.SemanticKey
+		if _, ok := wantEntities[id]; !ok {
+			t.Fatalf("unexpected producer-qualified entity %q", id)
+		}
+		wantEntities[id] = true
+	}
+	for id, found := range wantEntities {
+		if !found {
+			t.Fatalf("missing producer-qualified entity %q", id)
+		}
+	}
 	path := filepath.Join(workspace, suppressions.DefaultFile)
 	originalBytes, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	oneProducer := newParallelFixtureProducer()
-	nullSupport := oneProducer.anchors["catalog:item-b"]
+	nullSupport := oneProducer.anchors["item-b"]
 	nullSupport.Location.File = "../catalog/items.sql"
 	nullSupport.Tracking = nil
-	oneProducer.anchors["catalog:item-b"] = nullSupport
+	oneProducer.anchors["item-b"] = nullSupport
 	single := Open(Options{}, &coverageProducer{parallelFixtureProducer: oneProducer, revision: "catalog:1"}, secondCoverageProducer())
 	oneOptions := options
 	oneOptions.RuleWorkers = 1
@@ -359,73 +366,80 @@ func TestSuppressionPolicyValidationOnPlanReuse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, tc := range []struct {
-		name  string
-		rules []string
-	}{
-		{name: "valid first", rules: []string{"valid", "invalid"}},
-		{name: "invalid first", rules: []string{"invalid", "valid"}},
-		{name: "invalid alone", rules: []string{"invalid"}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			workspace, rules := t.TempDir(), t.TempDir()
-			writeTestFile(t, workspace, "src/a.ts", "export const value = 1;\n")
-			for i, kind := range tc.rules {
-				options := `{}`
-				if kind == "invalid" {
-					options = `[] as any`
-				}
-				source := parallelRuleSource("fixture.policy-"+kind,
-					"Decl violation(Entity). violation(Entity) :- ts.module(Entity).", `(row) => "finding"`)
-				source = strings.Replace(source, `.report("violation").message(`,
-					`.report("violation").suppression("violation", `+options+`).message(`, 1)
-				writeTestFile(t, rules, fmt.Sprintf("%02d-%s.ts", i, kind), source)
-			}
-			options := Options{RepoRoot: repo, AssetRoot: filepath.Join(repo, "packages", "client"),
-				WorkspaceRoot: workspace, RuleGlobs: []string{filepath.Join(rules, "*.ts")}, RuleWorkers: 1}
-			session := Open(options, typescript.New(typescript.Options{Files: typescript.FileScopeWalk}))
-			defer session.Close()
-			var priorPolicies map[string][]suppressionPolicy
-			var firstCompiles int64
-			for check := 0; check < 2; check++ {
-				result, err := session.Check(context.Background())
-				if err != nil {
-					t.Fatal(err)
-				}
-				byRule := make(map[string]diagnostics.Diagnostic)
-				for _, diagnostic := range result.Diagnostics {
-					byRule[diagnostic.RuleID] = diagnostic
-				}
-				if len(result.Diagnostics) != len(tc.rules) {
-					t.Errorf("check %d: expected one result per rule: %+v", check, result.Diagnostics)
-				}
-				if invalid := byRule["fixture.policy-invalid"]; invalid.Phase != "program_analysis" ||
-					!strings.Contains(invalid.Message, `must be an options object`) {
-					t.Errorf("check %d: invalid rule did not get its options-object error: %+v", check, invalid)
-				}
-				if len(tc.rules) == 2 {
-					if valid := byRule["fixture.policy-valid"]; valid.AssertionID != "violation" || valid.Message != "finding" || valid.Phase != "" {
-						t.Errorf("check %d: valid finding was lost: %+v", check, valid)
-					}
-				}
-				currentPolicies := make(map[string][]suppressionPolicy)
-				for key, plan := range session.planCache.plans {
-					for _, policy := range plan.suppressionRules {
-						currentPolicies[key] = append(currentPolicies[key], suppressionPolicy{assertion: policy.assertion, by: append([]string(nil), policy.by...)})
-					}
-				}
-				compiles := session.executionObservation().mangleCompiles
-				if check == 0 {
-					priorPolicies, firstCompiles = currentPolicies, compiles
-				} else if len(tc.rules) == 2 {
-					if compiles != firstCompiles {
-						t.Errorf("warm check did not reuse the compiled plan: first=%d warm=%d", firstCompiles, compiles)
-					}
-					if !reflect.DeepEqual(currentPolicies, priorPolicies) {
-						t.Errorf("cached suppression policies changed: first=%+v warm=%+v", priorPolicies, currentPolicies)
-					}
-				}
-			}
-		})
+	workspace, rules := t.TempDir(), t.TempDir()
+	writeTestFile(t, workspace, "src/a.ts", "export const value = 1;\n")
+	paths := make(map[string]string)
+	for _, kind := range []string{"valid", "invalid"} {
+		policy := `{}`
+		if kind == "invalid" {
+			policy = `[] as any`
+		}
+		source := parallelRuleSource("fixture.policy-"+kind,
+			"Decl violation(Entity). violation(Entity) :- ts.module(Entity).", `(row) => "finding"`)
+		source = strings.Replace(source, `.report("violation").message(`,
+			`.report("violation").suppression("violation", `+policy+`).message(`, 1)
+		paths[kind] = writeTestFile(t, rules, kind+".ts", source)
+	}
+	options := Options{RepoRoot: repo, AssetRoot: filepath.Join(repo, "packages", "client"),
+		WorkspaceRoot: workspace, RuleGlobs: []string{filepath.Join(rules, "*.ts")}, RuleWorkers: 1}
+	session := Open(options, typescript.New(typescript.Options{Files: typescript.FileScopeWalk}))
+	defer session.Close()
+	var template *rulePlan
+	var firstCompiles int64
+	for check := 0; check < 2; check++ {
+		result, err := session.Check(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		byRule := make(map[string]diagnostics.Diagnostic)
+		for _, diagnostic := range result.Diagnostics {
+			byRule[diagnostic.RuleID] = diagnostic
+		}
+		if len(result.Diagnostics) != 2 {
+			t.Fatalf("check %d: expected one result per rule: %+v", check, result.Diagnostics)
+		}
+		if invalid := byRule["fixture.policy-invalid"]; invalid.Phase != "program_analysis" ||
+			!strings.Contains(invalid.Message, `must be an options object`) {
+			t.Errorf("check %d: invalid rule did not get its options-object error: %+v", check, invalid)
+		}
+		if valid := byRule["fixture.policy-valid"]; valid.AssertionID != "violation" || valid.Message != "finding" || valid.Phase != "" {
+			t.Errorf("check %d: valid finding was lost: %+v", check, valid)
+		}
+		entry := session.ruleEntries[paths["valid"]]
+		if entry.plan == nil || entry.plan.ruleFacts != nil || len(entry.plan.suppressionRules) != 0 {
+			t.Fatal("retained plan contains per-run facts or policies")
+		}
+		if session.ruleEntries[paths["invalid"]].plan != nil {
+			t.Fatal("invalid suppression policy retained a plan")
+		}
+		compiles := session.executionObservation().mangleCompiles
+		if check == 0 {
+			template, firstCompiles = entry.plan, compiles
+		} else if entry.plan != template || compiles != firstCompiles+1 {
+			t.Errorf("valid plan was not reused or invalid plan was not retried: first=%d warm=%d", firstCompiles, compiles)
+		}
+	}
+	validSource, err := os.ReadFile(paths["valid"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	invalidSource := strings.Replace(string(validSource), `.suppression("violation", {})`, `.suppression("violation", [] as any)`, 1)
+	if invalidSource == string(validSource) {
+		t.Fatal("suppression fixture did not contain the expected declaration")
+	}
+	if err := os.WriteFile(paths["valid"], []byte(invalidSource), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := session.Check(context.Background())
+	if err != nil || len(result.Diagnostics) != 2 || session.executionObservation().mangleCompiles != firstCompiles+3 {
+		t.Fatalf("changed suppression declaration did not compile and fail independently: %+v %v", result.Diagnostics, err)
+	}
+	for _, diagnostic := range result.Diagnostics {
+		if diagnostic.Phase != "program_analysis" {
+			t.Fatalf("invalid declaration was accepted: %+v", diagnostic)
+		}
+	}
+	if session.ruleEntries[paths["valid"]].plan != template {
+		t.Fatal("failed compilation replaced the last valid template")
 	}
 }

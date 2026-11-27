@@ -1,15 +1,15 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { realpathSync } from "node:fs";
 import path from "node:path";
 
 import { suppressionOverlaps } from "./suppressions.js";
 
 import {
-	type Diagnostic,
+	type FileAnalysis,
 	type HostDefaults,
 	type LintaiOptions,
 	type ResolvedBridgeOptions,
 	getClient,
-	loadRuleIds,
 	resolveBridgeOptions,
 } from "./client.js";
 import {
@@ -37,13 +37,19 @@ export const authoringRuleNames = [
 export const reservedRuleNames: readonly string[] = [analysisRuleName, ...authoringRuleNames];
 
 // LintedFile is the part of a linter rule context that the lintai rules
-// use: the path of the file on disk, the text that the linter lints, and
-// report().
+// use: the path and text, an identity shared for one host file analysis,
+// and report().
 export type LintedFile = {
 	physicalFilename: string;
+	// Host SourceCode shared by enabled rules in this analysis.
+	analysis: object;
 	text: string;
 	report(report: Report): void;
 };
+
+// The completed batch's workspace problems, including a request failure. The
+// same problems are also available to lintai/analysis during the callback.
+export type BatchOperation = { problems: readonly string[] };
 
 export type LintaiRules = {
 	// rules are the lintai rules that get a linter rule lintai/<id>, sorted
@@ -53,6 +59,12 @@ export type LintaiRules = {
 	rules: ReadonlyArray<{ id: string; path: string }>;
 	lintRule(id: string, file: LintedFile): void;
 	lintAnalysis(file: LintedFile): void;
+	withFileBatch<T>(
+		files: readonly string[],
+		run: (operation: BatchOperation) => T | Promise<T>,
+	): Promise<T>;
+	// Invalidate a previous response when the host begins a new file analysis.
+	invalidateAnalysis(file: LintedFile): void;
 };
 
 // createLintaiRules reads the rule ids with lintai rules and returns the
@@ -65,10 +77,18 @@ export function createLintaiRules(
 	cwd: string = process.cwd(),
 ): LintaiRules {
 	if (options.rules !== undefined && options.rules.length === 0) {
-		return { rules: [], lintRule() {}, lintAnalysis() {} };
+		return {
+			rules: [],
+			lintRule() {},
+			lintAnalysis() {},
+			invalidateAnalysis() {},
+			async withFileBatch(_files, run) {
+				return run({ problems: [] });
+			},
+		};
 	}
 	const resolved = resolveBridgeOptions(options, cwd, host);
-	const list = loadRuleIds(resolved);
+	const list = getClient(resolved).listRuleIds();
 	const known = new Map(list.rules.map((item) => [item.id, item]));
 	for (const item of list.errors) {
 		if (item.id && !known.has(item.id)) {
@@ -95,50 +115,43 @@ export function createLintaiRules(
 	for (const message of loadErrorMessages) {
 		console.error(message);
 	}
-	// An error with an id (a duplicate id) is also a rule error of the
-	// analysis, so lintai/analysis reports it only once, as a rule error.
-	const loadErrors = loadErrorMessages.filter((_, index) => !list.errors[index]?.id);
-	loadErrors.push(...suppressionOverlaps(resolved.workspaceRoot));
-	let loadErrorsReported = false;
-
-	// The linter calls every lintai rule for a file in one synchronous pass,
-	// so the diagnostics of the file are read once per pass and the cache is
-	// cleared in the next microtask.
-	type PassEntry = { text: string; diagnostics: Diagnostic[] | undefined };
-	let passCache: Map<string, PassEntry> | undefined;
-	const readDiagnostics = (file: LintedFile): Diagnostic[] | undefined => {
-		if (resolved.mode === "serve" && hasUnsavedChanges(file.physicalFilename, file.text)) {
-			return undefined;
-		}
-		return getClient(resolved).getDiagnostics(workspacePath(resolved, file.physicalFilename));
+	// Both hosts invalidate each enabled rule's identity in create(), before
+	// Program traversal, so the first response is shared only for this analysis.
+	const analyses = new WeakMap<object, { response: FileAnalysis | undefined }>();
+	type Batch = { active: boolean; files: Map<string, FileAnalysis>; analyses: typeof analyses };
+	const batches = new AsyncLocalStorage<Batch>();
+	const currentBatch = () => {
+		const batch = batches.getStore();
+		return batch?.active ? batch : undefined;
 	};
-	const diagnosticsFor = (file: LintedFile): Diagnostic[] | undefined => {
-		if (!passCache) {
-			const cache = new Map<string, PassEntry>();
-			passCache = cache;
-			queueMicrotask(() => {
-				if (passCache === cache) {
-					passCache = undefined;
-				}
-			});
+	let reportedOverlaps = "";
+	const responseFor = (file: LintedFile) => {
+		const batch = currentBatch();
+		const cache = batch?.analyses ?? analyses;
+		const cached = cache.get(file.analysis);
+		if (cached) return cached.response;
+		const name = workspacePath(resolved, file.physicalFilename);
+		if (batch && !batch.files.has(name)) {
+			throw new Error(`lintai: file ${name} was not supplied to withFileBatch`);
 		}
-		const cached = passCache.get(file.physicalFilename);
-		if (cached && cached.text === file.text) {
-			return cached.diagnostics;
-		}
-		const diagnostics = readDiagnostics(file);
-		passCache.set(file.physicalFilename, { text: file.text, diagnostics });
-		return diagnostics;
+		const response =
+			resolved.mode === "serve" && hasUnsavedChanges(file.physicalFilename, file.text)
+				? undefined
+				: batch
+					? batch.files.get(name)
+					: getClient(resolved).getFileAnalysis(name);
+		cache.set(file.analysis, { response });
+		return response;
 	};
 
 	return {
 		rules,
 		lintRule(id, file) {
-			const diagnostics = diagnosticsFor(file);
-			if (!diagnostics) {
+			const response = responseFor(file);
+			if (!response) {
 				return;
 			}
-			const own = diagnostics.filter(
+			const own = response.diagnostics.filter(
 				(diagnostic) =>
 					diagnostic.rule_id === id &&
 					diagnostic.diagnostic_kind !== "rule_execution_error" &&
@@ -149,20 +162,22 @@ export function createLintaiRules(
 			}
 		},
 		lintAnalysis(file) {
-			const diagnostics = diagnosticsFor(file);
-			if (!diagnostics) {
+			const response = responseFor(file);
+			if (!response) {
 				file.report({ loc: programLocation, message: unsavedChangesMessage });
 				return;
 			}
-			const problems = getClient(resolved).problems();
-			if (!resolved.reportProblemsOnce || !loadErrorsReported) {
-				loadErrorsReported = true;
-				problems.push(...loadErrors);
+			const problems = response.problems();
+			const overlaps = suppressionOverlaps(resolved.workspaceRoot);
+			const overlapIdentity = JSON.stringify(overlaps);
+			if (!resolved.reportProblemsOnce || overlapIdentity !== reportedOverlaps) {
+				problems.push(...overlaps);
 			}
+			reportedOverlaps = overlapIdentity;
 			for (const message of problems) {
 				file.report({ loc: programLocation, message });
 			}
-			const ruleErrors = diagnostics.filter(
+			const ruleErrors = response.diagnostics.filter(
 				(diagnostic) =>
 					diagnostic.diagnostic_kind === "rule_execution_error" ||
 					diagnostic.diagnostic_kind === "unused_suppression",
@@ -170,7 +185,7 @@ export function createLintaiRules(
 			for (const report of toReports(ruleErrors)) {
 				file.report(report);
 			}
-			const orphans = diagnostics.filter(
+			const orphans = response.diagnostics.filter(
 				(diagnostic) =>
 					diagnostic.diagnostic_kind !== "rule_execution_error" &&
 					diagnostic.diagnostic_kind !== "unused_suppression" &&
@@ -184,6 +199,26 @@ export function createLintaiRules(
 					file.report(report);
 				}
 			}
+		},
+		async withFileBatch(files, run) {
+			const names = files.map((file) => {
+				if (!file.trim()) throw new Error("withFileBatch requires non-empty file paths");
+				return workspacePath(resolved, path.resolve(resolved.workspaceRoot, file));
+			});
+			const result = getClient(resolved).getFilesAnalysis(names);
+			const batch: Batch = { active: true, files: new Map(), analyses: new WeakMap() };
+			for (let i = 0; i < names.length; i++) batch.files.set(names[i], result.files[i]);
+			return batches.run(batch, async () => {
+				try {
+					return await run({ problems: result.problems });
+				} finally {
+					batch.active = false;
+					batch.files.clear();
+				}
+			});
+		},
+		invalidateAnalysis(file) {
+			(currentBatch()?.analyses ?? analyses).delete(file.analysis);
 		},
 	};
 }

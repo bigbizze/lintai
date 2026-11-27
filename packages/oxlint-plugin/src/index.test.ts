@@ -1,3 +1,10 @@
+import {
+	createFramedResponse,
+	createTestDependencies,
+	createTestProcess,
+	getClient,
+	resetClientsForTest,
+} from "../../client/dist/test-support.test.js";
 import { deepEqual } from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -5,16 +12,7 @@ import path from "node:path";
 import { after, describe, it } from "node:test";
 
 import { rules as authoringRules } from "@lintai/authoring-rules";
-import {
-	type Diagnostic,
-	createFramedResponse,
-	createTestDependencies,
-	createTestProcess,
-	getClient,
-	loadRuleIds,
-	resetClientsForTest,
-	resolveBridgeOptions,
-} from "@lintai/client";
+import { type Diagnostic, resolveBridgeOptions } from "@lintai/client";
 import { RuleTester as ESLintRuleTester } from "eslint";
 import { RuleTester } from "oxlint/plugins-dev";
 
@@ -38,6 +36,23 @@ after(() => {
 	rmSync(workspace, { recursive: true, force: true });
 });
 
+function testServeTransport(child: ReturnType<typeof createTestProcess>, read: () => Buffer) {
+	return {
+		write(bytes: Buffer) {
+			child.stdin.write(bytes);
+		},
+		read(_deadline: number) {
+			return read();
+		},
+		close() {
+			if (!child.stdin.destroyed) child.stdin.end();
+		},
+		failure() {
+			return undefined;
+		},
+	};
+}
+
 const ruleError: Diagnostic = {
 	rule_id: "arch.broken",
 	assertion_id: "default",
@@ -54,8 +69,6 @@ const violation: Diagnostic = {
 };
 const diagnostics = [ruleError, violation];
 const problem = "[lintai] rule arch.broken could not run (phase program_parse): parse error";
-const loadError =
-	"[lintai] rule file lintai-rules/typo.ts could not be loaded: Unexpected end of file";
 const violationError = {
 	message: "[arch.no-async/violation] functions must not be async",
 	line: 3,
@@ -64,7 +77,6 @@ const violationError = {
 	endColumn: 29,
 };
 const problemError = { message: problem, line: 1, column: 1 };
-const loadErrorReport = { message: loadError, line: 1, column: 1 };
 
 const bridge = { binary: "/tmp/lintai", workspaceRoot: workspace, repoRoot: workspace };
 
@@ -92,7 +104,6 @@ it("unused suppressions report through analysis rather than the generated rule",
 			};
 		},
 	});
-	loadRuleIds(resolved, dependencies);
 	getClient(resolved, dependencies);
 	const plugin = createLintaiPlugin(options);
 	const messages: string[] = [];
@@ -105,6 +116,51 @@ it("unused suppressions report through analysis rather than the generated rule",
 	deepEqual(messages, []);
 	plugin.rules.analysis?.create(context).Program();
 	deepEqual(messages, ["[arch.no-async/violation] unused suppression"]);
+	resetClientsForTest();
+});
+
+it("serve findings with unregistered IDs report through analysis with restart guidance", () => {
+	resetClientsForTest();
+	const options = { ...bridge, mode: "serve" as const };
+	const resolved = resolveBridgeOptions(options, process.cwd(), oxlintHostDefaults());
+	const child = createTestProcess();
+	let id = 0;
+	const dependencies = createTestDependencies({
+		spawnSync: () => ({
+			status: 0,
+			stderr: "",
+			stdout: JSON.stringify({ rules: [{ id: "arch.no-async", path: "rule.ts" }], errors: [] }),
+		}),
+		spawnServe: () =>
+			testServeTransport(child, () =>
+				createFramedResponse({
+					jsonrpc: "2.0",
+					id: ++id,
+					result:
+						id === 1
+							? { protocolVersion: 1 }
+							: {
+									snapshotVersion: "snap",
+									rulesLoaded: 2,
+									diagnostics: [{ ...violation, rule_id: "arch.new" }],
+									problems: [],
+								},
+				}),
+			),
+	});
+	getClient(resolved, dependencies);
+	const plugin = createLintaiPlugin(options);
+	const messages: string[] = [];
+	plugin.rules.analysis
+		?.create({
+			physicalFilename: path.join(workspace, "src/a.ts"),
+			sourceCode: { text: savedText },
+			report: (report: { message: string }) => messages.push(report.message),
+		})
+		.Program();
+	deepEqual(messages, [
+		"[lintai] rule arch.new has no linter rule lintai/arch.new, because the linter read the rule list when it loaded the plugin. Restart the linter or the editor's language server. [arch.new/violation] functions must not be async",
+	]);
 	resetClientsForTest();
 });
 
@@ -122,6 +178,7 @@ function withHost(argv: string[], fresh: boolean) {
 				resetClientsForTest();
 			}
 			const options = resolveBridgeOptions(bridge, process.cwd(), oxlintHostDefaults(argv));
+			const child = createTestProcess();
 			const dependencies = createTestDependencies({
 				spawnSync: (_binary, args) =>
 					args[0] === "rules"
@@ -138,16 +195,29 @@ function withHost(argv: string[], fresh: boolean) {
 								status: 0,
 							}
 						: { stdout: JSON.stringify(diagnostics), stderr: "", error: undefined, status: 3 },
-				spawnServe: () => createTestProcess(),
-				readServeSync: () =>
-					createFramedResponse({
-						jsonrpc: "2.0",
-						id: 1,
-						result: { rulesLoaded: 2, diagnosticCount: 2, snapshotVersion: "snap", diagnostics },
-					}),
+				spawnServe: () =>
+					testServeTransport(
+						child,
+						(() => {
+							let id = 0;
+							return () =>
+								createFramedResponse({
+									jsonrpc: "2.0",
+									id: ++id,
+									result:
+										id === 1
+											? { protocolVersion: 1 }
+											: {
+													rulesLoaded: 2,
+													snapshotVersion: "snap",
+													diagnostics: [violation],
+													problems: [problem],
+												},
+								});
+						})(),
+					),
 				log: () => undefined,
 			});
-			loadRuleIds(options, dependencies);
 			getClient(options, dependencies);
 		},
 		after() {
@@ -248,11 +318,11 @@ tester.run("analysis (oxlint CLI, oneshot)", cli.analysis, {
 	valid: [],
 	invalid: [
 		{
-			name: "rule errors and load errors are on line 1 of the first file",
+			name: "current rule errors are on line 1 of the first file",
 			code: savedText,
 			filename: path.join(workspace, "src", "a.ts"),
 			...withHost(cliArgv, false),
-			errors: [problemError, loadErrorReport],
+			errors: [problemError],
 		},
 	],
 });
@@ -279,14 +349,14 @@ tester.run("analysis (oxlint --lsp, serve)", lsp.analysis, {
 			code: savedText,
 			filename: path.join(workspace, "src", "a.ts"),
 			...withHost(lspArgv, false),
-			errors: [problemError, loadErrorReport],
+			errors: [problemError],
 		},
 		{
 			name: "a later lint of another file reports the problems again",
 			code: savedText,
 			filename: path.join(workspace, "src", "b.ts"),
 			...withHost(lspArgv, false),
-			errors: [problemError, loadErrorReport],
+			errors: [problemError],
 		},
 		{
 			name: "unsaved changes give the save message and nothing else",

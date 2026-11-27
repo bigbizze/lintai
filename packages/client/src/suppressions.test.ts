@@ -1,15 +1,15 @@
+import {
+	createFramedResponse,
+	createTestDependencies,
+	createTestProcess,
+	createTestTransport,
+} from "./test-support.test.js";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import {
-	LintAIClient,
-	createFramedResponse,
-	createTestDependencies,
-	createTestProcess,
-	resolveBridgeOptions,
-} from "./client.js";
+import { LintAIClient, resolveBridgeOptions } from "./client.js";
 import { suppressionOverlaps } from "./suppressions.js";
 
 // V25, V31: current policy findings exit 1, and invalid policy exits 2.
@@ -99,13 +99,22 @@ test("serve forwards suppression initialization parameters", () => {
 	const client = new LintAIClient(
 		options,
 		createTestDependencies({
-			spawnServe: () => child,
-			readServeSync: () =>
-				createFramedResponse({
-					jsonrpc: "2.0",
-					id: 1,
-					result: { rulesLoaded: 0, diagnosticCount: 0, snapshotVersion: "test", diagnostics: [] },
-				}),
+			spawnServe: () =>
+				createTestTransport(
+					child,
+					(() => {
+						let id = 0;
+						return () =>
+							createFramedResponse({
+								jsonrpc: "2.0",
+								id: ++id,
+								result:
+									id === 1
+										? { protocolVersion: 1 }
+										: { rulesLoaded: 0, snapshotVersion: "test", diagnostics: [], problems: [] },
+							});
+					})(),
+				),
 		}),
 	);
 	try {

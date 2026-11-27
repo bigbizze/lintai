@@ -62,8 +62,8 @@ func TestSourceConfigInputsInvalidateFailedAssociation(t *testing.T) {
 
 			before, beforeVersion := build()
 			changedPath := filepath.Join(root, test.changed)
-			if !hasSnapshotInput(before, changedPath) {
-				t.Fatalf("failed association did not report the input that can repair it: %s, inputs=%v", changedPath, before.Inputs)
+			if !hasCompilerInput(before, changedPath) {
+				t.Fatalf("failed association did not report the input that can repair it: %s, inputs=%v", changedPath, before.CompilerInputs)
 			}
 			if len(before.SourceEntries) != 1 || !before.SourceEntries[0].Applied || !slices.Contains(before.SourceEntries[0].Incomplete, "unsupported") {
 				t.Fatalf("invalid source config did not leave an unsupported association: %+v", before.SourceEntries)

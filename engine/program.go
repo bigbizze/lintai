@@ -280,13 +280,13 @@ func generatedRulePlanKey(catalogIdentity string, output runtime.ProgramOutput, 
 	}
 	policyRecords := make([]any, len(suppressions))
 	for index, suppression := range suppressions {
-		options, err := canonical.Normalize(suppression.Options)
+		options, err := canonical.NormalizeSuppressionOptions(suppression.Options)
 		if err != nil {
 			return "", err
 		}
 		policyRecords[index] = []any{suppression.Assertion, options}
 	}
-	encoded, err := canonical.Marshal([]any{
+	encoded, err := canonical.MarshalStructured([]any{
 		"rule-plan-v1", catalogIdentity, output.Text, factRecords,
 		report, expectNonEmpty, policyRecords,
 	})

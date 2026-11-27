@@ -24,12 +24,9 @@ func TestUnsupportedExportDeclarationValidates(t *testing.T) {
 		byName[relation.Predicate.Name] = relation.Predicate
 		requested = append(requested, relation.Predicate)
 	}
-	batch, err := producer.Collect(context.Background(), backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: root, Predicates: requested})
+	batch, err := inspectEmission(context.Background(), producer, backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: root, Predicates: requested})
 	if err != nil {
 		t.Fatal(err)
-	}
-	if _, err := facts.ValidateBatch(description, requested, batch); err != nil {
-		t.Fatalf("extracted batch does not validate: %v", err)
 	}
 	var id string
 	for _, row := range batch.Relations[byName["ts.declaration"]] {
@@ -40,9 +37,9 @@ func TestUnsupportedExportDeclarationValidates(t *testing.T) {
 	if id == "" {
 		t.Fatalf("missing unsupported exported property: %v", batch.Relations[byName["ts.declaration"]])
 	}
-	if !slices.ContainsFunc(batch.Relations[byName["ts.declaration_metadata_incomplete"]], func(row facts.Row) bool {
+	if !slices.ContainsFunc(batch.Relations[byName["ts.declaration_metadata_incomplete"]], func(row []facts.Value) bool {
 		return row[0].String == id && row[1] == facts.Name("unsupported")
-	}) || !slices.ContainsFunc(batch.Relations[byName["ts.declaration_type_incomplete"]], func(row facts.Row) bool {
+	}) || !slices.ContainsFunc(batch.Relations[byName["ts.declaration_type_incomplete"]], func(row []facts.Value) bool {
 		return row[0].String == id && row[1] == facts.Name("value") && row[2] == facts.Name("unsupported")
 	}) {
 		t.Fatalf("missing unsupported metadata or value-type evidence for %s", id)

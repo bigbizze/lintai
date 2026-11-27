@@ -97,8 +97,8 @@ export default rule("fixture.alias").version(1)
 		t.Fatal(err)
 	}
 	artifacts, failures, err := bundle.BuildAll(context.Background(), asset, repoRoot, workspace, t.TempDir(), []string{rulePath})
-	if err != nil || len(artifacts) != 0 || failures[rulePath] == nil || !strings.Contains(failures[rulePath].Error(), "changed during compilation") {
-		t.Fatalf("between-build config change must reject incomplete input evidence: artifacts=%+v failures=%+v err=%v", artifacts, failures, err)
+	if err != nil || len(artifacts) != 1 || failures[rulePath] != nil || bundleUnchanged(artifacts[rulePath].Observations) {
+		t.Fatalf("between-build config change must retain stale captured evidence: artifacts=%+v failures=%+v err=%v", artifacts, failures, err)
 	}
 	if err := os.WriteFile(control, []byte("disarmed"), 0o600); err != nil {
 		t.Fatal(err)
@@ -290,8 +290,8 @@ func TestRulesWithoutBaseDependenciesSkipProducerCollection(t *testing.T) {
 	if len(result.Diagnostics) != 0 {
 		t.Fatalf("fact-free rule unexpectedly produced findings: %+v", result.Diagnostics)
 	}
-	if producer.collectCalls.Load() != 0 {
-		t.Fatalf("producer was collected although no prepared rule needs facts (%d calls)", producer.collectCalls.Load())
+	if producer.prepareCalls.Load() != 0 {
+		t.Fatalf("producer was collected although no prepared rule needs facts (%d calls)", producer.prepareCalls.Load())
 	}
 }
 
@@ -303,18 +303,22 @@ func TestRulesLockIntegrityPrecedesSetupAndCollection(t *testing.T) {
 	workspace := t.TempDir()
 	producer := newParallelFixtureProducer()
 	source := `import { dl, rule } from "@lintai/sdk";
+export const config = { parse(env) { require("node:fs").appendFileSync(env.marker, "config\n"); return env; } };
 export default rule("fixture.locked-out").version(1)
-	.setup(() => { throw new Error("setup ran before integrity validation"); })
+	.setup(({ env, fs }) => { fs.appendFileSync(env.marker, "setup\n"); throw "setup reached"; })
 	.program(dl` + "`" + "Decl violation(Entity)." + "`" + `)
 	.report("violation").message((row) => row.Entity);
 `
-	writeTestFile(t, workspace, "lintai-rules/locked-out.ts", source)
+	rulePath := writeTestFile(t, workspace, "lintai-rules/locked-out.ts", source)
 	writeTestFile(t, workspace, "lintai-rules/tsconfig.json", `{"extends":"@fixture/lock-compiler"}`)
 	writeTestFile(t, workspace, "node_modules/@fixture/lock-compiler/package.json", `{
 		"name":"@fixture/lock-compiler", "tsconfig":"options.json", "exports":"./not-a-config.js"
 	}`)
 	writeTestFile(t, workspace, "node_modules/@fixture/lock-compiler/options.json", `{"compilerOptions":{"useDefineForClassFields":false}}`)
 	options := parallelFixtureOptions(repoRoot, workspace)
+	marker := filepath.Join(workspace, "prepare-marker")
+	options.Env = map[string]any{"marker": marker}
+	options.SetupSandbox = bundle.SetupSandboxOff
 	lockPath := filepath.Join(workspace, DefaultRulesLockFile)
 	lock, _, err := BuildRulesLock(context.Background(), options)
 	if err != nil {
@@ -333,17 +337,53 @@ export default rule("fixture.locked-out").version(1)
 	if len(result.Diagnostics) != 1 || result.Diagnostics[0].Phase != "setup" {
 		t.Fatalf("approved rule should reach setup, got %+v", result.Diagnostics)
 	}
+	if data, err := os.ReadFile(marker); err != nil || string(data) != "config\nsetup\n" {
+		t.Fatalf("approved rule did not execute both preparation steps: %q %v", data, err)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	lock, err = ReadRulesLock(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := lockKey(workspace, rulePath)
+	original := lock.Rules[key]
+	mismatched := original
+	mismatched.Version++
+	lock.Rules[key] = mismatched
+	if err := WriteRulesLock(context.Background(), lockPath, lock); err != nil {
+		t.Fatal(err)
+	}
+	result, err = engine.Check(context.Background(), options)
+	if err != nil || result.RulesLoaded != 1 || len(result.Diagnostics) != 1 || result.Diagnostics[0].Phase != "integrity" || !strings.Contains(result.Diagnostics[0].Message, "metadata does not match") {
+		t.Fatalf("metadata mismatch should fail after loading and before preparation: %+v %v", result, err)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("metadata mismatch entered preparation: %v", err)
+	}
+	lock, err = ReadRulesLock(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock.Rules[key] = original
+	if err := WriteRulesLock(context.Background(), lockPath, lock); err != nil {
+		t.Fatal(err)
+	}
 
 	writeTestFile(t, workspace, "node_modules/@fixture/lock-compiler/options.json", `{"compilerOptions":{"useDefineForClassFields":true}}`)
 	result, err = engine.Check(context.Background(), options)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Diagnostics) != 1 || result.Diagnostics[0].Phase != "integrity" {
+	if result.RulesLoaded != 0 || len(result.Diagnostics) != 1 || result.Diagnostics[0].Phase != "integrity" {
 		t.Fatalf("config-only change should require lock approval before setup, got %+v", result.Diagnostics)
 	}
-	if producer.collectCalls.Load() != 0 {
-		t.Fatalf("producer facts were collected for a rule rejected by lock integrity (%d calls)", producer.collectCalls.Load())
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("bundle hash mismatch entered preparation: %v", err)
+	}
+	if producer.prepareCalls.Load() != 0 {
+		t.Fatalf("producer facts were collected for a rule rejected by lock integrity (%d calls)", producer.prepareCalls.Load())
 	}
 	lock, _, err = BuildRulesLock(context.Background(), options)
 	if err != nil {
@@ -355,6 +395,9 @@ export default rule("fixture.locked-out").version(1)
 	result, err = engine.Check(context.Background(), options)
 	if err != nil || len(result.Diagnostics) != 1 || result.Diagnostics[0].Phase != "setup" {
 		t.Fatalf("reapproved rule should reach setup, got %+v %v", result.Diagnostics, err)
+	}
+	if data, err := os.ReadFile(marker); err != nil || string(data) != "config\nsetup\n" {
+		t.Fatalf("reapproved rule did not execute both preparation steps: %q %v", data, err)
 	}
 }
 
@@ -393,7 +436,7 @@ func TestRulesLockReportsMissingRulesWhenInventoryEmpty(t *testing.T) {
 			!strings.Contains(result.Diagnostics[0].Message, "in the rules lock but was not found") {
 			t.Fatalf("expected missing-rule integrity diagnostic, got %+v", result.Diagnostics)
 		}
-		if result.RulesLoaded != 0 || len(result.AnalyzedFiles) != 0 || producer.collectCalls.Load() != 0 || result.SuppressionsWritten {
+		if result.RulesLoaded != 0 || len(result.AnalyzedFiles) != 0 || producer.prepareCalls.Load() != 0 || result.SuppressionsWritten {
 			t.Fatalf("empty discovery collected facts or wrote suppressions: %+v", result)
 		}
 		if _, err := os.Stat(options.SuppressionsLocation); !os.IsNotExist(err) {

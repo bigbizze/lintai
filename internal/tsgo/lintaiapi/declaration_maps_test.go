@@ -488,13 +488,13 @@ func TestDeclarationMapKeepsOutcomesSeparateForSourcesInOneMap(t *testing.T) {
 	}
 	for path, exists := range map[string]bool{goodPath: true, missingPath: false, badPath: true, generatedPath + ".map": true} {
 		found := false
-		for _, input := range snapshot.Inputs {
-			if input.Path == filepath.ToSlash(path) && input.Exists == exists {
+		for _, input := range snapshot.CompilerInputs {
+			if input.Path == filepath.ToSlash(path) && observationExists(input) == exists {
 				found = true
 			}
 		}
 		if !found {
-			t.Errorf("missing source-map input %s exists=%t: %+v", path, exists, snapshot.Inputs)
+			t.Errorf("missing source-map input %s exists=%t: %+v", path, exists, snapshot.CompilerInputs)
 		}
 	}
 }
@@ -518,10 +518,10 @@ func TestDeclarationMapMissingURLTargetKeepsConfiguredFallback(t *testing.T) {
 	if len(snapshot.SourceBindings) != 1 || len(snapshot.SourceBindings[0].Incomplete) != 0 {
 		t.Fatalf("configured binding fallback was lost: %+v", snapshot.SourceBindings)
 	}
-	for _, input := range snapshot.Inputs {
-		if input.Path == filepath.ToSlash(mapPath) && !input.Exists {
+	for _, input := range snapshot.CompilerInputs {
+		if input.Path == filepath.ToSlash(mapPath) && observationMissing(input) {
 			return
 		}
 	}
-	t.Fatalf("missing URL target was not tracked: %+v", snapshot.Inputs)
+	t.Fatalf("missing URL target was not tracked: %+v", snapshot.CompilerInputs)
 }

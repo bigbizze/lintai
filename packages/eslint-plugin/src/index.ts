@@ -2,6 +2,7 @@ import path from "node:path";
 
 import { rules as authoringRules } from "@lintai/authoring-rules";
 import {
+	type BatchOperation,
 	type HostDefaults,
 	type LintaiOptions,
 	type LintedFile,
@@ -10,7 +11,7 @@ import {
 } from "@lintai/client";
 import type { ESLint, Rule } from "eslint";
 
-export type { LintaiOptions } from "@lintai/client";
+export type { BatchOperation, LintaiOptions } from "@lintai/client";
 
 // The ESLint CLI lints each file once, so it runs lintai once (oneshot) and
 // reports workspace problems on the first file only. An editor lints files
@@ -33,6 +34,10 @@ export function eslintHostDefaults(argv: string[] = process.argv): HostDefaults 
 
 export type LintaiPlugin = {
 	meta: { name: "lintai" };
+	withFileBatch<T>(
+		files: readonly string[],
+		run: (operation: BatchOperation) => T | Promise<T>,
+	): Promise<T>;
 	rules: Record<string, Rule.RuleModule>;
 	configs: {
 		all: LintaiConfig;
@@ -50,6 +55,7 @@ export type LintaiConfig = { plugins: { lintai: ESLint.Plugin }; rules: Record<s
 function lintedFile(context: Rule.RuleContext): LintedFile {
 	return {
 		physicalFilename: context.physicalFilename,
+		analysis: context.sourceCode,
 		text: context.sourceCode.text,
 		report(report) {
 			context.report(report);
@@ -62,6 +68,13 @@ function lintedFile(context: Rule.RuleContext): LintedFile {
 // rules. The rule list is read once, when the config calls this function.
 export function createLintaiPlugin(options: LintaiOptions = {}): LintaiPlugin {
 	const lintai = createLintaiRules(options, eslintHostDefaults());
+	const beginFileAnalysis = (context: Rule.RuleContext) => {
+		const file = lintedFile(context);
+		// ESLint creates every enabled rule listener before Program traversal.
+		// These invalidations therefore all precede the one shared response read.
+		lintai.invalidateAnalysis(file);
+		return file;
+	};
 	const rules: Record<string, Rule.RuleModule> = { ...authoringRules };
 	for (const item of lintai.rules) {
 		rules[item.id] = {
@@ -71,9 +84,10 @@ export function createLintaiPlugin(options: LintaiOptions = {}): LintaiPlugin {
 				schema: [],
 			},
 			create(context) {
+				const file = beginFileAnalysis(context);
 				return {
 					Program() {
-						lintai.lintRule(item.id, lintedFile(context));
+						lintai.lintRule(item.id, file);
 					},
 				};
 			},
@@ -89,9 +103,10 @@ export function createLintaiPlugin(options: LintaiOptions = {}): LintaiPlugin {
 			schema: [],
 		},
 		create(context) {
+			const file = beginFileAnalysis(context);
 			return {
 				Program() {
-					lintai.lintAnalysis(lintedFile(context));
+					lintai.lintAnalysis(file);
 				},
 			};
 		},
@@ -105,6 +120,7 @@ export function createLintaiPlugin(options: LintaiOptions = {}): LintaiPlugin {
 	);
 	const plugin: LintaiPlugin = {
 		meta: { name: "lintai" },
+		withFileBatch: lintai.withFileBatch,
 		rules,
 		configs: {} as LintaiPlugin["configs"],
 	};

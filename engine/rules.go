@@ -6,10 +6,11 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/bigbizze/lintai/bundle"
+	"github.com/bigbizze/lintai/diagnostics"
+	"github.com/bigbizze/lintai/observe"
 	"github.com/bigbizze/lintai/runtime"
 )
 
@@ -37,192 +38,220 @@ type RuleList struct {
 	Errors []RuleLoadError `json:"errors"`
 }
 
-type catalogRule struct {
-	path      string
-	artifact  bundle.Artifacts
-	pureCode  string
-	metadata  runtime.RuleMetadata
-	isRule    bool
-	loadError error
+// A ruleRecord owns all request-local state for one discovered rule. The
+// retained entry outlives this request; metadata, preparation and execution do not.
+type ruleRecord struct {
+	path         string
+	retained     *ruleEntry
+	artifact     bundle.Artifacts
+	bundled      bool
+	bundleError  error
+	metadata     runtime.RuleMetadata
+	metadataRead bool
+	isRule       bool
+	loadError    error
+	preparation  bundle.PrepareResult
+	loaded       *runtime.LoadedRule
+	output       runtime.ProgramOutput
+	plan         *rulePlan
+	severity     diagnostics.Severity
+	diagnostics  []diagnostics.Diagnostic
+	disposition  ruleDisposition
 }
+
+type ruleDisposition uint8
+
+const (
+	rulePending ruleDisposition = iota
+	ruleBundleFailed
+	ruleIntegrityRejected
+	ruleHelper
+	ruleMalformed
+	ruleDuplicate
+	ruleDisabled
+	rulePreparing
+	rulePrepared
+	ruleGenerated
+	rulePlanned
+	ruleCompleted
+	ruleFailed
+)
 
 // ruleCatalog owns discovery, bundling and pure metadata loading for listing,
 // lock creation and execution. It never runs setup or producer collection.
 type ruleCatalog struct {
-	paths          []string
-	entries        map[string]catalogRule
-	artifacts      map[string]bundle.Artifacts
-	bundleFailures map[string]error
-	bundleError    error
-	bundleDir      string
-	bundleBuilds   int
-	metadataLoaded bool
+	rules        []*ruleRecord
+	observations observe.Set
+	bundleError  error
+	bundleDir    string
+	bundleBuilds int
 }
 
-type cachedRuleBundle struct {
-	artifact    bundle.Artifacts
-	pureCode    string
-	prepareCode string
-	context     string
+type ruleToolContext struct {
+	assetRoot     string
+	repoRoot      string
+	workspaceRoot string
+}
+
+// ruleEntry is owned by the serialized session lifecycle. Bundle texts and the
+// plan template are independent of the request's temporary files and runtimes.
+type ruleEntry struct {
+	context      ruleToolContext
+	observations observe.Set
+	approvalHash string
+	prepareCode  string
+	pureCode     string
+	hasBundle    bool
+	planKey      string
+	plan         *rulePlan
 }
 
 func openRuleCatalog(ctx context.Context, options Options) (*ruleCatalog, error) {
-	return openRuleCatalogWithCache(ctx, options, nil, nil)
+	return openRuleCatalogWithEntries(ctx, options, nil, nil, observe.Full)
 }
 
-func openRuleCatalogWithCache(ctx context.Context, options Options, engine *Session, lock *RulesLock) (*ruleCatalog, error) {
+func openRuleCatalogWithEntries(ctx context.Context, options Options, engine *Session, lock *RulesLock, mode observe.Mode) (*ruleCatalog, error) {
 	if _, err := bundle.NodeExecutable(ctx); err != nil {
 		return nil, err
 	}
-	paths, err := discoverRulePaths(options.WorkspaceRoot, options.RuleGlobs, lock != nil && len(lock.Rules) > 0)
+	paths, observations, err := discoverRulePaths(options.WorkspaceRoot, options.RuleGlobs, lock != nil && len(lock.Rules) > 0)
 	if err != nil {
 		return nil, err
 	}
-	catalog := &ruleCatalog{
-		paths: paths, entries: make(map[string]catalogRule), artifacts: make(map[string]bundle.Artifacts),
-		bundleFailures: make(map[string]error),
+	retained := make(map[string]*ruleEntry)
+	if engine != nil {
+		if engine.ruleEntries == nil {
+			engine.ruleEntries = retained
+		} else {
+			retained = engine.ruleEntries
+		}
 	}
-	if len(paths) == 0 {
+	active := make(map[string]struct{}, len(paths))
+	for _, path := range paths {
+		active[path] = struct{}{}
+	}
+	for path := range retained {
+		if _, ok := active[path]; !ok {
+			delete(retained, path)
+		}
+	}
+	catalog := &ruleCatalog{observations: observations}
+	for _, path := range paths {
+		entry := retained[path]
+		if entry == nil {
+			entry = &ruleEntry{}
+			retained[path] = entry
+		}
+		catalog.rules = append(catalog.rules, &ruleRecord{path: path, retained: entry})
+	}
+	if len(catalog.rules) == 0 {
 		return catalog, nil
 	}
 	catalog.bundleDir, err = os.MkdirTemp("", "lintai-bundle-*")
 	if err != nil {
 		return nil, err
 	}
-	if engine == nil {
-		catalog.artifacts, catalog.bundleFailures, catalog.bundleError = bundle.BuildAll(
-			ctx, assetRootOf(options), options.RepoRoot, options.WorkspaceRoot, catalog.bundleDir, paths,
-		)
-		catalog.bundleBuilds = len(catalog.artifacts)
-	} else {
-		catalog.buildWithEngineCache(ctx, options, engine)
-	}
-	if catalog.artifacts == nil {
-		catalog.artifacts = make(map[string]bundle.Artifacts)
-	}
-	if catalog.bundleFailures == nil {
-		catalog.bundleFailures = make(map[string]error)
+	if err := catalog.build(ctx, options, mode); err != nil {
+		catalog.close()
+		return nil, err
 	}
 	return catalog, catalog.bundleError
 }
 
-func (catalog *ruleCatalog) buildWithEngineCache(ctx context.Context, options Options, engine *Session) {
-	toolContext := assetRootOf(options) + "\x00" + options.RepoRoot + "\x00" + options.WorkspaceRoot
-	engine.bundleMu.Lock()
-	defer engine.bundleMu.Unlock()
-	if engine.bundleCache == nil {
-		engine.bundleCache = make(map[string]cachedRuleBundle)
-	}
-	activeCacheKeys := make(map[string]struct{}, len(catalog.paths))
-	for _, rulePath := range catalog.paths {
-		activeCacheKeys[toolContext+"\x00"+rulePath] = struct{}{}
-	}
-	for key := range engine.bundleCache {
-		if _, active := activeCacheKeys[key]; !active {
-			delete(engine.bundleCache, key)
+// Discovery and bundling retain only the input evidence and immutable bundle
+// texts. The batch API's maps are transferred immediately into rule records.
+func (catalog *ruleCatalog) build(ctx context.Context, options Options, mode observe.Mode) error {
+	toolContext := ruleToolContext{assetRootOf(options), options.RepoRoot, options.WorkspaceRoot}
+	misses := make([]string, 0, len(catalog.rules))
+	for _, rule := range catalog.rules {
+		entry := rule.retained
+		reuse := entry.hasBundle && entry.context == toolContext
+		if reuse {
+			changed, err := entry.observations.Changed(ctx, mode)
+			if err != nil {
+				return err
+			}
+			reuse = changed == nil
 		}
-	}
-	catalog.artifacts = make(map[string]bundle.Artifacts, len(catalog.paths))
-	catalog.bundleFailures = make(map[string]error)
-	misses := make([]string, 0, len(catalog.paths))
-	for index, rulePath := range catalog.paths {
-		key := toolContext + "\x00" + rulePath
-		cached, exists := engine.bundleCache[key]
-		if !exists || cached.context != toolContext || !cached.artifact.Manifest.Unchanged() {
-			delete(engine.bundleCache, key)
-			misses = append(misses, rulePath)
+		if !reuse {
+			// The previous plan may still match the newly generated program.
+			entry.hasBundle = false
+			entry.observations = observe.Set{}
+			entry.approvalHash, entry.prepareCode, entry.pureCode = "", "", ""
+			misses = append(misses, rule.path)
 			continue
 		}
-		artifact, err := catalog.materializeCachedBundle(index, cached)
-		if err != nil {
-			delete(engine.bundleCache, key)
-			misses = append(misses, rulePath)
-			continue
-		}
-		catalog.artifacts[rulePath] = artifact
+		rule.artifact = bundle.Artifacts{Hash: entry.approvalHash, Observations: entry.observations}
+		rule.bundled = true
 	}
 	if len(misses) == 0 {
-		return
+		return nil
 	}
 	buildDir := filepath.Join(catalog.bundleDir, "built")
 	built, failures, buildErr := bundle.BuildAll(ctx, assetRootOf(options), options.RepoRoot, options.WorkspaceRoot, buildDir, misses)
 	catalog.bundleBuilds = len(built)
 	catalog.bundleError = buildErr
-	for rulePath, failure := range failures {
-		catalog.bundleFailures[rulePath] = failure
-	}
-	for _, rulePath := range misses {
-		artifact, exists := built[rulePath]
+	for _, rule := range catalog.rules {
+		if failure, failed := failures[rule.path]; failed {
+			rule.bundleError, rule.disposition = failure, ruleBundleFailed
+		}
+		artifact, exists := built[rule.path]
 		if !exists {
 			continue
 		}
-		catalog.artifacts[rulePath] = artifact
 		pureCode, pureErr := os.ReadFile(artifact.PureBundlePath)
 		prepareCode, prepareErr := os.ReadFile(artifact.PrepareBundlePath)
-		if pureErr != nil || prepareErr != nil {
+		if pureErr != nil {
+			rule.bundleError, rule.disposition = fmt.Errorf("read pure bundle: %w", pureErr), ruleBundleFailed
 			continue
 		}
-		key := toolContext + "\x00" + rulePath
-		engine.bundleCache[key] = cachedRuleBundle{
-			artifact: bundle.Artifacts{Hash: artifact.Hash, Manifest: cloneBundleManifest(artifact.Manifest)},
-			pureCode: string(pureCode), prepareCode: string(prepareCode), context: toolContext,
+		if prepareErr != nil {
+			rule.bundleError, rule.disposition = fmt.Errorf("read prepare bundle: %w", prepareErr), ruleBundleFailed
+			continue
 		}
+		entry := rule.retained
+		entry.context, entry.observations, entry.approvalHash = toolContext, artifact.Observations, artifact.Hash
+		entry.pureCode, entry.prepareCode, entry.hasBundle = string(pureCode), string(prepareCode), true
+		rule.artifact, rule.bundled = artifact, true
 	}
+	return nil
 }
 
-func (catalog *ruleCatalog) materializeCachedBundle(index int, cached cachedRuleBundle) (bundle.Artifacts, error) {
-	directory := filepath.Join(catalog.bundleDir, "cached", strconv.Itoa(index))
-	if err := os.MkdirAll(directory, 0o755); err != nil {
+func (catalog *ruleCatalog) prepareArtifact(rule *ruleRecord) (bundle.Artifacts, error) {
+	if rule.artifact.PrepareBundlePath != "" {
+		return rule.artifact, nil
+	}
+	directory, err := os.MkdirTemp(catalog.bundleDir, "retained-*")
+	if err != nil {
 		return bundle.Artifacts{}, err
 	}
 	preparePath := filepath.Join(directory, "prepare.cjs")
-	purePath := filepath.Join(directory, "pure.js")
-	if err := os.WriteFile(preparePath, []byte(cached.prepareCode), 0o600); err != nil {
+	if err := os.WriteFile(preparePath, []byte(rule.retained.prepareCode), 0o600); err != nil {
 		return bundle.Artifacts{}, err
 	}
-	if err := os.WriteFile(purePath, []byte(cached.pureCode), 0o600); err != nil {
-		return bundle.Artifacts{}, err
-	}
-	return bundle.Artifacts{
-		PureBundlePath: purePath, PrepareBundlePath: preparePath,
-		Hash: cached.artifact.Hash, Manifest: cloneBundleManifest(cached.artifact.Manifest),
-	}, nil
+	rule.artifact.PrepareBundlePath = preparePath
+	return rule.artifact, nil
 }
 
-func cloneBundleManifest(manifest bundle.InputManifest) bundle.InputManifest {
-	manifest.Inputs = append([]bundle.Input(nil), manifest.Inputs...)
-	manifest.Probes = append([]bundle.ConfigProbe(nil), manifest.Probes...)
-	for index := range manifest.Probes {
-		manifest.Probes[index].Ignore = append([]string(nil), manifest.Probes[index].Ignore...)
-	}
-	manifest.Resolutions = append([]string{}, manifest.Resolutions...)
-	return manifest
-}
-
-func (catalog *ruleCatalog) loadMetadata(skip map[string]struct{}) {
-	if catalog == nil || catalog.metadataLoaded {
-		return
-	}
-	catalog.metadataLoaded = true
-	for _, rulePath := range catalog.paths {
-		if _, skipped := skip[rulePath]; skipped {
+// Metadata is read only after the bundle-hash barrier. Partial metadata is
+// retained even on failure for duplicate and inventory checks.
+func (catalog *ruleCatalog) loadMetadata() int {
+	loaded := 0
+	for _, rule := range catalog.rules {
+		if !rule.bundled || rule.disposition == ruleIntegrityRejected || rule.metadataRead {
 			continue
 		}
-		artifact, built := catalog.artifacts[rulePath]
-		if !built {
-			continue
+		rule.metadata, rule.isRule, rule.loadError = runtime.ReadRuleMetadata(rule.retained.pureCode)
+		rule.metadataRead = true
+		loaded++
+		switch {
+		case rule.loadError != nil:
+			rule.disposition = ruleMalformed
+		case !rule.isRule:
+			rule.disposition = ruleHelper
 		}
-		entry := catalogRule{path: rulePath, artifact: artifact}
-		code, readErr := os.ReadFile(artifact.PureBundlePath)
-		if readErr != nil {
-			entry.loadError = readErr
-			catalog.entries[rulePath] = entry
-			continue
-		}
-		entry.pureCode = string(code)
-		entry.metadata, entry.isRule, entry.loadError = runtime.ReadRuleMetadata(entry.pureCode)
-		catalog.entries[rulePath] = entry
 	}
+	return loaded
 }
 
 func (catalog *ruleCatalog) close() {
@@ -250,21 +279,21 @@ func ListRules(ctx context.Context, options Options) (RuleList, error) {
 	}
 	defer catalog.close()
 	list := RuleList{Rules: []ListedRule{}, Errors: []RuleLoadError{}}
-	if len(catalog.paths) == 0 {
+	if len(catalog.rules) == 0 {
 		return list, nil
 	}
-	catalog.loadMetadata(nil)
-	for rulePath, failure := range catalog.bundleFailures {
-		list.Errors = append(list.Errors, RuleLoadError{Path: lockKey(options.WorkspaceRoot, rulePath), Message: failure.Error()})
-	}
+	catalog.loadMetadata()
 	type foundRule struct {
 		ListedRule
 		shapeErr error
 	}
-	found := make([]foundRule, 0, len(catalog.entries))
-	for _, rulePath := range catalog.paths {
-		entry, loaded := catalog.entries[rulePath]
-		if !loaded {
+	found := make([]foundRule, 0, len(catalog.rules))
+	for _, entry := range catalog.rules {
+		rulePath := entry.path
+		if entry.bundleError != nil {
+			list.Errors = append(list.Errors, RuleLoadError{Path: lockKey(options.WorkspaceRoot, rulePath), Message: entry.bundleError.Error()})
+		}
+		if !entry.metadataRead {
 			if catalog.bundleError != nil {
 				list.Errors = append(list.Errors, RuleLoadError{Path: lockKey(options.WorkspaceRoot, rulePath), Message: catalog.bundleError.Error()})
 			}

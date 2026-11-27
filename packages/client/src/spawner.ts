@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { readSync, writeSync } from "node:fs";
 import path from "node:path";
 import { PassThrough, type Readable } from "node:stream";
@@ -29,9 +29,22 @@ export type HostMessage =
 	| { type: "kill"; id: number; signal?: NodeJS.Signals | number };
 
 type SpawnerMessage =
-	| { type: "result"; id: number; stdout: string; stderr: string; status: number | null; error?: string }
+	| {
+			type: "result";
+			id: number;
+			stdout: string;
+			stderr: string;
+			status: number | null;
+			error?: string;
+	  }
 	| { type: "stdout"; id: number; data: string }
-	| { type: "exit"; id: number; code: number | null; signal: NodeJS.Signals | null; error?: string };
+	| {
+			type: "exit";
+			id: number;
+			code: number | null;
+			signal: NodeJS.Signals | null;
+			error?: string;
+	  };
 
 export type RunResult = {
 	stdout: string;
@@ -47,7 +60,15 @@ export type SpawnedProcess = {
 		readonly destroyed: boolean;
 	};
 	stdout: Readable;
-	on(event: "exit", listener: (code: number | null, signal: NodeJS.Signals | null) => void): SpawnedProcess;
+	writeBytes(bytes: Buffer, deadline: number): void;
+	readBytes(timeoutMs: number): Buffer;
+	close(): void;
+	failure(): Error | undefined;
+	on(
+		event: "exit",
+		listener: (code: number | null, signal: NodeJS.Signals | null) => void,
+	): SpawnedProcess;
+	on(event: "error", listener: (error: Error) => void): SpawnedProcess;
 	kill(signal?: NodeJS.Signals | number): boolean;
 	unref(): void;
 };
@@ -56,20 +77,15 @@ type Channel = {
 	process: SpawnedProcess;
 	pending: Buffer[];
 	exit?: { code: number | null; signal: NodeJS.Signals | null; error?: string };
+	failure?: Error;
 	exitListeners: Array<(code: number | null, signal: NodeJS.Signals | null) => void>;
+	errorListeners: Array<(error: Error) => void>;
 	exitEmitted: boolean;
+	errorEmitted: boolean;
 	flushScheduled: boolean;
 };
 
 const syncSleep = new Int32Array(new SharedArrayBuffer(4));
-
-const owners = new WeakMap<SpawnedProcess, Spawner>();
-
-// spawnerFor returns the spawner that started a process, or undefined when
-// the process was not started by a spawner.
-export function spawnerFor(child: unknown): Spawner | undefined {
-	return owners.get(child as SpawnedProcess);
-}
 
 export class Spawner {
 	private readonly child: ChildProcess | undefined;
@@ -92,7 +108,9 @@ export class Spawner {
 		return this.failed && this.started;
 	}
 
-	constructor(script: string = path.join(path.dirname(fileURLToPath(import.meta.url)), "spawner-child.js")) {
+	constructor(
+		script: string = path.join(path.dirname(fileURLToPath(import.meta.url)), "spawner-child.js"),
+	) {
 		let child: ChildProcess;
 		try {
 			child = spawn(process.execPath, [script], { stdio: ["pipe", "pipe", "inherit"] });
@@ -124,7 +142,12 @@ export class Spawner {
 				this.readOnce(undefined);
 			}
 		} catch (error) {
-			return { stdout: "", stderr: "", status: null, error: error instanceof Error ? error : new Error(String(error)) };
+			return {
+				stdout: "",
+				stderr: "",
+				status: null,
+				error: error instanceof Error ? error : new Error(String(error)),
+			};
 		}
 		const result = this.results.get(id) as SpawnerMessage & { type: "result" };
 		this.results.delete(id);
@@ -143,7 +166,9 @@ export class Spawner {
 		const channel: Channel = {
 			pending: [],
 			exitListeners: [],
+			errorListeners: [],
 			exitEmitted: false,
+			errorEmitted: false,
 			flushScheduled: false,
 			process: {
 				stdin: {
@@ -172,8 +197,33 @@ export class Spawner {
 					},
 				},
 				stdout: new PassThrough(),
-				on(_event, listener) {
-					channel.exitListeners.push(listener);
+				writeBytes(bytes, deadline) {
+					spawner.send({ type: "stdin", id, data: bytes.toString("base64") }, deadline);
+				},
+				readBytes(timeoutMs) {
+					return spawner.readSync(channel.process, timeoutMs);
+				},
+				close() {
+					channel.process.stdin.end();
+				},
+				failure() {
+					if (channel.failure) return channel.failure;
+					if (channel.exit) {
+						return new Error(
+							`lintai serve exited unexpectedly (code=${channel.exit.code ?? "null"}, signal=${channel.exit.signal ?? "null"})`,
+						);
+					}
+					if (spawner.failure) return spawner.failure;
+					return undefined;
+				},
+				on(event, listener) {
+					if (event === "exit") {
+						channel.exitListeners.push(
+							listener as (code: number | null, signal: NodeJS.Signals | null) => void,
+						);
+					} else if (event === "error") {
+						channel.errorListeners.push(listener as (error: Error) => void);
+					}
 					return channel.process;
 				},
 				kill(signal) {
@@ -189,11 +239,11 @@ export class Spawner {
 		};
 		this.channels.set(id, channel);
 		this.byProcess.set(channel.process, channel);
-		owners.set(channel.process, this);
 		try {
 			this.send({ type: "start", id, command, args, cwd });
 		} catch (error) {
-			channel.exit = { code: null, signal: null, error: error instanceof Error ? error.message : String(error) };
+			channel.failure = error instanceof Error ? error : new Error(String(error));
+			channel.exit = { code: null, signal: null, error: channel.failure.message };
 			this.scheduleFlush(channel);
 		}
 		return channel.process;
@@ -210,7 +260,9 @@ export class Spawner {
 		const deadline = Date.now() + timeoutMs;
 		while (channel.pending.length === 0) {
 			if (channel.exit) {
-				throw new Error(`lintai serve closed stdout${channel.exit.error ? `: ${channel.exit.error}` : ""}`);
+				throw new Error(
+					`lintai serve closed stdout${channel.exit.error ? `: ${channel.exit.error}` : ""}`,
+				);
 			}
 			this.readOnce(deadline);
 		}
@@ -224,7 +276,7 @@ export class Spawner {
 	// send writes the whole frame before it returns. The callers then block
 	// the event loop while they wait for the answer, so a write that the
 	// event loop would finish later could never complete.
-	private send(message: HostMessage): void {
+	private send(message: HostMessage, deadline?: number): void {
 		if (this.failure) {
 			throw this.failure;
 		}
@@ -236,17 +288,37 @@ export class Spawner {
 		}
 		let offset = 0;
 		while (offset < frame.length) {
+			if (deadline !== undefined && deadline - Date.now() <= 0) {
+				const failure = new Error("lintai spawner write timed out");
+				this.fail(failure);
+				throw failure;
+			}
 			try {
-				offset += writeSync(fd, frame, offset);
+				const bytesWritten = writeSync(fd, frame, offset);
+				if (bytesWritten > 0) {
+					offset += bytesWritten;
+				} else {
+					this.waitForWrite(deadline);
+				}
 			} catch (error) {
 				const code = (error as NodeJS.ErrnoException)?.code;
 				if (code !== "EAGAIN" && code !== "EWOULDBLOCK") {
 					this.fail(error instanceof Error ? error : new Error(String(error)));
 					throw this.failure;
 				}
-				Atomics.wait(syncSleep, 0, 0, 1);
+				this.waitForWrite(deadline);
 			}
 		}
+	}
+
+	private waitForWrite(deadline: number | undefined): void {
+		const remaining = deadline === undefined ? 1 : deadline - Date.now();
+		if (remaining <= 0) {
+			const failure = new Error("lintai spawner write timed out");
+			this.fail(failure);
+			throw failure;
+		}
+		Atomics.wait(syncSleep, 0, 0, Math.min(1, remaining));
 	}
 
 	private readOnce(deadline: number | undefined): void {
@@ -302,6 +374,7 @@ export class Spawner {
 				channel.pending.push(Buffer.from(message.data, "base64"));
 			} else {
 				channel.exit = { code: message.code, signal: message.signal, error: message.error };
+				if (message.error) channel.failure = new Error(message.error);
 				this.channels.delete(message.id);
 			}
 			this.scheduleFlush(channel);
@@ -321,6 +394,10 @@ export class Spawner {
 			if (channel.pending.length > 0 && channel.process.stdout.listenerCount("data") > 0) {
 				(channel.process.stdout as PassThrough).write(Buffer.concat(channel.pending.splice(0)));
 			}
+			if (channel.failure && !channel.errorEmitted) {
+				channel.errorEmitted = true;
+				for (const listener of channel.errorListeners) listener(channel.failure);
+			}
 			if (channel.exit && channel.pending.length === 0 && !channel.exitEmitted) {
 				channel.exitEmitted = true;
 				for (const listener of channel.exitListeners) {
@@ -336,6 +413,7 @@ export class Spawner {
 		}
 		this.failure = error;
 		for (const [id, channel] of this.channels) {
+			channel.failure = error;
 			channel.exit = { code: null, signal: null, error: error.message };
 			this.channels.delete(id);
 			this.scheduleFlush(channel);

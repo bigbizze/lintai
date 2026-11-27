@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"slices"
 	"testing"
+
+	"github.com/bigbizze/lintai/observe"
 )
 
 func TestSourceConfigOwnersAgreeOnlyWhenProgramInputsAgree(t *testing.T) {
@@ -158,9 +160,18 @@ func TestFailedSourceConfigTracksMissingReferenceUntilRecovery(t *testing.T) {
 	}
 	before := build()
 	missingReference := filepath.ToSlash(filepath.Join(root, "contracts/dep/tsconfig.json"))
-	if !slices.ContainsFunc(before.Inputs, func(input SnapshotInput) bool { return input.Path == missingReference && !input.Exists }) {
-		t.Fatalf("missing reference was lost when its parent config failed: %+v", before.Inputs)
+	index := slices.IndexFunc(before.CompilerInputs, func(input CompilerObservation) bool {
+		return input.Path == missingReference && input.Kind == "state" && input.Op == "compiler-file" && input.Value == "false"
+	})
+	if index < 0 {
+		t.Fatalf("missing reference was lost when its parent config failed: %+v", before.CompilerInputs)
 	}
+	captured := before.CompilerInputs[index]
+	probe, err := observe.New([]observe.Record{{Kind: observe.Kind(captured.Kind), Path: captured.Path, Op: observe.Operation(captured.Op), Value: observe.Value(captured.Value)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	if len(before.SourceEntries) != 1 || !slices.Contains(before.SourceEntries[0].Incomplete, AssociationUnsupported) {
 		t.Fatalf("invalid parent config did not leave an unsupported association: %+v", before.SourceEntries)
 	}
@@ -178,6 +189,10 @@ func TestFailedSourceConfigTracksMissingReferenceUntilRecovery(t *testing.T) {
 	writeWorkspace(t, root, map[string]string{
 		"contracts/dep/tsconfig.json": `{"compilerOptions":{"composite":true,"declaration":true,"rootDir":"src","outDir":"dist","module":"preserve","moduleResolution":"bundler"},"files":["src/index.ts"]}`,
 	})
+	changed, err := probe.Changed(context.Background(), observe.Full)
+	if err != nil || changed == nil {
+		t.Fatalf("creating the missing referenced config did not invalidate the captured probe: %v %v", changed, err)
+	}
 	after := build()
 	if !slices.ContainsFunc(after.SourceBindings, func(binding SourceBindingFact) bool {
 		return binding.Name == "Widget" && binding.Space == SpaceValue && binding.SourceFile == "contracts/src/index.ts" && len(binding.CheckedDeclarations) == 1 && len(binding.SourceDeclarations) == 1 && len(binding.Incomplete) == 0 && binding.CheckedDeclarations[0] != binding.SourceDeclarations[0]

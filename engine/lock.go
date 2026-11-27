@@ -12,8 +12,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/bigbizze/lintai/bundle"
 	"github.com/bigbizze/lintai/internal/atomicfile"
+	"github.com/bigbizze/lintai/observe"
 	"github.com/bigbizze/lintai/suppressions"
 )
 
@@ -27,6 +27,7 @@ type RulesLock struct {
 	targetSnapshot atomicfile.Snapshot
 	source         string
 	sourceSnapshot atomicfile.Snapshot
+	observations   observe.Set
 }
 type RulesLockRule struct {
 	ID      string
@@ -111,6 +112,10 @@ func ReadRulesLock(path string) (RulesLock, error) {
 		return RulesLock{}, err
 	}
 	lock.target, lock.targetSnapshot = path, state
+	lock.observations, err = policyObservations(path, state)
+	if err != nil {
+		return RulesLock{}, err
+	}
 	return lock, nil
 }
 func BuildRulesLock(ctx context.Context, options Options) (RulesLock, []LockedRule, error) {
@@ -150,20 +155,21 @@ func BuildRulesLock(ctx context.Context, options Options) (RulesLock, []LockedRu
 	if catalog.bundleError != nil {
 		return RulesLock{}, nil, catalog.bundleError
 	}
-	if len(catalog.bundleFailures) > 0 {
-		messages := []string{}
-		for name, failure := range catalog.bundleFailures {
-			messages = append(messages, fmt.Sprintf("%s: %v", lockKey(options.WorkspaceRoot, name), failure))
+	messages := []string{}
+	for _, entry := range catalog.rules {
+		if entry.bundleError != nil {
+			messages = append(messages, fmt.Sprintf("%s: %v", lockKey(options.WorkspaceRoot, entry.path), entry.bundleError))
 		}
+	}
+	if len(messages) > 0 {
 		sort.Strings(messages)
 		return RulesLock{}, nil, fmt.Errorf("could not bundle rules: %s", strings.Join(messages, "; "))
 	}
-	catalog.loadMetadata(nil)
+	catalog.loadMetadata()
 	lock := RulesLock{Rules: map[string]RulesLockRule{}, Suppressions: approved, target: target, targetSnapshot: targetState, source: source, sourceSnapshot: sourceState}
 	locked := []LockedRule{}
 	ids := map[string]bool{}
-	for _, rulePath := range catalog.paths {
-		entry := catalog.entries[rulePath]
+	for _, entry := range catalog.rules {
 		if entry.loadError != nil {
 			return RulesLock{}, nil, entry.loadError
 		}
@@ -174,7 +180,7 @@ func BuildRulesLock(ctx context.Context, options Options) (RulesLock, []LockedRu
 			return RulesLock{}, nil, fmt.Errorf("duplicate rule %s", entry.metadata.ID)
 		}
 		ids[entry.metadata.ID] = true
-		key := lockKey(options.WorkspaceRoot, rulePath)
+		key := lockKey(options.WorkspaceRoot, entry.path)
 		lock.Rules[key] = RulesLockRule{ID: entry.metadata.ID, Version: entry.metadata.Version, Hash: entry.artifact.Hash}
 		locked = append(locked, LockedRule{Path: key, Hash: entry.artifact.Hash})
 	}
@@ -219,43 +225,6 @@ func ResolveRulesLockPath(root, path string) string {
 		return path
 	}
 	return filepath.Join(root, path)
-}
-
-type integrityFailure struct {
-	key     string
-	message string
-}
-
-// checkRulesLock compares the bundled rules with the lock. It returns one
-// failure for each rule whose hash differs, each rule that is not in the
-// lock, and each locked rule that no longer exists. A rule that did not
-// bundle already has a bundle error.
-func checkRulesLock(lock RulesLock, workspaceRoot string, rulePaths []string, artifacts map[string]bundle.Artifacts) map[string]integrityFailure {
-	failures := make(map[string]integrityFailure)
-	seen := make(map[string]struct{}, len(rulePaths))
-	for _, rulePath := range rulePaths {
-		key := lockKey(workspaceRoot, rulePath)
-		seen[key] = struct{}{}
-		item, built := artifacts[rulePath]
-		if !built {
-			continue
-		}
-		locked, ok := lock.Rules[key]
-		switch {
-		case !ok:
-			// A glob can also select helper modules; the catalog classifies
-			// unlisted bundles before treating them as unapproved rules.
-			continue
-		case locked.Hash != item.Hash:
-			failures[rulePath] = integrityFailure{key: key, message: fmt.Sprintf("rule %s bundle changed since the rules lock was written (locked %s, now %s); review the change and run lintai lock", key, locked.Hash, item.Hash)}
-		}
-	}
-	for key := range lock.Rules {
-		if _, ok := seen[key]; !ok {
-			failures["locked:"+key] = integrityFailure{key: key, message: fmt.Sprintf("rule %s is in the rules lock but was not found; review the removal and run lintai lock", key)}
-		}
-	}
-	return failures
 }
 
 // lockKey is the path of a rule file in the rules lock: relative to the
