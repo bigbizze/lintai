@@ -97,14 +97,31 @@ func Build(ctx context.Context, root string, names []string) error {
 
 func compile(root, name string) (string, error) {
 	result := api.Build(api.BuildOptions{
-		AbsWorkingDir: root, EntryPoints: []string{"./" + name}, Bundle: true, Write: false,
-		Format: api.FormatIIFE, GlobalName: "LintAIPureModule", Platform: api.PlatformNeutral,
-		MainFields: []string{"module", "main"}, Conditions: []string{"default"},
-		Target: api.ES2022, TsconfigRaw: `{"compilerOptions":{"useDefineForClassFields":true}}`,
-		Charset: api.CharsetASCII, LegalComments: api.LegalCommentsNone, MinifyWhitespace: true,
-		PreserveSymlinks: true, LogLevel: api.LogLevelSilent,
-		Metafile:    true,
-		LogOverride: map[string]api.LogLevel{"indirect-require": api.LogLevelError, "require-resolve-not-external": api.LogLevelError, "unsupported-require-call": api.LogLevelError, "unsupported-dynamic-import": api.LogLevelError},
+		AbsWorkingDir: root,
+		EntryPoints:   []string{"./" + name},
+		Bundle:        true,
+		Format:        api.FormatIIFE,
+		GlobalName:    "LintAIPureModule",
+		Platform:      api.PlatformNeutral,
+		MainFields:    []string{"module", "main"},
+		Conditions:    []string{"default"},
+		Target:        api.ES2022,
+		TsconfigRaw:   `{"compilerOptions":{"useDefineForClassFields":true}}`,
+		Charset:       api.CharsetASCII,
+		LegalComments: api.LegalCommentsNone,
+		// Omit esbuild's profiling labels, which may include a real path
+		// when pnpm resolves a linked package outside the workspace.
+		MinifyIdentifiers: true,
+		KeepNames:         true,
+		MinifyWhitespace:  true,
+		LogLevel:          api.LogLevelSilent,
+		Metafile:          true,
+		LogOverride: map[string]api.LogLevel{
+			"indirect-require":             api.LogLevelError,
+			"require-resolve-not-external": api.LogLevelError,
+			"unsupported-require-call":     api.LogLevelError,
+			"unsupported-dynamic-import":   api.LogLevelError,
+		},
 	})
 	if len(result.Errors) > 0 {
 		return "", fmt.Errorf("build %s: %s", name, strings.Join(api.FormatMessages(result.Errors, api.FormatMessagesOptions{Kind: api.ErrorMessage}), ""))

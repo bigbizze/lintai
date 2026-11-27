@@ -93,3 +93,34 @@ func TestBuildIgnoresApplicationResolutionSettings(t *testing.T) {
 		t.Fatalf("ambient tsconfig alias was accepted: %v", err)
 	}
 }
+
+func TestBuildResolvesLinkedPackageDependencies(t *testing.T) {
+	root := t.TempDir()
+	store := filepath.Join(t.TempDir(), "linked-package-store")
+	for _, dir := range []string{filepath.Join(root, "node_modules"), filepath.Join(store, "node_modules", "policy"), filepath.Join(store, "node_modules", "shared")} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Symlink(filepath.Join(store, "node_modules", "policy"), filepath.Join(root, "node_modules", "policy")); err != nil {
+		t.Fatal(err)
+	}
+	write(t, root, "entry.ts", "import policy from 'policy'; export default policy")
+	write(t, store, "node_modules/policy/index.js", "module.exports = require('shared')")
+	write(t, store, "node_modules/shared/index.js", "module.exports = function allowed(){}")
+	if err := Build(t.Context(), root, []string{"entry.ts"}); err != nil {
+		t.Fatal(err)
+	}
+	pack, err := Decode(read(t, root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := pack.Entries[0].Code
+	if strings.Contains(code, filepath.Base(store)) {
+		t.Fatal("executable contains package store path")
+	}
+	value, err := goja.New().RunString(code + "; LintAIPureModule.default.name")
+	if err != nil || value.String() != "allowed" {
+		t.Fatalf("expected exported function: %s (%v)", value, err)
+	}
+}
