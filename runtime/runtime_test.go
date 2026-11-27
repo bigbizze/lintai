@@ -104,8 +104,25 @@ func TestPureExecutionStateAndExceptions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := rule.Rule.Message(nil, "violation"); err == nil || !strings.Contains(err.Error(), "message conversion failed") {
+	if _, err := rule.Rule.Message(nil, "violation"); err == nil || !strings.Contains(err.Error(), "must return a string") {
 		t.Fatalf("message conversion error: %v", err)
+	}
+	for _, tc := range []struct{ name, from, to, want string }{
+		{"async facts", `factsFn: () => { state += ":facts"; return {} }`, `factsFn: async () => ({violation: [["/a.js"]]})`, "facts(): returned a Promise"},
+		{"async message", `messageFn: () => state`, `messageFn: async () => "late"`, "message() returned a Promise"},
+	} {
+		rule, err := Inspect(context.Background(), strings.Replace(code, tc.from, tc.to, 1))
+		if err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		if tc.name == "async facts" {
+			_, err = rule.Rule.Program()
+		} else {
+			_, err = rule.Rule.Message(nil, "violation")
+		}
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s: got %v, want %q", tc.name, err, tc.want)
+		}
 	}
 }
 

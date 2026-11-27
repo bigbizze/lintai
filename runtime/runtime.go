@@ -318,7 +318,22 @@ func (r *LoadedRule) message(row map[string]any, assertionID string) (string, er
 	if err != nil {
 		return "", err
 	}
-	return result.String(), nil
+	if isPromise(result) {
+		return "", fmt.Errorf("message() returned a Promise; message callbacks must be synchronous")
+	}
+	text, ok := result.Export().(string)
+	if !ok {
+		return "", fmt.Errorf("message() must return a string")
+	}
+	return text, nil
+}
+
+func isPromise(value goja.Value) bool {
+	if value == nil {
+		return false
+	}
+	_, ok := value.Export().(*goja.Promise)
+	return ok
 }
 
 func suppressionDeclarations(vm *goja.Runtime, value goja.Value) ([]SuppressionDeclaration, error) {
@@ -391,6 +406,12 @@ func fragmentText(vm *goja.Runtime, value goja.Value) (string, bool) {
 func decodeFacts(vm *goja.Runtime, value goja.Value) (map[string][][]any, error) {
 	if value == nil || goja.IsUndefined(value) || goja.IsNull(value) {
 		return nil, fmt.Errorf("must return an object of relations")
+	}
+	if isPromise(value) {
+		return nil, fmt.Errorf("returned a Promise; facts callbacks must be synchronous")
+	}
+	if object, ok := value.(*goja.Object); !ok || object.ClassName() != "Object" {
+		return nil, fmt.Errorf("must return a plain object of relations")
 	}
 	raw, err := json.Marshal(value.Export())
 	if err != nil {
