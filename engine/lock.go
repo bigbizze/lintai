@@ -251,6 +251,9 @@ func (e *Session) BuildRulesLock(ctx context.Context, options Options) (RulesLoc
 	if err != nil {
 		return RulesLock{}, err
 	}
+	if targetState.Exists && !isRulesLockDocument(targetState.Data) {
+		return RulesLock{}, fmt.Errorf("%s exists and is not a lintai rules lock; refusing to overwrite it", target)
+	}
 	state, err := loadSuppressions(options)
 	if err != nil {
 		return RulesLock{}, err
@@ -285,6 +288,21 @@ func (e *Session) BuildRulesLock(ctx context.Context, options Options) (RulesLoc
 	}
 	return RulesLock{PackDigest: catalog.digest, PolicyDigest: digest, Suppressions: state.file, target: target, targetSnapshot: targetState, source: state.path, sourceSnapshot: state.snapshot}, ctx.Err()
 }
+
+// isRulesLockDocument accepts any lintai rules-lock format, including obsolete
+// ones, so explicit reapproval can replace them.
+func isRulesLockDocument(data []byte) bool {
+	var header struct {
+		Format  string          `json:"format"`
+		Version *int            `json:"version"`
+		Rules   json.RawMessage `json:"rules"`
+	}
+	if json.Unmarshal(data, &header) != nil {
+		return false
+	}
+	return strings.HasPrefix(header.Format, "lintai.rules-lock/") || (header.Version != nil && len(header.Rules) > 0)
+}
+
 func WriteRulesLock(ctx context.Context, path string, lock RulesLock) error {
 	if lock.target != "" && filepath.Clean(lock.target) != filepath.Clean(path) {
 		return fmt.Errorf("rules lock target changed")

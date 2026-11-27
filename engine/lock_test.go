@@ -50,6 +50,22 @@ func TestLockedChecksRejectChangesBeforeAnyVM(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	unrelated := "[workspace]\nsources = [\"src/**\"]\n"
+	writeTestFile(t, root, "lintai.toml", unrelated)
+	wrongTarget := opts
+	wrongTarget.RulesLock = "lintai.toml"
+	if _, err := session.BuildRulesLock(ctx, wrongTarget); err == nil || !strings.Contains(err.Error(), "not a lintai rules lock") {
+		t.Fatalf("unrelated lock target: %v", err)
+	}
+	if data, _ := os.ReadFile(filepath.Join(root, "lintai.toml")); string(data) != unrelated {
+		t.Fatalf("unrelated file changed: %q", data)
+	}
+	writeTestFile(t, root, DefaultRulesLockFile, `{"format":"lintai.rules-lock/4"}`)
+	if relock, err := session.BuildRulesLock(ctx, opts); err != nil {
+		t.Fatalf("obsolete lock reapproval: %v", err)
+	} else if err := WriteRulesLock(ctx, lockPath, relock); err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		name   string
 		change func(*Options, *rulepack.Pack)
