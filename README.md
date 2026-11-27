@@ -144,7 +144,7 @@ Then add it to your flat config:
 import { createLintaiPlugin } from "@lintai/eslint-plugin";
 import tsParser from "@typescript-eslint/parser";
 
-const lintai = createLintaiPlugin({ rules: ["lintai-rules/**/*.ts"] });
+const lintai = createLintaiPlugin({ workspaceRoot: import.meta.dirname });
 
 export default [
   {
@@ -155,9 +155,7 @@ export default [
 ];
 ```
 
-Each rule gets its own name, such as `lintai/arch.no-service-imports`, so you can set its severity and use ordinary ESLint overrides and disable comments. Keep `lintai/analysis` enabled: it reports analysis and rule execution failures.
-
-There is also an [oxlint plugin](docs/api.md#oxlint-plugin-reference-and-caveats). Both integrations can reuse a running lintai process in editor sessions. They read saved files and validate recorded inputs for each ordinary editor file analysis, sharing its response among the enabled lintai rules. An ESLint API caller with the complete file list can opt into [one validation per operation](docs/api.md#explicit-eslint-multi-file-operations). Each plugin construction discovers the current rule IDs. Newly discovered rule IDs report through `lintai/analysis` until a new plugin is constructed and registered; edits to an existing rule implementation need no restart.
+ESLint and Oxlint display findings through `lintai/error` and `lintai/warning`. Set semantic rule severity in `lintai.toml`. After a rule edit, run `lintai build-rules` to publish the change for the next editor request. See the [host configurations and bulk commands](docs/api.md#linter-rules).
 
 ## What a passing result means
 

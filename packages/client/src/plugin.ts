@@ -2,237 +2,217 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { realpathSync } from "node:fs";
 import path from "node:path";
 
-import { suppressionOverlaps } from "./suppressions.js";
-
 import {
 	type FileAnalysis,
-	type HostDefaults,
+	LintAIClient,
 	type LintaiOptions,
-	type ResolvedBridgeOptions,
-	getClient,
-	resolveBridgeOptions,
+	findWorkspaceRoot,
 } from "./client.js";
 import {
 	type Report,
-	hasUnsavedChanges,
+	mismatchMessage,
 	programLocation,
-	toReports,
-	unsavedChangesMessage,
+	sourceDigest,
+	toReport,
 } from "./reports.js";
+import { Spawner } from "./spawner.js";
 
-// analysisRuleName is the plugin rule that reports everything that is not a
-// violation of a configured lintai rule: rule errors, analysis problems,
-// the unsaved-file message and violations of rules that the plugin has no
-// linter rule for.
-export const analysisRuleName = "analysis";
-
-export const authoringRuleNames = [
-	"no-ambient-in-pure-phase",
-	"no-top-level-node-imports",
-	"require-rule-shape",
-] as const;
-
-// A lintai rule cannot have one of these ids, because the plugin uses the
-// names for its own rules.
-export const reservedRuleNames: readonly string[] = [analysisRuleName, ...authoringRuleNames];
-
-// LintedFile is the part of a linter rule context that the lintai rules
-// use: the path and text, an identity shared for one host file analysis,
-// and report().
-export type LintedFile = {
+export type BatchOperation = { problems: readonly string[] };
+export type FileContext = {
 	physicalFilename: string;
-	// Host SourceCode shared by enabled rules in this analysis.
-	analysis: object;
-	text: string;
+	sourceCode: { text: string; hasBOM: boolean };
 	report(report: Report): void;
 };
 
-// The completed batch's workspace problems, including a request failure. The
-// same problems are also available to lintai/analysis during the callback.
-export type BatchOperation = { problems: readonly string[] };
-
-export type LintaiRules = {
-	// rules are the lintai rules that get a linter rule lintai/<id>, sorted
-	// by id. A rule whose id is known but that cannot run, for example
-	// because two rule files have its id, is in the list too, so a config
-	// that names it still loads. Its problem is reported by lintai/analysis.
-	rules: ReadonlyArray<{ id: string; path: string }>;
-	lintRule(id: string, file: LintedFile): void;
-	lintAnalysis(file: LintedFile): void;
-	withFileBatch<T>(
-		files: readonly string[],
-		run: (operation: BatchOperation) => T | Promise<T>,
-	): Promise<T>;
-	// Invalidate a previous response when the host begins a new file analysis.
-	invalidateAnalysis(file: LintedFile): void;
+type Operation = {
+	key: (file: string) => string;
+	files: Map<string, FileAnalysis>;
+	problems: readonly string[];
+	reported: boolean;
 };
 
-// createLintaiRules reads the rule ids with lintai rules and returns the
-// logic of the generated rules and of lintai/analysis. All of them share one
-// client, so one lintai process serves every rule. With no rule globs it
-// starts no lintai process.
-export function createLintaiRules(
-	options: LintaiOptions,
-	host: HostDefaults,
-	cwd: string = process.cwd(),
-): LintaiRules {
-	if (options.rules !== undefined && options.rules.length === 0) {
-		return {
-			rules: [],
-			lintRule() {},
-			lintAnalysis() {},
-			invalidateAnalysis() {},
-			async withFileBatch(_files, run) {
-				return run({ problems: [] });
-			},
-		};
-	}
-	const resolved = resolveBridgeOptions(options, cwd, host);
-	const list = getClient(resolved).listRuleIds();
-	const known = new Map(list.rules.map((item) => [item.id, item]));
-	for (const item of list.errors) {
-		if (item.id && !known.has(item.id)) {
-			known.set(item.id, { id: item.id, path: item.path });
-		}
-	}
-	const rules = [...known.values()].sort((left, right) =>
-		left.id < right.id ? -1 : left.id > right.id ? 1 : 0,
-	);
-	const reserved = rules.filter((item) => reservedRuleNames.includes(item.id));
-	if (reserved.length > 0) {
-		throw new Error(
-			`lintai: ${reserved.map((item) => `rule ${item.path} has the id "${item.id}"`).join("; ")}. The lintai plugin uses the names ${reservedRuleNames.map((name) => `lintai/${name}`).join(", ")}, so rename the rule.`,
-		);
-	}
-	const ids = new Set(known.keys());
-	const loadErrorMessages = list.errors.map((item) =>
-		item.path
-			? `[lintai] rule file ${item.path} could not be loaded: ${item.message}`
-			: `[lintai] ${item.message}`,
-	);
-	// A config that names the rule of a file that did not load fails before
-	// lintai/analysis can run, so the cause also goes to stderr now.
-	for (const message of loadErrorMessages) {
-		console.error(message);
-	}
-	// Both hosts invalidate each enabled rule's identity in create(), before
-	// Program traversal, so the first response is shared only for this analysis.
-	const analyses = new WeakMap<object, { response: FileAnalysis | undefined }>();
-	type Batch = { active: boolean; files: Map<string, FileAnalysis>; analyses: typeof analyses };
-	const batches = new AsyncLocalStorage<Batch>();
-	const currentBatch = () => {
-		const batch = batches.getStore();
-		return batch?.active ? batch : undefined;
-	};
-	let reportedOverlaps = "";
-	const responseFor = (file: LintedFile) => {
-		const batch = currentBatch();
-		const cache = batch?.analyses ?? analyses;
-		const cached = cache.get(file.analysis);
-		if (cached) return cached.response;
-		const name = workspacePath(resolved, file.physicalFilename);
-		if (batch && !batch.files.has(name)) {
-			throw new Error(`lintai: file ${name} was not supplied to withFileBatch`);
-		}
-		const response =
-			resolved.mode === "serve" && hasUnsavedChanges(file.physicalFilename, file.text)
-				? undefined
-				: batch
-					? batch.files.get(name)
-					: getClient(resolved).getFileAnalysis(name);
-		cache.set(file.analysis, { response });
-		return response;
-	};
+// A host can report an absolute path through another spelling of the same
+// workspace (e.g. /var on macOS). Verify directory aliases without opening
+// the source file. Scope the mapping to the captured operation.
+function fileNames(workspaceRoot: string) {
+	const roots = new Set([workspaceRoot]);
+	const checked = new Set<string>();
+	let physicalRoot: string | undefined;
 
-	return {
-		rules,
-		lintRule(id, file) {
-			const response = responseFor(file);
-			if (!response) {
-				return;
+	return (file: string): string => {
+		const absolute = path.resolve(workspaceRoot, file);
+		const portable = (name: string) => name.split(path.sep).join("/");
+		for (const root of roots) {
+			const relative = path.relative(root, absolute);
+			if (
+				relative !== ".." &&
+				!relative.startsWith(`..${path.sep}`) &&
+				!path.isAbsolute(relative)
+			) {
+				return portable(relative);
 			}
-			const own = response.diagnostics.filter(
-				(diagnostic) =>
-					diagnostic.rule_id === id &&
-					diagnostic.diagnostic_kind !== "rule_execution_error" &&
-					diagnostic.diagnostic_kind !== "unused_suppression",
-			);
-			for (const report of toReports(own)) {
-				file.report(report);
-			}
-		},
-		lintAnalysis(file) {
-			const response = responseFor(file);
-			if (!response) {
-				file.report({ loc: programLocation, message: unsavedChangesMessage });
-				return;
-			}
-			const problems = response.problems();
-			const overlaps = suppressionOverlaps(resolved.workspaceRoot);
-			const overlapIdentity = JSON.stringify(overlaps);
-			if (!resolved.reportProblemsOnce || overlapIdentity !== reportedOverlaps) {
-				problems.push(...overlaps);
-			}
-			reportedOverlaps = overlapIdentity;
-			for (const message of problems) {
-				file.report({ loc: programLocation, message });
-			}
-			const ruleErrors = response.diagnostics.filter(
-				(diagnostic) =>
-					diagnostic.diagnostic_kind === "rule_execution_error" ||
-					diagnostic.diagnostic_kind === "unused_suppression",
-			);
-			for (const report of toReports(ruleErrors)) {
-				file.report(report);
-			}
-			const orphans = response.diagnostics.filter(
-				(diagnostic) =>
-					diagnostic.diagnostic_kind !== "rule_execution_error" &&
-					diagnostic.diagnostic_kind !== "unused_suppression" &&
-					!ids.has(diagnostic.rule_id),
-			);
-			for (const diagnostic of orphans) {
-				for (const report of toReports(
-					[diagnostic],
-					`[lintai] rule ${diagnostic.rule_id} has no linter rule lintai/${diagnostic.rule_id}, because the linter read the rule list when it loaded the plugin. Restart the linter or the editor's language server. `,
-				)) {
-					file.report(report);
-				}
-			}
-		},
-		async withFileBatch(files, run) {
-			const names = files.map((file) => {
-				if (!file.trim()) throw new Error("withFileBatch requires non-empty file paths");
-				return workspacePath(resolved, path.resolve(resolved.workspaceRoot, file));
-			});
-			const result = getClient(resolved).getFilesAnalysis(names);
-			const batch: Batch = { active: true, files: new Map(), analyses: new WeakMap() };
-			for (let i = 0; i < names.length; i++) batch.files.set(names[i], result.files[i]);
-			return batches.run(batch, async () => {
+		}
+		if (path.isAbsolute(file)) {
+			// A missing leaf or deleted source directory still has a name
+			// under a verified workspace alias.
+			let dir = path.dirname(absolute);
+			while (!checked.has(dir)) {
+				checked.add(dir);
 				try {
-					return await run({ problems: result.problems });
-				} finally {
-					batch.active = false;
-					batch.files.clear();
+					physicalRoot ??= realpathSync.native(workspaceRoot);
+					if (path.relative(physicalRoot, realpathSync.native(dir)) === "") {
+						roots.add(dir);
+						return portable(path.relative(dir, absolute));
+					}
+				} catch {
+					/* continue with the parent of a missing directory */
 				}
-			});
-		},
-		invalidateAnalysis(file) {
-			(currentBatch()?.analyses ?? analyses).delete(file.analysis);
-		},
+				const parent = path.dirname(dir);
+				if (parent === dir) break;
+				dir = parent;
+			}
+		}
+		return portable(path.normalize(file));
 	};
 }
 
-// workspacePath returns the path of a linted file relative to the workspace
-// root. process.cwd() is a real path, but a language server can give the
-// file under a symbolic link (on macOS, the temp directory /var is a link to
-// /private/var). If the file is not under the root, compare real paths.
-function workspacePath(options: ResolvedBridgeOptions, physicalFilename: string): string {
-	let relative = path.relative(options.workspaceRoot, physicalFilename);
-	if (relative.startsWith("..") || path.isAbsolute(relative)) {
-		try {
-			relative = path.relative(realpathSync(options.workspaceRoot), realpathSync(physicalFilename));
-		} catch {}
+export function createLintaiRules(options: LintaiOptions, linuxSpawner = false) {
+	const workspaceRoot = path.resolve(options.workspaceRoot ?? findWorkspaceRoot(process.cwd()));
+
+	const enabled = options.enabled !== false;
+	const relay = enabled && linuxSpawner && process.platform === "linux" ? new Spawner() : undefined;
+	const client = enabled
+		? new LintAIClient({ ...options, workspaceRoot }, relay?.spawn)
+		: undefined;
+	let disposed = false;
+	let invocation: Operation | undefined;
+	type Visit = { group?: FileAnalysis; operation: Operation; mismatch: boolean };
+	const visits = new WeakMap<object, Visit>();
+	const batches = new AsyncLocalStorage<{
+		operation?: Operation;
+		names: Set<string>;
+		visits: typeof visits;
+	}>();
+
+	function capture(files: string[] | "all", key = fileNames(workspaceRoot)): Operation {
+		if (disposed) throw new Error("lintai plugin is disposed");
+		const groups = new Map<string, FileAnalysis>();
+		let problems: string[] = [];
+		if (client) {
+			try {
+				const response = client.getFilesAnalysis(files);
+				for (const group of response.files) {
+					const name = key(group.file);
+					if (files === "all" && groups.has(name))
+						throw new Error(`duplicate lintai file group: ${name}`);
+					groups.set(name, group);
+				}
+				problems = response.problems;
+			} catch (error) {
+				groups.clear();
+				problems = [
+					`[lintai] Could not analyze the workspace: ${error instanceof Error ? error.message : error}`,
+				];
+			}
+		}
+		return { key, files: groups, problems, reported: false };
 	}
-	return relative.replace(/\\/g, "/");
+
+	function visit(context: FileContext): Visit {
+		if (disposed) throw new Error("lintai plugin is disposed");
+		const batch = batches.getStore();
+		const cache = batch?.operation ? batch.visits : visits;
+		const cached = cache.get(context.sourceCode);
+		if (cached) return cached;
+		if (!batch?.operation && options.operation === "invocation" && !invocation) {
+			invocation = capture("all");
+		}
+		const bulk = batch?.operation ?? invocation;
+		const key = bulk?.key ?? fileNames(workspaceRoot);
+		const name = key(context.physicalFilename);
+		if (batch?.operation && !batch.names.has(name))
+			throw new Error(`lintai: file ${name} was not supplied to withFileBatch`);
+		const operation = bulk ?? capture([name], key);
+		const group = operation.files.get(name);
+		const mismatch = group?.sourceDigest
+			? sourceDigest(context.sourceCode) !== group.sourceDigest
+			: !!group?.diagnostics.some((item) => item.source_location);
+		const result = { group, operation, mismatch };
+		cache.set(context.sourceCode, result);
+		return result;
+	}
+
+	function rule(severity: "error" | "warning") {
+		return {
+			meta: {
+				type: "problem" as const,
+				docs: { description: `Report lintai ${severity} diagnostics` },
+				schema: [],
+			},
+			create(context: FileContext) {
+				// Both hosts create all enabled listeners before entering Program,
+				// including when they reuse the same SourceCode object on a later visit.
+				const batch = batches.getStore();
+				(batch?.operation ? batch.visits : visits).delete(context.sourceCode);
+				return {
+					Program() {
+						const { operation, group, mismatch } = visit(context);
+						if (severity === "error") {
+							if (!operation.reported) {
+								for (const message of operation.problems)
+									context.report({ loc: programLocation, message });
+								operation.reported = true;
+							}
+							if (mismatch) context.report({ loc: programLocation, message: mismatchMessage });
+						}
+						for (const item of group?.diagnostics ?? []) {
+							const level =
+								item.diagnostic_kind === "rule_execution_error" ? "error" : item.severity;
+							if (level === severity && !(mismatch && item.source_location))
+								context.report(toReport(item));
+						}
+					},
+				};
+			},
+		};
+	}
+
+	return {
+		rules: { error: rule("error"), warning: rule("warning") },
+		levels: {
+			"lintai/error": enabled ? ("error" as const) : ("off" as const),
+			"lintai/warning": enabled ? ("warn" as const) : ("off" as const),
+		},
+		async withFileBatch<T>(
+			files: readonly string[],
+			run: (operation: BatchOperation) => T | Promise<T>,
+		): Promise<T> {
+			const key = fileNames(workspaceRoot);
+			const names = files.map((file) => {
+				if (!file.trim()) throw new Error("withFileBatch requires non-empty file paths");
+				return key(file);
+			});
+			const operation = capture(names, key);
+			const batch = {
+				operation: operation as Operation | undefined,
+				names: new Set(names),
+				visits: new WeakMap<object, Visit>(),
+			};
+			try {
+				return await batches.run(batch, () => run({ problems: [...operation.problems] }));
+			} finally {
+				batch.operation = undefined;
+				operation.files.clear();
+				batch.names.clear();
+				batch.visits = new WeakMap();
+			}
+		},
+		dispose() {
+			if (disposed) return;
+			disposed = true;
+			invocation = undefined;
+			client?.dispose();
+			relay?.dispose();
+		},
+	};
 }

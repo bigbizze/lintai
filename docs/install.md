@@ -112,60 +112,9 @@ For eligible modules, root membership is drawn from the bounded set of original 
 
 For shared scope settings, put `exclude`, `include` and exact `sources` under `[workspace]` in `lintai.toml` at the workspace root. Repeat `--source <file>` to add exact files, including files otherwise excluded. Use `--config <file>` to choose a different config, relative to the invocation directory. See [Snapshot scope](api.md#snapshot-scope) for precedence, `--files`, and how to inspect the selection.
 
-## ESLint setup and caveats
+## ESLint and Oxlint setup
 
-Add an ESLint config:
-
-```js
-// eslint.config.mjs
-import { createLintaiPlugin } from "@lintai/eslint-plugin";
-import tsParser from "@typescript-eslint/parser";
-
-const lintai = createLintaiPlugin({ rules: ["lintai-rules/**/*.ts"] });
-
-export default [
-	{
-		files: ["src/**/*.ts", "src/**/*.tsx"],
-		languageOptions: { parser: tsParser },
-		...lintai.configs.all,
-	},
-	{
-		files: ["lintai-rules/**/*.ts"],
-		languageOptions: { parser: tsParser },
-		plugins: { lintai },
-		rules: lintai.configs.authoring.rules,
-	},
-];
-```
-
-ESLint 10 looks for a flat config starting from each linted file; use `--config` to select one explicitly. Configure your editor to use the supported Node 26 runtime.
-
-Each lintai rule is the ESLint rule `lintai/<rule-id>`. Set its level, a per-file override or a disable comment as for any other rule. See [api.md](api.md#linter-rules).
-
-Options of `createLintaiPlugin`:
-
-- `mode?: "serve" | "oneshot"`
-- `binary?: string`
-- `repoRoot?: string`
-- `workspaceRoot?: string`
-- `rules?: string[]`
-- `exclude?: string[]`
-- `files?: "tsconfig" | "walk"`
-- `env?: Record<string, unknown>`
-- `factLimit?: number`
-- `ruleWorkers?: number`
-- `rulesLock?: string`
-- `setupSandbox?: "on" | "off"`
-
-Plugin caveats:
-
-- if `mode` is omitted, plain `eslint` CLI runs default to `oneshot`
-- long-lived editor/language-server use defaults to `serve`
-- an ESLint API caller with a complete file list can opt into one validation for the operation with [`plugin.withFileBatch`](api.md#explicit-eslint-multi-file-operations). Ordinary editor callbacks validate each file request; ESLint CLI one-shot behavior is unchanged
-- each file request checks recorded inputs and configuration. Source and rule edits are picked up on the next lint pass, without a background watcher. Quick validation can miss a same-size edit with a deliberately restored modification time; forced reanalysis performs a Full check
-- lintai reads saved files, not the editor buffer. While a file has unsaved changes, `lintai/analysis` shows one message on line 1 that asks you to save the file, and the other lintai rules report nothing for that file.
-- when lintai cannot produce diagnostics, `lintai/analysis` reports the reason on line 1 of each linted file, so a broken setup does not look like a clean workspace. This covers a failed analysis, a `serve` process that failed and fell back to one `oneshot` run, a rule that could not run (a `rule_execution_error`) and a rule file that did not load. In an `eslint` CLI run, these messages appear on the first linted file only.
-- the rule list is read when ESLint loads the config. Newly discovered IDs report through `lintai/analysis` with restart guidance; restart ESLint or its language server to register a dedicated rule. Existing rule implementation edits do not require a restart
+Build the rule pack, enable the fixed error and warning adapters, and use a single invocation-scoped plugin for bulk linting. The same configuration defaults to live requests in the editor. See the [ESLint and Oxlint configurations and commands](api.md#linter-rules).
 
 ## Build from source and caveats
 
@@ -237,8 +186,4 @@ Run `pnpm exec lintai build-rules` from the workspace root. Each path in `[rules
 
 ### ESLint does not pick up a rule change immediately
 
-In serve mode, the next file request checks rule inputs for changes. If an edit does not appear:
-
-- make sure the changed file is inside the configured `rules` glob
-- lint a target source file again, not just the rule file
-- if the editor still appears stuck, restart the ESLint service and report it as a bug
+Rebuild with `lintai build-rules` and lint the source file again. In locked mode, approve the replacement pack with `lintai lock` after review. The editor can pick up new IDs in the next live operation.

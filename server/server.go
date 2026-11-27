@@ -157,12 +157,17 @@ func (s *Server) handleInitialize(rawParams json.RawMessage) (InitializeResult, 
 		FactLimit: params.FactLimit, RuleWorkers: params.RuleWorkers, RulesLock: params.RulesLock,
 		SuppressionsLocation: params.SuppressionsLocation,
 	}
-	if s.factory != nil {
-		if s.engine != nil {
-			_ = s.engine.Close()
-		}
-		s.engine = s.factory(params)
+	if s.factory == nil {
+		return InitializeResult{}, fmt.Errorf("missing analyzer factory")
 	}
+	analyzer := s.factory(params)
+	if analyzer == nil {
+		return InitializeResult{}, fmt.Errorf("analyzer factory returned nil")
+	}
+	if s.engine != nil {
+		_ = s.engine.Close()
+	}
+	s.engine = analyzer
 	s.options, s.initialized = options, true
 	return InitializeResult{ProtocolVersion: ProtocolVersion}, nil
 }
@@ -193,7 +198,7 @@ func (s *Server) handleFilesDiagnostics(ctx context.Context, rawParams json.RawM
 				return FilesDiagnosticsResult{}, invalidParams("each file is required")
 			}
 		}
-		result, err = s.engine.RefreshFiles(ctx, s.options, names)
+		result, err = s.engine.RefreshFiles(ctx, s.options, slices.Clone(names))
 	}
 	if err != nil {
 		return FilesDiagnosticsResult{}, err

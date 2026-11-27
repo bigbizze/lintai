@@ -1,0 +1,5 @@
+[rules]
+entries = ["g3-rules/modules.mjs", "g3-rules/functions.mjs"]
+
+[producers.ts]
+files = "tsconfig"

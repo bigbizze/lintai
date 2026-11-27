@@ -1,54 +1,36 @@
-import { readFileSync } from "node:fs";
-
+import { createHash } from "node:crypto";
 import type { Diagnostic } from "./client.js";
 
-export const unsavedChangesMessage =
-	"[lintai] lintai checks saved files. Save this file to update its lintai diagnostics.";
+export const mismatchMessage =
+	"[lintai] This source does not match the analyzed text. Save the file and rerun lintai to update its diagnostics.";
 
-// lintai analyzes the files on disk. When the editor text is different from
-// the file on disk, the diagnostics would point at the wrong lines, so the
-// plugins do not show them. Only serve mode checks this: under a linter CLI,
-// a fix pass lints the fixed text before it writes the file.
-export function hasUnsavedChanges(physicalFilename: string, text: string): boolean {
-	let saved: string;
-	try {
-		saved = readFileSync(physicalFilename, "utf8");
-	} catch {
-		return false;
-	}
-	return saved !== text && saved.replace(/^\uFEFF/, "") !== text;
+export function sourceDigest(source: { text: string; hasBOM: boolean }): string {
+	// Both hosts expose the stripped text and a separate BOM flag. Stripping
+	// the reconstructed BOM leaves a genuine second BOM in source.text.
+	return createHash("sha256")
+		.update(source.hasBOM ? source.text : source.text.replace(/^\uFEFF/, ""))
+		.digest("hex");
 }
 
 export type Report = {
-	loc: {
-		start: { line: number; column: number };
-		end: { line: number; column: number };
-	};
+	loc: { start: { line: number; column: number }; end: { line: number; column: number } };
 	message: string;
 };
 
-export const programLocation: Report["loc"] = {
+export const programLocation = {
 	start: { line: 1, column: 0 },
 	end: { line: 1, column: 0 },
 };
 
-// toReports converts lintai diagnostics to linter reports. lintai columns are
-// 1-based and linter report columns are 0-based. Diagnostics without a
-// location are skipped.
-export function toReports(diagnostics: Diagnostic[], prefix = ""): Report[] {
-	const reports: Report[] = [];
-	for (const diagnostic of diagnostics) {
-		const location = diagnostic.source_location;
-		if (!location) {
-			continue;
-		}
-		reports.push({
-			loc: {
-				start: { line: location.startLine, column: location.startColumn - 1 },
-				end: { line: location.endLine, column: location.endColumn - 1 },
-			},
-			message: `${prefix}[${diagnostic.rule_id}/${diagnostic.assertion_id}] ${diagnostic.message}`,
-		});
-	}
-	return reports;
+export function toReport(diagnostic: Diagnostic): Report {
+	const location = diagnostic.source_location;
+	return {
+		loc: location
+			? {
+					start: { line: location.startLine, column: location.startColumn - 1 },
+					end: { line: location.endLine, column: location.endColumn - 1 },
+				}
+			: programLocation,
+		message: `[${diagnostic.rule_id}/${diagnostic.assertion_id}] ${diagnostic.message}`,
+	};
 }

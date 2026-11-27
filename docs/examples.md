@@ -404,43 +404,7 @@ pnpm exec lintai facts --workspace-root testdata/fixtures/workspace --relation t
 
 ## 11. ESLint integration
 
-```js
-import { createLintaiPlugin } from "@lintai/eslint-plugin";
-import tsParser from "@typescript-eslint/parser";
-
-const lintai = createLintaiPlugin({ rules: ["lintai-rules/**/*.ts"], factLimit: 1000000 });
-
-export default [
-	{
-		files: ["src/**/*.ts", "src/**/*.tsx"],
-		languageOptions: { parser: tsParser },
-		...lintai.configs.all,
-		rules: {
-			...lintai.configs.all.rules,
-			"lintai/arch.legacy-imports": "warn",
-		},
-	},
-	{
-		files: ["src/legacy/**"],
-		rules: { "lintai/arch.legacy-imports": "off" },
-	},
-	{
-		files: ["lintai-rules/**/*.ts"],
-		languageOptions: { parser: tsParser },
-		plugins: { lintai },
-		rules: lintai.configs.authoring.rules,
-	},
-];
-```
-
-Caveats:
-
-- each lintai rule is the ESLint rule `lintai/<rule-id>`. `configs.all` sets every one, and `lintai/analysis`, to `"error"`. Override single rules after the spread.
-- `// eslint-disable-next-line lintai/arch.legacy-imports` hides one violation of that rule
-- `lintai/analysis` reports rule errors and analysis problems; keep it at `"error"`
-- the lintai rules report diagnostics on target source files, not on the rule file that produced them. The authoring rules lint the rule files.
-- `factLimit` is optional. The default is 5,000,000 derived facts for each rule.
-- after you add a rule file or change a rule id, restart ESLint or the editor's ESLint server
+Use `lintai.configs.all` for application code and `lintai.configs.authoring` for rule entries. Configure semantic severity in `lintai.toml`. The [host integration reference](api.md#linter-rules) includes complete editor and bulk CLI configurations for ESLint and Oxlint.
 
 ## 12. Strict purity rule
 

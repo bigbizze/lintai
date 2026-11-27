@@ -1,130 +1,37 @@
-import path from "node:path";
-
 import { rules as authoringRules } from "@lintai/authoring-rules";
-import {
-	type BatchOperation,
-	type HostDefaults,
-	type LintaiOptions,
-	type LintedFile,
-	analysisRuleName,
-	createLintaiRules,
-} from "@lintai/client";
+import { type LintaiOptions, createLintaiRules } from "@lintai/client";
 import type { ESLint, Rule } from "eslint";
 
 export type { BatchOperation, LintaiOptions } from "@lintai/client";
 
-// The ESLint CLI lints each file once, so it runs lintai once (oneshot) and
-// reports workspace problems on the first file only. An editor lints files
-// again, so it keeps a lintai serve process.
-export function isLikelyESLintCLIProcess(argv: string[] = process.argv): boolean {
-	return argv.some((arg) => {
-		const value = arg.toLowerCase();
-		if (value.includes("language-server")) {
-			return false;
-		}
-		const base = path.basename(value);
-		return base === "eslint" || base === "eslint.js";
-	});
-}
-
-export function eslintHostDefaults(argv: string[] = process.argv): HostDefaults {
-	const cli = isLikelyESLintCLIProcess(argv);
-	return { defaultMode: cli ? "oneshot" : "serve", reportProblemsOnce: cli };
-}
-
-export type LintaiPlugin = {
+type LintaiConfig = {
+	plugins: { lintai: ESLint.Plugin };
+	rules: Record<string, "error" | "warn" | "off">;
+};
+export type LintaiPlugin = Pick<
+	ReturnType<typeof createLintaiRules>,
+	"dispose" | "withFileBatch"
+> & {
 	meta: { name: "lintai" };
-	withFileBatch<T>(
-		files: readonly string[],
-		run: (operation: BatchOperation) => T | Promise<T>,
-	): Promise<T>;
 	rules: Record<string, Rule.RuleModule>;
-	configs: {
-		all: LintaiConfig;
-		authoring: LintaiConfig;
-	};
+	configs: { all: LintaiConfig; authoring: LintaiConfig };
 };
 
-export type RuleLevel = "off" | "warn" | "error";
-
-// LintaiConfig is a flat config object that adds the plugin and sets rule
-// levels. Spread it in a config object, or spread its rules into the rules
-// of a config object.
-export type LintaiConfig = { plugins: { lintai: ESLint.Plugin }; rules: Record<string, RuleLevel> };
-
-function lintedFile(context: Rule.RuleContext): LintedFile {
-	return {
-		physicalFilename: context.physicalFilename,
-		analysis: context.sourceCode,
-		text: context.sourceCode.text,
-		report(report) {
-			context.report(report);
-		},
-	};
-}
-
-// createLintaiPlugin creates one ESLint rule lintai/<id> for each lintai rule
-// that the rule globs select, the rule lintai/analysis and the authoring
-// rules. The rule list is read once, when the config calls this function.
 export function createLintaiPlugin(options: LintaiOptions = {}): LintaiPlugin {
-	const lintai = createLintaiRules(options, eslintHostDefaults());
-	const beginFileAnalysis = (context: Rule.RuleContext) => {
-		const file = lintedFile(context);
-		// ESLint creates every enabled rule listener before Program traversal.
-		// These invalidations therefore all precede the one shared response read.
-		lintai.invalidateAnalysis(file);
-		return file;
-	};
-	const rules: Record<string, Rule.RuleModule> = { ...authoringRules };
-	for (const item of lintai.rules) {
-		rules[item.id] = {
-			meta: {
-				type: "problem",
-				docs: { description: `lintai rule ${item.id} (${item.path})` },
-				schema: [],
-			},
-			create(context) {
-				const file = beginFileAnalysis(context);
-				return {
-					Program() {
-						lintai.lintRule(item.id, file);
-					},
-				};
-			},
-		};
-	}
-	rules[analysisRuleName] = {
-		meta: {
-			type: "problem",
-			docs: {
-				description:
-					"report lintai rule errors, analysis problems and violations of rules that have no linter rule",
-			},
-			schema: [],
-		},
-		create(context) {
-			const file = beginFileAnalysis(context);
-			return {
-				Program() {
-					lintai.lintAnalysis(file);
-				},
-			};
-		},
-	};
-	const allRules: Record<string, RuleLevel> = { [`lintai/${analysisRuleName}`]: "error" };
-	for (const item of lintai.rules) {
-		allRules[`lintai/${item.id}`] = "error";
-	}
-	const authoring: Record<string, RuleLevel> = Object.fromEntries(
-		Object.keys(authoringRules).map((name) => [`lintai/${name}`, "error" as const]),
-	);
+	const analysis = createLintaiRules(options);
 	const plugin: LintaiPlugin = {
 		meta: { name: "lintai" },
-		withFileBatch: lintai.withFileBatch,
-		rules,
+		rules: { ...authoringRules, ...analysis.rules },
+		withFileBatch: analysis.withFileBatch,
+		dispose: analysis.dispose,
 		configs: {} as LintaiPlugin["configs"],
 	};
-	plugin.configs.all = { plugins: { lintai: plugin }, rules: allRules };
-	plugin.configs.authoring = { plugins: { lintai: plugin }, rules: authoring };
+	plugin.configs.all = { plugins: { lintai: plugin }, rules: analysis.levels };
+	plugin.configs.authoring = {
+		plugins: { lintai: plugin },
+		rules: Object.fromEntries(
+			Object.keys(authoringRules).map((name) => [`lintai/${name}`, "error"]),
+		),
+	};
 	return plugin;
 }
