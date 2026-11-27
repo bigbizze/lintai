@@ -222,7 +222,7 @@ type serveSession struct {
 	session  *engine.Session
 }
 
-func (s *serveSession) configure(ctx context.Context, force bool) (err error) {
+func (s *serveSession) configure(ctx context.Context) (err error) {
 	defer func() {
 		if err != nil {
 			_ = s.Close()
@@ -231,7 +231,7 @@ func (s *serveSession) configure(ctx context.Context, force bool) (err error) {
 	if err = ctx.Err(); err != nil {
 		return err
 	}
-	if !force && s.receipt && s.session != nil && len(s.config.Observations.Records()) != 0 {
+	if s.receipt && s.session != nil && len(s.config.Observations.Records()) != 0 {
 		var changed *observe.Record
 		changed, err = s.config.Observations.Changed(ctx, observe.Quick)
 		if err != nil {
@@ -272,23 +272,8 @@ func (s *serveSession) configure(ctx context.Context, force bool) (err error) {
 	return nil
 }
 
-func (s *serveSession) Check(ctx context.Context, requests ...engine.Options) (engine.Result, error) {
-	if err := s.configure(ctx, true); err != nil {
-		return engine.Result{}, err
-	}
-	if err := ctx.Err(); err != nil {
-		_ = s.Close()
-		return engine.Result{}, err
-	}
-	if len(requests) == 0 {
-		requests = []engine.Options{{WorkspaceRoot: s.params.WorkspaceRoot}}
-	}
-	requests[0].Rule = s.config.Rule
-	return s.session.Check(ctx, requests...)
-}
-
 func (s *serveSession) RefreshFiles(ctx context.Context, options engine.Options, files []string) (engine.FilesResult, error) {
-	if err := s.configure(ctx, false); err != nil {
+	if err := s.configure(ctx); err != nil {
 		return engine.FilesResult{}, err
 	}
 	if err := ctx.Err(); err != nil {
@@ -300,7 +285,7 @@ func (s *serveSession) RefreshFiles(ctx context.Context, options engine.Options,
 }
 
 func (s *serveSession) RefreshAll(ctx context.Context, options engine.Options) (engine.FilesResult, error) {
-	if err := s.configure(ctx, false); err != nil {
+	if err := s.configure(ctx); err != nil {
 		return engine.FilesResult{}, err
 	}
 	options.Rule = s.config.Rule

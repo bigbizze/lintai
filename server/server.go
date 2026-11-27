@@ -25,7 +25,6 @@ const (
 )
 
 type Analyzer interface {
-	Check(ctx context.Context, options ...engine.Options) (engine.Result, error)
 	RefreshAll(ctx context.Context, options engine.Options) (engine.FilesResult, error)
 	RefreshFiles(ctx context.Context, options engine.Options, files []string) (engine.FilesResult, error)
 	Close() error
@@ -52,18 +51,8 @@ type InitializeParams struct {
 	SuppressionsLocation string `json:"suppressionsLocation,omitempty"`
 }
 
-type ReanalyzeParams struct {
-	Reason      string `json:"reason,omitempty"`
-	RuleWorkers *int   `json:"ruleWorkers,omitempty"`
-}
 type InitializeResult struct {
 	ProtocolVersion int `json:"protocolVersion"`
-}
-type AnalysisResult struct {
-	SnapshotVersion string   `json:"snapshotVersion"`
-	RulesLoaded     int      `json:"rulesLoaded"`
-	DiagnosticCount int      `json:"diagnosticCount"`
-	Problems        []string `json:"problems"`
 }
 
 // FilesDiagnosticsResult preserves the order and duplicates in the request.
@@ -125,8 +114,6 @@ func (s *Server) handleRequest(ctx context.Context, request jsonrpc.Request) (js
 		response.Result, err = s.handleInitialize(request.Params)
 	case "diagnostics/files":
 		response.Result, err = s.handleFilesDiagnostics(ctx, request.Params)
-	case "reanalyze":
-		response.Result, err = s.handleReanalyze(ctx, request.Params)
 	case "shutdown":
 		response.Result = map[string]any{}
 		return response, true
@@ -224,31 +211,6 @@ func (s *Server) handleFilesDiagnostics(ctx context.Context, rawParams json.RawM
 	s.logWarnings(result.Warnings)
 	return FilesDiagnosticsResult{SnapshotVersion: result.SnapshotVersion, RulesLoaded: result.RulesLoaded,
 		Files: files, Problems: problemStrings(result.WorkspaceProblems)}, nil
-}
-
-func (s *Server) handleReanalyze(ctx context.Context, rawParams json.RawMessage) (AnalysisResult, error) {
-	if !s.initialized {
-		return AnalysisResult{}, fmt.Errorf("server not initialized")
-	}
-	var params ReanalyzeParams
-	if len(rawParams) > 0 {
-		if err := decodeParams(rawParams, &params); err != nil {
-			return AnalysisResult{}, err
-		}
-	}
-	options := s.options
-	if params.RuleWorkers != nil {
-		if *params.RuleWorkers < 0 {
-			return AnalysisResult{}, invalidParams("rule workers must be zero or a positive integer")
-		}
-		options.RuleWorkers = *params.RuleWorkers
-	}
-	result, err := s.engine.Check(ctx, options)
-	if err != nil {
-		return AnalysisResult{}, err
-	}
-	s.logWarnings(result.Warnings)
-	return AnalysisResult{SnapshotVersion: result.SnapshotVersion, RulesLoaded: result.RulesLoaded, DiagnosticCount: len(result.Diagnostics), Problems: problemStrings(result.Diagnostics)}, nil
 }
 
 func problemStrings(items []diagnostics.Diagnostic) []string {

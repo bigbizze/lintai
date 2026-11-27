@@ -148,9 +148,8 @@ func TestServeConfigurationAndRPCRecovery(t *testing.T) {
 	if got := batch("a.ts", "b.ts"); len(got.Files[0].Diagnostics) != 0 || len(got.Files[1].Diagnostics) != 1 {
 		t.Fatalf("configuration recovery: %+v", got)
 	}
-	forced := call("reanalyze", map[string]any{"ruleWorkers": 2})
-	if forced.Error != nil {
-		t.Fatalf("reanalyze: %+v", forced.Error)
+	if removed := call("reanalyze", nil); removed.Error == nil || removed.Error.Code != -32601 {
+		t.Fatalf("reanalyze must be unknown: %+v", removed)
 	}
 	write(rulePath, "throw new Error('invalid entry');")
 	if got := file("b.ts"); len(got.Files[0].Diagnostics) != 1 || len(got.Problems) != 0 {

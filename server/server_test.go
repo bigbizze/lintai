@@ -34,9 +34,6 @@ func (a *analyzer) RefreshAll(context.Context, engine.Options) (engine.FilesResu
 	a.all++
 	return a.result([]string{"a.ts", "b.ts"}), nil
 }
-func (*analyzer) Check(context.Context, ...engine.Options) (engine.Result, error) {
-	return engine.Result{}, nil
-}
 func (a *analyzer) Close() error { a.closed++; return nil }
 
 func TestFramedOperations(t *testing.T) {
