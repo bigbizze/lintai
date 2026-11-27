@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"regexp"
 
 	"github.com/dop251/goja"
@@ -329,12 +330,11 @@ func (r *LoadedRule) message(row map[string]any, assertionID string) (string, er
 }
 
 func isPromise(value goja.Value) bool {
-	if value == nil {
-		return false
-	}
-	_, ok := value.Export().(*goja.Promise)
-	return ok
+	object, ok := value.(*goja.Object)
+	return ok && object.ExportType() == promiseType
 }
+
+var promiseType = reflect.TypeOf((*goja.Promise)(nil))
 
 func suppressionDeclarations(vm *goja.Runtime, value goja.Value) ([]SuppressionDeclaration, error) {
 	if value == nil || goja.IsUndefined(value) || goja.IsNull(value) {
@@ -410,19 +410,27 @@ func decodeFacts(vm *goja.Runtime, value goja.Value) (map[string][][]any, error)
 	if isPromise(value) {
 		return nil, fmt.Errorf("returned a Promise; facts callbacks must be synchronous")
 	}
-	if object, ok := value.(*goja.Object); !ok || object.ClassName() != "Object" {
+	object, ok := value.(*goja.Object)
+	if !ok || object.ClassName() != "Object" {
+		return nil, fmt.Errorf("must return a plain object of relations")
+	}
+	if prototype := object.Prototype(); prototype != nil && !prototype.SameAs(vm.Get("Object").ToObject(vm).Get("prototype")) {
 		return nil, fmt.Errorf("must return a plain object of relations")
 	}
 	raw, err := json.Marshal(value.Export())
 	if err != nil {
 		return nil, err
 	}
-	var relations map[string][]json.RawMessage
+	var relations map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &relations); err != nil {
 		return nil, fmt.Errorf("must return Record<string, Array<Array<string | number | Name>>>")
 	}
 	result := make(map[string][][]any, len(relations))
-	for relation, rows := range relations {
+	for relation, rawRows := range relations {
+		var rows []json.RawMessage
+		if !bytes.HasPrefix(bytes.TrimSpace(rawRows), []byte("[")) || json.Unmarshal(rawRows, &rows) != nil {
+			return nil, fmt.Errorf("%s must be an array of rows", relation)
+		}
 		decodedRows := make([][]any, 0, len(rows))
 		for rowIndex, rawRow := range rows {
 			var cells []json.RawMessage

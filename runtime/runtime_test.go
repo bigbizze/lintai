@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/dop251/goja"
 )
 
 func TestInspectPureBundle(t *testing.T) {
@@ -170,5 +172,41 @@ func TestInspectionCancellationInterruptsMetadataGetter(t *testing.T) {
 	_, err := Inspect(ctx, `var LintAIPureModule={default:{get id(){ for (;;) {} }}};`)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("getter did not stop on cancellation: %v", err)
+	}
+}
+
+func TestDecodeFactsReadsReturnValueOnce(t *testing.T) {
+	vm := goja.New()
+	cases := []struct {
+		name   string
+		source string
+		rows   int
+		err    string
+	}{
+		{"single-use getter", `({ get deny() { return Array.from([["/a.js"]].values()) } })`, 1, ""},
+		{"iterator-backed rows", `(() => { const rows = [["/a.js"]].values(); return { get deny() { return Array.from(rows) } } })()`, 1, ""},
+		{"null relation", `({ deny: null })`, 0, "deny must be an array of rows"},
+		{"class instance", `(() => { class Facts { get deny() { return [["/a.js"]] } } return new Facts() })()`, 0, "plain object"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			value, err := vm.RunString(tc.source)
+			if err != nil {
+				t.Fatal(err)
+			}
+			facts, err := decodeFacts(vm, value)
+			if tc.err != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.err) {
+					t.Fatalf("error = %v, want %q", err, tc.err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(facts["deny"]) != tc.rows {
+				t.Fatalf("deny = %v, want %d rows", facts["deny"], tc.rows)
+			}
+		})
 	}
 }
