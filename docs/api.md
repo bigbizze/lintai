@@ -536,17 +536,9 @@ pnpm exec lintai facts --workspace-root . --relation ts.ambient_use --relation t
 
 `lintai scope --explain` prints the selected paths, compiler eligibility, configurations and pruned boundaries for each producer; `--json` emits the explanation as JSON. Its sorted `compilerFiles` records include the selected config before availability checking, the effective configured or synthetic owner, eligibility and the bounded original-root membership list, including for excluded files. `configurations` contains the real selected and owner configs, not a synthetic sentinel or inventory-only configs. It accepts `--source-links` but does not read that file when explaining scope. `lintai serve` uses JSON-RPC initialization rather than analysis CLI flags.
 
-Every analysis command and every `lintai serve` request resolves the workspace root to one physical directory and reads `lintai.toml` through it. The engine then resolves the root again when the operation starts. If the two disagree, because the root symlink changed in between, the operation fails with an error that ends in `retry` before it reads or writes any workspace file. This applies to `lintai`/`lintai check` (including suppression writes), `lintai lock`, `lintai facts` and `lintai scope --explain`. Otherwise the operation reads the rule pack, rules lock and suppressions file through that directory, and writes the suppressions file and rules lock there. If a producer reads a different directory, the operation also fails with a retry error. `serve` reports the directory as `physicalRoot`, and the next request uses the new target.
+Every analysis command and `lintai serve` resolve the workspace path to its physical directory before they read `lintai.toml`, and open a session on that directory. The rule pack, rules lock, suppressions file and producers use it. Absolute paths under the given workspace path, in `--source`, `--source-links`, `--rules-lock`, `--suppressions-location`, `--lock-file` and the server options, are rebased onto it. A command that started on a directory finishes on it, even when a symlinked root moves while it runs. `lintai serve` resolves the path again for each request and opens a new session when the physical directory or the effective configuration changed. Results it returned earlier still describe the earlier directory.
 
-All spellings of one file have one identity, so they get the same findings and digest:
-
-- A workspace-relative name.
-- An absolute name under the configured root or under the physical root. A name is first made relative to the configured root, so a root symlink inside its own target still matches.
-- A relative `../` name. It starts at the physical root, as the operating system resolves it.
-- A name outside the workspace. It has the identity of its absolute path, and the all-files selector uses that path.
-- A name that reaches the file through other symlinks, for example `alternate/src/a.ts` where `alternate` links to the workspace root, or an absolute path through a second link to the root or to a directory outside it. When a requested name is not a published spelling, its nearest existing directory is resolved once for that request and the name gets the identity of the file it reaches. Only directories are resolved; the source file is not read again.
-
-A `diagnostics/files` array keeps the spelling, order and duplicates the caller sent. A selected exact-source alias inside the workspace is a published spelling: it is looked up under the spelling the caller sent and gets the findings of its canonical file.
+Findings are grouped by document. For a file on disk, the document is the file's canonical physical path. A result names a document relative to the physical root inside it and by its absolute path outside it. Diagnostic output, suppressions and rule facts use the names producers report. A producer that reached a file through a symlink declares the file's physical path, so two producers that report one file share its group.
 
 ### Snapshot scope
 
@@ -563,7 +555,7 @@ files = "tsconfig" # or "walk"
 source_links = "source-links.json" # optional; the file must exist
 ```
 
-The workspace `include` patterns restore eligible source files excluded by built-in defaults or workspace `exclude`; they are not a whitelist and do not add `.d.ts` files. Invocation `--exclude` takes priority over those patterns. Exact `sources` and `--source` take priority over all of these exclusions and are added to the compiler roots even in `tsconfig` mode. Exact sources must be existing regular `.ts`, `.tsx`, `.js`, `.jsx` or `.d.ts` files inside the workspace; `.git` is never eligible. The walk does not follow symlinks, while exact paths may resolve through symlinks that stay inside the workspace and outside `.git`. Findings for such a file are available under both the configured spelling and the resolved path.
+The workspace `include` patterns restore eligible source files excluded by built-in defaults or workspace `exclude`; they are not a whitelist and do not add `.d.ts` files. Invocation `--exclude` takes priority over those patterns. Exact `sources` and `--source` take priority over all of these exclusions and are added to the compiler roots even in `tsconfig` mode. Exact sources must be existing regular `.ts`, `.tsx`, `.js`, `.jsx` or `.d.ts` files inside the workspace; `.git` is never eligible. The walk does not follow symlinks, while exact paths may resolve through symlinks that stay inside the workspace and outside `.git`. Findings for such a file belong to the resolved file.
 
 `--files` and `--source-links` override their configured producer values. With multiple TypeScript producers those scalar CLI overrides are ambiguous and rejected; configure each producer instead. Workspace settings and repeatable `--exclude` and `--source` apply to each producer.
 
@@ -695,9 +687,9 @@ pnpm exec lintai build-rules &&
 
 ### Programmatic captures
 
-Both adapters default to `operation: "live"`. An independent visit validates saved-workspace inputs once. Both severity rules use that response. For a raw CLI command, `operation: "invocation"` captures all projectable files on its first visit and serves subsequent visits locally. An embedder reusing a host process across commands should create a fresh invocation instance per command and call `dispose()` when done.
+Both adapters default to `operation: "live"`. A live visit resolves the host file to its canonical physical path, validates the saved workspace once and receives the findings of that document with the workspace problems. Both severity rules use that response. For a raw CLI command, `operation: "invocation"` captures the whole workspace on its first visit and looks up each later visit in that capture. An embedder reusing a host process across commands should create a fresh invocation instance per command and call `dispose()` when done.
 
-An in-process embedder creates a session, takes a synchronous capture of the files it will lint, and binds a plugin to that capture. A capture is a detached, read-only result: it holds workspace problems, the snapshot identity and file results, and owns no process or connection. `dispose()` stops new captures; completed captures remain usable. Two captures taken before and after an edit can be displayed in any order through two bound plugins. A bound plugin never starts a Go process.
+An in-process embedder creates a session, captures the workspace once, binds a plugin to the capture and lints the files it chooses. A capture is a detached, read-only result: it holds the workspace problems and every analyzed or diagnostic-bearing document, and owns no process or connection. `dispose()` stops new captures; completed captures remain usable. Two captures taken before and after an edit can be displayed in any order through two bound plugins. A bound plugin never starts a Go process.
 
 ```js
 import { ESLint } from "eslint";
@@ -707,7 +699,7 @@ import { createCapturedLintaiPlugin, createLintaiSession } from "@lintai/eslint-
 export async function lintSelected(workspaceRoot, files) {
   const session = createLintaiSession({ workspaceRoot });
   try {
-    const capture = session.capture(files);
+    const capture = session.capture();
     const plugin = createCapturedLintaiPlugin(capture);
     const eslint = new ESLint({
       cwd: workspaceRoot,
@@ -721,7 +713,7 @@ export async function lintSelected(workspaceRoot, files) {
       }],
     });
     const results = files.length ? await eslint.lintFiles(files) : [];
-    // Handle capture.problems, including when files is empty.
+    // capture.problems holds workspace failures, including when files is empty.
     return { results, problems: capture.problems };
   } finally {
     session.dispose();
@@ -729,30 +721,15 @@ export async function lintSelected(workspaceRoot, files) {
 }
 ```
 
-Migrating from `withFileBatch`: replace the callback with a capture and a bound plugin.
+Migrating from a selected capture: `session.capture(files)` and `session.capture("all")` become `session.capture()`. Pass the files to the host, not to the capture. `capture.snapshotVersion` is removed. A visit to a file the capture does not contain shows no findings instead of throwing.
 
-```js
-// Before
-const { results, problems } = await lintai.withFileBatch(files, async ({ problems }) => ({
-  results: await eslint.lintFiles(files),
-  problems,
-}));
-// After
-const capture = session.capture(files);
-const eslint = makeESLint(createCapturedLintaiPlugin(capture));
-const results = await eslint.lintFiles(files);
-const problems = capture.problems;
-```
+Rule failures and recoverable configuration or analysis errors, including malformed TOML, appear in `capture.problems`. A capture that fails with such an error has no files. A broken connection, incompatible protocol or malformed response throws. `@lintai/oxlint-plugin` exports the same `createLintaiSession` and `createCapturedLintaiPlugin`.
 
-`capture("all")` captures every projectable file. Rule failures and recoverable configuration or analysis errors, including malformed TOML on the first capture, appear in `capture.problems`. A broken connection, incompatible protocol or malformed response throws. `@lintai/oxlint-plugin` exports the same `createLintaiSession` and `createCapturedLintaiPlugin`.
+A visit shows findings that agree with the workspace and the document observed when the callback runs, and with the text the host supplies. The adapter resolves the host filename, relative to the host's working directory, to its canonical physical path and looks up that document. A host may open the workspace or a source directory through a symlink; the visit finds the file it resolves to. A capture keeps the physical root of its analysis. If a symlinked root later points elsewhere, the capture still describes the original directory, and a host file that now resolves into the new directory has no findings in it, even when its bytes are identical. A file that does not exist on disk cannot be identified and gets the save/rerun notice instead of findings. Files added after a capture join the next operation. A session or rule factory copies its options when it opens. Later changes to the options object do not affect it.
 
-A host may open the workspace through a directory symlink while its plugin config uses the physical workspace root. The adapter uses the same identity rule as the server, with the physical root frozen by the capture. A name inside the logical or physical root is workspace-relative. A relative name starts at the physical root. Another absolute name is workspace-relative when one of its parent directories resolves to the frozen physical root; otherwise its identity is the absolute path through its resolved directory. The adapter checks alternative spellings on every lookup, so a retargeted symlink stops matching, and it never opens the source. An unrelated absolute path stays distinct from a workspace-relative name.
+The adapter then compares the host text with the captured SHA-256 digest of the analyzed logical text, encoded as UTF-8 with exactly one leading BOM removed and line endings preserved. The digest comes from the producer that owns the reported ranges. A matching earlier buffer can display findings after the saved file changes. A mismatch, or ranges without a digest, produces a save/rerun notice through `lintai/error` instead of ranged findings. ESLint 10 can strip two leading BOMs from the buffer it exposes to plugins. A saved file that starts with two BOMs therefore gets the source-mismatch notice in that host. Workspace failures appear on every file the operation visits with the error adapter enabled, so a file-local suppression cannot hide a failure of the whole analysis. A transport failure surfaces on the failing operation and the next live operation can reconnect.
 
-A session or rule factory copies its options when it opens. Later changes to the options object do not affect it.
-
-Each invocation or capture freezes its file set and its physical workspace root. If a symlinked root later points elsewhere, the capture still describes the original target. A selected capture sends the spellings passed to `capture` unchanged and matches a visit by that spelling, or else by the first group with the same identity. A spelling inside the workspace through a symlink, such as `alias/example.ts`, is its own identity in the adapter: if the capture names it, the host must visit that spelling, and a visit to `src/example.ts` throws even when both reach the same file. Pass the same paths to the capture and the host. An all-files capture resolves canonical and alias names. A capture that fails with a recoverable error keeps its selection: each selected file shows the problem with no findings, and a visit to a file outside a non-empty selection still throws. A live visit requests the name the host file has in the workspace at visit time, which covers an editor's symlinked spelling of the root. If the analyzed physical root gives the host file another name, because the root moved during the request, the visit shows the save/rerun notice instead of findings. Looking up an uncaptured file in an invocation yields no findings. Files added after capture join the next operation. The adapter compares the host text with the captured SHA-256 digest of the analyzed logical text, encoded as UTF-8 with exactly one leading BOM removed and line endings preserved. A matching earlier buffer can display findings after the saved file changes. A mismatch or unverifiable range produces a save/rerun notice through `lintai/error`. ESLint 10 can strip two leading BOMs from the buffer it exposes to plugins. A saved file that starts with two BOMs therefore gets the source-mismatch notice in that host. Workspace failures appear on every file the operation visits with the error adapter enabled, so a file-local suppression cannot hide a failure of the whole analysis. A transport failure surfaces on the failing operation and the next live operation can reconnect.
-
-A host that visits zero files has nowhere to display workspace failures. For enforcement, CI can run `lintai build-rules && lintai check --rules-lock lintai-rules.lock.json`. The native check reports workspace failures even with zero host callbacks.
+A raw host that visits zero files has nowhere to display workspace failures. For enforcement, CI can run `lintai build-rules && lintai check --rules-lock lintai-rules.lock.json`. The native check reports workspace failures even with zero host callbacks.
 
 The factories accept `binary`, `workspaceRoot`, `ruleWorkers`, `factLimit`, `rulesLock` and `suppressionsLocation` alongside `operation` and `enabled`. Paths in the saved workspace policy resolve in Go. The independent `configs.authoring` preset checks rule modules.
 
@@ -779,7 +756,7 @@ CLI `--json` output emits diagnostics like:
       "semantic_key": "ts:site:..."
     },
     "provenance": {
-      "snapshot_version": "abc123",
+      "fact_revision": "sha256:abc123",
       "rule_version": 1,
       "producer_namespaces": ["ts"]
     },
@@ -803,7 +780,7 @@ Fields:
 - `message`
 - `source_location`
 - `entity_identity.semantic_key`: the producer's analysis anchor ID, not the cross-edit suppression tracking key
-- `provenance`
+- `provenance`: `fact_revision` identifies the composed producer facts, with the rule version and producer namespaces
 - `phase`: for execution errors, one of `load`, `config`, `integrity`, `program`, `program_parse`, `program_analysis`, `evaluation`, `premise`, `report`, `message`
 - `explanation`: with `--explain`, the proof of the violation as ground atoms in depth-first order; `!atom` marks a negated premise that holds because the atom is absent
 
