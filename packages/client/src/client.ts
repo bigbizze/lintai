@@ -244,10 +244,11 @@ function inside(root: string, file: string): string | undefined {
 
 // Normalize against the logical root and the physical root frozen with the
 // capture. Only a directory resolving to that frozen root can be an alternative
-// workspace spelling; never resolve the logical root again or open the source.
+// workspace spelling. Alternative spellings are verified on every lookup, since
+// their symlinks can be retargeted; never resolve the logical root again or open
+// the source.
 export function fileNames(logicalRoot: string, physicalRoot: string) {
 	const roots = [logicalRoot, ...(physicalRoot ? [physicalRoot] : [])];
-	const checked = new Set<string>();
 	return (file: string): string => {
 		const absolute = path.resolve(logicalRoot, file);
 		for (const root of roots) {
@@ -256,11 +257,9 @@ export function fileNames(logicalRoot: string, physicalRoot: string) {
 		}
 		if (physicalRoot && path.isAbsolute(file)) {
 			let dir = path.dirname(absolute);
-			while (!checked.has(dir)) {
-				checked.add(dir);
+			while (true) {
 				try {
 					if (realpathSync.native(dir) === physicalRoot) {
-						roots.push(dir);
 						return portable(path.relative(dir, absolute));
 					}
 				} catch {

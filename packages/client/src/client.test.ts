@@ -14,7 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { LintAIClient, findBinary } from "./client.js";
+import { LintAIClient, fileNames, findBinary } from "./client.js";
 import { FrameDecoder, encodeFrame } from "./frames.js";
 import { createLintaiSession } from "./plugin.js";
 import { NativeServeTransport } from "./transport.js";
@@ -139,6 +139,26 @@ test("normalized aliases cannot shadow groups or conflict with one another", () 
 			result,
 			workspaceRoot,
 		);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("a retargeted alternative root stops matching the frozen workspace", () => {
+	const root = mkdtempSync(path.join(tmpdir(), "lintai-retarget-"));
+	try {
+		for (const name of ["a", "b"]) {
+			mkdirSync(path.join(root, name));
+		}
+		const frozenRoot = realpathSync.native(path.join(root, "a"));
+		const alternate = path.join(root, "alternate");
+		symlinkSync(frozenRoot, alternate, "dir");
+		const name = fileNames(path.join(root, "a"), frozenRoot);
+		const file = path.join(alternate, "x.ts");
+		assert.equal(name(file), "x.ts");
+		rmSync(alternate);
+		symlinkSync(realpathSync.native(path.join(root, "b")), alternate, "dir");
+		assert.notEqual(name(file), "x.ts");
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
