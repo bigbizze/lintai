@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { record, reset } from "./metrics.mjs";
 import { names } from "./semantic.mjs";
-import { installed, options, out } from "./settings.mjs";
+import { installed, options, out, root } from "./settings.mjs";
 
 const library = installed("@lintai/client");
 const live = options("live");
@@ -24,17 +24,17 @@ for (const line of readFileSync(path.join(out, "engine.jsonl"), "utf8").trimEnd(
 try {
 	reset();
 	const start = performance.now();
-	const first = client.getFilesAnalysis([names[0]]);
+	const first = client.getDocument(realpathSync.native(path.join(root, names[0])));
 	const ms = performance.now() - start;
 	assert.deepEqual(first.problems, []);
-	assert.deepEqual(first.files[0].findings.map(findingRow(names[0])), expected.get(names[0]));
+	assert.deepEqual(first.findings.map(findingRow(names[0])), expected.get(names[0]));
 	record(
 		"singleton-cold",
 		{ elapsed_ms: ms, findings: 2 },
 		{ requests: 1, adapter_source_reads: 0 },
 	);
 	reset();
-	const groups = client.getFilesAnalysis("all");
+	const groups = client.getWorkspace();
 	assert.deepEqual(groups.problems, []);
 	assert.equal(groups.files.length, names.length);
 	assert.deepEqual(groups.files.map((group) => group.file).sort(), names);

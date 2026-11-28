@@ -32,10 +32,10 @@ export function record(event, metrics, expected) {
 			values.get(key).push(Number(value));
 		}
 		const get = (key) => values.get(key) ?? [];
-		const requests = get("rpc.diagnostics/files").length;
+		const all = get("rpc.diagnostics/workspace").length;
 		const counts = {
-			requests,
-			all: get("selector.all").length,
+			requests: all + get("rpc.diagnostics/document").length,
+			all,
 			adapter_source_reads: get("source.read").length,
 		};
 		const totals = (prefix) =>
@@ -47,19 +47,10 @@ export function record(event, metrics, expected) {
 		Object.assign(row, {
 			rpc_methods: totals("rpc."),
 			counts,
-			selector_lengths: [...new Set(get("selector.files"))],
 			largest_frame_bytes: Math.max(0, ...get("frame.bytes")),
 		});
-		if (requests && !counts.all) {
-			const sizes = {
-				"all-projections-warm": 511,
-				"capture-cold": 477,
-				"capture-warm": 477,
-				"empty-capture-warm": 0,
-			};
-			const n = sizes[event] ?? 1;
-			assert.deepEqual(row.selector_lengths, [n], `${event} selector`);
-		}
+		if (event.startsWith("singleton"))
+			assert.ok(row.largest_frame_bytes < 4096, `${event} response: ${row.largest_frame_bytes}`);
 		for (const [key, value] of Object.entries(expected ?? {})) {
 			assert.equal(counts[key], value, `${event} ${key}: ${JSON.stringify(counts)}`);
 		}

@@ -185,15 +185,15 @@ assert.match(findings[0].message, /\[arch.actions-return-action-result\/violatio
 assert.match(findings[1].message, /\[arch.no-async\/violation\] example/);
 const requests = await readRequests();
 assert.deepEqual(
-	requests.filter((row) => row.method === "diagnostics/files").map((row) => row.files),
-	["all"],
+	requests.filter((row) => row.method.startsWith("diagnostics/")).map((row) => row.method),
+	["diagnostics/workspace"],
 );
 await assertStopped(requests[0].pid);
 await encodedSources(repoDir, (file) => lint(file).map((item) => item.message), "eslint");
 await largeResult(repoDir, (file) => lint(file).map((item) => item.message));
 
 // A file-local disable on one file must not hide an invocation-wide failure,
-// and an exact source reached through a symlink keeps its configured spelling.
+// and a host visit through a source-directory link finds the linked document.
 {
 	const configPath = path.join(repoDir, "lintai.toml");
 	const eslintPath = path.join(repoDir, "eslint.config.mjs");
@@ -275,7 +275,7 @@ const display = (capture, text, name = filename, cwdLinter = linter) =>
 	);
 const messages = (items) => items.map((item) => item.message).join("\n");
 const analyses = async () =>
-	(await readRequests()).filter((row) => row.method === "diagnostics/files").length;
+	(await readRequests()).filter((row) => row.method.startsWith("diagnostics/")).length;
 const config = path.join(repoDir, "lintai.toml");
 const configText = await fs.readFile(config, "utf8");
 const session = createLintaiSession({
@@ -292,9 +292,8 @@ try {
 		configText.replace("entries = [", 'entries = ["lintai-rules/broken.ts", '),
 	);
 	build(repoDir);
-	const failed = session.capture([filename, filename]);
+	const failed = session.capture();
 	assert.match(failed.problems.join(" "), /capture problem/);
-	assert.match(session.capture([]).problems.join(" "), /capture problem/);
 	// The edited buffer no longer matches the captured digest: one problem and
 	// one save notice, and no stale range.
 	const mismatched = display(failed, edited);
@@ -304,14 +303,19 @@ try {
 	);
 	assert.match(messages(mismatched), /Save the file/);
 	assert.match(messages(display(failed, original)), /\[arch.no-async\/violation\]/);
-	assert.throws(() => display(failed, original, "src/extra.ts"), /was not supplied/);
+
+	// A workspace that cannot be analyzed has its problem and no files.
+	await fs.writeFile(config, "[workspace\n");
+	const broken = session.capture();
+	assert.match(broken.problems.join(" "), /config/);
+	assert.deepEqual(broken.files, []);
 
 	await fs.writeFile(config, configText);
 	build(repoDir);
-	const before = session.capture([filename]);
+	const before = session.capture();
 	assert.deepEqual(before.problems, []);
 	await fs.writeFile(sourcePath, edited);
-	const after = session.capture([filename]);
+	const after = session.capture();
 	const requests = await analyses();
 	session.dispose();
 	// Both captures remain displayable after the edit and after disposal,
@@ -320,7 +324,7 @@ try {
 	assert.match(messages(display(before, edited)), /Save the file/);
 	assert.deepEqual(display(after, edited), []);
 	assert.equal(await analyses(), requests);
-	assert.throws(() => session.capture([filename]), /disposed/);
+	assert.throws(() => session.capture(), /disposed/);
 } finally {
 	session.dispose();
 	await fs.rm(path.join(repoDir, "lintai-rules/broken.ts"), { force: true });
@@ -344,7 +348,7 @@ try {
 		binary: path.join(repoDir, "observe-serve.mjs"),
 	});
 	try {
-		const capture = switched.capture("all");
+		const capture = switched.capture();
 		await fs.rm(current);
 		await fs.symlink(copyB, current);
 		const requests = await analyses();
@@ -399,11 +403,12 @@ try {
 	assert.equal(verifyAction(await fs.readFile(actionPath, "utf8")).length, 1);
 	await fs.writeFile(imported, "export type ActionResult<T> = number;\n");
 	assert.equal(verifyAction(sameSource).length, 2);
-	const selectors = (await readRequests())
+	const documents = (await readRequests())
 		.slice(before)
-		.filter((row) => row.method === "diagnostics/files")
-		.map((row) => row.files);
-	assert.deepEqual(selectors, [["src/actions/save.ts"], ["src/actions/save.ts"]]);
+		.filter((row) => row.method.startsWith("diagnostics/"))
+		.map((row) => [row.method, row.file]);
+	const document = ["diagnostics/document", await fs.realpath(actionPath)];
+	assert.deepEqual(documents, [document, document]);
 } finally {
 	live.dispose();
 	await fs.writeFile(imported, typeSource);
@@ -427,10 +432,10 @@ try {
 	);
 	const requests = (await readRequests())
 		.slice(before)
-		.filter((row) => row.method === "diagnostics/files");
+		.filter((row) => row.method.startsWith("diagnostics/"));
 	assert.deepEqual(
-		requests.map((row) => row.files),
-		["all"],
+		requests.map((row) => row.method),
+		["diagnostics/workspace"],
 	);
 } finally {
 	invocation.dispose();

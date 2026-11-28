@@ -41,7 +41,7 @@ try {
 	writeFileSync(dep, "export const marked = 2;\n");
 	assert.deepEqual(visit(), []);
 	writeFileSync(configFile, "[broken\n");
-	assert.match(session.capture([]).problems.join("\n"), /config/i);
+	assert.match(session.capture().problems.join("\n"), /config/i);
 	writeFileSync(configFile, config);
 	assert.deepEqual(visit(), []);
 	record("cross-file-edit-and-empty-error-recovery", { passed: true });

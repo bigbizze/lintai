@@ -36,7 +36,7 @@ try {
 		const start = performance.now();
 		let result;
 		if (captured) {
-			const capture = session.capture(files);
+			const capture = session.capture();
 			assert.deepEqual(capture.problems, []);
 			result = await visits(eslintConfig(createCapturedLintaiPlugin(capture)));
 		} else result = await visits();
@@ -48,13 +48,12 @@ try {
 			reference = rows;
 			saveRows("eslint", rows);
 		}
-		const requests = captured ? 1 : 477;
 		record(
 			event,
 			{ elapsed_ms: elapsed, files: 477, findings: rows.length },
 			{
-				requests,
-				all: 0,
+				requests: captured ? 1 : 477,
+				all: captured ? 1 : 0,
 				adapter_source_reads: 0,
 			},
 		);
@@ -69,7 +68,7 @@ try {
 	LintAIClient.prototype.request = function (name, ...args) {
 		const start = performance.now();
 		const response = original.call(this, name, ...args);
-		if (name === "diagnostics/files") trips.push(performance.now() - start);
+		if (name === "diagnostics/document") trips.push(performance.now() - start);
 		return response;
 	};
 	try {
@@ -104,8 +103,8 @@ try {
 		LintAIClient.prototype.request = original;
 	}
 	reset();
-	assert.deepEqual(session.capture([]).problems, []);
-	record("empty-capture-warm", { files: 0 }, { requests: 1, adapter_source_reads: 0 });
+	assert.deepEqual(session.capture().problems, []);
+	record("empty-capture-warm", { files: 0 }, { requests: 1, all: 1, adapter_source_reads: 0 });
 } finally {
 	plugin.dispose?.();
 	session.dispose();

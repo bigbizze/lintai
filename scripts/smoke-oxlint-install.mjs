@@ -68,8 +68,8 @@ assert.match(warning.message, /\[arch\.actions-return-action-result\/violation\]
 assert.deepEqual(warning.labels[0].span, { offset: 150, length: 66, line: 7, column: 1 });
 const requests = await readRequests();
 assert.deepEqual(
-	requests.filter((row) => row.method === "diagnostics/files").map((row) => row.files),
-	["all"],
+	requests.filter((row) => row.method.startsWith("diagnostics/")).map((row) => row.method),
+	["diagnostics/workspace"],
 );
 await assertStopped(requests[0].pid);
 await encodedSources(
@@ -123,7 +123,7 @@ try {
 		opened.some((diagnostic) => diagnostic.message.includes("[arch.no-async/violation]")),
 		`expected the lintai diagnostic after didOpen\n${JSON.stringify(opened)}`,
 	);
-	assert.deepEqual((await readRequests()).at(-1).files, ["src/example.ts"]);
+	assert.equal((await readRequests()).at(-1).file, await fs.realpath(examplePath));
 	const located = opened.find((diagnostic) =>
 		diagnostic.message.includes("[arch.no-async/violation]"),
 	);
@@ -205,7 +205,7 @@ try {
 } finally {
 	server.close();
 }
-const live = (await readRequests()).filter((row) => Array.isArray(row.files));
+const live = (await readRequests()).filter((row) => row.method === "diagnostics/document");
 assert.equal(new Set(live.map((row) => row.pid)).size, 2);
 await assertStopped(live.at(-1).pid);
 

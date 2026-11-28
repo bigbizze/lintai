@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
 import {
 	chmodSync,
@@ -14,14 +15,9 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { LintAIClient, type LintaiOptions, fileNames, findBinary } from "./client.js";
+import { LintAIClient, type LintaiOptions, findBinary } from "./client.js";
 import { FrameDecoder, encodeFrame } from "./frames.js";
-import {
-	type LintaiCapture,
-	createCapturedRules,
-	createLintaiRules,
-	createLintaiSession,
-} from "./plugin.js";
+import { createCapturedRules, createLintaiRules, createLintaiSession } from "./plugin.js";
 import { type Report, mismatchMessage } from "./reports.js";
 import { NativeServeTransport } from "./transport.js";
 
@@ -36,24 +32,19 @@ test("split headers, split UTF-8 payloads and adjacent frames", () => {
 	assert.throws(() => decoder.push(Buffer.from("Content-Length: -1\r\n\r\n")), /invalid frame/);
 });
 
-const group = (file: string) => ({ file, sourceDigest: "", findings: [] });
-const analysis = (files: string[]) => ({
-	snapshotVersion: "snap",
+const group = (file: string) => ({ file, sourceDigest: "", findings: [] as unknown[] });
+const workspace = (files: string[]) => ({
 	problems: [] as string[],
-	physicalRoot: "",
-	aliases: {} as Record<string, string>,
+	physicalRoot: process.cwd(),
 	files: files.map(group),
 });
 
-function reconnectAfterMalformed(
-	selector: readonly string[] | "all",
-	malformed: unknown,
-	recovered: unknown,
-	workspaceRoot = process.cwd(),
-) {
+// The first connection returns a malformed analysis; the client closes it and
+// the next request reconnects and receives the recovered analysis.
+function reconnectAfterMalformed(malformed: unknown, recovered: unknown) {
 	let connection = 0;
 	const closed: boolean[] = [];
-	const client = new LintAIClient({ workspaceRoot }, () => {
+	const client = new LintAIClient({ workspaceRoot: process.cwd() }, () => {
 		connection++;
 		let current: { id: number; method: string };
 		const decoder = new FrameDecoder();
@@ -64,7 +55,7 @@ function reconnectAfterMalformed(
 			read() {
 				const result =
 					current.method === "initialize"
-						? { protocolVersion: 4 }
+						? { protocolVersion: 5 }
 						: connection === 1
 							? malformed
 							: recovered;
@@ -79,12 +70,9 @@ function reconnectAfterMalformed(
 		};
 	});
 	try {
-		assert.throws(
-			() => client.getFilesAnalysis(selector),
-			/lintai serve \(.*\) failed: (invalid|unexpected) /,
-		);
+		assert.throws(() => client.getWorkspace(), /lintai serve \(.*\) failed: invalid /);
 		assert.deepEqual(closed, [true]);
-		assert.deepEqual(client.getFilesAnalysis(selector), recovered);
+		assert.deepEqual(client.getWorkspace(), recovered);
 		assert.equal(connection, 2);
 	} finally {
 		client.dispose();
@@ -93,115 +81,25 @@ function reconnectAfterMalformed(
 	assert.deepEqual(closed, [true, false]);
 }
 
-test("malformed file groups close the connection and the next request can reconnect", () => {
+test("a malformed analysis closes the connection and the next request can reconnect", () => {
 	reconnectAfterMalformed(
-		["a.ts", "a.ts"],
-		analysis(["a.ts", "old.ts"]),
-		analysis(["a.ts", "a.ts"]),
+		{ ...workspace(["a.ts"]), files: [{ ...group("a.ts"), sourceDigest: "ABC" }] },
+		workspace(["a.ts"]),
 	);
-});
-
-test("all-files groups must have distinct normalized names", () => {
-	const physicalRoot = path.join(path.dirname(process.cwd()), "lintai-physical-root");
-	const recovered = { ...analysis(["a.ts", "b.ts"]), physicalRoot };
-	for (const name of [
-		"./a.ts",
-		path.join(process.cwd(), "a.ts"),
-		path.join(physicalRoot, "a.ts"),
-	]) {
-		reconnectAfterMalformed("all", { ...analysis(["a.ts", name]), physicalRoot }, recovered);
-	}
-});
-
-test("normalized aliases cannot shadow groups or conflict with one another", () => {
-	const physicalRoot = path.join(path.dirname(process.cwd()), "lintai-physical-root");
-	const recovered = {
-		...analysis(["a.ts", "b.ts"]),
-		physicalRoot,
-		aliases: { "link.ts": "a.ts", "./link.ts": "a.ts" },
-	};
-	for (const aliases of [
-		{ "./a.ts": "b.ts" },
-		{ [path.join(process.cwd(), "a.ts")]: "b.ts" },
-		{ [path.join(physicalRoot, "a.ts")]: "b.ts" },
-		{ "link.ts": "a.ts", "./link.ts": "b.ts" },
-		{ "link.ts": "missing.ts" },
-		{ "": "a.ts" },
-	]) {
-		reconnectAfterMalformed("all", { ...recovered, aliases }, recovered);
-	}
-
-	const root = mkdtempSync(path.join(tmpdir(), "lintai-alias-"));
-	try {
-		const workspaceRoot = path.join(root, "workspace");
-		mkdirSync(workspaceRoot);
-		const frozenRoot = realpathSync.native(workspaceRoot);
-		const alternate = path.join(root, "alternate");
-		symlinkSync(frozenRoot, alternate, "dir");
-		const result = { ...analysis(["a.ts", "b.ts"]), physicalRoot: frozenRoot };
-		reconnectAfterMalformed(
-			"all",
-			{ ...result, aliases: { [path.join(alternate, "a.ts")]: "b.ts" } },
-			result,
-			workspaceRoot,
-		);
-	} finally {
-		rmSync(root, { recursive: true, force: true });
-	}
-});
-
-test("a retargeted alternative root stops matching the frozen workspace", () => {
-	const root = mkdtempSync(path.join(tmpdir(), "lintai-retarget-"));
-	try {
-		for (const name of ["a", "b"]) {
-			mkdirSync(path.join(root, name));
-		}
-		const frozenRoot = realpathSync.native(path.join(root, "a"));
-		const alternate = path.join(root, "alternate");
-		symlinkSync(frozenRoot, alternate, "dir");
-		const name = fileNames(path.join(root, "a"), frozenRoot);
-		const file = path.join(alternate, "x.ts");
-		assert.equal(name(file), "x.ts");
-		rmSync(alternate);
-		symlinkSync(realpathSync.native(path.join(root, "b")), alternate, "dir");
-		assert.notEqual(name(file), "x.ts");
-	} finally {
-		rmSync(root, { recursive: true, force: true });
-	}
 });
 
 test("finding ranges must have ordered start and end coordinates", () => {
 	const finding = { ruleId: "rule", assertionId: "assertion", severity: "warning", message: "m" };
-	const recovered = {
-		...analysis(["a.ts"]),
-		files: [
-			{
-				...group("a.ts"),
-				findings: [
-					{ ...finding, range: [1, 5, 1, 5] },
-					{ ...finding, range: [1, 5, 2, 1] },
-				],
-			},
-		],
-	};
+	const withRanges = (...ranges: number[][]) => ({
+		...workspace([]),
+		files: [{ ...group("a.ts"), findings: ranges.map((range) => ({ ...finding, range })) }],
+	});
 	for (const range of [
 		[5, 1, 2, 1],
 		[1, 5, 1, 2],
 	]) {
-		reconnectAfterMalformed(
-			["a.ts"],
-			{ ...recovered, files: [{ ...group("a.ts"), findings: [{ ...finding, range }] }] },
-			recovered,
-		);
+		reconnectAfterMalformed(withRanges(range), withRanges([1, 5, 1, 5], [1, 5, 2, 1]));
 	}
-});
-
-test("a clean response requires a snapshot identity", () => {
-	reconnectAfterMalformed(
-		[],
-		{ ...analysis([]), snapshotVersion: "" },
-		{ ...analysis([]), snapshotVersion: "", problems: ["analysis failed"] },
-	);
 });
 
 // A fake lintai serve. `respond` is the body of (method, params) => reply,
@@ -236,23 +134,23 @@ process.stdin.on("data", (chunk) => {
 	};
 }
 
-// Each requested or published file gets one finding naming that spelling and
-// the physical root of the analysis.
+// A document request gets one finding naming the requested path. A workspace
+// request gets FILES under the server's physical root.
 const echoFindings = `
-	if (method === "initialize") return { result: { protocolVersion: 4 } };
+	if (method === "initialize") return { result: { protocolVersion: 5 } };
+	const finding = (message) => [{ ruleId: "r", assertionId: "a", severity: "error", message }];
+	if (method === "diagnostics/document")
+		return { result: { problems: [], sourceDigest: "", findings: finding(params.file) } };
 	const physicalRoot = fs.realpathSync.native(process.cwd());
-	const files = (params.files === "all" ? ALL : params.files).map((file) => ({
-		file, sourceDigest: "",
-		findings: [{ ruleId: "r", assertionId: "a", severity: "error", message: file + " in " + physicalRoot }],
-	}));
-	return { result: { snapshotVersion: "s", problems: [], physicalRoot, aliases: {}, files } };
+	const files = FILES.map((file) => ({ file, sourceDigest: "", findings: finding(file) }));
+	return { result: { problems: [], physicalRoot, files } };
 `;
 
-function visit(rules: ReturnType<typeof createCapturedRules>, physicalFilename: string) {
+function visit(rules: ReturnType<typeof createCapturedRules>, physicalFilename: string, text = "") {
 	const messages: string[] = [];
 	const context = {
 		physicalFilename,
-		sourceCode: { text: "", hasBOM: false },
+		sourceCode: { text, hasBOM: false },
 		report: (report: Report) => messages.push(report.message),
 	};
 	// Hosts create every listener before they enter Program.
@@ -261,47 +159,37 @@ function visit(rules: ReturnType<typeof createCapturedRules>, physicalFilename: 
 	return messages;
 }
 
-test("analysis errors produce captures that keep their selection, then recover", () => {
+test("a failed capture shows its problem on every visit, then a later capture recovers", () => {
 	const root = mkdtempSync(path.join(tmpdir(), "lintai-analysis-"));
 	const serve = fakeServe(
 		root,
 		`
 		const failed = (message) => ({ error: { code: -32010, message } });
 		if (method === "initialize") {
-			if (fs.existsSync("attempted")) return { result: { protocolVersion: 4 } };
+			if (fs.existsSync("attempted")) return { result: { protocolVersion: 5 } };
 			fs.writeFileSync("attempted", "");
 			return failed("invalid TOML");
 		}
 		const refreshes = fs.readdirSync(".").filter((name) => name.startsWith("refresh")).length;
 		fs.writeFileSync("refresh" + refreshes, "");
-		if (refreshes < 2) return failed("refresh failed");
-		return { result: { snapshotVersion: "recovered", problems: [], physicalRoot: "", aliases: {}, files: [] } };
+		if (refreshes < 1) return failed("refresh failed");
+		return { result: { problems: [], physicalRoot: process.cwd(), files: [] } };
 	`,
 	);
 	const session = createLintaiSession({ binary: serve.binary, workspaceRoot: root });
-	const file = (name: string) => path.join(root, name);
 	try {
-		const first = session.capture([]);
-		assert.equal(first.snapshotVersion, "");
+		const first = session.capture();
 		assert.deepEqual(first.files, []);
 		assert.match(first.problems[0], /Could not analyze the workspace: invalid TOML/);
-		assert.throws(() => visit(createCapturedRules(first), file("a.js")), /was not supplied/);
+		assert.deepEqual(visit(createCapturedRules(first), serve.binary), first.problems);
 
-		const second = session.capture(["a.js"]);
-		assert.deepEqual(second.files, []);
+		const second = session.capture();
 		assert.match(second.problems[0], /Could not analyze the workspace: refresh failed/);
-		assert.deepEqual(visit(createCapturedRules(second), file("a.js")), second.problems);
-		assert.throws(() => visit(createCapturedRules(second), file("b.js")), /was not supplied/);
 
-		const third = session.capture("all");
-		assert.deepEqual(visit(createCapturedRules(third), file("b.js")), third.problems);
-
-		const fourth = session.capture([]);
-		assert.equal(fourth.snapshotVersion, "recovered");
-		assert.deepEqual(fourth.problems, []);
+		assert.deepEqual(session.capture().problems, []);
 		assert.deepEqual(
 			serve.requests().map((request) => request.method),
-			["initialize", "initialize", "diagnostics/files", "diagnostics/files", "diagnostics/files"],
+			["initialize", "initialize", "diagnostics/workspace", "diagnostics/workspace"],
 		);
 	} finally {
 		session.dispose();
@@ -311,7 +199,7 @@ test("analysis errors produce captures that keep their selection, then recover",
 
 test("a session copies its options when it opens", () => {
 	const root = mkdtempSync(path.join(tmpdir(), "lintai-options-"));
-	const serve = fakeServe(root, echoFindings.replace("ALL", "[]"));
+	const serve = fakeServe(root, echoFindings.replace("FILES", "[]"));
 	const options = (): LintaiOptions => ({
 		workspaceRoot: root,
 		binary: serve.binary,
@@ -328,15 +216,15 @@ test("a session copies its options when it opens", () => {
 			changed.binary = "/absent/lintai";
 			changed.operation = "live";
 		}
-		session.capture([]);
-		visit(rules, path.join(root, "a.js"));
+		session.capture();
+		visit(rules, serve.binary);
 		for (const { method, params } of serve.requests()) {
 			if (method === "initialize") {
 				assert.equal(params.rulesLock, "a.lock");
 				assert.equal(params.workspaceRoot, root);
 			}
 		}
-		assert.deepEqual(serve.requests()[3].params.files, "all");
+		assert.equal(serve.requests()[3].method, "diagnostics/workspace");
 	} finally {
 		session.dispose();
 		rules.dispose();
@@ -344,110 +232,62 @@ test("a session copies its options when it opens", () => {
 	}
 });
 
-test("a live visit does not show another workspace's findings after the root moves", () => {
-	const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "lintai-live-")));
-	const current = path.join(root, "current");
-	for (const name of ["a", "b"]) mkdirSync(path.join(root, name));
-	symlinkSync(path.join(root, "a"), current, "dir");
-	// The fake server moves the root to B before it analyzes, then answers
-	// for the requested name.
+test("a capture finds a document through a directory link and checks its text", () => {
+	const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "lintai-document-")));
+	mkdirSync(path.join(root, "src"));
+	const text = "export const a = 1;\n";
+	writeFileSync(path.join(root, "src", "a.js"), text);
+	symlinkSync(path.join(root, "src"), path.join(root, "linked"), "dir");
+	const digest = createHash("sha256").update(text).digest("hex");
 	const serve = fakeServe(
 		root,
 		`
-		if (method !== "initialize" && fs.existsSync(${JSON.stringify(path.join(root, "move"))})) {
-			fs.rmSync(${JSON.stringify(path.join(root, "move"))});
-			fs.rmSync(${JSON.stringify(current)});
-			fs.symlinkSync(${JSON.stringify(path.join(root, "b"))}, ${JSON.stringify(current)});
-			process.chdir(${JSON.stringify(path.join(root, "b"))});
-		}
-		${echoFindings.replace("ALL", "[]")}
+		if (method === "initialize") return { result: { protocolVersion: 5 } };
+		const findings = [{ ruleId: "r", assertionId: "a", severity: "error", message: "m", range: [1, 1, 1, 2] }];
+		return { result: { problems: [], physicalRoot: ${JSON.stringify(root)}, files: [{ file: "src/a.js", sourceDigest: ${JSON.stringify(digest)}, findings }] } };
 	`,
 	);
-	const rules = createLintaiRules({ workspaceRoot: current, binary: serve.binary });
-	const file = path.join(root, "a", "src", "a.js");
+	const session = createLintaiSession({ workspaceRoot: root, binary: serve.binary });
 	try {
-		assert.deepEqual(visit(rules, file), [`[r/a] src/a.js in ${path.join(root, "a")}`]);
-		writeFileSync(path.join(root, "move"), "");
-		assert.deepEqual(visit(rules, file), [mismatchMessage]);
-		assert.deepEqual(
-			serve
-				.requests()
-				.filter((request) => request.method === "diagnostics/files")
-				.map((request) => request.params.files),
-			[["src/a.js"], ["src/a.js"]],
-		);
+		const rules = createCapturedRules(session.capture());
+		assert.deepEqual(visit(rules, path.join(root, "linked", "a.js"), text), ["[r/a] m"]);
+		assert.deepEqual(visit(rules, path.join(root, "src", "a.js"), `${text}// edited\n`), [
+			mismatchMessage,
+		]);
+		assert.deepEqual(visit(rules, path.join(root, "src", "missing.js"), text), [mismatchMessage]);
+		assert.deepEqual(visit(rules, serve.binary, text), []);
 	} finally {
-		rules.dispose();
+		session.dispose();
 		rmSync(root, { recursive: true, force: true });
 	}
 });
 
-test("every spelling of a file is sent as supplied and found under one identity", () => {
-	const base = realpathSync.native(mkdtempSync(path.join(tmpdir(), "lintai-names-")));
-	const real = path.join(base, "real");
-	const physical = path.join(real, "ws");
-	const outside = path.join(real, "deps", "shared.js");
-	mkdirSync(path.join(physical, "src"), { recursive: true });
-	mkdirSync(path.dirname(outside));
-	// The logical root is a symlink in another parent directory, and a second
-	// symlink gives the outside file another absolute spelling.
-	const workspaceRoot = path.join(base, "ws");
-	symlinkSync(physical, workspaceRoot, "dir");
-	symlinkSync(real, path.join(base, "link"), "dir");
-	symlinkSync(physical, path.join(physical, "interior"), "dir");
-	symlinkSync(physical, path.join(base, "alternate"), "dir");
-	const serve = fakeServe(
-		physical,
-		echoFindings.replace("ALL", JSON.stringify(["src/a.js", outside])),
-	);
-	const session = createLintaiSession({ workspaceRoot, binary: serve.binary });
-	const shown = (capture: LintaiCapture, file: string) =>
-		visit(createCapturedRules(capture), file).map((message) => message.split(" in ")[0]);
-	const sent = () => serve.requests().at(-1)?.params.files;
+test("a moved workspace link does not show another document's findings", () => {
+	const root = realpathSync.native(mkdtempSync(path.join(tmpdir(), "lintai-live-")));
+	const current = path.join(root, "current");
+	for (const name of ["a", "b"]) {
+		mkdirSync(path.join(root, name, "src"), { recursive: true });
+		writeFileSync(path.join(root, name, "src", "a.js"), "");
+	}
+	symlinkSync(path.join(root, "a"), current, "dir");
+	const serve = fakeServe(path.join(root, "a"), echoFindings.replace("FILES", '["src/a.js"]'));
+	const live = createLintaiRules({ workspaceRoot: current, binary: serve.binary });
+	const session = createLintaiSession({ workspaceRoot: current, binary: serve.binary });
+	const file = path.join(current, "src", "a.js");
 	try {
-		const interior = session.capture(["interior/src/a.js"]);
-		assert.deepEqual(sent(), ["interior/src/a.js"]);
-		assert.deepEqual(shown(interior, path.join(workspaceRoot, "interior/src/a.js")), [
-			"[r/a] interior/src/a.js",
-		]);
-		assert.throws(() => shown(interior, path.join(workspaceRoot, "src/a.js")), /not supplied/);
-
-		const direct = path.join(physical, "src/a.js");
-		const alternate = path.join(base, "alternate/src/a.js");
-		for (const files of [
-			[direct, alternate, direct],
-			[alternate, direct],
-		]) {
-			const capture = session.capture(files);
-			assert.deepEqual(sent(), files);
-			assert.equal(capture.files.length, files.length);
-			assert.deepEqual(shown(capture, direct), [`[r/a] ${direct}`]);
-			assert.deepEqual(shown(capture, alternate), [`[r/a] ${alternate}`]);
-		}
-
-		const logicalOutside = path.join(base, "link", "deps", "shared.js");
-		const relative = session.capture(["../deps/shared.js"]);
-		assert.deepEqual(sent(), ["../deps/shared.js"]);
-		for (const file of [logicalOutside, outside]) {
-			assert.deepEqual(shown(relative, file), ["[r/a] ../deps/shared.js"]);
-			assert.deepEqual(shown(session.capture("all"), file), [`[r/a] ${outside}`]);
-		}
-		const live = createLintaiRules({ workspaceRoot, binary: serve.binary });
-		const invocation = createLintaiRules({
-			workspaceRoot,
-			binary: serve.binary,
-			operation: "invocation",
-		});
-		try {
-			assert.equal(visit(live, logicalOutside).length, 1);
-			assert.equal(visit(invocation, logicalOutside).length, 1);
-		} finally {
-			live.dispose();
-			invocation.dispose();
-		}
+		const capture = createCapturedRules(session.capture());
+		assert.deepEqual(visit(live, file), [`[r/a] ${path.join(root, "a", "src", "a.js")}`]);
+		assert.deepEqual(visit(capture, file), ["[r/a] src/a.js"]);
+		rmSync(current);
+		symlinkSync(path.join(root, "b"), current, "dir");
+		// The host file is now b's document: a live visit asks for it, and a's
+		// capture has no findings for it.
+		assert.deepEqual(visit(live, file), [`[r/a] ${path.join(root, "b", "src", "a.js")}`]);
+		assert.deepEqual(visit(capture, file), []);
 	} finally {
+		live.dispose();
 		session.dispose();
-		rmSync(base, { recursive: true, force: true });
+		rmSync(root, { recursive: true, force: true });
 	}
 });
 

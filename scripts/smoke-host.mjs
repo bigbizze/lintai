@@ -43,7 +43,7 @@ process.stdin.on("data", chunk => {
 		const size = Number(/Content-Length: (\\d+)/i.exec(pending.toString("ascii", 0, end))[1]);
 		if (pending.length < end + 4 + size) break;
 		const {method,params} = JSON.parse(pending.subarray(end + 4, end + 4 + size));
-		appendFileSync(${JSON.stringify(log)}, JSON.stringify({pid:child.pid,method,files:params.files})+"\\n");
+		appendFileSync(${JSON.stringify(log)}, JSON.stringify({pid:child.pid,method,file:params.file})+"\\n");
 		pending = pending.subarray(end + 4 + size);
 	}
 });

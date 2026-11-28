@@ -1,10 +1,11 @@
 export {
 	AnalysisError,
 	LintAIClient,
+	type DocumentAnalysis,
 	type FileAnalysis,
-	type FilesAnalysis,
 	type Finding,
 	type LintaiOptions,
+	type WorkspaceAnalysis,
 } from "./client.js";
 export {
 	createCapturedRules,

@@ -42,11 +42,11 @@ The two rules report 511 modules and 9,703 functions. Oxlint can emit files in w
 | `forced-full-cold` | New `lintai check --json --rule-workers 1` process, including startup and complete stdout. Requires exit 1 and all 10,214 diagnostics. |
 | `singleton-cold` | First one-file request on a new client, including server startup and handshake. |
 | `all-projections-warm` | One all-files request compared against the native result. |
-| `capture-cold`, `capture-warm` | `createLintaiSession(...).capture(files)` for 477 files, then 477 `Linter.verify` calls through `createCapturedLintaiPlugin`. One request each. |
+| `capture-cold`, `capture-warm` | `createLintaiSession(...).capture()` of the workspace, then 477 `Linter.verify` calls through `createCapturedLintaiPlugin`. One request each. |
 | `ordinary-warm` | 477 independent live callbacks. Each validates the saved workspace. |
 | `singleton-warm` | 20 visits to one unchanged file. Records callback time and client round-trip time. |
-| `empty-capture-warm` | `capture([])` returns workspace problems with no files. |
+| `empty-capture-warm` | `capture().problems` with no host visits. |
 | `eslint-cli-cold`, `oxlint-cli-cold` | Installed raw hosts on all 477 paths in invocation mode, including startup and JSON output. ESLint uses `--no-cache --concurrency off`. |
-| `cross-file-edit-and-empty-error-recovery` | In a two-file workspace, an unchanged importer gains and loses a finding as its dependency changes. A broken configuration appears in `capture([])` and recovers after repair. |
+| `cross-file-edit-and-empty-error-recovery` | In a two-file workspace, an unchanged importer gains and loses a finding as its dependency changes. A broken configuration appears in `capture().problems` and recovers after repair. |
 
-`timing.jsonl` holds release measurements using the installed CLI. `counted.jsonl` holds a replay with a transparent framed transport relay (`transport-probe.mjs`) and a JS read probe (`reads.mjs`), counting requests, selector sizes, response payload bytes and adapter reads of application sources. Use the release run for timing. Filesystem caches may be warm; load averages are recorded with each event.
+`timing.jsonl` holds release measurements using the installed CLI. `counted.jsonl` holds a replay with a transparent framed transport relay (`transport-probe.mjs`) and a JS read probe (`reads.mjs`), counting requests, response payload bytes and adapter reads of application sources. A singleton response must be smaller than 4 KiB. Use the release run for timing. Filesystem caches may be warm; load averages are recorded with each event.

@@ -1,4 +1,4 @@
-import { constants, accessSync, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { constants, accessSync, existsSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 
 import { FrameDecoder, encodeFrame } from "./frames.js";
@@ -24,16 +24,12 @@ export type LintaiOptions = {
 };
 
 export type FileAnalysis = { file: string; sourceDigest: string; findings: Finding[] };
-export type FilesAnalysis = {
-	snapshotVersion: string;
-	problems: string[];
-	physicalRoot: string;
-	aliases: Record<string, string>;
-	files: FileAnalysis[];
-};
+/** Every document of one analysis. A file is relative to physicalRoot inside it. */
+export type WorkspaceAnalysis = { problems: string[]; physicalRoot: string; files: FileAnalysis[] };
+/** One document of an analysis and the workspace problems of that analysis. */
+export type DocumentAnalysis = { problems: string[]; sourceDigest: string; findings: Finding[] };
 
-export const protocolVersion = 4;
-type Selector = readonly string[] | "all";
+export const protocolVersion = 5;
 type Response = {
 	jsonrpc: string;
 	id: number;
@@ -57,7 +53,17 @@ export class LintAIClient {
 		private readonly spawnServe: SpawnServe = spawnNativeServe,
 	) {}
 
-	getFilesAnalysis(files: Selector): FilesAnalysis {
+	/** Analyzes the saved workspace once and returns every document. */
+	getWorkspace(): WorkspaceAnalysis {
+		return this.analyze("diagnostics/workspace", {}, isWorkspace);
+	}
+
+	/** Analyzes the saved workspace once and returns the document at a physical path. */
+	getDocument(file: string): DocumentAnalysis {
+		return this.analyze("diagnostics/document", { file }, isDocument);
+	}
+
+	private analyze<T>(method: string, params: unknown, valid: (value: unknown) => value is T): T {
 		if (this.disposed) throw new Error("lintai client is disposed");
 		const { workspaceRoot, binary, ruleWorkers, factLimit, rulesLock, suppressionsLocation } =
 			this.options;
@@ -82,8 +88,8 @@ export class LintAIClient {
 				}
 				initialized = true;
 			}
-			const result = this.request("diagnostics/files", { files });
-			validateFilesAnalysis(result, files, workspaceRoot);
+			const result = this.request(method, params);
+			if (!valid(result)) throw new Error(`invalid lintai ${method} response`);
 			return result;
 		} catch (error) {
 			if (error instanceof AnalysisError) {
@@ -119,10 +125,7 @@ export class LintAIClient {
 			if (response.error !== undefined) {
 				if (typeof response.error?.message !== "string" || typeof response.error?.code !== "number")
 					throw new Error(`invalid lintai serve error for ${method}`);
-				if (
-					(method === "initialize" || method === "diagnostics/files") &&
-					response.error.code === -32010
-				)
+				if (method !== "shutdown" && response.error.code === -32010)
 					throw new AnalysisError(response.error.message);
 				throw new Error(`${method}: ${response.error.message}`);
 			}
@@ -174,102 +177,36 @@ const isFinding = (value: unknown): value is Finding => {
 	);
 };
 
-function validateFilesAnalysis(
-	value: unknown,
-	files: Selector,
-	workspaceRoot: string,
-): asserts value is FilesAnalysis {
-	const result = value as FilesAnalysis;
-	const valid =
+const isDigest = (value: unknown) => isString(value) && /^([0-9a-f]{64})?$/.test(value);
+const isProblems = (value: unknown) => Array.isArray(value) && value.every(isString);
+const isFindings = (value: unknown) => Array.isArray(value) && value.every(isFinding);
+
+function isDocument(value: unknown): value is DocumentAnalysis {
+	const result = value as DocumentAnalysis;
+	return (
 		!!result &&
-		isString(result.snapshotVersion) &&
-		Array.isArray(result.problems) &&
-		result.problems.every(isString) &&
+		isProblems(result.problems) &&
+		isDigest(result.sourceDigest) &&
+		isFindings(result.findings)
+	);
+}
+
+function isWorkspace(value: unknown): value is WorkspaceAnalysis {
+	const result = value as WorkspaceAnalysis;
+	return (
+		!!result &&
+		isProblems(result.problems) &&
 		isString(result.physicalRoot) &&
-		!!result.aliases &&
-		typeof result.aliases === "object" &&
-		!Array.isArray(result.aliases) &&
-		Object.values(result.aliases).every(isString) &&
 		Array.isArray(result.files) &&
 		result.files.every(
 			(group) =>
 				!!group &&
 				isString(group.file) &&
 				group.file.trim() !== "" &&
-				isString(group.sourceDigest) &&
-				/^([0-9a-f]{64})?$/.test(group.sourceDigest) &&
-				Array.isArray(group.findings) &&
-				group.findings.every(isFinding),
-		);
-	if (!valid || (!result.snapshotVersion && result.problems.length === 0))
-		throw new Error("invalid lintai diagnostics/files response");
-	const names = new Set(result.files.map((group) => group.file));
-	const aliases = Object.entries(result.aliases);
-	let unexpected: boolean;
-	if (files === "all") {
-		const key = fileNames(workspaceRoot, result.physicalRoot);
-		const normalizedNames = new Set(result.files.map((group) => key(group.file)));
-		const normalizedAliases = new Map<string, string>();
-		unexpected =
-			normalizedNames.size !== result.files.length ||
-			aliases.some(([alias, file]) => {
-				const name = key(alias);
-				const previous = normalizedAliases.get(name);
-				normalizedAliases.set(name, file);
-				return (
-					!alias.trim() ||
-					!names.has(file) ||
-					normalizedNames.has(name) ||
-					(previous !== undefined && previous !== file)
-				);
-			});
-	} else {
-		unexpected =
-			aliases.length !== 0 ||
-			files.length !== result.files.length ||
-			result.files.some((group, i) => group.file !== files[i]);
-	}
-	if (unexpected) {
-		throw new Error("unexpected file groups in lintai diagnostics/files response");
-	}
-}
-
-const portable = (name: string) => name.split(path.sep).join("/");
-function inside(root: string, file: string): string | undefined {
-	const relative = path.relative(root, file);
-	return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)
-		? portable(relative)
-		: undefined;
-}
-
-// One identity for every spelling of a file: workspace-relative against the
-// logical root and the physical root frozen with the capture, otherwise the
-// absolute path through its resolved directory. A relative name starts at the
-// physical root, as the operating system resolves `../`. Only a directory resolving to
-// that frozen root can be an alternative workspace spelling. Alternative
-// spellings are verified on every lookup, since their symlinks can be
-// retargeted; never resolve the logical root again or open the source.
-export function fileNames(logicalRoot: string, physicalRoot: string) {
-	const roots = [logicalRoot, ...(physicalRoot ? [physicalRoot] : [])];
-	return (file: string): string => {
-		const absolute = path.resolve(physicalRoot || logicalRoot, file);
-		for (const root of roots) {
-			const name = inside(root, absolute);
-			if (name !== undefined) return name;
-		}
-		let resolved: string | undefined;
-		for (let dir = path.dirname(absolute); ; dir = path.dirname(dir)) {
-			try {
-				const real = realpathSync.native(dir);
-				if (real === physicalRoot) return portable(path.relative(dir, absolute));
-				resolved ??= path.join(real, path.relative(dir, absolute));
-			} catch {
-				/* continue with the parent of a missing directory */
-			}
-			if (path.dirname(dir) === dir) break;
-		}
-		return portable(resolved ?? absolute);
-	};
+				isDigest(group.sourceDigest) &&
+				isFindings(group.findings),
+		)
+	);
 }
 
 export function findWorkspaceRoot(from: string): string {

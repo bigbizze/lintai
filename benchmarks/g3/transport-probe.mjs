@@ -22,13 +22,6 @@ function observe(stream, requests) {
 			if (requests) {
 				const message = JSON.parse(buffer.subarray(end + 4, end + 4 + length));
 				trace(`rpc.${message.method}`, 1);
-				if (message.method === "diagnostics/files") {
-					const files = message.params.files;
-					trace(
-						files === "all" ? "selector.all" : "selector.files",
-						files === "all" ? 1 : files.length,
-					);
-				}
 			} else trace("frame.bytes", length);
 			buffer = buffer.subarray(end + 4 + length);
 		}
