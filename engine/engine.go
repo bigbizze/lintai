@@ -475,10 +475,10 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, mode observe.Mode, st
 	if dispatchErr != nil {
 		return Result{}, run, evidence, dispatchErr
 	}
+	outcomeOf := make(map[*ruleRecord]ruleOutcome, len(outcomes))
 	for index, outcome := range outcomes {
 		rule := jobs[index]
-		rule.diagnostics = append(rule.diagnostics, outcome.diagnostics...)
-		evidence.findings = append(evidence.findings, outcome.findings...)
+		outcomeOf[rule] = outcome
 		if outcome.completed {
 			rule.disposition = ruleCompleted
 			run.completed[outcome.ruleID] = struct{}{}
@@ -488,14 +488,26 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, mode observe.Mode, st
 			rule.disposition = ruleFailed
 		}
 	}
-	allDiagnostics := catalogDiagnostics(ruleCatalog, nil)
-	allDiagnostics = append(allDiagnostics, unknownPolicyRules(config, knownRules)...)
-	stampDiagnostics(allDiagnostics, assembled.snapshotID, producerNames)
-	for index := range evidence.findings {
-		stampDiagnostic(&evidence.findings[index].diagnostic, assembled.snapshotID, producerNames)
+	// Each diagnostic keeps the typed finding it came from, so suppression
+	// decisions read the finding itself.
+	var items []diagnostics.Diagnostic
+	var findings []*violation
+	for _, rule := range ruleCatalog.rules {
+		items = append(items, rule.diagnostics...)
+		findings = append(findings, make([]*violation, len(rule.diagnostics))...)
+		outcome := outcomeOf[rule]
+		for index, item := range outcome.diagnostics {
+			var finding *violation
+			if outcome.completed {
+				finding = &outcome.findings[index]
+			}
+			items, findings = append(items, item), append(findings, finding)
+		}
 	}
-	sortDiagnostics(allDiagnostics)
-	result.Diagnostics = allDiagnostics
+	unknown := unknownPolicyRules(config, knownRules)
+	items, findings = append(items, unknown...), append(findings, make([]*violation, len(unknown))...)
+	stampDiagnostics(items, assembled.snapshotID, producerNames)
+	result.Diagnostics, evidence.findings = sortOutcomes(items, findings)
 	assembleSeverity(config, &result, &run)
 	return result, run, evidence, nil
 }
@@ -540,11 +552,13 @@ type ruleOutcome struct {
 type executionEvidence struct {
 	sourceDigests map[string]string
 	digestOwners  map[string]map[string]struct{}
-	findings      []violation
-	anchors       map[string]facts.AnchorSupport
-	anchorOwners  map[string]string
-	observations  observe.Set
-	reusable      bool
+	// findings holds the typed finding of each diagnostic in Result.Diagnostics
+	// at the same index, or nil.
+	findings     []*violation
+	anchors      map[string]facts.AnchorSupport
+	anchorOwners map[string]string
+	observations observe.Set
+	reusable     bool
 }
 
 func (rule *ruleRecord) release() {
@@ -621,7 +635,7 @@ func runPreparedRule(rule *ruleRecord, assembled composedFacts, options Config, 
 		violations[index].ruleID = rule.metadata.ID
 	}
 	provisional := make([]diagnostics.Diagnostic, 0, len(violations))
-	for index, item := range violations {
+	for _, item := range violations {
 		message, err := rule.loaded.Message(item.row, item.predicate)
 		if err != nil {
 			outcome.diagnostics = []diagnostics.Diagnostic{errorDiagnostic(rule.metadata.ID, "message", rule.metadata.Version, "", nil, err.Error())}
@@ -636,7 +650,6 @@ func runPreparedRule(rule *ruleRecord, assembled composedFacts, options Config, 
 			Provenance:     diagnostics.Provenance{RuleVersion: rule.metadata.Version},
 			Explanation:    append([]string(nil), item.explanation...),
 		})
-		violations[index].diagnostic = provisional[len(provisional)-1]
 	}
 	outcome.coverage = make(map[string]struct{})
 	for pred := range rule.plan.basePredicates {
@@ -678,15 +691,11 @@ func ruleIDOrPath(ruleID, rulePath string) string {
 
 // stampDiagnostics attaches the final provenance once to every diagnostic of
 // the completed analysis.
-func stampDiagnostics(items []diagnostics.Diagnostic, snapshotID string, namespaces []string) {
+func stampDiagnostics(items []diagnostics.Diagnostic, factRevision string, namespaces []string) {
 	for index := range items {
-		stampDiagnostic(&items[index], snapshotID, namespaces)
+		items[index].Provenance.FactRevision = factRevision
+		items[index].Provenance.ProducerNamespaces = append([]string(nil), namespaces...)
 	}
-}
-
-func stampDiagnostic(item *diagnostics.Diagnostic, snapshotID string, namespaces []string) {
-	item.Provenance.FactRevision = snapshotID
-	item.Provenance.ProducerNamespaces = append([]string(nil), namespaces...)
 }
 
 func severityOf(options Config, id string) diagnostics.Severity {
@@ -709,6 +718,23 @@ func unknownPolicyRules(options Config, known map[string]struct{}) []diagnostics
 		result = append(result, errorDiagnostic(id, "config", 0, "", nil, fmt.Sprintf("policy is configured for rule %q, but no loaded rule has this id", id)))
 	}
 	return result
+}
+
+// sortOutcomes orders diagnostics as sortDiagnostics does and keeps each
+// typed finding beside its diagnostic.
+func sortOutcomes(items []diagnostics.Diagnostic, findings []*violation) ([]diagnostics.Diagnostic, []*violation) {
+	order := make([]int, len(items))
+	for index := range order {
+		order[index] = index
+	}
+	sort.SliceStable(order, func(left, right int) bool {
+		return compareDiagnostics(items[order[left]], items[order[right]]) < 0
+	})
+	sortedItems, sortedFindings := make([]diagnostics.Diagnostic, len(items)), make([]*violation, len(items))
+	for index, from := range order {
+		sortedItems[index], sortedFindings[index] = items[from], findings[from]
+	}
+	return sortedItems, sortedFindings
 }
 
 func sortDiagnostics(allDiagnostics []diagnostics.Diagnostic) {

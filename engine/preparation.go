@@ -122,11 +122,3 @@ func ruleRelationDemand(catalog *ruleCatalog) ([]*ruleRecord, map[string]map[fac
 	}
 	return jobs, requested
 }
-
-func catalogDiagnostics(catalog *ruleCatalog, inventory []diagnostics.Diagnostic) []diagnostics.Diagnostic {
-	items := append([]diagnostics.Diagnostic{}, inventory...)
-	for _, rule := range catalog.rules {
-		items = append(items, rule.diagnostics...)
-	}
-	return items
-}

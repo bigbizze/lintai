@@ -196,13 +196,18 @@ func assertParallelFixtureOutcomes(t *testing.T, result Result, run runInfo, evi
 	if got := byRule["lintai-rules/init-failure.ts"]; len(got) != 1 || got[0].DiagnosticKind != diagnostics.KindRuleExecutionError || got[0].Phase != "load" || !strings.Contains(got[0].Message, "initialization failed") {
 		t.Fatalf("module initialization failure did not produce an explicit rule error: %+v", got)
 	}
-	if len(evidence.findings) != 15 {
-		t.Fatalf("failed rules contributed provisional findings: got %d detached typed rows, want 15", len(evidence.findings))
-	}
-	for _, finding := range evidence.findings {
-		if len(finding.typedRow) != 2 || len(finding.columns) != 2 || finding.columns[0] != "Entity" || finding.columns[1] != "Code" {
-			t.Fatalf("typed report outcome was not detached with its assertion columns: %+v", finding)
+	findings := 0
+	for index, finding := range evidence.findings {
+		if finding == nil {
+			continue
 		}
+		findings++
+		if finding.ruleID != result.Diagnostics[index].RuleID || len(finding.typedRow) != 2 || len(finding.columns) != 2 || finding.columns[0] != "Entity" || finding.columns[1] != "Code" {
+			t.Fatalf("typed report outcome was not detached beside its diagnostic: %+v", finding)
+		}
+	}
+	if findings != 15 || len(evidence.findings) != len(result.Diagnostics) {
+		t.Fatalf("failed rules contributed provisional findings: got %d detached typed rows, want 15", findings)
 	}
 	for _, id := range []string{"fixture.success-0", "fixture.success-1", "fixture.success-2", "fixture.success-3", "fixture.success-4"} {
 		if _, ok := run.evaluated[id]; !ok {

@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"math"
 	"path/filepath"
@@ -165,34 +164,17 @@ type groupFindings struct {
 	indexes []int
 }
 
-func diagnosticKey(item diagnostics.Diagnostic) string {
-	data, _ := json.Marshal(item)
-	return string(data)
-}
 func collectGroups(file suppressions.File, result Result, evidence executionEvidence, useSaved bool) (map[string]*groupFindings, error) {
 	saved := map[string]suppressions.Entry{}
 	for _, entry := range file {
 		saved[suppressions.EntryID(entry)] = entry
 	}
-	indexes := map[string][]int{}
-	for i, item := range result.Diagnostics {
-		if item.DiagnosticKind == diagnostics.KindArchitectureViolation && item.Severity == diagnostics.SeverityError && item.SourceLocation != nil {
-			key := diagnosticKey(item)
-			indexes[key] = append(indexes[key], i)
-		}
-	}
 	groups := map[string]*groupFindings{}
-	for _, item := range evidence.findings {
-		diag := item.diagnostic
-		// Severity is presentation policy and may have changed during reuse.
-		diag.Severity = diagnostics.SeverityError
-		key := diagnosticKey(diag)
-		available := indexes[key]
-		if len(available) == 0 {
+	for index, diagnostic := range result.Diagnostics {
+		if index >= len(evidence.findings) || evidence.findings[index] == nil || diagnostic.DiagnosticKind != diagnostics.KindArchitectureViolation || diagnostic.Severity != diagnostics.SeverityError || diagnostic.SourceLocation == nil {
 			continue
 		}
-		index := available[0]
-		indexes[key] = available[1:]
+		item := *evidence.findings[index]
 		entry := suppressions.Entry{File: suppressions.NormalizePath(item.location.File), Rule: item.ruleID, Assertion: suppressions.Assertion{Name: item.predicate, Arity: len(item.typedRow)}}
 		by := item.by
 		if existing, ok := saved[suppressions.EntryID(entry)]; ok && useSaved {

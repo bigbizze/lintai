@@ -59,7 +59,6 @@ type violation struct {
 	columns     []string
 	explanation []string
 	by          []string
-	diagnostic  diagnostics.Diagnostic
 }
 
 type evalOptions struct {
