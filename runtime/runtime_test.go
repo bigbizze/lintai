@@ -186,6 +186,8 @@ func TestDecodeFactsReadsReturnValueOnce(t *testing.T) {
 		{"single-use getter", `({ get deny() { return Array.from([["/a.js"]].values()) } })`, 1, ""},
 		{"iterator-backed rows", `(() => { const rows = [["/a.js"]].values(); return { get deny() { return Array.from(rows) } } })()`, 1, ""},
 		{"null relation", `({ deny: null })`, 0, "deny must be an array of rows"},
+		{"null row", `({ deny: [null] })`, 0, "deny[0] is not an array"},
+		{"empty tuple", `({ deny: [[]] })`, 1, ""},
 		{"class instance", `(() => { class Facts { get deny() { return [["/a.js"]] } } return new Facts() })()`, 0, "plain object"},
 	}
 	for _, tc := range cases {

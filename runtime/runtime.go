@@ -434,7 +434,7 @@ func decodeFacts(vm *goja.Runtime, value goja.Value) (map[string][][]any, error)
 		decodedRows := make([][]any, 0, len(rows))
 		for rowIndex, rawRow := range rows {
 			var cells []json.RawMessage
-			if err := json.Unmarshal(rawRow, &cells); err != nil {
+			if !bytes.HasPrefix(bytes.TrimSpace(rawRow), []byte("[")) || json.Unmarshal(rawRow, &cells) != nil {
 				return nil, fmt.Errorf("%s[%d] is not an array", relation, rowIndex)
 			}
 			row := make([]any, 0, len(cells))
