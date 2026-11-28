@@ -51,23 +51,21 @@ func normalizeConfig(config Config) (Config, error) {
 	if config.RuleWorkers < 0 {
 		return Config{}, fmt.Errorf("rule workers must be zero or a positive integer")
 	}
-	var err error
-	if config.WorkspaceRoot, err = filepath.Abs(config.WorkspaceRoot); err != nil {
+	given, err := filepath.Abs(config.WorkspaceRoot)
+	if err != nil {
 		return Config{}, err
 	}
 	// A root that does not resolve is used as given, so producers that read no
 	// files do not need it to exist.
-	if physical, err := filepath.EvalSymlinks(config.WorkspaceRoot); err == nil {
+	config.WorkspaceRoot = given
+	if physical, err := filepath.EvalSymlinks(given); err == nil {
 		config.WorkspaceRoot = physical
 	}
 	if config.RulesLock != "" {
-		config.RulesLock = filepath.Clean(ResolveRulesLockPath(config.WorkspaceRoot, config.RulesLock))
-	}
-	if config.SuppressionsLocation != "" && !filepath.IsAbs(config.SuppressionsLocation) {
-		config.SuppressionsLocation = filepath.Join(config.WorkspaceRoot, config.SuppressionsLocation)
+		config.RulesLock = filepath.Clean(RebasePath(given, config.WorkspaceRoot, ResolveRulesLockPath(config.WorkspaceRoot, config.RulesLock)))
 	}
 	if config.SuppressionsLocation != "" {
-		config.SuppressionsLocation = filepath.Clean(config.SuppressionsLocation)
+		config.SuppressionsLocation = filepath.Clean(RebasePath(given, config.WorkspaceRoot, ResolveRulesLockPath(config.WorkspaceRoot, config.SuppressionsLocation)))
 	}
 	if config.FactLimit <= 0 {
 		config.FactLimit = DefaultFactLimit

@@ -229,19 +229,6 @@ func physicalRoot(root string) string {
 	return absolute
 }
 
-// rebase moves an absolute path under the workspace path given by the user
-// onto its physical directory, so every path of a session names one workspace.
-func rebase(root, physical, path string) string {
-	absolute, err := filepath.Abs(root)
-	if err != nil || !filepath.IsAbs(path) {
-		return path
-	}
-	if relative, err := filepath.Rel(absolute, path); err == nil && filepath.IsLocal(relative) {
-		return filepath.Join(physical, relative)
-	}
-	return path
-}
-
 // configure follows a moved workspace link or changed configuration by
 // replacing the session. A session never changes its workspace.
 func (s *serveSession) configure(ctx context.Context) (err error) {
@@ -288,7 +275,7 @@ func (s *serveSession) configure(ctx context.Context) (err error) {
 		root := s.params.WorkspaceRoot
 		s.session, err = openSession(engine.Config{
 			WorkspaceRoot: physical, Rule: config.Rule, FactLimit: s.params.FactLimit, RuleWorkers: s.params.RuleWorkers,
-			RulesLock: rebase(root, physical, s.params.RulesLock), SuppressionsLocation: rebase(root, physical, s.params.SuppressionsLocation),
+			RulesLock: engine.RebasePath(root, physical, s.params.RulesLock), SuppressionsLocation: engine.RebasePath(root, physical, s.params.SuppressionsLocation),
 		}, producers...)
 		if err != nil {
 			return err
@@ -349,7 +336,7 @@ func captureTypeScriptSettings(workspaceRoot, explicitConfig, filesOverride stri
 	if err != nil {
 		return nil, workspace.WorkspaceConfig{}, "", err
 	}
-	config, err := workspace.LoadWorkspaceConfig(rebase(workspaceRoot, physical, configPath), optional)
+	config, err := workspace.LoadWorkspaceConfig(engine.RebasePath(workspaceRoot, physical, configPath), optional)
 	if err != nil {
 		return nil, workspace.WorkspaceConfig{}, "", err
 	}
@@ -392,12 +379,12 @@ func captureTypeScriptSettings(workspaceRoot, explicitConfig, filesOverride stri
 		}
 		sources := append(slices.Clone(config.Sources), invocationSources...)
 		for i, source := range sources {
-			sources[i] = rebase(workspaceRoot, physical, source)
+			sources[i] = engine.RebasePath(workspaceRoot, physical, source)
 		}
 		settings = append(settings, typescript.Options{
 			Namespace: namespace, WorkspaceExcludes: config.Exclude,
 			Includes: config.Include, Sources: sources,
-			Excludes: invocationExcludes, Files: scope, SourceLinks: rebase(workspaceRoot, physical, sourceLinks),
+			Excludes: invocationExcludes, Files: scope, SourceLinks: engine.RebasePath(workspaceRoot, physical, sourceLinks),
 		})
 	}
 	return settings, config, physical, nil
@@ -524,8 +511,8 @@ func (p *projectFlags) open(options engine.Config) (*engine.Session, engine.Conf
 		return nil, engine.Config{}, err
 	}
 	options.WorkspaceRoot, options.Rule, options.FactLimit = physical, config.Rule, *p.factLimit
-	options.SuppressionsLocation = rebase(*p.root, physical, *p.suppressions)
-	options.RulesLock = rebase(*p.root, physical, options.RulesLock)
+	options.SuppressionsLocation = engine.RebasePath(*p.root, physical, *p.suppressions)
+	options.RulesLock = engine.RebasePath(*p.root, physical, options.RulesLock)
 	producers := make([]backend.Producer, 0, len(settings))
 	for _, setting := range settings {
 		producers = append(producers, newBackend(setting))
@@ -650,7 +637,7 @@ func runLock(ctx context.Context, args []string, stdout io.Writer) error {
 		return err
 	}
 	defer session.Close()
-	lock, err := session.ApproveRules(ctx, rebase(*project.root, options.WorkspaceRoot, *path))
+	lock, err := session.ApproveRules(ctx, engine.RebasePath(*project.root, options.WorkspaceRoot, *path))
 	if err != nil {
 		return err
 	}

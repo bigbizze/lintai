@@ -323,7 +323,8 @@ func TestOperationUsesOneWorkspace(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	session := openTestSession(t, Config{WorkspaceRoot: link}, producer)
+	// The absolute suppressions path names the workspace through the link.
+	session := openTestSession(t, Config{WorkspaceRoot: link, SuppressionsLocation: filepath.Join(link, suppressions.DefaultFile)}, producer)
 	messages := func(items []diagnostics.Diagnostic) []string {
 		var result []string
 		for _, item := range items {

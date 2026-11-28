@@ -25,6 +25,8 @@ type Config struct {
 	// WorkspaceRoot is resolved once by Open to a physical directory. Every
 	// operation of the session reads and writes workspace files through it,
 	// and producers receive it. Open another session to follow a moved link.
+	// Absolute RulesLock and SuppressionsLocation paths under WorkspaceRoot
+	// are moved onto the same physical directory.
 	WorkspaceRoot string
 	Rule          map[string]RulePolicy
 	FactLimit     int

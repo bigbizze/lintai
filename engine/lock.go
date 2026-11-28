@@ -359,3 +359,17 @@ func ResolveRulesLockPath(root, path string) string {
 	}
 	return filepath.Join(root, path)
 }
+
+// RebasePath moves an absolute path under the workspace path root onto the
+// physical directory of that workspace, so every path of a session names one
+// workspace. Other paths are returned unchanged.
+func RebasePath(root, physical, path string) string {
+	absolute, err := filepath.Abs(root)
+	if err != nil || !filepath.IsAbs(path) {
+		return path
+	}
+	if relative, err := filepath.Rel(absolute, path); err == nil && filepath.IsLocal(relative) {
+		return filepath.Join(physical, relative)
+	}
+	return path
+}
