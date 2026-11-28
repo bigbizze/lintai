@@ -190,10 +190,14 @@ export function createLintaiSession(options: LintaiOptions = {}): LintaiSession 
 
 type Visit = { group?: CapturedFile; problems: readonly string[]; mismatch: boolean };
 
-function visitCapture(capture: LintaiCapture, context: FileContext): Visit {
+function visitCapture(
+	capture: LintaiCapture,
+	context: FileContext,
+	filename = context.physicalFilename,
+): Visit {
 	const lookup = lookups.get(capture);
 	if (!lookup) throw new Error("lintai: not a capture created by createLintaiSession");
-	const name = lookup.key(context.physicalFilename);
+	const name = lookup.key(filename);
 	const group = lookup.groups.get(name);
 	if (lookup.selected && !group)
 		throw new Error(`lintai: file ${name} was not supplied to this capture`);
@@ -277,7 +281,7 @@ export function createLintaiRules(options: LintaiOptions, linuxSpawner = false) 
 		const capture = captureSafely([name]);
 		const lookup = lookups.get(capture);
 		if (!lookup?.selected) return { problems: capture.problems, mismatch: false };
-		return visitCapture(capture, { ...context, physicalFilename: name });
+		return visitCapture(capture, context, name);
 	});
 	return {
 		...rules,
