@@ -468,7 +468,6 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, mode observe.Mode, st
 	evidence.digestOwners = assembled.digestOwners
 	evidence.anchors = assembled.anchors
 	evidence.anchorOwners = assembled.anchorOwners
-	run.files = assembled.analyzedFiles
 	run.factRevision = assembled.snapshotID
 	run.known = knownRules
 	outcomes, dispatchErr := dispatchRuleJobs(ctx, jobs, assembled, config, e.hooks)

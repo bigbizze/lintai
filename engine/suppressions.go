@@ -21,7 +21,6 @@ type assertionSchema struct {
 }
 type runInfo struct {
 	lock                        *RulesLock
-	files                       map[string]struct{}
 	evaluated, completed, known map[string]struct{}
 	coverage                    map[string]map[string]struct{}
 	assertions                  map[string]map[string]assertionSchema
