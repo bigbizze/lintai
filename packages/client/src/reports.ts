@@ -4,9 +4,6 @@ import type { Finding } from "./client.js";
 export const mismatchMessage =
 	"[lintai] This source does not match the analyzed text. Save the file and rerun lintai to update its diagnostics.";
 
-export const workspaceChangedMessage =
-	"[lintai] The workspace directory changed while lintai analyzed this file. Rerun lintai to update its diagnostics.";
-
 export function sourceDigest(source: { text: string; hasBOM: boolean }): string {
 	// Both hosts expose the stripped text and a separate BOM flag. Stripping
 	// the reconstructed BOM leaves a genuine second BOM in source.text.

@@ -3,7 +3,11 @@ import test from "node:test";
 import { createLintaiPlugin, createLintaiSession } from "./index.js";
 
 test("disabled integration supports authoring without a binary", () => {
-	const plugin = createLintaiPlugin({ enabled: false, binary: "/absent/lintai" });
+	const plugin = createLintaiPlugin({
+		enabled: false,
+		workspaceRoot: "/absent/workspace",
+		binary: "/absent/lintai",
+	});
 	assert.deepEqual(plugin.configs.all.rules, { "lintai/error": "off", "lintai/warning": "off" });
 	assert.equal(plugin.configs.authoring.rules["lintai/no-top-level-node-imports"], "error");
 	plugin.dispose();

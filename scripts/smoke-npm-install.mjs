@@ -282,6 +282,42 @@ const session = createLintaiSession({
 	workspaceRoot: repoDir,
 	binary: path.join(repoDir, "observe-serve.mjs"),
 });
+const otherDir = await fs.mkdtemp(path.join(path.dirname(repoDir), "lintai-other-"));
+const otherFile = path.join(otherDir, "other.ts");
+const otherSource = "export const other = 1;\n";
+await fs.writeFile(otherFile, otherSource);
+const boundRoot = await fs.realpath(repoDir);
+function assertRawProblem(cause) {
+	for (const operation of ["live", "invocation"]) {
+		const plugin = createLintaiPlugin({
+			workspaceRoot: repoDir,
+			binary: path.join(repoDir, "observe-serve.mjs"),
+			operation,
+		});
+		try {
+			const outer = new Linter({ cwd: path.dirname(repoDir) });
+			for (const [file, text] of [
+				[sourcePath, original],
+				[otherFile, otherSource],
+			]) {
+				const result = outer.verify(text, [{ files: ["**/*.ts"], ...plugin.configs.all }], {
+					filename: file,
+				});
+				assert.ok(
+					result.some(
+						(item) =>
+							item.ruleId === "lintai/error" &&
+							item.message.includes(boundRoot) &&
+							item.message.includes(cause),
+					),
+					messages(result),
+				);
+			}
+		} finally {
+			plugin.dispose();
+		}
+	}
+}
 try {
 	await fs.writeFile(
 		path.join(repoDir, "lintai-rules/broken.ts"),
@@ -294,21 +330,35 @@ try {
 	build(repoDir);
 	const failed = session.capture();
 	assert.match(failed.problems.join(" "), /capture problem/);
-	// The edited buffer no longer matches the captured digest: one problem and
-	// one save notice, and no stale range.
+	assert.deepEqual(
+		display(failed, otherSource, otherFile, new Linter({ cwd: path.dirname(repoDir) })),
+		[],
+	);
+	// The embedder presents the problem once. File callbacks show the save
+	// notice and successful rules' findings without broadcasting the problem.
 	const mismatched = display(failed, edited);
 	assert.deepEqual(
 		mismatched.map((item) => item.ruleId),
-		["lintai/error", "lintai/error"],
+		["lintai/error"],
 	);
 	assert.match(messages(mismatched), /Save the file/);
 	assert.match(messages(display(failed, original)), /\[arch.no-async\/violation\]/);
+	assert.doesNotMatch(messages(display(failed, original)), /capture problem/);
+	assertRawProblem("capture problem");
+	assert.equal(installed(repoDir, "lintai", ["check", "--json"]).status, 3);
 
 	// A workspace that cannot be analyzed has its problem and no files.
 	await fs.writeFile(config, "[workspace\n");
 	const broken = session.capture();
 	assert.match(broken.problems.join(" "), /config/);
 	assert.deepEqual(broken.files, []);
+	assert.deepEqual(display(broken, original), []);
+	assert.deepEqual(
+		display(broken, otherSource, otherFile, new Linter({ cwd: path.dirname(repoDir) })),
+		[],
+	);
+	assertRawProblem("config");
+	assert.equal(installed(repoDir, "lintai", ["check", "--json"]).status, 2);
 
 	await fs.writeFile(config, configText);
 	build(repoDir);
@@ -330,11 +380,12 @@ try {
 	await fs.rm(path.join(repoDir, "lintai-rules/broken.ts"), { force: true });
 	await fs.writeFile(config, configText);
 	await fs.writeFile(sourcePath, original);
+	await fs.rm(otherDir, { recursive: true, force: true });
 	build(repoDir);
 }
 
-// A capture through current -> A keeps A's identity after current moves to a
-// copy B with identical bytes.
+// Bind before the first request, then reconnect after current moves. A and B
+// import one physical document but apply different severity policies to it.
 {
 	const parent = await fs.mkdtemp(path.join(path.dirname(repoDir), "lintai-switch-"));
 	const copyA = path.join(parent, "a");
@@ -343,14 +394,72 @@ try {
 	await fs.cp(repoDir, copyA, { recursive: true, verbatimSymlinks: true });
 	await fs.cp(repoDir, copyB, { recursive: true, verbatimSymlinks: true });
 	await fs.symlink(copyA, current);
+	const shared = path.join(parent, "shared.ts");
+	const sharedSource = "export function helper() { return 2; }\n";
+	await fs.writeFile(shared, sharedSource);
+	const documentRule =
+		"import {dl,rule} from '@lintai/sdk'; export default rule('example.documents').version(1).program(dl`Decl violation(E). violation(E) :- ts.module(E). violation(E) :- ts.declaration_origin(E, /declaration_file, _).`).report('violation').message(() => 'located');";
+	for (const [copy, sources, policy] of [
+		[
+			copyA,
+			[path.join(current, "src/example.ts"), path.join(current, "src/shared-import.ts")],
+			'\n[rule."example.documents"]\nseverity = "warning"\n',
+		],
+		[copyB, ["src/example.ts", "src/shared-import.ts"], ""],
+	]) {
+		await fs.writeFile(
+			path.join(copy, "src/shared-import.ts"),
+			'import { helper } from "../../shared";\nexport const value = helper();\n',
+		);
+		await fs.writeFile(path.join(copy, "lintai-rules/documents.ts"), documentRule);
+		await fs.writeFile(
+			path.join(copy, "lintai.toml"),
+			`${configText.replace("entries = [", 'entries = ["lintai-rules/documents.ts", ')}\n[workspace]\nsources = ${JSON.stringify(sources)}\nexclude = ["lintai-rules/**"]\n[producers.ts]\nfiles = "walk"\n${policy}`,
+		);
+		build(copy);
+	}
 	const switched = createLintaiSession({
 		workspaceRoot: current,
 		binary: path.join(repoDir, "observe-serve.mjs"),
 	});
 	try {
-		const capture = switched.capture();
 		await fs.rm(current);
 		await fs.symlink(copyB, current);
+		const capture = switched.capture();
+		const fresh = createLintaiSession({
+			workspaceRoot: current,
+			binary: path.join(repoDir, "observe-serve.mjs"),
+		});
+		try {
+			const currentCapture = fresh.capture();
+			const outer = new Linter({ cwd: parent });
+			const sharedA = display(capture, sharedSource, shared, outer);
+			const sharedB = display(currentCapture, sharedSource, shared, outer);
+			assert.ok(
+				sharedA.some(
+					(item) => item.ruleId === "lintai/warning" && item.message.includes("example.documents"),
+				),
+				messages(sharedA),
+			);
+			assert.ok(
+				sharedB.some(
+					(item) => item.ruleId === "lintai/error" && item.message.includes("example.documents"),
+				),
+				messages(sharedB),
+			);
+			await fs.writeFile(path.join(repoDir, "disconnect-serve"), "");
+			assert.throws(() => switched.capture(), /lintai serve .* failed/);
+			const reconnected = switched.capture();
+			const sharedAgain = display(reconnected, sharedSource, shared, outer);
+			assert.ok(
+				sharedAgain.some(
+					(item) => item.ruleId === "lintai/warning" && item.message.includes("example.documents"),
+				),
+				messages(sharedAgain),
+			);
+		} finally {
+			fresh.dispose();
+		}
 		const requests = await analyses();
 		const outer = new Linter({ cwd: parent });
 		const atA = display(capture, original, path.join(copyA, filename), outer);
