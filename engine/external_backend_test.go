@@ -209,6 +209,78 @@ func TestCatalogFakeAloneReportsProducerOwnedAnchorAndOpaqueRevision(t *testing.
 	}
 }
 
+func TestNonFileProducerJoinsCodeAndRecoversWithoutUndemandedInterference(t *testing.T) {
+	// Spec 3: a code producer and a database producer join on a table name.
+	// Only the database revision changes; the finding on unchanged code follows it.
+	repoRoot, _ := filepath.Abs("..")
+	workspace := t.TempDir()
+	tableArgument := facts.ArgumentDescription{
+		Name: "Table", Representations: []facts.ValueKind{facts.StringKind}, Role: facts.ValueRole,
+		ReportSupport: facts.ReportNone,
+	}
+	code := fakeProducer("code", "uses")
+	code.scope = "code scope"
+	uses := facts.Predicate{Name: "code.uses", Arity: 2}
+	code.description.BaseRelations[0].Predicate = uses
+	code.description.BaseRelations[0].Arguments = append(code.description.BaseRelations[0].Arguments, tableArgument)
+	code.description.Schema = facts.Schema{Declarations: "Decl uses(Entity, Table) descr [extensional(), arg(Entity, \"entity id\"), arg(Table, \"table name\")].\n"}
+	code.description.Helpers = nil
+	code.rows = map[facts.Predicate][][]facts.Value{uses: {{facts.String("orders-query"), facts.String("orders")}}}
+	code.anchors["orders-query"] = facts.AnchorSupport{
+		Location:    diagnostics.SourceLocation{File: "app/orders.ts", StartLine: 3, StartColumn: 1, EndLine: 3, EndColumn: 12},
+		Description: "query of orders",
+	}
+	database := fakeProducer("db", "deprecated")
+	database.scope = map[string]any{"schema": "dbo"}
+	database.description.BaseRelations[0].Arguments[0] = tableArgument
+	database.description.Schema = facts.Schema{Declarations: "Decl deprecated(Table) descr [extensional(), arg(Table, \"table name\")].\n"}
+	database.description.Helpers = nil
+	deprecated := facts.Predicate{Name: "db.deprecated", Arity: 1}
+	broken := fakeProducer("unused", "item")
+	broken.failEmit = true
+	writeCatalogRule(t, workspace, `Decl violation(Entity). violation(Entity) :- code.uses(Entity, Table), db.deprecated(Table).`, "violation")
+	session := openTestSession(t, engine.Config{WorkspaceRoot: testpack.Build(t, repoRoot, workspace, "lintai-rules/*.ts")}, code, database, broken)
+	check := func() []diagnostics.Diagnostic {
+		t.Helper()
+		result, err := session.Check(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result.Diagnostics
+	}
+
+	if got := check(); len(got) != 0 {
+		t.Fatalf("no deprecated table should mean no finding: %+v", got)
+	}
+	database.revision = "db-v2"
+	database.rows[deprecated] = [][]facts.Value{{facts.String("orders")}}
+	got := check()
+	if len(got) != 1 || got[0].SourceLocation == nil || got[0].SourceLocation.File != "app/orders.ts" {
+		t.Fatalf("database revision alone did not add the code-anchored finding: %+v", got)
+	}
+	if strings.Join(got[0].Provenance.ProducerNamespaces, ",") != "code,db" {
+		t.Fatalf("provenance = %v", got[0].Provenance.ProducerNamespaces)
+	}
+
+	database.revision = "db-v3"
+	database.failEmit = true
+	if _, err := session.Check(context.Background()); err == nil || !strings.Contains(err.Error(), "fixture emit failed") {
+		t.Fatalf("demanded producer failure was not reported: %v", err)
+	}
+	if _, err := session.Current(); err == nil {
+		t.Fatal("failed composition left a published result")
+	}
+	database.failEmit = false
+	database.revision = "db-v4"
+	database.rows[deprecated] = nil
+	if got := check(); len(got) != 0 {
+		t.Fatalf("recovered database revision did not retract the finding: %+v", got)
+	}
+	if broken.prepares != 0 || broken.emits != 0 {
+		t.Fatalf("undemanded producer was invoked: prepares=%d emits=%d", broken.prepares, broken.emits)
+	}
+}
+
 func TestOpaqueProducerScopeContributesToResultIdentity(t *testing.T) {
 	// V16: identical opaque revision and file coverage with a different scope
 	// token produce different producer-result-v2 identities.
