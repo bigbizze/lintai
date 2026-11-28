@@ -68,8 +68,6 @@ A rule can match the member declaration selected by the compiler. It does not ne
 
 This tells you which declared operation the call uses. It does **not** establish which implementation runs at runtime. See the [working Writer policy](testdata/call-provenance/writer-policy.ts) and its [example and expected results](docs/examples.md#18-forbid-a-declared-capability-member).
 
-Declared call provenance requires lintai 0.8.0 or later. See the [API reference](docs/api.md#declared-members-at-call-sites) for supported forms and incomplete evidence.
-
 ## Where it fits
 
 Keep your type checker, tests and existing linters. LintAI is useful when a rule needs relationships across files, declarations or call chains.
@@ -169,7 +167,7 @@ Calls use the caller's owner, and a function's whole signature comes from its ow
 
 Original root membership, effective ownership and import visibility are different facts. For eligible modules, `module_config` records original-root membership using the bounded inventory built from the selected files' nearest configs and their reference closures; it does not include files visible only through imports. Public config values share one normalized path format, so owner-to-`config_adjusted` and source-entry-to-`source_config_adjusted` joins use the same value.
 
-Function signatures are whole observations; `fn_signature_unresolved` is a helper derived from `fn_signature` and `signature_incomplete`. `declaration_fn` is a direct optional link to a retained implementation. The removed `call_target_conflict`, `fn_signature_conflict` and `declaration_fn_incomplete` bases have no aliases. Ordinary metadata, call-declaration and source-endpoint uncertainty use separate reason sets; the [API reference](docs/api.md#base-relations-and-caveats) lists the exact values. Source-only endpoints may have optional reporting anchors but no queryable `location` row.
+Function signatures are whole observations; `fn_signature_unresolved` is a helper derived from `fn_signature` and `signature_incomplete`. `declaration_fn` is a direct optional link to a retained implementation. Ordinary metadata, call-declaration and source-endpoint uncertainty use separate reason sets; the [API reference](docs/api.md#base-relations-and-caveats) lists the exact values. Source-only endpoints may have optional reporting anchors but no queryable `location` row.
 
 A few boundaries matter when choosing a policy:
 

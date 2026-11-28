@@ -23,7 +23,7 @@ lintai build-rules && lintai check --rules-lock lintai-rules.lock.json
 
 Allowance filenames are compared by reporting document, so equivalent absolute and workspace-relative spellings cannot create extra approval. The lock records workspace-relative names, including `..` for external documents, or a clean absolute name when no relative path exists. This remains true when the suppression file or lock is stored outside the workspace. Duplicate entries for the same document, rule and assertion are invalid and are never combined.
 
-The engine verifies the published bytes, lint policy and saved allowances before initializing any rule in a locked check. A missing, invalid or mismatched approval produces an integrity diagnostic and exit code 3. To replace an obsolete lock, explicitly run `lintai lock` after review. It prints the new digests and replaces the file atomically.
+The engine verifies the published bytes, lint policy and saved allowances before initializing any rule in a locked check. A missing, invalid or mismatched approval produces an integrity diagnostic and exit code 3. To replace an outdated lock, explicitly run `lintai lock` after review. It prints the new digests and replaces the file atomically.
 
 ## Rule execution and changing source
 
