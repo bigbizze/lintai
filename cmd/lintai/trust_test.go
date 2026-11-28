@@ -131,7 +131,7 @@ func TestPortableTypeScriptApproval(t *testing.T) {
 	if err != nil || len(result.Diagnostics) != 1 || result.Diagnostics[0].Message != "finding" {
 		t.Fatalf("relocated Go producer: %+v %v", result, err)
 	}
-	other, err := s.BuildRulesLock(ctx, "")
+	other, err := s.ApproveRules(ctx, "")
 	if err != nil {
 		t.Fatal(err)
 	}

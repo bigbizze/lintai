@@ -99,6 +99,7 @@ type testHooks struct {
 	beforeCollect    func()
 	beforeEvaluation func()
 	afterDispatch    func()
+	beforeWrite      func()
 }
 
 // Open binds each producer's validated description once. On success, the

@@ -426,6 +426,15 @@ func TestOperationUsesOneWorkspace(t *testing.T) {
 	if refreshed.PhysicalRoot != physical["a"] || !slices.Equal(producer.roots, []string{physical["a"], physical["a"]}) {
 		t.Fatalf("expected workspace a, got root %s and producer roots %v", refreshed.PhysicalRoot, producer.roots)
 	}
+	if _, err := session.ApproveRules(context.Background(), ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadRulesLock(filepath.Join(physical["a"], DefaultRulesLockFile)); err != nil {
+		t.Fatalf("lock not written into a: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(physical["b"], DefaultRulesLockFile)); !os.IsNotExist(err) {
+		t.Fatalf("lock written into b: %v", err)
+	}
 }
 
 func TestProjectAllOmitsIdentityAliases(t *testing.T) {

@@ -29,13 +29,11 @@ type RulesLock struct {
 	PackDigest   string
 	PolicyDigest string
 	Suppressions suppressions.File
-	// target is the configured spelling of the lock file; location is the
-	// same file under the physical root it was read through, and is written.
-	target, location string
-	targetSnapshot   atomicfile.Snapshot
-	source           string
-	sourceSnapshot   atomicfile.Snapshot
-	observations     observe.Set
+	// target and targetSnapshot are the lock file read by a locked check,
+	// which guards that check's suppression write.
+	target         string
+	targetSnapshot atomicfile.Snapshot
+	observations   observe.Set
 }
 type lockJSON struct {
 	Format       string          `json:"format"`
@@ -225,9 +223,13 @@ func (lock RulesLock) verify(options Config, root fileKeys, pack string, catalog
 	return nil
 }
 
-// BuildRulesLock inspects the published pack and the same effective policy used by Check.
-// target is the destination; an empty target selects the default lock file.
-func (e *Session) BuildRulesLock(ctx context.Context, target string) (RulesLock, error) {
+// ApproveRules inspects the published pack and the effective policy used by
+// Check and writes the rules lock to target in one guarded replacement. An
+// empty target selects the default lock file, and a relative target is under
+// the workspace root. It refuses a target that names the rule pack or the
+// suppressions file, or an existing file that is not a rules lock, and writes
+// nothing when the target or the suppressions file changes before the write.
+func (e *Session) ApproveRules(ctx context.Context, target string) (RulesLock, error) {
 	ctx, finish, err := e.beginCheck(ctx)
 	if err != nil {
 		return RulesLock{}, err
@@ -237,29 +239,26 @@ func (e *Session) BuildRulesLock(ctx context.Context, target string) (RulesLock,
 	if target == "" {
 		target = DefaultRulesLockFile
 	}
-	root := e.files()
 	target = filepath.Clean(ResolveRulesLockPath(options.WorkspaceRoot, target))
-	location := target
-	targetState, err := atomicfile.Read(location)
+	state, err := loadSuppressions(options, SuppressionUpdate{})
+	if err != nil {
+		return RulesLock{}, err
+	}
+	if sameDestination(target, state.path) || sameDestination(target, filepath.Join(options.WorkspaceRoot, rulepack.Path)) {
+		return RulesLock{}, fmt.Errorf("lock path conflicts with rule pack or suppressions")
+	}
+	targetState, err := atomicfile.Read(target)
 	if err != nil {
 		return RulesLock{}, err
 	}
 	if targetState.Exists && !isRulesLockDocument(targetState.Data) {
 		return RulesLock{}, fmt.Errorf("%s exists and is not a lintai rules lock; refusing to overwrite it", target)
 	}
-	state, err := loadSuppressions(options, SuppressionUpdate{})
+	digest, err := policyDigest(options, e.files(), e.catalog)
 	if err != nil {
 		return RulesLock{}, err
 	}
-	if target == state.path || target == filepath.Join(options.WorkspaceRoot, rulepack.Path) {
-		return RulesLock{}, fmt.Errorf("lock path conflicts with rule pack or suppressions")
-	}
-	producers := e.catalog
-	digest, err := policyDigest(options, root, producers)
-	if err != nil {
-		return RulesLock{}, err
-	}
-	catalog, err := openRuleCatalog(ctx, root.physical, nil)
+	catalog, err := openRuleCatalog(ctx, options.WorkspaceRoot, nil)
 	if err != nil {
 		return RulesLock{}, err
 	}
@@ -279,7 +278,39 @@ func (e *Session) BuildRulesLock(ctx context.Context, target string) (RulesLock,
 	if unknown := unknownPolicyRules(options, ids); len(unknown) > 0 {
 		return RulesLock{}, fmt.Errorf("%s", unknown[0].Message)
 	}
-	return RulesLock{PackDigest: catalog.digest, PolicyDigest: digest, Suppressions: state.file, target: target, location: location, targetSnapshot: targetState, source: state.path, sourceSnapshot: state.snapshot}, ctx.Err()
+	lock := RulesLock{PackDigest: catalog.digest, PolicyDigest: digest, Suppressions: state.file}
+	data, err := encodeRulesLock(target, lock)
+	if err != nil {
+		return RulesLock{}, err
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return RulesLock{}, err
+	}
+	if e.hooks.beforeWrite != nil {
+		e.hooks.beforeWrite()
+	}
+	if err := atomicfile.Write(ctx, target, targetState, data, "rules_lock_changed", state.path, state.snapshot, "suppression_changed"); err != nil {
+		return RulesLock{}, err
+	}
+	return lock, nil
+}
+
+// sameDestination reports whether two paths name one file: through linked
+// directories, including before the file exists, or through a link to an
+// existing file.
+func sameDestination(a, b string) bool {
+	destination := func(path string) string {
+		if dir, err := filepath.EvalSymlinks(filepath.Dir(path)); err == nil {
+			return filepath.Join(dir, filepath.Base(path))
+		}
+		return filepath.Clean(path)
+	}
+	if destination(a) == destination(b) {
+		return true
+	}
+	left, leftErr := os.Stat(a)
+	right, rightErr := os.Stat(b)
+	return leftErr == nil && rightErr == nil && os.SameFile(left, right)
 }
 
 // isRulesLockDocument accepts any branded lintai rules-lock format, including
@@ -294,39 +325,34 @@ func isRulesLockDocument(data []byte) bool {
 	return strings.HasPrefix(header.Format, "lintai.rules-lock/")
 }
 
-func WriteRulesLock(ctx context.Context, path string, lock RulesLock) error {
+func encodeRulesLock(path string, lock RulesLock) ([]byte, error) {
 	approved := lock.Suppressions
 	if approved == nil {
 		approved = suppressions.File{}
 	}
 	canonicalApproved, err := suppressions.Encode(approved)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	approved, err = suppressions.Parse(path, canonicalApproved)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	allowances, err := json.Marshal(approved)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	data, err := json.MarshalIndent(lockJSON{RulesLockFormat, rulepack.ABI, lock.PackDigest, lock.PolicyDigest, allowances}, "", "  ")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	data = append(data, '\n')
 	if _, err := parseRulesLock(path, data); err != nil {
-		return err
+		return nil, err
 	}
-	if lock.location != "" {
-		path = lock.location
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	return atomicfile.Write(ctx, path, lock.targetSnapshot, data, "rules_lock_changed", lock.source, lock.sourceSnapshot, "suppression_changed")
+	return data, nil
 }
+
 func ResolveRulesLockPath(root, path string) string {
 	if filepath.IsAbs(path) {
 		return path

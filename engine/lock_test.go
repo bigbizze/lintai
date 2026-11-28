@@ -36,22 +36,25 @@ func TestLockedChecksRejectChangesBeforeAnyVM(t *testing.T) {
 		writeTestFile(t, root, suppressions.DefaultFile, string(data))
 	}
 	savePack(pack)
+	// A target is compared by the file it names, before the file exists.
+	if err := os.Symlink(root, filepath.Join(root, "linked")); err != nil {
+		t.Skip(err)
+	}
+	if _, err := session.ApproveRules(ctx, filepath.Join("linked", suppressions.DefaultFile)); err == nil || !strings.Contains(err.Error(), "conflicts") {
+		t.Fatalf("lock target naming the suppressions file: %v", err)
+	}
 	saveAllowances(2, "original")
-	lock, err := session.BuildRulesLock(ctx, "")
-	if err != nil {
+	if _, err := session.ApproveRules(ctx, ""); err != nil {
 		t.Fatal(err)
 	}
 	lockPath := filepath.Join(root, DefaultRulesLockFile)
-	if err := WriteRulesLock(ctx, lockPath, lock); err != nil {
-		t.Fatal(err)
-	}
 	approved, err := os.ReadFile(lockPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	unrelated := "[workspace]\nsources = [\"src/**\"]\n"
 	writeTestFile(t, root, "lintai.toml", unrelated)
-	if _, err := session.BuildRulesLock(ctx, "lintai.toml"); err == nil || !strings.Contains(err.Error(), "not a lintai rules lock") {
+	if _, err := session.ApproveRules(ctx, "lintai.toml"); err == nil || !strings.Contains(err.Error(), "not a lintai rules lock") {
 		t.Fatalf("unrelated lock target: %v", err)
 	}
 	if data, _ := os.ReadFile(filepath.Join(root, "lintai.toml")); string(data) != unrelated {
@@ -59,17 +62,15 @@ func TestLockedChecksRejectChangesBeforeAnyVM(t *testing.T) {
 	}
 	policy := `{"version":1,"rules":[{"id":"approval","enabled":true}],"owner":"operations"}`
 	writeTestFile(t, root, "app-policy.json", policy)
-	if _, err := session.BuildRulesLock(ctx, "app-policy.json"); err == nil || !strings.Contains(err.Error(), "not a lintai rules lock") {
+	if _, err := session.ApproveRules(ctx, "app-policy.json"); err == nil || !strings.Contains(err.Error(), "not a lintai rules lock") {
 		t.Fatalf("application policy lock target: %v", err)
 	}
 	if data, _ := os.ReadFile(filepath.Join(root, "app-policy.json")); string(data) != policy {
 		t.Fatalf("application policy changed: %q", data)
 	}
 	writeTestFile(t, root, DefaultRulesLockFile, `{"format":"lintai.rules-lock/4"}`)
-	if relock, err := session.BuildRulesLock(ctx, ""); err != nil {
+	if _, err := session.ApproveRules(ctx, ""); err != nil {
 		t.Fatalf("obsolete lock reapproval: %v", err)
-	} else if err := WriteRulesLock(ctx, lockPath, relock); err != nil {
-		t.Fatal(err)
 	}
 	for _, tc := range []struct {
 		name   string

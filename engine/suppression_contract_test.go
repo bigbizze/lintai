@@ -246,24 +246,17 @@ func TestSavedWriteGuards(t *testing.T) {
 		t.Fatalf("cancelled check wrote suppression: %v", err)
 	}
 	session.hooks.afterDispatch = nil
-	lock, err := session.BuildRulesLock(context.Background(), "")
-	if err != nil {
-		t.Fatal(err)
-	}
 	lockPath := filepath.Join(workspace, DefaultRulesLockFile)
 	cancelledLock, cancelLock := context.WithCancel(context.Background())
-	cancelLock()
-	if err := WriteRulesLock(cancelledLock, lockPath, lock); err == nil {
+	session.hooks.beforeWrite = cancelLock
+	if _, err := session.ApproveRules(cancelledLock, ""); err == nil {
 		t.Fatal("cancelled lock write succeeded")
 	}
 	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
 		t.Fatalf("cancelled lock write left a file: %v", err)
 	}
-	if err := WriteRulesLock(context.Background(), lockPath, lock); err != nil {
-		t.Fatal(err)
-	}
-	lock, err = session.BuildRulesLock(context.Background(), "")
-	if err != nil {
+	session.hooks.beforeWrite = nil
+	if _, err := session.ApproveRules(context.Background(), ""); err != nil {
 		t.Fatal(err)
 	}
 	before, err := os.ReadFile(lockPath)
@@ -271,10 +264,12 @@ func TestSavedWriteGuards(t *testing.T) {
 		t.Fatal(err)
 	}
 	external := append(append([]byte(nil), before...), '\n')
-	if err := os.WriteFile(lockPath, external, 0o644); err != nil {
-		t.Fatal(err)
+	session.hooks.beforeWrite = func() {
+		if err := os.WriteFile(lockPath, external, 0o644); err != nil {
+			t.Error(err)
+		}
 	}
-	if err := WriteRulesLock(context.Background(), lockPath, lock); err == nil || !strings.Contains(err.Error(), "rules_lock_changed") {
+	if _, err := session.ApproveRules(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "rules_lock_changed") {
 		t.Fatalf("expected rules_lock_changed: %v", err)
 	}
 	current, err = os.ReadFile(lockPath)
@@ -297,20 +292,19 @@ func TestSavedWriteGuards(t *testing.T) {
 	if err != nil || !bytes.Equal(current, changed) {
 		t.Fatalf("approval edit allowed a suppression write: %v", err)
 	}
-	lock, err = session.BuildRulesLock(context.Background(), "")
-	if err != nil {
-		t.Fatal(err)
+	session.hooks.beforeWrite = func() {
+		if err := os.WriteFile(path, append(changed, '\n'), 0o644); err != nil {
+			t.Error(err)
+		}
 	}
-	if err := os.WriteFile(path, append(changed, '\n'), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := WriteRulesLock(context.Background(), lockPath, lock); err == nil || !strings.Contains(err.Error(), "suppression_changed") {
+	if _, err := session.ApproveRules(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "suppression_changed") {
 		t.Fatalf("suppression edit must block lock write: %v", err)
 	}
+	session.hooks.beforeWrite = nil
 	if err := os.WriteFile(lockPath, []byte(`{"format":"lintai.rules-lock/2","rules":{}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := session.BuildRulesLock(context.Background(), ""); err != nil {
+	if _, err := session.ApproveRules(context.Background(), ""); err != nil {
 		t.Fatal("explicit approval should replace obsolete format")
 	}
 }

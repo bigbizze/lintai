@@ -654,14 +654,12 @@ func runLock(ctx context.Context, args []string, stdout io.Writer) error {
 		return err
 	}
 	defer session.Close()
-	lock, err := session.BuildRulesLock(ctx, *path)
+	lock, err := session.ApproveRules(ctx, rebase(*project.root, options.WorkspaceRoot, *path))
 	if err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(stdout, "pack %s\npolicy %s\n", lock.PackDigest, lock.PolicyDigest); err != nil {
-		return err
-	}
-	return engine.WriteRulesLock(ctx, engine.ResolveRulesLockPath(options.WorkspaceRoot, *path), lock)
+	_, err = fmt.Fprintf(stdout, "pack %s\npolicy %s\n", lock.PackDigest, lock.PolicyDigest)
+	return err
 }
 
 // newBackend returns the TypeScript backend that reports adjusted tsconfigs
