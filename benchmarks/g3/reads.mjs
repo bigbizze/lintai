@@ -7,8 +7,9 @@ import { fileURLToPath } from "node:url";
 
 const root = path.join(process.env.G3_FIXTURE, "zod");
 const files = new Set(
-	JSON.parse(fs.readFileSync(new URL("./analyzed-files.json", import.meta.url)))
-		.map((name) => path.join(root, name)),
+	JSON.parse(fs.readFileSync(new URL("./analyzed-files.json", import.meta.url))).map((name) =>
+		path.join(root, name),
+	),
 );
 for (const [object, method] of [
 	[fs, "readFileSync"],

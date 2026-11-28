@@ -14,7 +14,9 @@ export const binary = path.join(env.G3_INSTALL, "node_modules", ".bin", "lintai"
 const tools = createRequire(path.join(fixture, "host-tools", "package.json"));
 export function options(operation) {
 	return {
-		binary: env.G3_TRACE ? fileURLToPath(new URL("./transport-probe.mjs", import.meta.url)) : binary,
+		binary: env.G3_TRACE
+			? fileURLToPath(new URL("./transport-probe.mjs", import.meta.url))
+			: binary,
 		workspaceRoot: root,
 		ruleWorkers: 1,
 		operation,

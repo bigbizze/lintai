@@ -24,7 +24,10 @@ function observe(stream, requests) {
 				trace(`rpc.${message.method}`, 1);
 				if (message.method === "diagnostics/files") {
 					const files = message.params.files;
-					trace(files === "all" ? "selector.all" : "selector.files", files === "all" ? 1 : files.length);
+					trace(
+						files === "all" ? "selector.all" : "selector.files",
+						files === "all" ? 1 : files.length,
+					);
 				}
 			} else trace("frame.bytes", length);
 			buffer = buffer.subarray(end + 4 + length);

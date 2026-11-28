@@ -66,7 +66,10 @@ if (!existsSync(zod)) {
 // Verify the analyzed fixture inputs even when a cached checkout is reused.
 const fixtureHash = createHash("sha256");
 for (const name of JSON.parse(readFileSync(path.join(here, "analyzed-files.json"))))
-	fixtureHash.update(`${name}\0`).update(readFileSync(path.join(zod, name))).update("\0");
+	fixtureHash
+		.update(`${name}\0`)
+		.update(readFileSync(path.join(zod, name)))
+		.update("\0");
 assert.equal(fixtureHash.digest("hex"), fixtureSha, "fixture input digest");
 
 const out = path.join(work, `run-${Date.now()}`);
@@ -78,9 +81,17 @@ mkdirSync(candidate, { recursive: true });
 for (const name of ["package.json", "pnpm-workspace.yaml", "tsconfig.base.json"])
 	cpSync(path.join(repo, name), path.join(candidate, name));
 const jsPackages = ["sdk", "authoring-rules", "client", "eslint-plugin", "oxlint-plugin", "lintai"];
-const platformPackages = ["lintai-darwin-arm64", "lintai-darwin-x64", "lintai-linux-arm64", "lintai-linux-x64"];
+const platformPackages = [
+	"lintai-darwin-arm64",
+	"lintai-darwin-x64",
+	"lintai-linux-arm64",
+	"lintai-linux-x64",
+];
 const platform = `lintai-${process.platform}-${process.arch}`;
-assert.ok(platformPackages.includes(platform), `unsupported host ${process.platform}/${process.arch}`);
+assert.ok(
+	platformPackages.includes(platform),
+	`unsupported host ${process.platform}/${process.arch}`,
+);
 for (const pkg of [...jsPackages, ...platformPackages]) {
 	const source = path.join(repo, "packages", pkg);
 	const target = path.join(candidate, "packages", pkg);
@@ -95,13 +106,29 @@ for (const pkg of [...jsPackages, ...platformPackages]) {
 	mkdirSync(path.join(modules, "@lintai"), { recursive: true });
 	for (const dep of readdirSync(path.join(source, "node_modules")))
 		if (dep !== "@lintai" && !dep.startsWith("."))
-			symlinkSync(realpathSync(path.join(source, "node_modules", dep)), path.join(modules, dep), "dir");
+			symlinkSync(
+				realpathSync(path.join(source, "node_modules", dep)),
+				path.join(modules, dep),
+				"dir",
+			);
 	for (const dep of [...jsPackages, ...platformPackages])
 		symlinkSync(path.join(candidate, "packages", dep), path.join(modules, "@lintai", dep), "dir");
 }
-symlinkSync(realpathSync(path.join(repo, "node_modules")), path.join(candidate, "node_modules"), "dir");
+symlinkSync(
+	realpathSync(path.join(repo, "node_modules")),
+	path.join(candidate, "node_modules"),
+	"dir",
+);
 for (const pkg of jsPackages)
-	run(process.execPath, [path.join(repo, "node_modules/typescript/bin/tsc"), "-p", path.join(candidate, "packages", pkg)], candidate);
+	run(
+		process.execPath,
+		[
+			path.join(repo, "node_modules/typescript/bin/tsc"),
+			"-p",
+			path.join(candidate, "packages", pkg),
+		],
+		candidate,
+	);
 const native = path.join(candidate, "packages", platform, "bin", "lintai");
 mkdirSync(path.dirname(native), { recursive: true });
 run("go", ["build", "-trimpath", "-buildvcs=false", "-o", native, "./cmd/lintai"], repo, {
@@ -112,7 +139,10 @@ run("go", ["build", "-trimpath", "-buildvcs=false", "-o", native, "./cmd/lintai"
 for (const pkg of [...jsPackages, platform])
 	run("pnpm", ["pack", "--pack-destination", tarballs], path.join(candidate, "packages", pkg));
 mkdirSync(consumer, { recursive: true });
-writeFileSync(path.join(consumer, "package.json"), '{"name":"g3-consumer","private":true,"type":"module"}\n');
+writeFileSync(
+	path.join(consumer, "package.json"),
+	'{"name":"g3-consumer","private":true,"type":"module"}\n',
+);
 const packs = readdirSync(tarballs).map((name) => path.join(tarballs, name));
 const pinned = ["eslint@10.15.0", "oxlint@1.90.0", "typescript@5.9.3"];
 const flags = ["--no-audit", "--no-fund", "--ignore-scripts", "--save-exact"];
