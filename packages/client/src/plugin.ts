@@ -268,15 +268,15 @@ export function createLintaiRules(options: LintaiOptions, linuxSpawner = false) 
 			invocation ??= captureSafely("all");
 			return visitCapture(invocation, context);
 		}
-		// Request the host's own spelling. If the root moved during the request,
-		// the analyzed workspace may not contain the file the host read.
+		// Request the name the host file has now, which also covers an editor's
+		// symlinked spelling of the root. If the root moved during the request,
+		// the host file has another name in the analyzed workspace.
 		const file = context.physicalFilename;
-		const member = fileNames(workspaceRoot, physicalRootOf(workspaceRoot))(file);
-		const capture = captureSafely([file]);
-		const visit = visitCapture(capture, context);
-		return lookups.get(capture)?.key(file) === member
-			? visit
-			: { problems: capture.problems, mismatch: true };
+		const name = fileNames(workspaceRoot, physicalRootOf(workspaceRoot))(file);
+		const capture = captureSafely([name]);
+		if (lookups.get(capture)?.key(file) !== name)
+			return { problems: capture.problems, mismatch: true };
+		return visitCapture(capture, context);
 	});
 	return {
 		...rules,

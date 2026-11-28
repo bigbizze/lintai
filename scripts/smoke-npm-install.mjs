@@ -403,7 +403,7 @@ try {
 		.slice(before)
 		.filter((row) => row.method === "diagnostics/files")
 		.map((row) => row.files);
-	assert.deepEqual(selectors, [[actionPath], [actionPath]]);
+	assert.deepEqual(selectors, [["src/actions/save.ts"], ["src/actions/save.ts"]]);
 } finally {
 	live.dispose();
 	await fs.writeFile(imported, typeSource);

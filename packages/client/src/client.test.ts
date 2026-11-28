@@ -366,7 +366,7 @@ test("a live visit does not show another workspace's findings after the root mov
 	const rules = createLintaiRules({ workspaceRoot: current, binary: serve.binary });
 	const file = path.join(root, "a", "src", "a.js");
 	try {
-		assert.deepEqual(visit(rules, file), [`[r/a] ${file} in ${path.join(root, "a")}`]);
+		assert.deepEqual(visit(rules, file), [`[r/a] src/a.js in ${path.join(root, "a")}`]);
 		writeFileSync(path.join(root, "move"), "");
 		assert.deepEqual(visit(rules, file), [mismatchMessage]);
 		assert.deepEqual(
@@ -374,7 +374,7 @@ test("a live visit does not show another workspace's findings after the root mov
 				.requests()
 				.filter((request) => request.method === "diagnostics/files")
 				.map((request) => request.params.files),
-			[[file], [file]],
+			[["src/a.js"], ["src/a.js"]],
 		);
 	} finally {
 		rules.dispose();
