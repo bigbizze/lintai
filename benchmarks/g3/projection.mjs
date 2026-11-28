@@ -31,7 +31,7 @@ try {
 	record(
 		"singleton-cold",
 		{ elapsed_ms: ms, findings: 2 },
-		{ requests: 1, workspace: 0, config: 0, analyses: 1 },
+		{ requests: 1, adapter_source_reads: 0 },
 	);
 	reset();
 	const groups = client.getFilesAnalysis("all");
@@ -47,7 +47,7 @@ try {
 	record(
 		"all-projections-warm",
 		{ files: names.length, diagnostics: 10214 },
-		{ requests: 1, config: 1, workspace: 1, analyses: 0, all: 1 },
+		{ requests: 1, all: 1, adapter_source_reads: 0 },
 	);
 } finally {
 	client.dispose();

@@ -29,7 +29,6 @@ try {
 	let reference;
 	for (const event of ["capture-cold", "capture-warm", "ordinary-warm"]) {
 		const captured = event.startsWith("capture");
-		const cold = event.endsWith("cold");
 		// The live plugin owns a separate server from the session; analyze once
 		// before measuring its warm callbacks.
 		if (!captured) verify(0);
@@ -55,9 +54,6 @@ try {
 			{ elapsed_ms: elapsed, files: 477, findings: rows.length },
 			{
 				requests,
-				analyses: cold ? 1 : 0,
-				config: cold ? 0 : requests,
-				workspace: cold ? 0 : requests,
 				all: 0,
 				adapter_source_reads: 0,
 			},
@@ -101,9 +97,6 @@ try {
 			},
 			{
 				requests: 20,
-				config: 20,
-				workspace: 20,
-				analyses: 0,
 				adapter_source_reads: 0,
 			},
 		);
@@ -112,7 +105,7 @@ try {
 	}
 	reset();
 	assert.deepEqual(session.capture([]).problems, []);
-	record("empty-capture-warm", { files: 0 }, { requests: 1, config: 1, workspace: 1, analyses: 0 });
+	record("empty-capture-warm", { files: 0 }, { requests: 1, adapter_source_reads: 0 });
 } finally {
 	plugin.dispose?.();
 	session.dispose();

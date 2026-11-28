@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { copyFileSync, mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { record } from "./metrics.mjs";
-import { eslintConfig, hosts, installed, options, out } from "./settings.mjs";
+import { binary, eslintConfig, hosts, installed, options, out } from "./settings.mjs";
 
 const workspaceRoot = mkdtempSync(path.join(out, "cross-file-"));
 const configFile = path.join(workspaceRoot, "lintai.toml");
@@ -24,7 +24,7 @@ const main = path.join(workspaceRoot, "main.ts");
 const dep = path.join(workspaceRoot, "dep.ts");
 writeFileSync(main, source);
 writeFileSync(dep, "export const marked = 1;\n");
-execFileSync(process.env.G3_BINARY, ["build-rules"], { cwd: workspaceRoot });
+execFileSync(binary, ["build-rules"], { cwd: workspaceRoot });
 const { Linter } = hosts("eslint");
 const { createLintaiPlugin, createLintaiSession } = installed("@lintai/eslint-plugin");
 const plugin = createLintaiPlugin({ ...options("live"), workspaceRoot });

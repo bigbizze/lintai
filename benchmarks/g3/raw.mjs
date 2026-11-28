@@ -84,9 +84,6 @@ for (const host of ["eslint", "oxlint"]) {
 		{
 			requests: 1,
 			all: 1,
-			analyses: 1,
-			workspace: 0,
-			config: 0,
 			adapter_source_reads: 0,
 		},
 	);

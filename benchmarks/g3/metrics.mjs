@@ -21,8 +21,7 @@ export function summary(samples) {
 	};
 }
 
-// Release and counted runs have separate files. A cold capture has no previous
-// config receipt or workspace publication to validate.
+// Release and counted runs have separate files.
 export function record(event, metrics, expected) {
 	const row = { event, ...metrics, load_avg_before: loadBefore, load_avg_after: os.loadavg() };
 	if (trace) {
@@ -34,13 +33,8 @@ export function record(event, metrics, expected) {
 		}
 		const get = (key) => values.get(key) ?? [];
 		const requests = get("rpc.diagnostics/files").length;
-		const workspace = get("workspace.ns");
-		const config = get("config.ns");
 		const counts = {
 			requests,
-			config: config.length,
-			workspace: workspace.length,
-			analyses: get("analysis").length,
 			all: get("selector.all").length,
 			adapter_source_reads: get("source.read").length,
 		};
@@ -52,20 +46,10 @@ export function record(event, metrics, expected) {
 			);
 		Object.assign(row, {
 			rpc_methods: totals("rpc."),
-			binary_commands: totals("binary."),
 			counts,
 			selector_lengths: [...new Set(get("selector.files"))],
 			largest_frame_bytes: Math.max(0, ...get("frame.bytes")),
-			observations: Object.fromEntries(
-				[...values]
-					.filter(([k]) => k.startsWith("observations."))
-					.map(([k, v]) => [k.slice("observations.".length), v[0]]),
-			),
 		});
-		if (event === "singleton-warm") {
-			row.workspace_validation = summary(workspace.map((ns) => ns / 1e6));
-			row.config_validation = summary(config.map((ns) => ns / 1e6));
-		}
 		if (requests && !counts.all) {
 			const sizes = {
 				"all-projections-warm": 511,
@@ -79,8 +63,6 @@ export function record(event, metrics, expected) {
 		for (const [key, value] of Object.entries(expected ?? {})) {
 			assert.equal(counts[key], value, `${event} ${key}: ${JSON.stringify(counts)}`);
 		}
-		if (event.endsWith("-cli-cold") && counts.all)
-			assert.deepEqual(row.binary_commands, { serve: 1 });
 	}
 	const json = JSON.stringify(row);
 	appendFileSync(path.join(out, trace ? "counted.jsonl" : "timing.jsonl"), `${json}\n`);

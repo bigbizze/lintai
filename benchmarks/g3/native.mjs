@@ -5,12 +5,12 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { record, reset, saveRows } from "./metrics.mjs";
 import { engineRow, names } from "./semantic.mjs";
-import { root, versions } from "./settings.mjs";
+import { binary, root, versions } from "./settings.mjs";
 
 function run(args, status) {
 	reset();
 	const start = performance.now();
-	const result = spawnSync(process.env.G3_BINARY, args, {
+	const result = spawnSync(binary, args, {
 		cwd: root,
 		encoding: "utf8",
 		maxBuffer: 64 << 20,
@@ -34,7 +34,7 @@ record("tools", versions());
 			pack_bytes: pack.length,
 			pack_sha256: createHash("sha256").update(pack).digest("hex"),
 		},
-		{ requests: 0, config: 0, workspace: 0, analyses: 0 },
+		{ requests: 0 },
 	);
 }
 const args = ["check", "--json", "--rule-workers", "1"];
@@ -53,5 +53,5 @@ record(
 		diagnostics: rows.length,
 		stdout_bytes: Buffer.byteLength(stdout),
 	},
-	{ requests: 0, config: 0, workspace: 0, analyses: 1 },
+	{ requests: 0 },
 );

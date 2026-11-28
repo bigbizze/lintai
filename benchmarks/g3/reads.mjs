@@ -1,4 +1,4 @@
-// Loaded only in the counted host. Attribute reads of the 477 source files
+// Loaded only in the counted host. Attribute reads of the 511 source files
 // to their immediate JS caller so the host's own parser/loader IO is excluded.
 import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
@@ -8,7 +8,6 @@ import { fileURLToPath } from "node:url";
 const root = path.join(process.env.G3_FIXTURE, "zod");
 const files = new Set(
 	JSON.parse(fs.readFileSync(new URL("./analyzed-files.json", import.meta.url)))
-		.filter((name) => name.endsWith(".ts"))
 		.map((name) => path.join(root, name)),
 );
 for (const [object, method] of [
