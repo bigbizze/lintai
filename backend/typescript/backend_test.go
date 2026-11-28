@@ -843,6 +843,9 @@ func TestLegacyTsconfigIsAdjusted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if repoRoot, err = filepath.EvalSymlinks(repoRoot); err != nil {
+		t.Fatal(err)
+	}
 	workspaceRoot := filepath.Join(repoRoot, "testdata/fixtures/legacy-tsconfig")
 	before := listTree(t, workspaceRoot)
 	for _, files := range []FileScope{FileScopeTsconfig, FileScopeWalk} {
