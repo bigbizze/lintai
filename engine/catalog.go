@@ -331,7 +331,7 @@ func (catalog producerCatalog) collect(ctx context.Context, root string, request
 		producerFiles[namespace] = make(map[string]struct{})
 		for _, file := range item.metadata.AnalyzedFiles {
 			analyzedFiles[file] = struct{}{}
-			producerFiles[namespace][file] = struct{}{}
+			producerFiles[namespace][documentName(root, file)] = struct{}{}
 		}
 	}
 	return composedFacts{sourceDigests: sourceDigests, digestOwners: digestOwners, base: base, anchors: anchors, anchorOwners: anchorOwners, producerFiles: producerFiles, reportable: reportable, factCounts: factCounts, analyzedFiles: analyzedFiles, namespaces: namespaces, snapshotID: snapshotID, observations: captured, reusableFromObservations: reusable}, nil

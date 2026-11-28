@@ -22,6 +22,7 @@ type assertionSchema struct {
 type runInfo struct {
 	lock                        *RulesLock
 	evaluated, completed, known map[string]struct{}
+	root                        string
 	coverage                    map[string]map[string]struct{}
 	assertions                  map[string]map[string]assertionSchema
 	complete                    bool
@@ -223,7 +224,7 @@ func covered(run runInfo, entry suppressions.Entry) bool {
 	if _, ok := run.evaluated[entry.Rule]; !ok {
 		return false
 	}
-	if _, ok := run.coverage[entry.Rule][entry.File]; !ok {
+	if _, ok := run.coverage[entry.Rule][documentName(run.root, entry.File)]; !ok {
 		return false
 	}
 	schema, ok := run.assertions[entry.Rule][entry.Assertion.Name]

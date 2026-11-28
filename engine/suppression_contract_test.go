@@ -206,6 +206,29 @@ func TestSuppressionProducerCoverage(t *testing.T) {
 	if !dependencyEntry {
 		t.Fatalf("dependency allowance did not survive primary-file pruning: %+v", after)
 	}
+	// Coverage named by absolute paths prunes allowances whose findings use
+	// the equivalent relative names.
+	catalog.rows, catalog.revision = oneProducer.rows, "catalog:4"
+	if _, err := session.UpdateSuppressions(context.Background(), SuppressionUpdate{All: true}); err != nil {
+		t.Fatal(err)
+	}
+	physical, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog.rows, catalog.revision = nil, "catalog:5"
+	catalog.files = []string{filepath.ToSlash(filepath.Join(physical, "catalog/items.sql")), filepath.ToSlash(filepath.Join(physical, "../catalog/items.sql"))}
+	if _, err := session.UpdateSuppressions(context.Background(), SuppressionUpdate{Prune: true}); err != nil {
+		t.Fatal(err)
+	}
+	catalog.rows, catalog.revision = oneProducer.rows, "catalog:6"
+	reintroduced, err := session.Check(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reintroduced.Diagnostics) != 3 {
+		t.Fatalf("absolute coverage did not prune relative allowances: %+v", reintroduced.Diagnostics)
+	}
 }
 
 // V23, V25, V30, V39: a concurrent edit or cancellation blocks the guarded

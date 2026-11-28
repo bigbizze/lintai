@@ -395,6 +395,7 @@ func cloneResult(result Result) Result {
 func (e *Session) analyzeWithEvidence(ctx context.Context, mode observe.Mode, state suppressionsState) (Result, runInfo, executionEvidence, error) {
 	config := e.config
 	run := runInfo{
+		root:       config.WorkspaceRoot,
 		evaluated:  make(map[string]struct{}),
 		completed:  make(map[string]struct{}),
 		known:      make(map[string]struct{}),
