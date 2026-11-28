@@ -337,7 +337,10 @@ type TypeRef struct {
 
 type Snapshot struct {
 	// SourceDigests identifies the decoded compiler text from which locations were computed.
-	SourceDigests             map[string]string
+	SourceDigests map[string]string
+	// Documents maps a name in SourceDigests or Modules to the resolved path
+	// of the file its text was read from, when that path differs.
+	Documents                 map[string]string
 	Sites                     []SourceSite
 	siteConflict              string
 	Tracking                  map[string]TrackingSupport
@@ -612,6 +615,15 @@ func BuildSnapshot(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, er
 			return nil, fmt.Errorf("conflicting TypeScript source identities for %q", file)
 		}
 	}
+	root, err := normalizeAbsPath(req.WorkspaceRoot)
+	if err != nil {
+		return nil, err
+	}
+	names := slices.Collect(maps.Keys(snapshot.SourceDigests))
+	for _, module := range snapshot.Modules {
+		names = append(names, module.Path)
+	}
+	snapshot.Documents = snapshot.capture.documents(root, names)
 	snapshot.CompilerInputs = snapshot.capture.observations()
 	snapshot.capture = nil
 	return snapshot, nil

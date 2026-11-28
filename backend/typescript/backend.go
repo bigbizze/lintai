@@ -157,7 +157,7 @@ func (g *producerGeneration) Metadata() backend.GenerationMetadata {
 	for _, module := range g.snapshot.Modules {
 		files = append(files, module.Path)
 	}
-	return backend.GenerationMetadata{InputRevision: g.inputRevision, Scope: cloneProducerValue(g.scope), AnalyzedFiles: files, SourceDigests: maps.Clone(g.snapshot.SourceDigests), Observations: g.observations, ReusableFromObservations: true}
+	return backend.GenerationMetadata{InputRevision: g.inputRevision, Scope: cloneProducerValue(g.scope), AnalyzedFiles: files, SourceDigests: maps.Clone(g.snapshot.SourceDigests), Documents: maps.Clone(g.snapshot.Documents), Observations: g.observations, ReusableFromObservations: true}
 }
 
 func (g *producerGeneration) Emit(ctx context.Context, builder *facts.Builder) error {

@@ -3,7 +3,7 @@ package typescript
 import (
 	"context"
 	"fmt"
-
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1446,18 +1446,23 @@ export const mapped = [1].map((n) => n);`,
 }
 
 func TestGenerationValidatesUnchangedSymlinkMembership(t *testing.T) {
-	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	writeWorkspaceFile(t, root, "tsconfig.json", `{"include":["src/**/*.ts"]}`)
-	writeWorkspaceFile(t, root, "src/a.ts", `export const value = 1;`)
+	writeWorkspaceFile(t, root, "src/a.ts", `export const value = 1; export { other } from "../linked/b";`)
+	writeWorkspaceFile(t, root, "lib/b.ts", `export const other = 2;`)
 	if err := os.Mkdir(filepath.Join(root, "empty"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	for _, link := range []struct{ target, name string }{
-		{"a.ts", "link.ts"},
-		{"../empty", "linked-dir"},
-		{"missing.ts", "dangling.ts"},
+		{"a.ts", "src/link.ts"},
+		{"../empty", "src/linked-dir"},
+		{"missing.ts", "src/dangling.ts"},
+		{"lib", "linked"},
 	} {
-		if err := os.Symlink(link.target, filepath.Join(root, "src", link.name)); err != nil {
+		if err := os.Symlink(link.target, filepath.Join(root, link.name)); err != nil {
 			t.Skipf("symlinks unavailable: %v", err)
 		}
 	}
@@ -1473,6 +1478,11 @@ func TestGenerationValidatesUnchangedSymlinkMembership(t *testing.T) {
 	snapshot := generation.snapshot
 	if len(snapshot.Modules) != 1 || snapshot.Modules[0].Path != "src/a.ts" {
 		t.Fatalf("unexpected selected modules: %+v", snapshot.Modules)
+	}
+	// A file imported through a linked directory keeps its compiler name and
+	// declares the file its text was read from.
+	if documents := generation.Metadata().Documents; !maps.Equal(documents, map[string]string{"linked/b.ts": filepath.Join(root, "lib", "b.ts")}) {
+		t.Fatalf("unexpected documents: %v", documents)
 	}
 }
 

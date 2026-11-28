@@ -88,7 +88,12 @@ func (fsys *resolutionInputFS) ReadFile(path tspath.RootedFilePath) (string, boo
 	if captured, ok := fsys.reads[key]; ok {
 		return captured.contents, captured.exists
 	}
+	// The text is read through its resolved path, which also names the
+	// document that supplied it.
 	file := filepath.FromSlash(key)
+	if actual := fsys.resolve(key); actual != "" {
+		file = actual
+	}
 	before, statErr := os.Stat(file)
 	observed := time.Now()
 	raw, err := os.ReadFile(file)
@@ -230,9 +235,19 @@ func (fsys *resolutionInputFS) Realpath(path tspath.RootedPath) tspath.RootedPat
 	}
 	fsys.mu.Lock()
 	defer fsys.mu.Unlock()
+	actual := fsys.resolve(key)
+	if actual == "" || nativepath.IsNetworkPath(actual) {
+		return path
+	}
+	return tspath.RootedPathFromAbsolute(actual)
+}
+
+// resolve is called with mu held. It resolves key once, so the compiler,
+// source reads and observation see the same link target, and returns an empty
+// path when key does not resolve.
+func (fsys *resolutionInputFS) resolve(key string) string {
 	actual, seen := fsys.realpaths[key]
 	if !seen {
-		// Resolve once so compiler and observation see the same link target.
 		var err error
 		actual, err = nativepath.Realpath(filepath.FromSlash(key))
 		if err == nil {
@@ -246,10 +261,26 @@ func (fsys *resolutionInputFS) Realpath(path tspath.RootedPath) tspath.RootedPat
 		}
 		fsys.realpaths[key] = actual
 	}
-	if actual == "" || nativepath.IsNetworkPath(actual) {
-		return path
+	return actual
+}
+
+// documents maps each name of a file read for coordinates, relative to root
+// or absolute, to the resolved path of the file that supplied its text when
+// that path differs from the name.
+func (fsys *resolutionInputFS) documents(root string, names []string) map[string]string {
+	fsys.mu.Lock()
+	defer fsys.mu.Unlock()
+	documents := make(map[string]string)
+	for _, name := range names {
+		path := filepath.FromSlash(name)
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(filepath.FromSlash(root), path)
+		}
+		if actual := fsys.realpaths[normalizeSlash(path)]; actual != "" && actual != path {
+			documents[name] = actual
+		}
 	}
-	return tspath.RootedPathFromAbsolute(actual)
+	return documents
 }
 
 func (fsys *resolutionInputFS) inputPath(path string) string { return normalizeSlash(path) }
