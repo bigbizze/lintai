@@ -1,8 +1,8 @@
 # lintai: an example for every relation, and a docs cleanup
 
-> Status: completed and superseded in part. The Markdown inventory, its `LINTAI_UPDATE_GOLDEN` comparison and the coverage report were later removed. `TestRelationCoverageInventory` now only checks that every base relation is used by a fixture rule or allowlisted in `testdata/fixtures/relation-examples/uncovered.json`.
+> Status: archived. The generated inventory, coverage report, relation-coverage CI gate, and `uncovered.json` allowlist have been removed. Real fixture and emission tests remain. The inventory, gate, and allowlist directions below are historical and are not current maintenance instructions.
 
-> **Superseded work order.** This document records the pre-owner-context 0.9.0 inventory and cleanup instructions. Its catalog size, old conflict predicates, and directions not to change relation meanings are historical and are not active requirements. Use [the owner-context implementation specification](lintai-owner-context-implementation.md), especially sections 4 and 10.3, for the current vocabulary, populations, examples, and documentation contract. The original text below is retained as history.
+> **Superseded work order.** This document records the pre-owner-context 0.9.0 inventory and cleanup instructions. Its catalog size, old conflict predicates, and directions not to change relation meanings are historical and are not active requirements. Use [the owner-context implementation specification](lintai-owner-context-implementation.md), especially sections 4 and 10.3, for the current vocabulary, populations, examples, and documentation contract. The original text below is retained as history, not as active maintenance guidance.
 
 You are working in a clone of `bigbizze/lintai` at 0.9.0 (`4bda7a8`). This document is the full specification for this work. Create a new feature branch from `main` for it. Before writing code, copy this document into the repository as `specs/relation-examples-and-docs-cleanup.md`.
 
@@ -40,25 +40,7 @@ lintai is a general tool. Judge each example by whether a team in any TypeScript
 
 ## 4. Families and the inventory
 
-**Families.** Appendix A of the r6 spec is the authority for which family a relation belongs to. Use its sections A.1 to A.8 as the families. Do not make up a different grouping. If a catalog relation does not appear in Appendix A, record that in the report and place it by its description.
-
-> **Superseded inventory hint:** the following names describe the earlier 103-base catalog. In particular, the listed conflict relations are no longer active bases; consult the owner-context specification for the final catalog.
-
-A.9 (`ts.location/6`) is reporting support, not a family. Put it in the allowlist with the reason `reporting support`; do not record it as `not in Appendix A`.
-
-**One piece of code, two outputs.** The coverage test in section 7 computes the inventory. Do not write a separate inventory script. The test:
-
-- reads every base relation from the producer catalog (the same catalog the `schema` command prints), never from a text search of the schema file
-- works out, for each relation, whether an example rule uses it directly, or uses a prelude helper that depends on it
-- writes or checks `docs/followups/relation-coverage-inventory.md`. With `LINTAI_UPDATE_GOLDEN=1` it rewrites the file. Without it, the test fails when the file is out of date
-
-**Helper dependencies.** Work out which base relations a helper depends on by reusing the production `catalogForRule` selection on the assembled, package-bearing catalog. Do not keep a hand-written helper-to-relation map, and do not write a new dependency analyzer.
-
-`catalogForRule` returns selected source units and the required predicate names. Qualify positive and negative premises using each unit's package before matching the base catalog; count explicit helper roots as well as clause references. This inventory records dependencies, not positive-emission witnesses.
-
-For orientation only, an earlier text search found these relations with no direct use in any example, fixture rule or helper. Treat it as a hint, and expect differences:
-
-`fn_kind`, `fn_container`, `fn_value_escape`, `fn_value_escape_target`, `import_form`, `import_package`, `import_opaque`, `module_parse_error`, `config_adjusted`, `global_ref`, `ambient_source`, `ambient_write`, `call_site`, `call_target_conflict`, `type_ref`, `type_ref_target`, `signature_arity`, `signature_param_optional`, `signature_param_rest`, `signature_complete`, `signature_incomplete`, `type_kind`, `type_arg_optional`, `type_arg_rest`, `type_readonly`, `type_literal`, `type_param_name`, `type_prop_optional`, `type_prop_readonly`, `type_sig_param_optional`, `type_sig_param_rest`, `declaration_origin`, `declaration_type_subject`, `declaration_fn`, `declaration_fn_incomplete`, `export_via`, `declaration_source_candidate`, `declaration_source`, `declaration_source_outcome`, `source_entry`, `source_entry_tsconfig`, `source_entry_applied`, `source_entry_unapplied`, `source_entry_incomplete`, `source_binding_attempt`, `source_binding`, `source_binding_checked_decl`, `source_binding_source_decl`, `source_binding_incomplete`.
+> Retired. The 0.9.0 relation-family inventory and its catalog coverage instructions are historical. Use the owner-context implementation specification for the current relation vocabulary and organization.
 
 ## 5. What an example is
 
@@ -80,29 +62,11 @@ Each example has these parts:
 
 ## 6. The report
 
-Write `docs/followups/relation-coverage-report.md` with one row per relation that did **not** get an example:
-
-| Column | Content |
-|---|---|
-| Relation | qualified name |
-| Outcome | `no realistic rule found`, `covered only through a helper`, `disagrees with its description`, `not in Appendix A`, or `could not build a fixture` |
-| What was tried | the rule ideas you considered, in one or two sentences |
-| Why it failed | the concrete reason |
-| Suggestion | keep and document as a building block, merge into another relation, or consider removing. This is advice for the owner, not a decision |
-
-A relation that exists only to support other relations (a building block) is a valid outcome. Say which relations or helpers it supports.
+> Retired. The relation-coverage report and its generation instructions have been removed from this work order.
 
 ## 7. The coverage test
 
-Add one Go test that:
-
-- reads every base relation from the producer catalog
-- finds which ones are used by an example rule under `testdata/fixtures/`, directly or through a helper (section 4)
-- reads an explicit allowlist file, `testdata/fixtures/relation-examples/uncovered.json`, where each entry has a relation name and a reason
-- fails when a relation is in neither set, and fails when a relation is in both
-- writes or checks the inventory file (section 4)
-
-After this work, adding a relation without an example or a stated reason breaks the build.
+> Retired. The catalog coverage gate and its allowlist have been removed. Real fixture-rule and relation-emission tests remain; no catalog coverage checker is maintained.
 
 ## 8. Docs cleanup
 
@@ -118,22 +82,7 @@ List every correction in the change description, with the file and line you chec
 
 ## 9. How to split the work
 
-Six units, in order. Each is its own change and its own review.
-
-1. **Inventory and coverage test.** The test from section 7, the generated inventory, and an allowlist that contains every currently uncovered relation with the reason `not yet reviewed`.
-2. **Source identity, imports and type references** (Appendix A.1 and A.2).
-3. **Invocations and function values** (A.3).
-4. **Signatures and structural types** (A.4 and A.5).
-5. **Declarations, exports and source correspondence** (A.6, A.7 and A.8).
-6. **Docs cleanup** (section 8, without timings).
-
-Units 2 to 5 each remove entries from the allowlist as examples land, or replace `not yet reviewed` with a real reason and a report row. When unit 5 is done, no entry may still say `not yet reviewed`.
-
-Because the coverage test fails when a relation is both covered and allowlisted, remove a relation's allowlist entry in the same commit as the example that covers it.
-
-**Timings** are a seventh unit for a worker with network access, or for the owner.
-
-**"All tests green"** means every step of the run's `ci.sh`. If no `ci.sh` is provided, it means every step in `.github/workflows/ci.yml`. Each unit must leave all of those steps passing.
+> Retired. The original unit plan, including its inventory, gate, and allowlist maintenance steps, is historical and is not a current work sequence.
 
 ## 10. Not part of this work
 
@@ -145,11 +94,7 @@ Because the coverage test fails when a relation is both covered and allowlisted,
 
 ## 11. Done when
 
-1. The coverage test exists, reads the catalog, and produces `docs/followups/relation-coverage-inventory.md`.
-2. Every base relation is either used by a tested example with a planted violation and a near-miss, or listed in `uncovered.json` with a real reason and a matching row in the report.
-3. The coverage test fails when a relation is removed from both sets, and when it is in both.
-4. One table-driven test runs every family's examples twice and checks the exact diagnostics and the docs text.
-5. Every new example appears in `docs/examples.md`.
-6. The existing golden files are unchanged, or each change to them is explained.
-7. The docs corrections in section 8 are made and listed. Timings are either re-measured or reported as skipped for lack of network access.
-8. Every step named in section 9 under "All tests green" passes.
+1. One table-driven test runs every family's examples twice and checks the exact diagnostics and the docs text.
+2. Every new example appears in `docs/examples.md`.
+3. The existing golden files are unchanged, or each change to them is explained.
+4. The docs corrections in section 8 are made and listed. Timings are either re-measured or reported as skipped for lack of network access.
