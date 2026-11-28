@@ -47,6 +47,34 @@ func TestLockedChecksRejectChangesBeforeAnyVM(t *testing.T) {
 	if _, err := session.ApproveRules(ctx, ""); err != nil {
 		t.Fatal(err)
 	}
+	// A link in the target path that moves before the write does not move it.
+	for _, dir := range []string{"a", "b"} {
+		if err := os.Mkdir(filepath.Join(root, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	destination := filepath.Join(root, "destination")
+	if err := os.Symlink(filepath.Join(root, "a"), destination); err != nil {
+		t.Fatal(err)
+	}
+	session.hooks.beforeWrite = func() {
+		if err := os.Remove(destination); err != nil {
+			t.Error(err)
+		}
+		if err := os.Symlink(filepath.Join(root, "b"), destination); err != nil {
+			t.Error(err)
+		}
+	}
+	if _, err := session.ApproveRules(ctx, filepath.Join("destination", "new", DefaultRulesLockFile)); err != nil {
+		t.Fatal(err)
+	}
+	session.hooks.beforeWrite = nil
+	if _, err := ReadRulesLock(filepath.Join(root, "a", "new", DefaultRulesLockFile)); err != nil {
+		t.Fatalf("lock not written through the bound link: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "b", "new")); !os.IsNotExist(err) {
+		t.Fatalf("lock written through the moved link: %v", err)
+	}
 	lockPath := filepath.Join(root, DefaultRulesLockFile)
 	approved, err := os.ReadFile(lockPath)
 	if err != nil {

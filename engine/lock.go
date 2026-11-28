@@ -229,6 +229,8 @@ func (lock RulesLock) verify(options Config, pack string, catalog producerCatalo
 // the workspace root. It refuses a target that names the rule pack or the
 // suppressions file, or an existing file that is not a rules lock, and writes
 // nothing when the target or the suppressions file changes before the write.
+// The target is bound to its physical path before it is read, so a link in
+// that path that moves later does not move the write.
 func (e *Session) ApproveRules(ctx context.Context, target string) (RulesLock, error) {
 	ctx, finish, err := e.beginCheck(ctx)
 	if err != nil {
@@ -239,7 +241,7 @@ func (e *Session) ApproveRules(ctx context.Context, target string) (RulesLock, e
 	if target == "" {
 		target = DefaultRulesLockFile
 	}
-	target = filepath.Clean(ResolveRulesLockPath(options.WorkspaceRoot, target))
+	target = physicalPath(ResolveRulesLockPath(options.WorkspaceRoot, target))
 	state, err := loadSuppressions(options, SuppressionUpdate{})
 	if err != nil {
 		return RulesLock{}, err
@@ -299,18 +301,26 @@ func (e *Session) ApproveRules(ctx context.Context, target string) (RulesLock, e
 // directories, including before the file exists, or through a link to an
 // existing file.
 func sameDestination(a, b string) bool {
-	destination := func(path string) string {
-		if dir, err := filepath.EvalSymlinks(filepath.Dir(path)); err == nil {
-			return filepath.Join(dir, filepath.Base(path))
-		}
-		return filepath.Clean(path)
-	}
-	if destination(a) == destination(b) {
+	if physicalPath(a) == physicalPath(b) {
 		return true
 	}
 	left, leftErr := os.Stat(a)
 	right, rightErr := os.Stat(b)
 	return leftErr == nil && rightErr == nil && os.SameFile(left, right)
+}
+
+// physicalPath resolves every link in path. When path does not resolve, it
+// resolves the nearest directory that does and keeps the remaining names.
+func physicalPath(path string) string {
+	path = filepath.Clean(path)
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	dir := filepath.Dir(path)
+	if dir == path {
+		return path
+	}
+	return filepath.Join(physicalPath(dir), filepath.Base(path))
 }
 
 // isRulesLockDocument accepts any branded lintai rules-lock format, including
