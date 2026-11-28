@@ -246,7 +246,14 @@ func (e *Session) ApproveRules(ctx context.Context, target string) (RulesLock, e
 	if err != nil {
 		return RulesLock{}, err
 	}
-	if sameDestination(target, state.path) || sameDestination(target, filepath.Join(options.WorkspaceRoot, rulepack.Path)) {
+	if err := rejectDanglingControlFile(state.path, "suppressions file"); err != nil {
+		return RulesLock{}, err
+	}
+	rulePackPath := filepath.Join(options.WorkspaceRoot, rulepack.Path)
+	if err := rejectDanglingControlFile(rulePackPath, "rule pack"); err != nil {
+		return RulesLock{}, err
+	}
+	if sameDestination(target, state.path) || sameDestination(target, rulePackPath) {
 		return RulesLock{}, fmt.Errorf("lock path conflicts with rule pack or suppressions")
 	}
 	targetState, err := atomicfile.Read(target)
@@ -309,15 +316,21 @@ func sameDestination(a, b string) bool {
 	return leftErr == nil && rightErr == nil && os.SameFile(left, right)
 }
 
-// physicalPath resolves every link in path. When path does not resolve, it
-// resolves the nearest directory that does and keeps the remaining names. A
-// dangling link names the file it points to, as a link to an existing file
-// does.
-func physicalPath(path string) string {
-	return resolvePhysicalPath(path, 0)
+func rejectDanglingControlFile(path, name string) error {
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		return nil
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return fmt.Errorf("%s %s is a dangling symlink", name, path)
+	}
+	return nil
 }
 
-func resolvePhysicalPath(path string, links int) string {
+// physicalPath resolves every link in path. When path does not resolve, it
+// resolves the nearest directory that does and keeps the remaining names. A
+// link at the unresolved part of the path is kept as a name.
+func physicalPath(path string) string {
 	path = filepath.Clean(path)
 	if resolved, err := filepath.EvalSymlinks(path); err == nil {
 		return resolved
@@ -326,14 +339,7 @@ func resolvePhysicalPath(path string, links int) string {
 	if dir == path {
 		return path
 	}
-	parent := resolvePhysicalPath(dir, links)
-	if target, err := os.Readlink(path); err == nil && links < 255 {
-		if !filepath.IsAbs(target) {
-			target = filepath.Join(parent, target)
-		}
-		return resolvePhysicalPath(target, links+1)
-	}
-	return filepath.Join(parent, filepath.Base(path))
+	return filepath.Join(physicalPath(dir), filepath.Base(path))
 }
 
 // isRulesLockDocument accepts any branded lintai rules-lock format, including

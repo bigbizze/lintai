@@ -43,12 +43,16 @@ func TestLockedChecksRejectChangesBeforeAnyVM(t *testing.T) {
 	if _, err := session.ApproveRules(ctx, filepath.Join("linked", suppressions.DefaultFile)); err == nil || !strings.Contains(err.Error(), "conflicts") {
 		t.Fatalf("lock target naming the suppressions file: %v", err)
 	}
-	// A dangling link in the suppressions location names the file it points to.
-	if err := os.Symlink("shared.json", filepath.Join(root, suppressions.DefaultFile)); err != nil {
+	// A dangling link in a reserved location is rejected before its target can
+	// be used as the lock destination, even when the target differs by case.
+	if err := os.Symlink("SHARED.json", filepath.Join(root, suppressions.DefaultFile)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := session.ApproveRules(ctx, "shared.json"); err == nil || !strings.Contains(err.Error(), "conflicts") {
-		t.Fatalf("lock target behind a dangling suppressions link: %v", err)
+	if _, err := session.ApproveRules(ctx, "shared.json"); err == nil || !strings.Contains(err.Error(), suppressions.DefaultFile) || !strings.Contains(err.Error(), "dangling symlink") {
+		t.Fatalf("dangling suppressions location: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "shared.json")); !os.IsNotExist(err) {
+		t.Fatalf("lock target created behind a dangling suppressions link: %v", err)
 	}
 	if err := os.Remove(filepath.Join(root, suppressions.DefaultFile)); err != nil {
 		t.Fatal(err)
