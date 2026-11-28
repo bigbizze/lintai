@@ -1451,8 +1451,9 @@ func TestGenerationValidatesUnchangedSymlinkMembership(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeWorkspaceFile(t, root, "tsconfig.json", `{"include":["src/**/*.ts"]}`)
-	writeWorkspaceFile(t, root, "src/a.ts", `export const value = 1; export { other } from "../linked/b";`)
+	writeWorkspaceFile(t, root, "src/a.ts", `export const value = 1; export { other } from "../linked/b"; export { third } from "../lib/cEE";`)
 	writeWorkspaceFile(t, root, "lib/b.ts", `export const other = 2;`)
+	writeWorkspaceFile(t, root, "lib/Cee.ts", `export const third = 3;`)
 	if err := os.Mkdir(filepath.Join(root, "empty"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -1475,13 +1476,23 @@ func TestGenerationValidatesUnchangedSymlinkMembership(t *testing.T) {
 	if err != nil || again != generation {
 		t.Fatalf("unchanged symlink membership was not reused: err=%v", err)
 	}
-	snapshot := generation.snapshot
-	if len(snapshot.Modules) != 1 || snapshot.Modules[0].Path != "src/a.ts" {
-		t.Fatalf("unexpected selected modules: %+v", snapshot.Modules)
+	// A file imported through a linked directory, or by another letter case on
+	// a case-insensitive volume, keeps its compiler name and declares the file
+	// its text was read from in its on-disk spelling.
+	modules := []string{"src/a.ts"}
+	want := map[string]string{"linked/b.ts": filepath.Join(root, "lib", "b.ts")}
+	if _, err := os.Stat(filepath.Join(root, "lib", "cEE.ts")); err == nil {
+		modules = []string{"lib/Cee.ts", "src/a.ts"}
+		want["lib/cEE.ts"] = filepath.Join(root, "lib", "Cee.ts")
 	}
-	// A file imported through a linked directory keeps its compiler name and
-	// declares the file its text was read from.
-	if documents := generation.Metadata().Documents; !maps.Equal(documents, map[string]string{"linked/b.ts": filepath.Join(root, "lib", "b.ts")}) {
+	var paths []string
+	for _, module := range generation.snapshot.Modules {
+		paths = append(paths, module.Path)
+	}
+	if !slices.Equal(paths, modules) {
+		t.Fatalf("unexpected selected modules: %+v", generation.snapshot.Modules)
+	}
+	if documents := generation.Metadata().Documents; !maps.Equal(documents, want) {
 		t.Fatalf("unexpected documents: %v", documents)
 	}
 }

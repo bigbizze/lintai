@@ -9,6 +9,7 @@ import (
 
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/internal/canonical"
+	"github.com/bigbizze/lintai/internal/workspace"
 	"github.com/bigbizze/lintai/observe"
 )
 
@@ -56,7 +57,7 @@ func normalizeConfig(config Config) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	physical, err := filepath.EvalSymlinks(given)
+	physical, err := workspace.PhysicalPath(given)
 	if err != nil {
 		return Config{}, fmt.Errorf("workspace root: %w", err)
 	}

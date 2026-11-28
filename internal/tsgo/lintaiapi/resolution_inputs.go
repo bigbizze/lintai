@@ -265,9 +265,9 @@ func (fsys *resolutionInputFS) resolve(key string) string {
 }
 
 // documents maps each name of a file read for coordinates, relative to root
-// or absolute, to the resolved path of the file that supplied its text when
-// that path differs from the name.
-func (fsys *resolutionInputFS) documents(root string, names []string) map[string]string {
+// or absolute, to the resolved path of the file that supplied its text, in
+// its on-disk spelling, when that path differs from the name.
+func (fsys *resolutionInputFS) documents(root string, names []string) (map[string]string, error) {
 	fsys.mu.Lock()
 	defer fsys.mu.Unlock()
 	documents := make(map[string]string)
@@ -276,11 +276,19 @@ func (fsys *resolutionInputFS) documents(root string, names []string) map[string
 		if !filepath.IsAbs(path) {
 			path = filepath.Join(filepath.FromSlash(root), path)
 		}
-		if actual := fsys.realpaths[normalizeSlash(path)]; actual != "" && actual != path {
+		actual := fsys.realpaths[normalizeSlash(path)]
+		if actual == "" {
+			continue
+		}
+		actual, err := onDiskSpelling(actual)
+		if err != nil {
+			return nil, err
+		}
+		if actual != path {
 			documents[name] = actual
 		}
 	}
-	return documents
+	return documents, nil
 }
 
 func (fsys *resolutionInputFS) inputPath(path string) string { return normalizeSlash(path) }

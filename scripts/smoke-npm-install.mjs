@@ -364,6 +364,39 @@ try {
 	}
 }
 
+// On a case-insensitive volume, a workspace path typed in another letter case
+// names the same documents in a live visit and in a capture.
+{
+	const base = path.basename(repoDir);
+	const upper = base.toUpperCase();
+	const respelled = path.join(path.dirname(repoDir), upper === base ? base.toLowerCase() : upper);
+	const same = await Promise.all([fs.stat(repoDir), fs.stat(respelled).catch(() => undefined)]);
+	if (same[1]?.ino !== same[0].ino) {
+		console.log("skipping the letter-case check: the temporary volume is case-sensitive");
+	} else {
+		const options = { workspaceRoot: respelled, binary: path.join(repoDir, "observe-serve.mjs") };
+		const respelledLinter = new Linter({ cwd: respelled });
+		const respelledFile = path.join(respelled, filename);
+		const livePlugin = createLintaiPlugin(options);
+		const caseSession = createLintaiSession(options);
+		try {
+			const visited = respelledLinter.verify(
+				original,
+				[{ files: ["**/*.ts"], ...livePlugin.configs.all }],
+				{ filename: respelledFile },
+			);
+			assert.match(messages(visited), /\[arch.no-async\/violation\] example/);
+			const capture = caseSession.capture();
+			assert.deepEqual(capture.problems, []);
+			const captured = display(capture, original, respelledFile, respelledLinter);
+			assert.match(messages(captured), /\[arch.no-async\/violation\] example/);
+		} finally {
+			livePlugin.dispose();
+			caseSession.dispose();
+		}
+	}
+}
+
 // Lint one unchanged SourceCode object before and after an imported type
 // changes. Both rules share the file request on each independent visit.
 const live = createLintaiPlugin({

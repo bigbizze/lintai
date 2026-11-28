@@ -223,7 +223,7 @@ func physicalRoot(root string) string {
 	if err != nil {
 		return root
 	}
-	if physical, err := filepath.EvalSymlinks(absolute); err == nil {
+	if physical, err := workspace.PhysicalPath(absolute); err == nil {
 		return physical
 	}
 	return absolute

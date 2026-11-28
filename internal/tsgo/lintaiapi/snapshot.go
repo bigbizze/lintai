@@ -623,7 +623,9 @@ func BuildSnapshot(ctx context.Context, req BuildSnapshotRequest) (*Snapshot, er
 	for _, module := range snapshot.Modules {
 		names = append(names, module.Path)
 	}
-	snapshot.Documents = snapshot.capture.documents(root, names)
+	if snapshot.Documents, err = snapshot.capture.documents(root, names); err != nil {
+		return nil, err
+	}
 	snapshot.CompilerInputs = snapshot.capture.observations()
 	snapshot.capture = nil
 	return snapshot, nil
