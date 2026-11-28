@@ -347,26 +347,69 @@ func TestOpaqueProducerScopeContributesToResultIdentity(t *testing.T) {
 	}
 }
 
-func TestTypeScriptAndFakeComposeThroughCatalog(t *testing.T) {
-	// V01/V24: TypeScript and an independent fake compose with two namespaces,
-	// producer-owned location support, and no file-ID inference.
+func TestExternalTypeScriptAndFakeComposeThroughCatalog(t *testing.T) {
+	// The checked-in rule joins the TypeScript import specifier to an external
+	// inventory value and reports the TypeScript-owned import site.
 	repoRoot, _ := filepath.Abs("..")
 	workspace := filepath.Join(repoRoot, "testdata/fixtures/external-backend/mixed-facts")
 	fake := fakeProducer("catalog", "external_boundary")
-	setFakeRow(fake, "external_boundary", "catalog-api")
-	result, err := openTestSession(t, engine.Config{WorkspaceRoot: testpack.Build(t, repoRoot, workspace, "lintai-rules/*.ts")}, typescript.New(), fake).Check(context.Background())
-	if err != nil {
-		t.Fatal(err)
+	fake.scope = map[string]any{"environment": "production"}
+	fake.description.BaseRelations[0].Arguments[0] = facts.ArgumentDescription{
+		Name: "Specifier", Representations: []facts.ValueKind{facts.StringKind}, Role: facts.ValueRole, ReportSupport: facts.ReportNone,
 	}
-	if len(result.Diagnostics) != 1 {
-		t.Fatalf("expected one joined TypeScript/fake diagnostic, got %+v", result.Diagnostics)
+	fake.description.Schema = facts.Schema{Declarations: `Decl external_boundary(Specifier) descr [extensional(), arg(Specifier, "module specifier")].`}
+	fake.description.Helpers = nil
+	predicate := facts.Predicate{Name: "catalog.external_boundary", Arity: 1}
+	fake.rows[predicate] = [][]facts.Value{{facts.String("other-api")}}
+	unused := fakeProducer("unused", "item")
+	unused.failEmit = true
+	session := openTestSession(t, engine.Config{WorkspaceRoot: testpack.Build(t, repoRoot, workspace, "lintai-rules/*.ts")},
+		typescript.New(typescript.Options{Sources: []string{"src/handler.ts"}}), fake, unused)
+	check := func() engine.Result {
+		t.Helper()
+		result, err := session.Check(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
 	}
-	item := result.Diagnostics[0]
-	if item.RuleID != "fixture.external-boundary" || item.SourceLocation == nil || item.SourceLocation.File != "catalog/object.sql" {
+	first := check()
+	if len(first.Diagnostics) != 0 {
+		t.Fatalf("unmatched external value should not join: %+v", first.Diagnostics)
+	}
+	fake.revision = "inventory-v2"
+	fake.rows[predicate] = [][]facts.Value{{facts.String("catalog-api")}}
+	matched := check()
+	if matched.SnapshotVersion == first.SnapshotVersion || len(matched.Diagnostics) != 1 {
+		t.Fatalf("external revision did not add a joined diagnostic: %+v", matched)
+	}
+	item := matched.Diagnostics[0]
+	if item.RuleID != "fixture.external-boundary" || item.Message != "Import catalog-api is marked as an external boundary" ||
+		item.SourceLocation == nil || *item.SourceLocation != (diagnostics.SourceLocation{
+		File: "src/handler.ts", StartLine: 1, StartColumn: 1, EndLine: 1, EndColumn: 38,
+	}) ||
+		item.EntityIdentity == nil || !strings.HasPrefix(item.EntityIdentity.SemanticKey, "ts:") {
 		t.Fatalf("unexpected diagnostic from composed facts: %+v", item)
 	}
 	if got := strings.Join(item.Provenance.ProducerNamespaces, ","); got != "catalog,ts" {
 		t.Fatalf("producer provenance = %q", got)
+	}
+	fake.revision = "inventory-v3"
+	fake.failEmit = true
+	if _, err := session.Check(context.Background()); err == nil || !strings.Contains(err.Error(), "fixture emit failed") {
+		t.Fatalf("expected demanded producer failure: %v", err)
+	}
+	if _, err := session.Current(); err == nil {
+		t.Fatal("failed composition left a published result")
+	}
+	fake.revision = "inventory-v4"
+	fake.failEmit = false
+	fake.rows[predicate] = [][]facts.Value{{facts.String("other-api")}}
+	if recovered := check(); len(recovered.Diagnostics) != 0 || recovered.SnapshotVersion == matched.SnapshotVersion {
+		t.Fatalf("recovered inventory did not retract the finding: %+v", recovered)
+	}
+	if unused.prepares != 0 || unused.emits != 0 {
+		t.Fatalf("undemanded failing producer was invoked: prepares=%d emits=%d", unused.prepares, unused.emits)
 	}
 }
 

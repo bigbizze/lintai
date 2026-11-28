@@ -2,40 +2,69 @@ package main
 
 import (
 	"context"
+	"errors"
+	"slices"
 
 	"github.com/bigbizze/lintai/backend"
-	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/facts"
 	"github.com/bigbizze/lintai/observe"
 )
 
-// externalProducer demonstrates an immutable producer implemented in a separate module.
-type externalProducer struct{}
-
-func (externalProducer) Describe() (facts.ProducerDescription, error) {
-	return facts.DescribeSchema("example", "consumer.example", "v1", "example/1", nil, facts.Schema{Declarations: `Decl item(Entity) descr [extensional(), arg_role(Entity, "entity"), arg_report_support(Entity, "required")].`})
+// externalProducer represents an in-memory inventory with its own revision and scope.
+// The caller changes it only between session operations.
+type externalProducer struct {
+	namespace   string
+	revision    string
+	specifiers  []string
+	failPrepare bool
+	failEmit    bool
+	prepares    int
 }
-func (externalProducer) Prepare(ctx context.Context, _ backend.CollectionRequest, _ observe.Mode) (backend.Generation, error) {
+
+func (p *externalProducer) Describe() (facts.ProducerDescription, error) {
+	return facts.DescribeSchema(p.namespace, "consumer."+p.namespace, "v1", "inventory/1",
+		map[string]any{"inventory": "external modules"}, facts.Schema{Declarations: `
+			Decl external_boundary(Specifier) descr [extensional(), arg(Specifier, "module specifier")].
+		`})
+}
+func (p *externalProducer) Prepare(ctx context.Context, _ backend.CollectionRequest, _ observe.Mode) (backend.Generation, error) {
+	p.prepares++
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return externalGeneration{}, nil
+	if p.failPrepare {
+		return nil, errors.New("inventory preparation failed")
+	}
+	return externalGeneration{revision: p.revision, specifiers: slices.Clone(p.specifiers), failEmit: p.failEmit}, nil
 }
-func (externalProducer) Close() error { return nil }
+func (*externalProducer) Close() error { return nil }
 
-type externalGeneration struct{}
-
-func (externalGeneration) Metadata() backend.GenerationMetadata {
-	return backend.GenerationMetadata{InputRevision: "immutable-example-v1", ReusableFromObservations: true}
+type externalGeneration struct {
+	revision   string
+	specifiers []string
+	failEmit   bool
 }
-func (externalGeneration) Emit(ctx context.Context, builder *facts.Builder) error {
-	item, err := builder.Relation("item", 1)
+
+func (g externalGeneration) Metadata() backend.GenerationMetadata {
+	return backend.GenerationMetadata{
+		InputRevision: g.revision, Scope: map[string]any{"environment": "production"},
+		// In-memory changes have no filesystem observations, so each refresh
+		// must prepare again and obtain the current revision.
+		ReusableFromObservations: false,
+	}
+}
+func (g externalGeneration) Emit(ctx context.Context, builder *facts.Builder) error {
+	item, err := builder.Relation("external_boundary", 1)
 	if err != nil {
 		return err
 	}
-	builder.Add(item, facts.String("example"))
-	builder.Anchor("example", facts.AnchorSupport{Location: diagnostics.SourceLocation{File: "example.txt", StartLine: 1, StartColumn: 1, EndLine: 1, EndColumn: 2}, Description: "example item"})
+	for _, specifier := range g.specifiers {
+		builder.Add(item, facts.String(specifier))
+	}
+	if g.failEmit {
+		return errors.New("inventory emission failed")
+	}
 	return ctx.Err()
 }
 
-var _ backend.Producer = externalProducer{}
+var _ backend.Producer = (*externalProducer)(nil)
