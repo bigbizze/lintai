@@ -8,6 +8,20 @@ export const hostNames = names.filter((name) => name.endsWith(".ts"));
 assert.equal(names.length, 511);
 assert.equal(hostNames.length, 477);
 
+// These notices come from directives in the pinned fixture, not the adapter.
+// Only these exact locations, rule IDs, severities and messages may be omitted.
+const eslintDirectives = new Map([
+	["packages/zod/src/v3/ZodError.ts:206:7", "ban/ban"],
+	["packages/zod/src/v3/helpers/util.ts:40:39", "ban/ban"],
+	["packages/zod/src/v3/helpers/util.ts:41:40", "ban/ban"],
+	["packages/zod/src/v3/helpers/util.ts:66:40", "ban/ban"],
+	["packages/zod/src/v3/tests/object.test.ts:162:3", "ban/ban"],
+	["packages/zod/src/v3/types.ts:610:1", null],
+	["packages/zod/src/v3/types.ts:3085:5", "ban/ban"],
+	["packages/zod/src/v3/types.ts:3879:7", "@typescript-eslint/no-this-alias"],
+	["packages/zod/src/v3/types.ts:3898:7", "@typescript-eslint/no-this-alias"],
+]);
+
 export function engineRow(d) {
 	assert.equal(d.diagnostic_kind, "architecture_violation");
 	const { file, startLine, startColumn, endLine, endColumn } = d.source_location;
@@ -24,26 +38,44 @@ export function engineRow(d) {
 	];
 }
 
-function finding(name, rule, severity, message, range) {
+function finding(name, severity, message, range) {
 	const prefix = /^\[([^/\]]+)\/([^\]]+)\] ([\s\S]*)$/.exec(message);
 	assert.ok(prefix, `${name} unexpected adapter message: ${message}`);
 	const [, id, assertion, text] = prefix;
-	assert.equal(rule, severity);
 	return [name, id, assertion, severity, text, ...range];
 }
 
 export function eslintRows(name, messages) {
 	assert.ok(!messages.some((m) => m.fatal), `parse failure: ${name}`);
-	return messages
-		.filter((m) => m.ruleId?.startsWith("lintai/"))
-		.map((m) =>
-			finding(name, m.ruleId.slice(7), ["off", "warning", "error"][m.severity], m.message, [
-				m.line,
-				m.column,
-				m.endLine,
-				m.endColumn,
-			]),
+	const rows = [];
+	const notices = new Set();
+	for (const m of messages) {
+		if (m.ruleId !== "lintai/error" && m.ruleId !== "lintai/warning") {
+			const location = `${name}:${m.line}:${m.column}`;
+			assert.ok(eslintDirectives.has(location), `${name} unexpected ESLint rule: ${m.ruleId}`);
+			assert.ok(!notices.has(location), `${location} duplicate ESLint directive notice`);
+			notices.add(location);
+			const rule = eslintDirectives.get(location);
+			assert.equal(m.ruleId, rule, `${location} ESLint directive rule`);
+			assert.equal(m.severity, rule === null ? 1 : 2, `${location} ESLint directive severity`);
+			assert.equal(
+				m.message,
+				rule === null
+					? "Unused eslint-disable directive (no problems were reported)."
+					: `Definition for rule '${rule}' was not found.`,
+				`${location} ESLint directive message`,
+			);
+			continue;
+		}
+		assert.ok(
+			m.severity === 1 || m.severity === 2,
+			`${name} unexpected ESLint severity: ${m.severity}`,
 		);
+		const severity = m.severity === 1 ? "warning" : "error";
+		assert.equal(m.ruleId, `lintai/${severity}`, `${name} ESLint rule/severity mismatch`);
+		rows.push(finding(name, severity, m.message, [m.line, m.column, m.endLine, m.endColumn]));
+	}
+	return rows;
 }
 
 // Oxlint exposes byte spans. Decode both endpoints to the UTF-16 coordinates
@@ -52,8 +84,15 @@ export function oxlintRows(diagnostics) {
 	const sources = new Map();
 	return diagnostics.map((d) => {
 		const name = path.relative(root, path.resolve(root, d.filename));
-		const rule = /^lintai\(([^)]+)\)$/.exec(d.code);
-		assert.ok(rule, `unexpected Oxlint diagnostic: ${d.code}: ${d.message}`);
+		assert.ok(
+			d.code === "lintai(error)" || d.code === "lintai(warning)",
+			`${name} unexpected Oxlint rule: ${d.code}`,
+		);
+		assert.ok(
+			d.severity === "error" || d.severity === "warning",
+			`${name} unexpected Oxlint severity: ${d.severity}`,
+		);
+		assert.equal(d.code, `lintai(${d.severity})`, `${name} Oxlint rule/severity mismatch`);
 		if (!sources.has(name)) {
 			const bytes = readFileSync(path.join(root, name));
 			const starts = [0];
@@ -67,11 +106,21 @@ export function oxlintRows(diagnostics) {
 			return [line + 1, bytes.toString("utf8", starts[line], offset).length + 1];
 		};
 		const { offset, length } = d.labels[0].span;
-		return finding(name, rule[1], d.severity, d.message, [
+		return finding(name, d.severity, d.message, [
 			...position(offset),
 			...position(offset + length),
 		]);
 	});
+}
+
+export function manifestOrder(rows) {
+	const groups = new Map(hostNames.map((name) => [name, []]));
+	for (const row of rows) {
+		const group = groups.get(row[0]);
+		assert.ok(group, `unexpected host file: ${row[0]}`);
+		group.push(row);
+	}
+	return hostNames.flatMap((name) => groups.get(name));
 }
 
 export function checkHost(rows) {

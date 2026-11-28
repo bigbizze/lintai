@@ -4,7 +4,7 @@ import { closeSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { record, reset, saveRows } from "./metrics.mjs";
-import { checkHost, eslintRows, hostNames, oxlintRows } from "./semantic.mjs";
+import { checkHost, eslintRows, hostNames, manifestOrder, oxlintRows } from "./semantic.mjs";
 import { hosts, out, root } from "./settings.mjs";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
@@ -58,23 +58,21 @@ for (const host of ["eslint", "oxlint"]) {
 	assert.equal(result.status, 1, readFileSync(`${prefix}.stderr`, "utf8").slice(-2000));
 	const output = readFileSync(`${prefix}.json`);
 	const data = JSON.parse(output);
-	const messages = host === "eslint" ? data.flatMap((group) => group.messages) : data.diagnostics;
 	assert.equal(host === "eslint" ? data.length : data.number_of_files, hostNames.length);
 	const event = `${host}-cli-cold`;
-	let rows;
+	// Normalize file completion order while keeping each file's report order.
+	const rows = manifestOrder(
+		host === "eslint"
+			? data.flatMap((group) => eslintRows(path.relative(root, group.filePath), group.messages))
+			: oxlintRows(data.diagnostics),
+	);
 	if (host === "eslint") {
-		const groups = new Map(
-			data.map((group) => [path.relative(root, group.filePath), group.messages]),
-		);
-		rows = hostNames.flatMap((name) => eslintRows(name, groups.get(name)));
 		const expected = readFileSync(path.join(out, "eslint.jsonl"), "utf8");
 		assert.ok(
 			`${rows.map((row) => JSON.stringify(row)).join("\n")}\n` === expected,
 			"raw ESLint order/content differs",
 		);
 	} else {
-		// File completion order varies with native workers. Preserve report order within each file.
-		rows = oxlintRows(messages).sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
 		saveRows("oxlint", rows);
 	}
 	checkHost(rows);

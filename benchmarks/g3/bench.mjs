@@ -27,7 +27,7 @@ const lockSha = "508845cb8833310c3b723754ff82455c114e145881601bcc54e8f69cb89f6ad
 const fixtureSha = "7e392ea76bfa68ffa253c9bc9ba3f716b2537ae4a00facf0a4976671fa3ddf63";
 const oracle = {
 	engine: "d314a9239519c8aad70102ce5251a126bd116b8c02d73298d35d5cbf32babbbb",
-	eslint: "dfeb21655e25cf63220b769b47d4c305043a320c044550f1bf1737c724a9c62b",
+	host: "dfeb21655e25cf63220b769b47d4c305043a320c044550f1bf1737c724a9c62b",
 	sorted: "8651398689b3d7dfb77f965331921496d189bc00a6f367e457e866c9de1bbee1",
 };
 const sha = (data) => createHash("sha256").update(data).digest("hex");
@@ -189,7 +189,8 @@ const sorted = (text) =>
 		.map((line) => `${line}\n`)
 		.join("");
 assert.equal(sha(rows("engine")), oracle.engine, "native oracle");
-assert.equal(sha(rows("eslint")), oracle.eslint, "ESLint oracle");
+for (const label of ["eslint", "oxlint"])
+	assert.equal(sha(rows(label)), oracle.host, `${label} host-order oracle`);
 for (const label of ["engine", "eslint", "oxlint"])
 	assert.equal(sha(sorted(rows(label))), oracle.sorted, `${label} sorted oracle`);
 console.log(`G3 passed. Results: ${out}`);
