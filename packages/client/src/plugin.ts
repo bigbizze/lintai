@@ -17,7 +17,6 @@ import {
 	programLocation,
 	sourceDigest,
 	toReport,
-	workspaceChangedMessage,
 } from "./reports.js";
 import { Spawner } from "./spawner.js";
 
@@ -47,9 +46,8 @@ export type LintaiSession = {
 
 type Document = { readonly sourceDigest: string; readonly findings: readonly Readonly<Finding>[] };
 
-// Each capture's documents by canonical physical path. The problems of a
-// failed capture bound to a physical root belong to the files under it.
-type Registered = { byPath: Map<string, CapturedFile>; problemRoot?: string };
+// Each capture's documents by canonical physical path.
+type Registered = { byPath: Map<string, CapturedFile> };
 const documents = new WeakMap<LintaiCapture, Registered>();
 
 function register(capture: LintaiCapture, registered: Registered) {
@@ -82,26 +80,10 @@ function freezeCapture(response: WorkspaceAnalysis): LintaiCapture {
 	return register(capture, { byPath });
 }
 
-function failedCapture(message: string, problemRoot?: string): LintaiCapture {
+function failedCapture(message: string): LintaiCapture {
 	return register(Object.freeze({ problems: Object.freeze([message]), files: Object.freeze([]) }), {
 		byPath: new Map(),
-		problemRoot,
 	});
-}
-
-// The canonical physical path of a directory, or undefined when it does not
-// resolve.
-function physicalRootOf(root: string): string | undefined {
-	try {
-		return realpathSync.native(root);
-	} catch {
-		return undefined;
-	}
-}
-
-function isUnder(root: string, file: string) {
-	const relative = path.relative(root, file);
-	return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 }
 
 // The document the host file names when the callback runs: its canonical
@@ -120,33 +102,38 @@ const analysisProblem = (error: unknown) =>
 const disposedError = (error: unknown) =>
 	error instanceof Error && error.message === "lintai session is disposed";
 
-function openSession(options: LintaiOptions, linuxSpawner: boolean) {
-	const settings = Object.freeze({
-		...options,
-		workspaceRoot: path.resolve(options.workspaceRoot ?? findWorkspaceRoot(process.cwd())),
-	});
+function openSession(options: LintaiOptions, linuxSpawner: boolean, active = true) {
+	let relay: Spawner | undefined;
+	const useRelay = active && linuxSpawner && process.platform === "linux";
+	const client = active
+		? new LintAIClient(
+				{ ...options, workspaceRoot: options.workspaceRoot ?? findWorkspaceRoot(process.cwd()) },
+				useRelay
+					? (...args) => {
+							if (!relay) throw new Error("lintai helper is unavailable");
+							return relay.spawn(...args);
+						}
+					: undefined,
+			)
+		: undefined;
+	const settings = Object.freeze({ ...options, workspaceRoot: client?.workspaceRoot });
 	// The Linux Oxlint helper must start before the host enters rule callbacks,
 	// where starting a child can fail.
-	const relay =
-		linuxSpawner && settings.enabled !== false && process.platform === "linux"
-			? new Spawner()
-			: undefined;
-	let client: LintAIClient | undefined;
+	if (useRelay) relay = new Spawner();
 	let disposed = false;
 	const connect = () => {
 		if (disposed) throw new Error("lintai session is disposed");
-		client ??= new LintAIClient(settings, relay?.spawn);
+		if (!client) throw new Error("lintai session is disabled");
 		return client;
 	};
 	return {
 		settings,
 		capture(): LintaiCapture {
 			const connected = connect();
-			const root = physicalRootOf(settings.workspaceRoot);
 			try {
 				return freezeCapture(connected.getWorkspace());
 			} catch (error) {
-				if (error instanceof AnalysisError) return failedCapture(analysisProblem(error), root);
+				if (error instanceof AnalysisError) return failedCapture(analysisProblem(error));
 				throw error;
 			}
 		},
@@ -183,17 +170,16 @@ function visitDocument(
 	return { document, problems, mismatch };
 }
 
-function visitCapture(capture: LintaiCapture, context: FileContext): Visit {
+function visitCapture(
+	capture: LintaiCapture,
+	context: FileContext,
+	problems: readonly string[],
+): Visit {
 	const registered = documents.get(capture);
 	if (!registered) throw new Error("lintai: not a capture created by createLintaiSession");
-	const { byPath, problemRoot } = registered;
 	const file = documentOf(context);
-	const problems =
-		problemRoot === undefined || (file !== undefined && isUnder(problemRoot, file))
-			? capture.problems
-			: [];
 	if (file === undefined) return { problems, mismatch: true };
-	return visitDocument(problems, byPath.get(file), context);
+	return visitDocument(problems, registered.byPath.get(file), context);
 }
 
 function createRules(enabled: boolean, resolve: (context: FileContext) => Visit) {
@@ -243,9 +229,14 @@ function createRules(enabled: boolean, resolve: (context: FileContext) => Visit)
 
 /** Rules that analyze live (one validated request per visit) or once per invocation. */
 export function createLintaiRules(options: LintaiOptions, linuxSpawner = false) {
-	const session = openSession(options, linuxSpawner);
+	const session = openSession(options, linuxSpawner, options.enabled !== false);
 	const { operation } = session.settings;
 	const enabled = session.settings.enabled !== false;
+	const problemsForHost = (problems: readonly string[]) =>
+		problems.map(
+			(message) =>
+				`[lintai] Workspace ${session.settings.workspaceRoot}: ${message.replace(/^\[lintai\] /, "")}`,
+		);
 	let invocation: LintaiCapture | undefined;
 	const rules = createRules(enabled, (context) => {
 		if (!enabled) return { problems: [], mismatch: false };
@@ -256,21 +247,16 @@ export function createLintaiRules(options: LintaiOptions, linuxSpawner = false) 
 				if (disposedError(error)) throw error;
 				invocation = failedCapture(analysisProblem(error));
 			}
-			return visitCapture(invocation, context);
+			return visitCapture(invocation, context, problemsForHost(invocation.problems));
 		}
-		// The root is observed before the file, so a link that moves after
-		// either observation makes the reply's root differ from it.
-		const root = physicalRootOf(session.settings.workspaceRoot);
 		const file = documentOf(context);
 		if (file === undefined) return { problems: [], mismatch: true };
 		try {
 			const response = session.document(file);
-			if (response.physicalRoot !== root)
-				return { problems: [workspaceChangedMessage], mismatch: false };
-			return visitDocument(response.problems, response, context);
+			return visitDocument(problemsForHost(response.problems), response, context);
 		} catch (error) {
 			if (disposedError(error)) throw error;
-			return { problems: [analysisProblem(error)], mismatch: false };
+			return { problems: problemsForHost([analysisProblem(error)]), mismatch: false };
 		}
 	});
 	return {
@@ -286,5 +272,5 @@ export function createLintaiRules(options: LintaiOptions, linuxSpawner = false) 
 export function createCapturedRules(capture: LintaiCapture) {
 	if (!documents.has(capture))
 		throw new Error("lintai: not a capture created by createLintaiSession");
-	return createRules(true, (context) => visitCapture(capture, context));
+	return createRules(true, (context) => visitCapture(capture, context, []));
 }

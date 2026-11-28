@@ -1,4 +1,4 @@
-import { constants, accessSync, existsSync, readFileSync, statSync } from "node:fs";
+import { constants, accessSync, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 
 import { FrameDecoder, encodeFrame } from "./frames.js";
@@ -26,15 +26,14 @@ export type LintaiOptions = {
 export type FileAnalysis = { file: string; sourceDigest: string; findings: Finding[] };
 /** Every document of one analysis. A file is relative to physicalRoot inside it. */
 export type WorkspaceAnalysis = { problems: string[]; physicalRoot: string; files: FileAnalysis[] };
-/** One document of an analysis, its workspace problems and its physical root. */
+/** One document of an analysis and its workspace problems. */
 export type DocumentAnalysis = {
 	problems: string[];
-	physicalRoot: string;
 	sourceDigest: string;
 	findings: Finding[];
 };
 
-export const protocolVersion = 5;
+export const protocolVersion = 6;
 type Response = {
 	jsonrpc: string;
 	id: number;
@@ -48,15 +47,51 @@ export class AnalysisError extends Error {}
 
 export class LintAIClient {
 	private transport?: ServeTransport;
+	private executable?: string;
 	private decoder = new FrameDecoder();
 	private nextID = 1;
 	private disposed = false;
 	private readonly exit = () => this.dispose();
+	private readonly options: LintaiOptions & { workspaceRoot: string; workspaceAlias: string };
 
 	constructor(
-		private readonly options: LintaiOptions & { workspaceRoot: string },
+		options: LintaiOptions & { workspaceRoot: string },
 		private readonly spawnServe: SpawnServe = spawnNativeServe,
-	) {}
+	) {
+		const workspaceAlias = path.resolve(options.workspaceRoot);
+		let workspaceRoot: string;
+		try {
+			workspaceRoot = realpathSync.native(workspaceAlias);
+			if (!statSync(workspaceRoot).isDirectory()) throw new Error("is not a directory");
+		} catch (error) {
+			throw new Error(
+				`workspace root ${workspaceAlias}: ${error instanceof Error ? error.message : error}`,
+				{ cause: error },
+			);
+		}
+		const rebase = (value: string | undefined) => {
+			if (!value || !path.isAbsolute(value)) return value;
+			const relative = path.relative(workspaceAlias, value);
+			return relative !== ".." &&
+				!relative.startsWith(`..${path.sep}`) &&
+				!path.isAbsolute(relative)
+				? path.join(workspaceRoot, relative)
+				: value;
+		};
+		this.options = Object.freeze({
+			...options,
+			workspaceRoot,
+			workspaceAlias,
+			binary: rebase(options.binary),
+			rulesLock: rebase(options.rulesLock),
+			suppressionsLocation: rebase(options.suppressionsLocation),
+		});
+	}
+
+	/** The physical directory selected when this client was constructed. */
+	get workspaceRoot(): string {
+		return this.options.workspaceRoot;
+	}
 
 	/** Analyzes the saved workspace once and returns every document. */
 	getWorkspace(): WorkspaceAnalysis {
@@ -70,17 +105,24 @@ export class LintAIClient {
 
 	private analyze<T>(method: string, params: unknown, valid: (value: unknown) => value is T): T {
 		if (this.disposed) throw new Error("lintai client is disposed");
-		const { workspaceRoot, binary, ruleWorkers, factLimit, rulesLock, suppressionsLocation } =
-			this.options;
-		const executable = binary ?? findBinary(workspaceRoot);
-		let initialized = !!this.transport;
+		const {
+			workspaceRoot,
+			workspaceAlias,
+			binary,
+			ruleWorkers,
+			factLimit,
+			rulesLock,
+			suppressionsLocation,
+		} = this.options;
 		try {
 			if (!this.transport) {
-				this.transport = this.spawnServe(executable, ["serve"], workspaceRoot);
+				this.executable = binary ?? findBinary(workspaceRoot);
+				this.transport = this.spawnServe(this.executable, ["serve"], workspaceRoot);
 				process.once("exit", this.exit);
 				const result = this.request("initialize", {
 					protocolVersion,
 					workspaceRoot,
+					workspaceAlias,
 					ruleWorkers,
 					factLimit,
 					rulesLock,
@@ -91,19 +133,15 @@ export class LintAIClient {
 						`incompatible lintai serve protocol: expected ${protocolVersion}, received ${result?.protocolVersion}`,
 					);
 				}
-				initialized = true;
 			}
 			const result = this.request(method, params);
 			if (!valid(result)) throw new Error(`invalid lintai ${method} response`);
 			return result;
 		} catch (error) {
-			if (error instanceof AnalysisError) {
-				if (!initialized) this.disconnect(true);
-				throw error;
-			}
+			if (error instanceof AnalysisError) throw error;
 			this.disconnect(true);
 			throw new Error(
-				`lintai serve (${executable}) failed: ${error instanceof Error ? error.message : error}`,
+				`lintai serve (${this.executable ?? binary ?? "lintai"}) failed: ${error instanceof Error ? error.message : error}`,
 				{ cause: error },
 			);
 		}
@@ -130,7 +168,7 @@ export class LintAIClient {
 			if (response.error !== undefined) {
 				if (typeof response.error?.message !== "string" || typeof response.error?.code !== "number")
 					throw new Error(`invalid lintai serve error for ${method}`);
-				if (method !== "shutdown" && response.error.code === -32010)
+				if (method.startsWith("diagnostics/") && response.error.code === -32010)
 					throw new AnalysisError(response.error.message);
 				throw new Error(`${method}: ${response.error.message}`);
 			}
@@ -191,7 +229,6 @@ function isDocument(value: unknown): value is DocumentAnalysis {
 	return (
 		!!result &&
 		isProblems(result.problems) &&
-		isString(result.physicalRoot) &&
 		isDigest(result.sourceDigest) &&
 		isFindings(result.findings)
 	);

@@ -69,7 +69,9 @@ Set `Config.RulesLock` to enforce the approved pack bytes, effective policy and 
 
 ## Serve protocol
 
-`lintai serve` processes Content-Length framed JSON-RPC requests sequentially. Initialize with `{"protocolVersion":5,"workspaceRoot":"/project"}`. Both peers require version 5. Initialization supplies the session settings once. Each request resolves the workspace path and validates the workspace configuration and the publication once.
+`lintai serve` processes Content-Length framed JSON-RPC requests sequentially. Initialize with `{"protocolVersion":6,"workspaceRoot":"/project"}`. Both peers require version 6; an older version is rejected before analysis. A successful initialize resolves and binds an existing physical directory without analyzing it. A second initialize on the same connection is rejected, and a failed first initialize leaves the connection unbound. Each analysis request validates the saved configuration and publication in the bound directory. Malformed configuration is a recoverable analysis error; repair it and request again on the same connection. To select a different workspace, close the connection and initialize a new one.
+
+A client that already resolved an alias may send the selected physical path as `workspaceRoot` and the original absolute spelling as optional `workspaceAlias`. The alias only rebases absolute settings under that spelling; it never selects the workspace. A reconnect sends the same bound root and alias.
 
 Call `diagnostics/document` with `{"file":"/physical/project/src/example.ts"}` for one document, or `diagnostics/workspace` with `{}` for every document. A file is the document's absolute physical path or its name under the physical root. The results have these shapes:
 
@@ -79,7 +81,7 @@ type Finding = {
   message: string; range?: [number, number, number, number];
 };
 type DocumentResult = {
-  problems: string[]; physicalRoot: string; sourceDigest: string; findings: Finding[];
+  problems: string[]; sourceDigest: string; findings: Finding[];
 };
 type WorkspaceResult = {
   problems: string[]; physicalRoot: string;
@@ -87,6 +89,6 @@ type WorkspaceResult = {
 };
 ```
 
-A range is start line, start column, end line, end column, one-based in UTF-16 units. `physicalRoot` is the session's directory in both results; a file is relative to it inside it and absolute outside it. A client that resolved the workspace path itself compares `physicalRoot` with its own resolution to detect a workspace link that moved before the server opened the session. An empty digest means source identity is unavailable. The digest is lowercase hex SHA-256 over the analyzed logical text encoded in UTF-8 after removing one leading BOM. Native and Go diagnostics keep fact revisions, producers, anchors and explanations; the host payload omits them.
+A range is start line, start column, end line, end column, one-based in UTF-16 units. The workspace result's `physicalRoot` is the session's directory; a grouped file is relative to it inside it and absolute outside it. An empty digest means source identity is unavailable. The digest is lowercase hex SHA-256 over the analyzed logical text encoded in UTF-8 after removing one leading BOM. Native and Go diagnostics keep fact revisions, producers, anchors and explanations; the host payload omits them.
 
-A custom `server.Analyzer` implements `RefreshFile`, `RefreshAll` and `Close`, returning an `engine.FilesResult`; `RefreshFile` returns the document as its first group. A recoverable analysis failure returns JSON-RPC error `-32010`. `shutdown` responds with `{}` and closes the session.
+A custom `server.Analyzer` implements `RefreshFile`, `RefreshAll` and `Close`, returning an `engine.FilesResult`; `RefreshFile` returns the document as its first group. Its `server.AnalyzerFactory` binds the workspace and returns the analyzer or an error at initialization. A recoverable analysis failure returns JSON-RPC error `-32010`. `shutdown` responds with `{}` and closes the session.

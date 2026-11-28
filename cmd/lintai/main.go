@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -99,7 +98,10 @@ func runBuildRules(ctx context.Context, args []string) error {
 	if flags.NArg() != 0 {
 		return fmt.Errorf("unexpected build-rules arguments: %v", flags.Args())
 	}
-	physical := physicalRoot(*root)
+	physical, err := bindWorkspace(*root)
+	if err != nil {
+		return err
+	}
 	config, err := workspace.LoadWorkspaceConfig(filepath.Join(physical, "lintai.toml"), false)
 	if err != nil {
 		return err
@@ -199,49 +201,73 @@ func runFacts(ctx context.Context, args []string, stdout io.Writer) error {
 }
 
 func runServe(ctx context.Context) error {
-	instance := server.NewWithFactory(func(params server.InitializeParams) server.Analyzer {
-		return &serveSession{params: params}
+	instance := server.NewWithFactory(func(params server.InitializeParams) (server.Analyzer, error) {
+		return bindServeSession(params)
 	})
 	instance.Log = os.Stderr
 	return instance.Serve(ctx, os.Stdin, os.Stdout)
 }
 
-// serveSession owns the configuration receipt and the producers made from it.
-// physical is the workspace directory the session and its configuration use.
-type serveSession struct {
-	params   server.InitializeParams
-	config   workspace.WorkspaceConfig
-	physical string
-	receipt  bool
-	settings []typescript.Options
-	session  *engine.Session
-}
-
-// physicalRoot resolves the workspace path to the directory a session uses.
-func physicalRoot(root string) string {
+// bindWorkspace resolves a workspace path to the existing physical directory,
+// in its on-disk letter case, that a command or connection uses until it ends.
+func bindWorkspace(root string) (string, error) {
 	absolute, err := filepath.Abs(root)
 	if err != nil {
-		return root
+		return "", fmt.Errorf("workspace root %s: %w", root, err)
 	}
-	if physical, err := workspace.PhysicalPath(absolute); err == nil {
-		return physical
+	physical, err := workspace.PhysicalPath(absolute)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", fmt.Errorf("workspace root %s does not exist", absolute)
 	}
-	return absolute
+	if err != nil {
+		return "", fmt.Errorf("workspace root %s: %w", absolute, err)
+	}
+	info, err := os.Stat(physical)
+	if err != nil {
+		return "", fmt.Errorf("workspace root %s: %w", absolute, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("workspace root %s is not a directory", absolute)
+	}
+	return physical, nil
 }
 
-// configure follows a moved workspace link or changed configuration by
-// replacing the session. A session never changes its workspace.
+// serveSession serves the workspace its connection bound. It owns the
+// configuration receipt and the engine opened from it, and replaces the engine
+// when the configuration changes. alias is the client's spelling of the
+// workspace; absolute settings under it are rebased onto root.
+type serveSession struct {
+	params  server.InitializeParams
+	root    string
+	alias   string
+	config  workspace.WorkspaceConfig
+	session *engine.Session
+}
+
+func bindServeSession(params server.InitializeParams) (*serveSession, error) {
+	root, err := bindWorkspace(params.WorkspaceRoot)
+	if err != nil {
+		return nil, err
+	}
+	alias := params.WorkspaceAlias
+	if alias == "" {
+		alias = params.WorkspaceRoot
+	}
+	return &serveSession{params: params, root: root, alias: alias}, nil
+}
+
+// configure keeps the engine while the configuration it read is unchanged and
+// otherwise opens a new engine on the same bound directory.
 func (s *serveSession) configure(ctx context.Context) (err error) {
 	defer func() {
 		if err != nil {
-			_ = s.Close()
+			_ = s.release()
 		}
 	}()
 	if err = ctx.Err(); err != nil {
 		return err
 	}
-	physical := physicalRoot(s.params.WorkspaceRoot)
-	if s.receipt && s.session != nil && physical == s.physical && len(s.config.Observations.Records()) != 0 {
+	if s.session != nil && len(s.config.Observations.Records()) != 0 {
 		var changed *observe.Record
 		changed, err = s.config.Observations.Changed(ctx, observe.Quick)
 		if err != nil {
@@ -251,38 +277,28 @@ func (s *serveSession) configure(ctx context.Context) (err error) {
 			return ctx.Err()
 		}
 	}
-	var config workspace.WorkspaceConfig
-	var settings []typescript.Options
-	settings, config, physical, err = captureTypeScriptSettings(s.params.WorkspaceRoot, "", "", false, "", false, nil, nil)
+	settings, config, err := readProjectSettings(s.root, s.alias, "", "", false, "", false, nil, nil)
 	if err != nil {
 		return fmt.Errorf("load workspace configuration: %w", err)
 	}
 	if err = ctx.Err(); err != nil {
 		return err
 	}
-	if s.session == nil || physical != s.physical || !reflect.DeepEqual(settings, s.settings) || !reflect.DeepEqual(config.Rule, s.config.Rule) {
-		if s.session != nil {
-			err = s.session.Close()
-			s.session = nil
-			if err != nil {
-				return err
-			}
-		}
-		producers := make([]backend.Producer, 0, len(settings))
-		for _, item := range settings {
-			producers = append(producers, newBackend(item))
-		}
-		root := s.params.WorkspaceRoot
-		s.session, err = openSession(engine.Config{
-			WorkspaceRoot: physical, Rule: config.Rule, FactLimit: s.params.FactLimit, RuleWorkers: s.params.RuleWorkers,
-			RulesLock: engine.RebasePath(root, physical, s.params.RulesLock), SuppressionsLocation: engine.RebasePath(root, physical, s.params.SuppressionsLocation),
-		}, producers...)
-		if err != nil {
-			return err
-		}
-		s.settings = settings
+	if err = s.release(); err != nil {
+		return err
 	}
-	s.config, s.physical, s.receipt = config, physical, true
+	producers := make([]backend.Producer, 0, len(settings))
+	for _, item := range settings {
+		producers = append(producers, newBackend(item))
+	}
+	s.session, err = openSession(engine.Config{
+		WorkspaceRoot: s.root, Rule: config.Rule, FactLimit: s.params.FactLimit, RuleWorkers: s.params.RuleWorkers,
+		RulesLock: engine.RebasePath(s.alias, s.root, s.params.RulesLock), SuppressionsLocation: engine.RebasePath(s.alias, s.root, s.params.SuppressionsLocation),
+	}, producers...)
+	if err != nil {
+		return err
+	}
+	s.config = config
 	return nil
 }
 
@@ -300,17 +316,18 @@ func (s *serveSession) RefreshAll(ctx context.Context) (engine.FilesResult, erro
 	return s.session.RefreshAll(ctx)
 }
 
-func (s *serveSession) Close() error {
-	s.receipt = false
-	s.config, s.physical = workspace.WorkspaceConfig{}, ""
-	s.settings = nil
-	if s.session != nil {
-		session := s.session
-		s.session = nil
-		return session.Close()
+// release closes the engine. The session keeps its bound directory.
+func (s *serveSession) release() error {
+	s.config = workspace.WorkspaceConfig{}
+	if s.session == nil {
+		return nil
 	}
-	return nil
+	session := s.session
+	s.session = nil
+	return session.Close()
 }
+
+func (s *serveSession) Close() error { return s.release() }
 
 func flagProvided(flags *flag.FlagSet, name string) bool {
 	provided := false
@@ -322,23 +339,33 @@ func flagProvided(flags *flag.FlagSet, name string) bool {
 	return provided
 }
 
-// captureTypeScriptSettings resolves the workspace path to its physical
-// directory before it reads the configuration, reads every input through that
-// directory and returns it. Absolute paths under the given path are rebased
-// onto the physical directory.
+// captureTypeScriptSettings binds the workspace path to its physical directory
+// before it reads the configuration, and returns the settings read through
+// that directory with the directory.
 func captureTypeScriptSettings(workspaceRoot, explicitConfig, filesOverride string, filesSet bool, sourceLinksOverride string, sourceLinksSet bool, invocationExcludes, invocationSources []string) ([]typescript.Options, workspace.WorkspaceConfig, string, error) {
+	physical, err := bindWorkspace(workspaceRoot)
+	if err != nil {
+		return nil, workspace.WorkspaceConfig{}, "", err
+	}
+	settings, config, err := readProjectSettings(physical, workspaceRoot, explicitConfig, filesOverride, filesSet, sourceLinksOverride, sourceLinksSet, invocationExcludes, invocationSources)
+	return settings, config, physical, err
+}
+
+// readProjectSettings reads the configuration of the bound physical directory.
+// Absolute paths under alias, the caller's spelling of the workspace, are
+// rebased onto that directory. alias never selects the workspace.
+func readProjectSettings(physical, alias, explicitConfig, filesOverride string, filesSet bool, sourceLinksOverride string, sourceLinksSet bool, invocationExcludes, invocationSources []string) ([]typescript.Options, workspace.WorkspaceConfig, error) {
 	invocationDir, err := os.Getwd()
 	if err != nil {
-		return nil, workspace.WorkspaceConfig{}, "", err
+		return nil, workspace.WorkspaceConfig{}, err
 	}
-	physical := physicalRoot(workspaceRoot)
 	configPath, optional, err := workspace.ResolveConfigPath(physical, invocationDir, explicitConfig)
 	if err != nil {
-		return nil, workspace.WorkspaceConfig{}, "", err
+		return nil, workspace.WorkspaceConfig{}, err
 	}
-	config, err := workspace.LoadWorkspaceConfig(engine.RebasePath(workspaceRoot, physical, configPath), optional)
+	config, err := workspace.LoadWorkspaceConfig(engine.RebasePath(alias, physical, configPath), optional)
 	if err != nil {
-		return nil, workspace.WorkspaceConfig{}, "", err
+		return nil, workspace.WorkspaceConfig{}, err
 	}
 	producers := config.Producers
 	if len(producers) == 0 {
@@ -350,7 +377,7 @@ func captureTypeScriptSettings(workspaceRoot, explicitConfig, filesOverride stri
 	}
 	sort.Strings(namespaces)
 	if len(namespaces) > 1 && (filesSet || sourceLinksSet) {
-		return nil, workspace.WorkspaceConfig{}, "", fmt.Errorf("TypeScript command-line scope flags are ambiguous with multiple TypeScript producers; configure them in lintai.toml")
+		return nil, workspace.WorkspaceConfig{}, fmt.Errorf("TypeScript command-line scope flags are ambiguous with multiple TypeScript producers; configure them in lintai.toml")
 	}
 	settings := make([]typescript.Options, 0, len(namespaces))
 	for _, namespace := range namespaces {
@@ -360,7 +387,7 @@ func captureTypeScriptSettings(workspaceRoot, explicitConfig, filesOverride stri
 			implementation = "lintai.typescript"
 		}
 		if implementation != "lintai.typescript" {
-			return nil, workspace.WorkspaceConfig{}, "", fmt.Errorf("unknown implementation %q for producer %q", implementation, namespace)
+			return nil, workspace.WorkspaceConfig{}, fmt.Errorf("unknown implementation %q for producer %q", implementation, namespace)
 		}
 		fileMode := producerConfig.Files
 		if fileMode == "" {
@@ -371,7 +398,7 @@ func captureTypeScriptSettings(workspaceRoot, explicitConfig, filesOverride stri
 		}
 		scope, err := typescript.ParseFileScope(fileMode)
 		if err != nil {
-			return nil, workspace.WorkspaceConfig{}, "", err
+			return nil, workspace.WorkspaceConfig{}, err
 		}
 		sourceLinks := producerConfig.SourceLinks
 		if sourceLinksSet {
@@ -379,15 +406,15 @@ func captureTypeScriptSettings(workspaceRoot, explicitConfig, filesOverride stri
 		}
 		sources := append(slices.Clone(config.Sources), invocationSources...)
 		for i, source := range sources {
-			sources[i] = engine.RebasePath(workspaceRoot, physical, source)
+			sources[i] = engine.RebasePath(alias, physical, source)
 		}
 		settings = append(settings, typescript.Options{
 			Namespace: namespace, WorkspaceExcludes: config.Exclude,
 			Includes: config.Include, Sources: sources,
-			Excludes: invocationExcludes, Files: scope, SourceLinks: engine.RebasePath(workspaceRoot, physical, sourceLinks),
+			Excludes: invocationExcludes, Files: scope, SourceLinks: engine.RebasePath(alias, physical, sourceLinks),
 		})
 	}
-	return settings, config, physical, nil
+	return settings, config, nil
 }
 
 type producerScope struct {
@@ -664,7 +691,11 @@ func runRules(ctx context.Context, args []string, stdout io.Writer) error {
 	if flags.NArg() != 0 {
 		return fmt.Errorf("unexpected arguments: %v", flags.Args())
 	}
-	list, err := engine.ListRules(ctx, *root)
+	physical, err := bindWorkspace(*root)
+	if err != nil {
+		return err
+	}
+	list, err := engine.ListRules(ctx, physical)
 	if err != nil {
 		return err
 	}
