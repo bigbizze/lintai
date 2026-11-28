@@ -63,9 +63,11 @@ type WorkspaceResult struct {
 	Files        []FileFindings `json:"files"`
 }
 
-// DocumentResult holds one document of an analysis and its workspace problems.
+// DocumentResult holds one document of an analysis, its workspace problems and
+// the physical root of the workspace the analysis used.
 type DocumentResult struct {
 	Problems     []string  `json:"problems"`
+	PhysicalRoot string    `json:"physicalRoot"`
 	SourceDigest string    `json:"sourceDigest"`
 	Findings     []Finding `json:"findings"`
 }
@@ -211,7 +213,7 @@ func (s *Server) handleDocument(ctx context.Context, rawParams json.RawMessage) 
 	if err != nil {
 		return DocumentResult{}, err
 	}
-	document := DocumentResult{Problems: problemStrings(result.WorkspaceProblems), Findings: []Finding{}}
+	document := DocumentResult{Problems: problemStrings(result.WorkspaceProblems), PhysicalRoot: result.PhysicalRoot, Findings: []Finding{}}
 	if len(result.Files) > 0 {
 		document.SourceDigest, document.Findings = result.Files[0].SourceDigest, findings(result.Files[0].Diagnostics)
 	}

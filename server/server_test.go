@@ -94,7 +94,7 @@ func TestFramedOperations(t *testing.T) {
 			}
 		case 5:
 			var result DocumentResult
-			if err := json.Unmarshal(body, &result); err != nil || result.SourceDigest != "digest" || result.Findings == nil || !reflect.DeepEqual(result.Problems, problems) {
+			if err := json.Unmarshal(body, &result); err != nil || result.SourceDigest != "digest" || result.PhysicalRoot != "/workspace" || result.Findings == nil || !reflect.DeepEqual(result.Problems, problems) {
 				t.Fatalf("document: %s", body)
 			}
 		case 6:

@@ -76,13 +76,15 @@ type Finding = {
   ruleId: string; assertionId: string; severity: "error" | "warning";
   message: string; range?: [number, number, number, number];
 };
-type DocumentResult = { problems: string[]; sourceDigest: string; findings: Finding[] };
+type DocumentResult = {
+  problems: string[]; physicalRoot: string; sourceDigest: string; findings: Finding[];
+};
 type WorkspaceResult = {
   problems: string[]; physicalRoot: string;
   files: Array<{ file: string; sourceDigest: string; findings: Finding[] }>;
 };
 ```
 
-A range is start line, start column, end line, end column, one-based in UTF-16 units. `physicalRoot` is the session's directory; a file is relative to it inside it and absolute outside it. An empty digest means source identity is unavailable. The digest is lowercase hex SHA-256 over the analyzed logical text encoded in UTF-8 after removing one leading BOM. Native and Go diagnostics keep fact revisions, producers, anchors and explanations; the host payload omits them.
+A range is start line, start column, end line, end column, one-based in UTF-16 units. `physicalRoot` is the session's directory in both results; a file is relative to it inside it and absolute outside it. A client that resolved the workspace path itself compares `physicalRoot` with its own resolution to detect a workspace link that moved before the server opened the session. An empty digest means source identity is unavailable. The digest is lowercase hex SHA-256 over the analyzed logical text encoded in UTF-8 after removing one leading BOM. Native and Go diagnostics keep fact revisions, producers, anchors and explanations; the host payload omits them.
 
 A custom `server.Analyzer` implements `RefreshFile`, `RefreshAll` and `Close`, returning an `engine.FilesResult`; `RefreshFile` returns the document as its first group. A recoverable analysis failure returns JSON-RPC error `-32010`. `shutdown` responds with `{}` and closes the session.

@@ -17,6 +17,7 @@ import {
 	programLocation,
 	sourceDigest,
 	toReport,
+	workspaceChangedMessage,
 } from "./reports.js";
 import { Spawner } from "./spawner.js";
 
@@ -46,11 +47,13 @@ export type LintaiSession = {
 
 type Document = { readonly sourceDigest: string; readonly findings: readonly Readonly<Finding>[] };
 
-// Each capture's documents by canonical physical path.
-const documents = new WeakMap<LintaiCapture, Map<string, CapturedFile>>();
+// Each capture's documents by canonical physical path. The problems of a
+// failed capture bound to a physical root belong to the files under it.
+type Registered = { byPath: Map<string, CapturedFile>; problemRoot?: string };
+const documents = new WeakMap<LintaiCapture, Registered>();
 
-function register(capture: LintaiCapture, byPath: Map<string, CapturedFile>) {
-	documents.set(capture, byPath);
+function register(capture: LintaiCapture, registered: Registered) {
+	documents.set(capture, registered);
 	return capture;
 }
 
@@ -76,14 +79,29 @@ function freezeCapture(response: WorkspaceAnalysis): LintaiCapture {
 		problems: Object.freeze([...response.problems]),
 		files: Object.freeze(files),
 	});
-	return register(capture, byPath);
+	return register(capture, { byPath });
 }
 
-function failedCapture(message: string): LintaiCapture {
-	return register(
-		Object.freeze({ problems: Object.freeze([message]), files: Object.freeze([]) }),
-		new Map(),
-	);
+function failedCapture(message: string, problemRoot?: string): LintaiCapture {
+	return register(Object.freeze({ problems: Object.freeze([message]), files: Object.freeze([]) }), {
+		byPath: new Map(),
+		problemRoot,
+	});
+}
+
+// The canonical physical path of a directory, or undefined when it does not
+// resolve.
+function physicalRootOf(root: string): string | undefined {
+	try {
+		return realpathSync.native(root);
+	} catch {
+		return undefined;
+	}
+}
+
+function isUnder(root: string, file: string) {
+	const relative = path.relative(root, file);
+	return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 }
 
 // The document the host file names when the callback runs: its canonical
@@ -124,10 +142,11 @@ function openSession(options: LintaiOptions, linuxSpawner: boolean) {
 		settings,
 		capture(): LintaiCapture {
 			const connected = connect();
+			const root = physicalRootOf(settings.workspaceRoot);
 			try {
 				return freezeCapture(connected.getWorkspace());
 			} catch (error) {
-				if (error instanceof AnalysisError) return failedCapture(analysisProblem(error));
+				if (error instanceof AnalysisError) return failedCapture(analysisProblem(error), root);
 				throw error;
 			}
 		},
@@ -165,11 +184,16 @@ function visitDocument(
 }
 
 function visitCapture(capture: LintaiCapture, context: FileContext): Visit {
-	const byPath = documents.get(capture);
-	if (!byPath) throw new Error("lintai: not a capture created by createLintaiSession");
+	const registered = documents.get(capture);
+	if (!registered) throw new Error("lintai: not a capture created by createLintaiSession");
+	const { byPath, problemRoot } = registered;
 	const file = documentOf(context);
-	if (file === undefined) return { problems: capture.problems, mismatch: true };
-	return visitDocument(capture.problems, byPath.get(file), context);
+	const problems =
+		problemRoot === undefined || (file !== undefined && isUnder(problemRoot, file))
+			? capture.problems
+			: [];
+	if (file === undefined) return { problems, mismatch: true };
+	return visitDocument(problems, byPath.get(file), context);
 }
 
 function createRules(enabled: boolean, resolve: (context: FileContext) => Visit) {
@@ -234,10 +258,15 @@ export function createLintaiRules(options: LintaiOptions, linuxSpawner = false) 
 			}
 			return visitCapture(invocation, context);
 		}
+		// The root is observed before the file, so a link that moves after
+		// either observation makes the reply's root differ from it.
+		const root = physicalRootOf(session.settings.workspaceRoot);
 		const file = documentOf(context);
 		if (file === undefined) return { problems: [], mismatch: true };
 		try {
 			const response = session.document(file);
+			if (response.physicalRoot !== root)
+				return { problems: [workspaceChangedMessage], mismatch: false };
 			return visitDocument(response.problems, response, context);
 		} catch (error) {
 			if (disposedError(error)) throw error;

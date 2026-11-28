@@ -18,7 +18,7 @@ import test from "node:test";
 import { LintAIClient, type LintaiOptions, findBinary } from "./client.js";
 import { FrameDecoder, encodeFrame } from "./frames.js";
 import { createCapturedRules, createLintaiRules, createLintaiSession } from "./plugin.js";
-import { type Report, mismatchMessage } from "./reports.js";
+import { type Report, mismatchMessage, workspaceChangedMessage } from "./reports.js";
 import { NativeServeTransport } from "./transport.js";
 
 test("split headers, split UTF-8 payloads and adjacent frames", () => {
@@ -135,13 +135,13 @@ process.stdin.on("data", (chunk) => {
 }
 
 // A document request gets one finding naming the requested path. A workspace
-// request gets FILES under the server's physical root.
+// request gets FILES. Both name the server's physical root.
 const echoFindings = `
 	if (method === "initialize") return { result: { protocolVersion: 5 } };
 	const finding = (message) => [{ ruleId: "r", assertionId: "a", severity: "error", message }];
-	if (method === "diagnostics/document")
-		return { result: { problems: [], sourceDigest: "", findings: finding(params.file) } };
 	const physicalRoot = fs.realpathSync.native(process.cwd());
+	if (method === "diagnostics/document")
+		return { result: { problems: [], physicalRoot, sourceDigest: "", findings: finding(params.file) } };
 	const files = FILES.map((file) => ({ file, sourceDigest: "", findings: finding(file) }));
 	return { result: { problems: [], physicalRoot, files } };
 `;
@@ -159,8 +159,10 @@ function visit(rules: ReturnType<typeof createCapturedRules>, physicalFilename: 
 	return messages;
 }
 
-test("a failed capture shows its problem on every visit, then a later capture recovers", () => {
+test("a failed capture shows its problem on visits under its workspace, then a later capture recovers", () => {
 	const root = mkdtempSync(path.join(tmpdir(), "lintai-analysis-"));
+	const other = mkdtempSync(path.join(tmpdir(), "lintai-other-"));
+	writeFileSync(path.join(other, "b.js"), "");
 	const serve = fakeServe(
 		root,
 		`
@@ -182,6 +184,7 @@ test("a failed capture shows its problem on every visit, then a later capture re
 		assert.deepEqual(first.files, []);
 		assert.match(first.problems[0], /Could not analyze the workspace: invalid TOML/);
 		assert.deepEqual(visit(createCapturedRules(first), serve.binary), first.problems);
+		assert.deepEqual(visit(createCapturedRules(first), path.join(other, "b.js")), []);
 
 		const second = session.capture();
 		assert.match(second.problems[0], /Could not analyze the workspace: refresh failed/);
@@ -194,6 +197,7 @@ test("a failed capture shows its problem on every visit, then a later capture re
 	} finally {
 		session.dispose();
 		rmSync(root, { recursive: true, force: true });
+		rmSync(other, { recursive: true, force: true });
 	}
 });
 
@@ -280,9 +284,9 @@ test("a moved workspace link does not show another document's findings", () => {
 		assert.deepEqual(visit(capture, file), ["[r/a] src/a.js"]);
 		rmSync(current);
 		symlinkSync(path.join(root, "b"), current, "dir");
-		// The host file is now b's document: a live visit asks for it, and a's
-		// capture has no findings for it.
-		assert.deepEqual(visit(live, file), [`[r/a] ${path.join(root, "b", "src", "a.js")}`]);
+		// The host file is now b's document. The server still analyzes a, so a
+		// live visit shows the retry notice, and a's capture has no findings for it.
+		assert.deepEqual(visit(live, file), [workspaceChangedMessage]);
 		assert.deepEqual(visit(capture, file), []);
 	} finally {
 		live.dispose();

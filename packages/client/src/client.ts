@@ -26,8 +26,13 @@ export type LintaiOptions = {
 export type FileAnalysis = { file: string; sourceDigest: string; findings: Finding[] };
 /** Every document of one analysis. A file is relative to physicalRoot inside it. */
 export type WorkspaceAnalysis = { problems: string[]; physicalRoot: string; files: FileAnalysis[] };
-/** One document of an analysis and the workspace problems of that analysis. */
-export type DocumentAnalysis = { problems: string[]; sourceDigest: string; findings: Finding[] };
+/** One document of an analysis, its workspace problems and its physical root. */
+export type DocumentAnalysis = {
+	problems: string[];
+	physicalRoot: string;
+	sourceDigest: string;
+	findings: Finding[];
+};
 
 export const protocolVersion = 5;
 type Response = {
@@ -186,6 +191,7 @@ function isDocument(value: unknown): value is DocumentAnalysis {
 	return (
 		!!result &&
 		isProblems(result.problems) &&
+		isString(result.physicalRoot) &&
 		isDigest(result.sourceDigest) &&
 		isFindings(result.findings)
 	);
