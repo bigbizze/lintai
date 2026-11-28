@@ -9,11 +9,11 @@ import (
 	"github.com/bigbizze/lintai/runtime"
 )
 
-func (rule *ruleRecord) addError(id, phase string, version int, snapshot string, producers []string, message string) {
-	rule.diagnostics = append(rule.diagnostics, errorDiagnostic(id, phase, version, snapshot, producers, message))
+func (rule *ruleRecord) addError(id, phase string, version int, message string) {
+	rule.diagnostics = append(rule.diagnostics, errorDiagnostic(id, phase, version, "", nil, message))
 }
 
-func classifyRuleIDs(catalog *ruleCatalog, snapshot string) (map[string]struct{}, int) {
+func classifyRuleIDs(catalog *ruleCatalog) (map[string]struct{}, int) {
 	known := make(map[string]struct{})
 	byID := make(map[string][]*ruleRecord)
 	loaded := 0
@@ -38,16 +38,16 @@ func classifyRuleIDs(catalog *ruleCatalog, snapshot string) (map[string]struct{}
 		for i, peer := range peers {
 			keys[i] = peer.path
 		}
-		rule.addError(rule.metadata.ID, "config", rule.metadata.Version, snapshot, nil, duplicateIDMessage(rule.metadata.ID, keys))
+		rule.addError(rule.metadata.ID, "config", rule.metadata.Version, duplicateIDMessage(rule.metadata.ID, keys))
 		rule.disposition = ruleDuplicate
 	}
 	return known, loaded
 }
 
-func (e *Session) generateRulePrograms(catalog *ruleCatalog, options Options, snapshot string) {
+func generateRulePrograms(catalog *ruleCatalog, options Config) {
 	for _, rule := range catalog.rules {
 		if rule.loadError != nil {
-			rule.addError(ruleIDOrPath(rule.metadata.ID, rule.path), "load", rule.metadata.Version, snapshot, nil, fmt.Sprintf("%s: %v", rule.path, rule.loadError))
+			rule.addError(ruleIDOrPath(rule.metadata.ID, rule.path), "load", rule.metadata.Version, fmt.Sprintf("%s: %v", rule.path, rule.loadError))
 			continue
 		}
 		if rule.disposition != rulePending {
@@ -59,14 +59,13 @@ func (e *Session) generateRulePrograms(catalog *ruleCatalog, options Options, sn
 			continue
 		}
 		if err := rule.loaded.Configure(options.Rule[rule.metadata.ID].Options); err != nil {
-			rule.addError(rule.metadata.ID, "config", rule.metadata.Version, snapshot, nil, err.Error())
+			rule.addError(rule.metadata.ID, "config", rule.metadata.Version, err.Error())
 			rule.disposition = ruleFailed
 			continue
 		}
-		e.stats.programBuilds.Add(1)
 		output, err := rule.loaded.Program()
 		if err != nil {
-			rule.addError(rule.metadata.ID, "program", rule.metadata.Version, snapshot, nil, err.Error())
+			rule.addError(rule.metadata.ID, "program", rule.metadata.Version, err.Error())
 			rule.disposition = ruleFailed
 			continue
 		}
@@ -74,7 +73,7 @@ func (e *Session) generateRulePrograms(catalog *ruleCatalog, options Options, sn
 	}
 }
 
-func (e *Session) prepareRulePlans(catalog *ruleCatalog, producers producerCatalog, snapshot string) {
+func prepareRulePlans(catalog *ruleCatalog, producers producerCatalog) {
 	for _, rule := range catalog.rules {
 		if rule.disposition != ruleGenerated {
 			continue
@@ -88,7 +87,6 @@ func (e *Session) prepareRulePlans(catalog *ruleCatalog, producers producerCatal
 		}
 		var perr *phaseError
 		if plan == nil {
-			e.stats.mangleCompiles.Add(1)
 			plan, perr = prepareProgram(producers.sources, producers.schemaDecls, producers.namespaces,
 				rule.output, metadata.Report, metadata.ExpectNonEmpty, metadata.Suppressions)
 			if perr == nil && keyErr == nil && key != "" {
@@ -96,7 +94,7 @@ func (e *Session) prepareRulePlans(catalog *ruleCatalog, producers producerCatal
 			}
 		}
 		if perr != nil {
-			rule.addError(rule.metadata.ID, perr.phase, rule.metadata.Version, snapshot, producers.namespaces, perr.Error())
+			rule.addError(rule.metadata.ID, perr.phase, rule.metadata.Version, perr.Error())
 			rule.disposition = ruleFailed
 			continue
 		}

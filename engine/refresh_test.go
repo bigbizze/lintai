@@ -77,18 +77,17 @@ func TestRefreshPublicationAndReuse(t *testing.T) {
 	}
 	var evaluations atomic.Int64
 	options := parallelFixtureOptions(t, repo, workspace)
-	options.beforeEvaluation = func() { evaluations.Add(1) }
-	session := openTestSession(t, Options{}, producer)
-	defer session.Close()
+	session := openTestSession(t, options, producer)
+	session.hooks.beforeEvaluation = func() { evaluations.Add(1) }
 
-	first, err := session.Check(context.Background(), options)
+	first, err := session.Check(context.Background())
 	if err != nil || len(first.Diagnostics) != 3 {
 		t.Fatalf("captured result: %+v %v", first, err)
 	}
 	if mismatch, err := session.currentResult.observations.Changed(context.Background(), observe.Quick); err != nil || mismatch == nil {
 		t.Fatalf("published evidence did not retain the captured version: %v %v", mismatch, err)
 	}
-	refreshed, err := session.Refresh(context.Background(), options, "catalog/items.sql")
+	refreshed, err := refreshOne(context.Background(), session, "catalog/items.sql")
 	if err != nil || len(refreshed.Diagnostics) != 3 || len(refreshed.WorkspaceProblems) != 0 {
 		t.Fatalf("changed input: %+v %v", refreshed, err)
 	}
@@ -96,38 +95,37 @@ func TestRefreshPublicationAndReuse(t *testing.T) {
 		t.Fatalf("validation modes: %v", producer.modes)
 	}
 	counts := func() string {
-		return fmt.Sprintf("goja=%d program=%d plan=%d describe=%d prepare=%d emit=%d eval=%d", session.stats.gojaRuntimes.Load(), session.stats.programBuilds.Load(), session.stats.mangleCompiles.Load(), producer.describes.Load(), producer.prepareCalls.Load(), producer.emitCalls.Load(), evaluations.Load())
+		return fmt.Sprintf("describe=%d prepare=%d emit=%d eval=%d", producer.describes.Load(), producer.prepareCalls.Load(), producer.emitCalls.Load(), evaluations.Load())
 	}
 	if producer.describes.Load() != 1 {
 		t.Fatalf("Describe called %d times", producer.describes.Load())
 	}
 	before := counts()
-	if session.stats.gojaRuntimes.Load() == 0 || session.stats.mangleCompiles.Load() == 0 || producer.prepareCalls.Load() == 0 || producer.emitCalls.Load() == 0 || evaluations.Load() == 0 {
+	if producer.prepareCalls.Load() == 0 || producer.emitCalls.Load() == 0 || evaluations.Load() == 0 {
 		t.Fatalf("fixture did not execute all stages: %s", before)
 	}
-	options.RuleWorkers = 2
-	warm, err := session.Refresh(context.Background(), options, "catalog/items.sql")
+	warm, err := refreshOne(context.Background(), session, "catalog/items.sql")
 	if err != nil || len(warm.Diagnostics) != 3 || counts() != before {
 		t.Fatalf("unchanged refresh did work: before %s after %s result=%+v err=%v", before, counts(), warm, err)
 	}
-	absolute, err := session.Refresh(context.Background(), options, filepath.Join(workspace, "catalog/items.sql"))
+	absolute, err := refreshOne(context.Background(), session, filepath.Join(workspace, "catalog/items.sql"))
 	if err != nil || len(absolute.Diagnostics) != 3 || counts() != before {
 		t.Fatalf("absolute file projection: %+v %v", absolute, err)
 	}
 	outside := filepath.Join(filepath.VolumeName(workspace)+string(filepath.Separator), "catalog", "items.sql")
-	outsideResult, err := session.Refresh(context.Background(), options, outside)
+	outsideResult, err := refreshOne(context.Background(), session, outside)
 	if err != nil || len(outsideResult.Diagnostics) != 0 {
 		t.Fatalf("outside absolute path collided: %+v %v", outsideResult, err)
 	}
 	warm.Diagnostics[0].Message = "mutated"
-	other, err := session.Refresh(context.Background(), options, "another.ts")
+	other, err := refreshOne(context.Background(), session, "another.ts")
 	current, currentErr := session.Current()
 	if err != nil || currentErr != nil || len(other.Diagnostics) != 0 || current.Diagnostics[0].Message == "mutated" || counts() != before {
 		t.Fatalf("projection or detachment: %+v %+v %v %v", other, current, err, currentErr)
 	}
 
 	files := []string{"catalog/items.sql", "another.ts", "catalog/items.sql"}
-	batch, err := session.RefreshFiles(context.Background(), options, files)
+	batch, err := session.RefreshFiles(context.Background(), files)
 	if err != nil || !slices.Equal(batch.Files, files) || len(batch.SourceDigests) != len(files) || batch.SnapshotVersion != current.SnapshotVersion || len(batch.Diagnostics) != len(files) || counts() != before {
 		t.Fatalf("batch refresh: %+v %v", batch, err)
 	}
@@ -142,12 +140,8 @@ func TestRefreshPublicationAndReuse(t *testing.T) {
 		t.Fatal("duplicate file projections share mutable diagnostics")
 	}
 
-	options.Rule = map[string]RulePolicy{"fixture.refresh": {Options: map[string]any{"shape": map[string]any{"a": "b"}}}}
-	if _, err := session.Refresh(context.Background(), options, "catalog/items.sql"); err != nil {
-		t.Fatal(err)
-	}
 	policy := writeTestFile(t, workspace, "lintai-suppressions.json", "invalid")
-	if result, err := session.RefreshFiles(context.Background(), options, files); err == nil || len(result.Diagnostics) != 0 {
+	if result, err := session.RefreshFiles(context.Background(), files); err == nil || len(result.Diagnostics) != 0 {
 		t.Fatal("changed suppressions returned an old batch")
 	}
 	if _, err := session.Current(); err == nil {
@@ -156,48 +150,32 @@ func TestRefreshPublicationAndReuse(t *testing.T) {
 	if err := os.Remove(policy); err != nil {
 		t.Fatal(err)
 	}
-	if result, err := session.RefreshFiles(context.Background(), options, files); err != nil || len(result.Diagnostics[0]) != 3 {
+	if result, err := session.RefreshFiles(context.Background(), files); err != nil || len(result.Diagnostics[0]) != 3 {
 		t.Fatalf("batch recovery: %+v %v", result, err)
 	}
-	objectCount := evaluations.Load()
-	options.Rule = map[string]RulePolicy{"fixture.refresh": {Options: map[string]any{"shape": []any{[]any{"a", "b"}}}}}
-	if _, err := session.Refresh(context.Background(), options, "catalog/items.sql"); err != nil || evaluations.Load() != objectCount+1 {
-		t.Fatalf("object/array options reused: %v", err)
-	}
-	options.Rule = map[string]RulePolicy{"fixture.refresh": {Severity: "warning"}}
-	warning, err := session.Refresh(context.Background(), options, "catalog/items.sql")
+	warningOptions := options
+	warningOptions.Rule = map[string]RulePolicy{"fixture.refresh": {Severity: "warning"}}
+	warning, err := refreshOne(context.Background(), openTestSession(t, warningOptions, producer), "catalog/items.sql")
 	if err != nil || len(warning.Diagnostics) != 3 || warning.Diagnostics[0].Severity != diagnostics.SeverityWarning {
 		t.Fatalf("explicit severity: %+v %v", warning, err)
 	}
-
 	invalid := options
 	invalid.Rule = map[string]RulePolicy{"fixture.refresh": {Options: map[string]any{"invalid": make(chan int)}}}
-	if _, err := session.Refresh(context.Background(), invalid, "catalog/items.sql"); err == nil {
-		t.Fatal("unsupported environment reused prior success")
-	}
-	if _, err := session.Current(); err == nil {
-		t.Fatal("failed request left an old current result")
-	}
-	if _, err := session.Refresh(context.Background(), options, "catalog/items.sql"); err != nil {
-		t.Fatal(err)
+	if _, err := Open(invalid, producer); err == nil {
+		t.Fatal("unsupported environment opened a session")
 	}
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := session.Refresh(canceled, options, "catalog/items.sql"); err == nil {
+	if _, err := refreshOne(canceled, session, "catalog/items.sql"); err == nil {
 		t.Fatal("canceled refresh succeeded")
 	}
 	if _, err := session.Current(); err == nil {
 		t.Fatal("canceled refresh left an old success")
 	}
-	for _, action := range []Options{{SuppressAll: true}, {SuppressRules: []string{"fixture.refresh"}}, {PruneSuppressions: true}} {
-		if _, err := session.Refresh(context.Background(), action, "catalog/items.sql"); err == nil {
-			t.Fatal("refresh accepted a write action")
-		}
-	}
 	if err := session.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := session.Refresh(context.Background(), options, "catalog/items.sql"); err == nil {
+	if _, err := refreshOne(context.Background(), session, "catalog/items.sql"); err == nil {
 		t.Fatal("closed session accepted refresh")
 	}
 }
@@ -212,16 +190,15 @@ func TestRefreshCloseJoinsActiveWork(t *testing.T) {
 	producer := &refreshProducer{parallelFixtureProducer: newParallelFixtureProducer()}
 	producer.reusable = true
 	options := parallelFixtureOptions(t, repo, workspace)
-	session := openTestSession(t, Options{}, producer)
-	if _, err := session.Refresh(context.Background(), options, "catalog/items.sql"); err != nil {
+	session := openTestSession(t, options, producer)
+	if _, err := session.Check(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	entered, release := make(chan struct{}), make(chan struct{})
-	options.Explain = true
-	options.beforeEvaluation = func() { close(entered); <-release }
+	session.hooks.beforeEvaluation = func() { close(entered); <-release }
 	refreshDone := make(chan error, 1)
 	go func() {
-		_, err := session.Refresh(context.Background(), options, "catalog/items.sql")
+		_, err := session.Check(context.Background())
 		refreshDone <- err
 	}()
 	select {
@@ -242,7 +219,7 @@ func TestRefreshCloseJoinsActiveWork(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("queued caller waited for the active worker")
 	}
-	go func() { _, err := session.RefreshAll(context.Background(), options); queued <- err }()
+	go func() { _, err := session.RefreshAll(context.Background()); queued <- err }()
 	closeDone := make(chan error, 1)
 	go func() { closeDone <- session.Close() }()
 	select {
@@ -295,78 +272,35 @@ func TestRefreshCloseJoinsActiveWork(t *testing.T) {
 	}
 }
 
-func TestEffectiveRequestIdentity(t *testing.T) {
-	base := Options{RepoRoot: t.TempDir(), WorkspaceRoot: t.TempDir(), Rule: map[string]RulePolicy{"fixture.refresh": {Options: map[string]any{"nested": map[string]any{"x": "y"}}}}}
-	detached, key, err := effectiveOptions(base)
+func TestConfigDetachesAndPreservesJSONShapes(t *testing.T) {
+	base := Config{WorkspaceRoot: t.TempDir(), Rule: map[string]RulePolicy{"fixture.refresh": {Options: map[string]any{"nested": map[string]any{"x": "y"}}}}}
+	detached, err := normalizeConfig(base)
 	if err != nil {
 		t.Fatal(err)
 	}
 	base.Rule["fixture.refresh"].Options["nested"].(map[string]any)["x"] = "changed"
 	if detached.Rule["fixture.refresh"].Options["nested"].(map[string]any)["x"] != "y" {
-		t.Fatal("effective environment was not detached")
+		t.Fatal("configuration was not detached")
 	}
-	shapeCases := []struct {
-		name  string
+	for _, tc := range []struct {
 		value any
 		want  string
 	}{
-		{name: "nil slice is null", value: []any(nil), want: `{"value":null}`},
-		{name: "nil map is null", value: map[string]any(nil), want: `{"value":null}`},
-		{name: "empty array stays empty array", value: []any{}, want: `{"value":[]}`},
-		{name: "empty object stays empty object", value: map[string]any{}, want: `{"value":{}}`},
-	}
-	keysByJSON := make(map[string]string)
-	for _, tc := range shapeCases {
-		t.Run(tc.name, func(t *testing.T) {
-			candidate := base
-			candidate.Rule = map[string]RulePolicy{"fixture.refresh": {Options: map[string]any{"value": tc.value}}}
-			got, key, err := effectiveOptions(candidate)
-			if err != nil {
-				t.Fatal(err)
-			}
-			encoded, err := json.Marshal(got.Rule["fixture.refresh"].Options)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if string(encoded) != tc.want {
-				t.Fatalf("environment JSON = %s, want %s", encoded, tc.want)
-			}
-			keysByJSON[tc.want] = key
-		})
-	}
-	if keysByJSON[`{"value":null}`] == keysByJSON[`{"value":[]}`] ||
-		keysByJSON[`{"value":null}`] == keysByJSON[`{"value":{}}`] ||
-		keysByJSON[`{"value":[]}`] == keysByJSON[`{"value":{}}`] {
-		t.Fatal("environment identity collapsed null, array, and object values")
-	}
-	base.Rule["fixture.refresh"].Options["nested"].(map[string]any)["x"] = "y"
-	changes := []func(*Options){
-		func(o *Options) { o.RepoRoot = t.TempDir() },
-		func(o *Options) { o.WorkspaceRoot = t.TempDir() },
-		func(o *Options) {
-			o.Rule = map[string]RulePolicy{"fixture.refresh": {Options: map[string]any{"nested": []any{[]any{"x", "y"}}}}}
-		},
-		func(o *Options) { o.Rule = map[string]RulePolicy{"a": {Severity: "off"}} },
-		func(o *Options) { o.FactLimit = 42 },
-		func(o *Options) { o.Explain = true },
-		func(o *Options) { o.RulesLock = "rules.lock" },
-		func(o *Options) { o.SuppressionsLocation = "other.json" },
-		func(o *Options) { o.SuppressAll = true },
-		func(o *Options) { o.SuppressRules = []string{"a"} },
-		func(o *Options) { o.PruneSuppressions = true },
-	}
-	for i, change := range changes {
+		{[]any(nil), `{"value":null}`},
+		{map[string]any(nil), `{"value":null}`},
+		{[]any{}, `{"value":[]}`},
+		{map[string]any{}, `{"value":{}}`},
+	} {
 		candidate := base
-		change(&candidate)
-		_, got, err := effectiveOptions(candidate)
-		if err != nil || got == key {
-			t.Fatalf("change %d did not affect request identity: %v", i, err)
+		candidate.Rule = map[string]RulePolicy{"fixture.refresh": {Options: map[string]any{"value": tc.value}}}
+		got, err := normalizeConfig(candidate)
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	base.RuleWorkers = 99
-	_, scheduling, err := effectiveOptions(base)
-	if err != nil || scheduling != key {
-		t.Fatalf("scheduling affected identity: %v", err)
+		encoded, err := json.Marshal(got.Rule["fixture.refresh"].Options)
+		if err != nil || string(encoded) != tc.want {
+			t.Fatalf("configuration JSON = %s, want %s (%v)", encoded, tc.want, err)
+		}
 	}
 }
 
@@ -380,13 +314,12 @@ func TestRefreshRecoversRuleAndRejectsConflictingEvidence(t *testing.T) {
 	producer := &refreshProducer{parallelFixtureProducer: newParallelFixtureProducer()}
 	producer.reusable = true
 	options := parallelFixtureOptions(t, repo, workspace)
-	session := openTestSession(t, Options{}, producer)
-	defer session.Close()
-	failed, err := session.Refresh(context.Background(), options, "catalog/items.sql")
+	session := openTestSession(t, options, producer)
+	failed, err := refreshOne(context.Background(), session, "catalog/items.sql")
 	if err != nil || len(failed.WorkspaceProblems) == 0 || failed.WorkspaceProblems[0].DiagnosticKind != diagnostics.KindRuleExecutionError {
 		t.Fatalf("expected displayable rule error: %+v %v", failed, err)
 	}
-	if _, err := session.Refresh(context.Background(), options, "catalog/items.sql"); err != nil {
+	if _, err := refreshOne(context.Background(), session, "catalog/items.sql"); err != nil {
 		t.Fatal(err)
 	}
 	good := parallelRuleSource("fixture.recovered", "Decl violation(Entity, Code). violation(Entity, Code) :- catalog.usable(Entity, Code).", "(row) => row.Code")
@@ -394,18 +327,18 @@ func TestRefreshRecoversRuleAndRejectsConflictingEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 	parallelFixtureOptions(t, repo, workspace)
-	recovered, err := session.Refresh(context.Background(), options, "catalog/items.sql")
+	recovered, err := refreshOne(context.Background(), session, "catalog/items.sql")
 	if err != nil || len(recovered.Diagnostics) != 3 || len(recovered.WorkspaceProblems) != 0 {
 		t.Fatalf("same-path recovery: %+v %v", recovered, err)
 	}
 	// One producer claims it consumed different bytes for the same rule path.
 	producer.observations = refreshContent(t, filepath.Join(workspace, ".lintai/rules.json"), "different captured bytes")
-	if _, err := session.Check(context.Background(), options); err != nil {
+	if _, err := session.Check(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	before := producer.prepareCalls.Load()
 	for i := 0; i < 2; i++ {
-		if _, err := session.Refresh(context.Background(), options, "catalog/items.sql"); err != nil {
+		if _, err := refreshOne(context.Background(), session, "catalog/items.sql"); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -414,14 +347,28 @@ func TestRefreshRecoversRuleAndRejectsConflictingEvidence(t *testing.T) {
 	}
 	producer.observations = observe.Set{}
 	producer.reusable = false
-	if _, err := session.Check(context.Background(), options); err != nil {
+	if _, err := session.Check(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	before, emits := producer.prepareCalls.Load(), producer.emitCalls.Load()
-	if _, err := session.Refresh(context.Background(), options, "catalog/items.sql"); err != nil {
+	if _, err := refreshOne(context.Background(), session, "catalog/items.sql"); err != nil {
 		t.Fatal(err)
 	}
 	if producer.prepareCalls.Load() != before+1 || producer.emitCalls.Load() != emits {
 		t.Fatal("opaque producer revision did not force preparation and reuse equal facts")
 	}
+}
+
+type refreshedFile struct {
+	Diagnostics       []diagnostics.Diagnostic
+	WorkspaceProblems []diagnostics.Diagnostic
+	SourceDigest      string
+}
+
+func refreshOne(ctx context.Context, session *Session, file string) (refreshedFile, error) {
+	result, err := session.RefreshFiles(ctx, []string{file})
+	if err != nil {
+		return refreshedFile{}, err
+	}
+	return refreshedFile{Diagnostics: result.Diagnostics[0], WorkspaceProblems: result.WorkspaceProblems, SourceDigest: result.SourceDigests[0]}, nil
 }

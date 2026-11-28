@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -28,77 +27,21 @@ func TestParallelRuleExecutionContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	workspace := t.TempDir()
-	producer := newParallelFixtureProducer()
 	writeParallelRules(t, workspace, 5, true)
-	engine := openTestSession(t, Options{}, producer)
-	defer engine.Close()
-
-	var active atomic.Int64
-	var peak atomic.Int64
-	var entered atomic.Int64
-	releaseOverlap := make(chan struct{})
-	var releaseOnce sync.Once
-	parallelOptions := parallelFixtureOptions(t, repoRoot, workspace)
-	parallelOptions.RuleWorkers = 2
-	parallelOptions.FactLimit = 8
-	parallelOptions.Explain = true
-	parallelOptions.onDerivedFact = func() {
-		current := active.Add(1)
-		for previous := peak.Load(); current > previous; previous = peak.Load() {
-			if peak.CompareAndSwap(previous, current) {
-				break
-			}
+	run := func(workers int) (Result, runInfo, executionEvidence) {
+		t.Helper()
+		config := parallelFixtureOptions(t, repoRoot, workspace)
+		config.RuleWorkers, config.FactLimit, config.Explain = workers, 8, true
+		session := openTestSession(t, config, newParallelFixtureProducer())
+		result, info, evidence, err := session.analyzeWithEvidence(context.Background(), observe.Full, suppressionsState{})
+		if err != nil {
+			t.Fatal(err)
 		}
-		if entered.Add(1) >= 2 {
-			releaseOnce.Do(func() { close(releaseOverlap) })
-		}
-		select {
-		case <-releaseOverlap:
-		case <-time.After(10 * time.Second):
-			t.Error("timed out waiting for overlapping derived facts")
-			releaseOnce.Do(func() { close(releaseOverlap) })
-		}
-		active.Add(-1)
+		assertParallelFixtureOutcomes(t, result, info, evidence)
+		return result, info, evidence
 	}
-	parallelResult, parallelRun, parallelEvidence, err := engine.analyzeWithEvidence(context.Background(), parallelOptions, observe.Full, suppressionsState{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := peak.Load(); got != 2 {
-		t.Fatalf("expected two overlapping production evaluators under bound 2, peak was %d", got)
-	}
-	assertParallelFixtureOutcomes(t, parallelResult, parallelRun, parallelEvidence)
-	firstObservation := engine.executionObservation()
-	if firstObservation.gojaRuntimes != 8 || firstObservation.programBuilds != 7 || firstObservation.mangleCompiles != 7 || firstObservation.peakActiveJobs != 2 {
-		t.Fatalf("unexpected first-run execution observation: %+v", firstObservation)
-	}
-	t.Logf("R5 cold observation: program builds=%d, Mangle plan compiles=%d, created facts=%v, peak active jobs=%d",
-		firstObservation.programBuilds, firstObservation.mangleCompiles,
-		parallelEvidence.createdFactCounts, firstObservation.peakActiveJobs)
-
-	var sequentialActive atomic.Int64
-	var sequentialPeak atomic.Int64
-	sequentialOptions := parallelFixtureOptions(t, repoRoot, workspace)
-	sequentialOptions.RuleWorkers = 1
-	sequentialOptions.FactLimit = 8
-	sequentialOptions.Explain = true
-	sequentialOptions.onDerivedFact = func() {
-		current := sequentialActive.Add(1)
-		for previous := sequentialPeak.Load(); current > previous; previous = sequentialPeak.Load() {
-			if sequentialPeak.CompareAndSwap(previous, current) {
-				break
-			}
-		}
-		sequentialActive.Add(-1)
-	}
-	sequentialResult, sequentialRun, sequentialEvidence, err := engine.analyzeWithEvidence(context.Background(), sequentialOptions, observe.Full, suppressionsState{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := sequentialPeak.Load(); got != 1 {
-		t.Fatalf("one worker must use the same evaluator without overlap, peak was %d", got)
-	}
-	assertParallelFixtureOutcomes(t, sequentialResult, sequentialRun, sequentialEvidence)
+	parallelResult, _, parallelEvidence := run(2)
+	sequentialResult, _, sequentialEvidence := run(1)
 	if !reflect.DeepEqual(parallelResult, sequentialResult) {
 		t.Fatalf("one-worker and multi-worker results differ:\nparallel:   %+v\nsequential: %+v", parallelResult, sequentialResult)
 	}
@@ -108,20 +51,6 @@ func TestParallelRuleExecutionContract(t *testing.T) {
 	if !reflect.DeepEqual(parallelEvidence.anchors, sequentialEvidence.anchors) {
 		t.Fatalf("one-worker and multi-worker producer tracking support differs:\nparallel:   %+v\nsequential: %+v", parallelEvidence.anchors, sequentialEvidence.anchors)
 	}
-	if !reflect.DeepEqual(parallelEvidence.createdFactCounts, sequentialEvidence.createdFactCounts) {
-		t.Fatalf("one-worker and multi-worker created-fact counts differ: parallel=%+v sequential=%+v", parallelEvidence.createdFactCounts, sequentialEvidence.createdFactCounts)
-	}
-	secondObservation := engine.executionObservation()
-	if secondObservation.mangleCompiles != firstObservation.mangleCompiles {
-		t.Fatalf("unchanged generated plans were rebuilt: first=%+v second=%+v", firstObservation, secondObservation)
-	}
-	if secondObservation.gojaRuntimes != firstObservation.gojaRuntimes+8 || secondObservation.programBuilds != firstObservation.programBuilds+7 {
-		t.Fatalf("each run must generate programs in fresh rule runtimes: first=%+v second=%+v", firstObservation, secondObservation)
-	}
-	t.Logf("R5 unchanged observation delta: program builds=%d, Mangle plan compiles=%d, peak active jobs=%d",
-		secondObservation.programBuilds-firstObservation.programBuilds,
-		secondObservation.mangleCompiles-firstObservation.mangleCompiles,
-		secondObservation.peakActiveJobs)
 }
 
 func TestParallelRuleExecutionCancellationJoinsBeforeClose(t *testing.T) {
@@ -132,8 +61,6 @@ func TestParallelRuleExecutionCancellationJoinsBeforeClose(t *testing.T) {
 	workspace := t.TempDir()
 	producer := newParallelFixtureProducer()
 	writeParallelRules(t, workspace, 5, false)
-	engine := openTestSession(t, Options{}, producer)
-
 	started := make(chan struct{}, 8)
 	releaseWorkers := make(chan struct{})
 	dispatchFinished := make(chan struct{})
@@ -142,8 +69,8 @@ func TestParallelRuleExecutionCancellationJoinsBeforeClose(t *testing.T) {
 	options := parallelFixtureOptions(t, repoRoot, workspace)
 	options.RuleWorkers = 2
 	options.SuppressionsLocation = filepath.Join(t.TempDir(), "suppression-state.json")
-	options.SuppressAll = true
-	options.onDerivedFact = func() {
+	engine := openTestSession(t, options, producer)
+	engine.hooks.beforeEvaluation = func() {
 		current := active.Add(1)
 		for previous := peak.Load(); current > previous; previous = peak.Load() {
 			if peak.CompareAndSwap(previous, current) {
@@ -154,11 +81,11 @@ func TestParallelRuleExecutionCancellationJoinsBeforeClose(t *testing.T) {
 		<-releaseWorkers
 		active.Add(-1)
 	}
-	options.afterDispatch = func() { close(dispatchFinished) }
+	engine.hooks.afterDispatch = func() { close(dispatchFinished) }
 
 	analyzeDone := make(chan error, 1)
 	go func() {
-		_, err := engine.Check(context.Background(), options)
+		_, err := engine.UpdateSuppressions(context.Background(), SuppressionUpdate{All: true})
 		analyzeDone <- err
 	}()
 	for i := 0; i < 2; i++ {
@@ -254,9 +181,6 @@ func assertParallelFixtureOutcomes(t *testing.T, result Result, run runInfo, evi
 	if len(evidence.findings) != 15 {
 		t.Fatalf("failed rules contributed provisional findings: got %d detached typed rows, want 15", len(evidence.findings))
 	}
-	if len(evidence.createdFactCounts) != 7 || evidence.createdFactCounts["fixture.fact-limit"] <= evidence.createdFactCounts["fixture.success-0"] {
-		t.Fatalf("fixture did not record each rule's created-fact count: %+v", evidence.createdFactCounts)
-	}
 	for _, finding := range evidence.findings {
 		if len(finding.typedRow) != 2 || len(finding.columns) != 2 || finding.columns[0] != "Entity" || finding.columns[1] != "Code" {
 			t.Fatalf("typed report outcome was not detached with its assertion columns: %+v", finding)
@@ -274,10 +198,8 @@ func assertParallelFixtureOutcomes(t *testing.T, result Result, run runInfo, evi
 	}
 }
 
-func parallelFixtureOptions(t *testing.T, repoRoot, workspace string) Options {
-	return Options{
-		RepoRoot: repoRoot, WorkspaceRoot: testpack.Build(t, repoRoot, workspace, "lintai-rules/*.ts"),
-	}
+func parallelFixtureOptions(t *testing.T, repoRoot, workspace string) Config {
+	return Config{WorkspaceRoot: testpack.Build(t, repoRoot, workspace, "lintai-rules/*.ts")}
 }
 
 func writeParallelRules(t *testing.T, workspace string, successes int, includeFailures bool) {

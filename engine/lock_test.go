@@ -15,9 +15,8 @@ import (
 func TestLockedChecksRejectChangesBeforeAnyVM(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
-	opts := Options{WorkspaceRoot: root, RulesLock: DefaultRulesLockFile}
+	opts := Config{WorkspaceRoot: root, RulesLock: DefaultRulesLockFile}
 	session := openTestSession(t, opts)
-	defer session.Close()
 	code := "var LintAIPureModule = {default:{id:'test',versionValue:1,programValue:{__lintaiKind:'fragment',text:'Decl v(M).'},reportPredicates:['v'],messageFn:()=>'test'}};"
 	pack := rulepack.Pack{Format: rulepack.Format, ABI: rulepack.ABI, Entries: []rulepack.Entry{{Entry: "rules/test.js", Code: code}}}
 	savePack := func(pack rulepack.Pack) {
@@ -38,7 +37,7 @@ func TestLockedChecksRejectChangesBeforeAnyVM(t *testing.T) {
 	}
 	savePack(pack)
 	saveAllowances(2, "original")
-	lock, err := session.BuildRulesLock(ctx, opts)
+	lock, err := session.BuildRulesLock(ctx, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,9 +51,7 @@ func TestLockedChecksRejectChangesBeforeAnyVM(t *testing.T) {
 	}
 	unrelated := "[workspace]\nsources = [\"src/**\"]\n"
 	writeTestFile(t, root, "lintai.toml", unrelated)
-	wrongTarget := opts
-	wrongTarget.RulesLock = "lintai.toml"
-	if _, err := session.BuildRulesLock(ctx, wrongTarget); err == nil || !strings.Contains(err.Error(), "not a lintai rules lock") {
+	if _, err := session.BuildRulesLock(ctx, "lintai.toml"); err == nil || !strings.Contains(err.Error(), "not a lintai rules lock") {
 		t.Fatalf("unrelated lock target: %v", err)
 	}
 	if data, _ := os.ReadFile(filepath.Join(root, "lintai.toml")); string(data) != unrelated {
@@ -62,43 +59,41 @@ func TestLockedChecksRejectChangesBeforeAnyVM(t *testing.T) {
 	}
 	policy := `{"version":1,"rules":[{"id":"approval","enabled":true}],"owner":"operations"}`
 	writeTestFile(t, root, "app-policy.json", policy)
-	policyTarget := opts
-	policyTarget.RulesLock = "app-policy.json"
-	if _, err := session.BuildRulesLock(ctx, policyTarget); err == nil || !strings.Contains(err.Error(), "not a lintai rules lock") {
+	if _, err := session.BuildRulesLock(ctx, "app-policy.json"); err == nil || !strings.Contains(err.Error(), "not a lintai rules lock") {
 		t.Fatalf("application policy lock target: %v", err)
 	}
 	if data, _ := os.ReadFile(filepath.Join(root, "app-policy.json")); string(data) != policy {
 		t.Fatalf("application policy changed: %q", data)
 	}
 	writeTestFile(t, root, DefaultRulesLockFile, `{"format":"lintai.rules-lock/4"}`)
-	if relock, err := session.BuildRulesLock(ctx, opts); err != nil {
+	if relock, err := session.BuildRulesLock(ctx, ""); err != nil {
 		t.Fatalf("obsolete lock reapproval: %v", err)
 	} else if err := WriteRulesLock(ctx, lockPath, relock); err != nil {
 		t.Fatal(err)
 	}
 	for _, tc := range []struct {
 		name   string
-		change func(*Options, *rulepack.Pack)
+		change func(*Config, *rulepack.Pack)
 	}{
-		{"altered bytes", func(_ *Options, p *rulepack.Pack) { p.Entries[0].Code += " " }},
-		{"entry name", func(_ *Options, p *rulepack.Pack) { p.Entries[0].Entry = "other.js" }},
-		{"added", func(_ *Options, p *rulepack.Pack) {
+		{"altered bytes", func(_ *Config, p *rulepack.Pack) { p.Entries[0].Code += " " }},
+		{"entry name", func(_ *Config, p *rulepack.Pack) { p.Entries[0].Entry = "other.js" }},
+		{"added", func(_ *Config, p *rulepack.Pack) {
 			p.Entries = append(p.Entries, rulepack.Entry{Entry: "z.js", Code: "throw 1"})
 		}},
-		{"removed", func(_ *Options, p *rulepack.Pack) { p.Entries = []rulepack.Entry{} }},
-		{"unsupported ABI", func(_ *Options, p *rulepack.Pack) { p.ABI = "unknown" }},
-		{"options", func(o *Options, _ *rulepack.Pack) {
+		{"removed", func(_ *Config, p *rulepack.Pack) { p.Entries = []rulepack.Entry{} }},
+		{"unsupported ABI", func(_ *Config, p *rulepack.Pack) { p.ABI = "unknown" }},
+		{"options", func(o *Config, _ *rulepack.Pack) {
 			o.Rule = map[string]RulePolicy{"test": {Options: map[string]any{"k": []any{}}}}
 		}},
-		{"severity", func(o *Options, _ *rulepack.Pack) { o.Rule = map[string]RulePolicy{"test": {Severity: "off"}} }},
-		{"allowance count", func(_ *Options, _ *rulepack.Pack) { saveAllowances(3, "original") }},
-		{"allowance reason", func(_ *Options, _ *rulepack.Pack) { saveAllowances(1, "different") }},
-		{"missing lock", func(_ *Options, _ *rulepack.Pack) {
+		{"severity", func(o *Config, _ *rulepack.Pack) { o.Rule = map[string]RulePolicy{"test": {Severity: "off"}} }},
+		{"allowance count", func(_ *Config, _ *rulepack.Pack) { saveAllowances(3, "original") }},
+		{"allowance reason", func(_ *Config, _ *rulepack.Pack) { saveAllowances(1, "different") }},
+		{"missing lock", func(_ *Config, _ *rulepack.Pack) {
 			if err := os.Remove(lockPath); err != nil {
 				t.Fatal(err)
 			}
 		}},
-		{"ambiguous lock", func(_ *Options, _ *rulepack.Pack) {
+		{"ambiguous lock", func(_ *Config, _ *rulepack.Pack) {
 			writeTestFile(t, root, DefaultRulesLockFile, strings.Replace(string(approved), "{", "{\"abi\":\"x\",", 1))
 		}},
 	} {
@@ -110,9 +105,9 @@ func TestLockedChecksRejectChangesBeforeAnyVM(t *testing.T) {
 			request := opts
 			tc.change(&request, &changed)
 			savePack(changed)
-			result, err := session.Check(ctx, request)
-			if err != nil || len(result.Diagnostics) != 1 || result.Diagnostics[0].Phase != "integrity" || session.stats.gojaRuntimes.Load() != 0 {
-				t.Fatalf("rejected check: %+v, %v, VMs %d", result, err, session.stats.gojaRuntimes.Load())
+			result, err := openTestSession(t, request).Check(ctx)
+			if err != nil || len(result.Diagnostics) != 1 || result.Diagnostics[0].Phase != "integrity" || result.RulesLoaded != 0 {
+				t.Fatalf("rejected check: %+v, %v", result, err)
 			}
 		})
 	}

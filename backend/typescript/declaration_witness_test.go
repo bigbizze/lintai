@@ -24,7 +24,7 @@ func TestUnsupportedExportDeclarationValidates(t *testing.T) {
 		byName[relation.Predicate.Name] = relation.Predicate
 		requested = append(requested, relation.Predicate)
 	}
-	batch, err := inspectEmission(context.Background(), producer, backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: root, Predicates: requested})
+	batch, err := inspectEmission(context.Background(), producer, backend.CollectionRequest{WorkspaceRoot: root, Predicates: requested})
 	if err != nil {
 		t.Fatal(err)
 	}

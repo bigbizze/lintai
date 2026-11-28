@@ -39,74 +39,57 @@ type FilesResult struct {
 type publishedResult struct {
 	result        Result
 	sourceDigests map[string]string
-	requestKey    string
 	observations  observe.Set
 	reusable      bool
 	byFile        map[string][]int
 	unlocated     []int
 }
 
-// effectiveOptions detaches the request and encodes every output-affecting
-// option before a reuse decision. Worker count and synchronization hooks are
-// execution details, not part of the result identity.
-func effectiveOptions(options Options) (Options, string, error) {
-	if options.RuleWorkers < 0 {
-		return Options{}, "", fmt.Errorf("rule workers must be zero or a positive integer")
+// normalizeConfig detaches the session policy and resolves its paths once.
+func normalizeConfig(config Config) (Config, error) {
+	if config.RuleWorkers < 0 {
+		return Config{}, fmt.Errorf("rule workers must be zero or a positive integer")
 	}
 	var err error
-	if options.RepoRoot, err = filepath.Abs(options.RepoRoot); err != nil {
-		return Options{}, "", err
+	if config.WorkspaceRoot, err = filepath.Abs(config.WorkspaceRoot); err != nil {
+		return Config{}, err
 	}
-	if options.WorkspaceRoot, err = filepath.Abs(options.WorkspaceRoot); err != nil {
-		return Options{}, "", err
+	if config.RulesLock != "" {
+		config.RulesLock = filepath.Clean(ResolveRulesLockPath(config.WorkspaceRoot, config.RulesLock))
 	}
-	if options.RulesLock != "" {
-		options.RulesLock = filepath.Clean(ResolveRulesLockPath(options.WorkspaceRoot, options.RulesLock))
+	if config.SuppressionsLocation != "" && !filepath.IsAbs(config.SuppressionsLocation) {
+		config.SuppressionsLocation = filepath.Join(config.WorkspaceRoot, config.SuppressionsLocation)
 	}
-	if options.SuppressionsLocation != "" && !filepath.IsAbs(options.SuppressionsLocation) {
-		options.SuppressionsLocation = filepath.Join(options.WorkspaceRoot, options.SuppressionsLocation)
+	if config.SuppressionsLocation != "" {
+		config.SuppressionsLocation = filepath.Clean(config.SuppressionsLocation)
 	}
-	if options.SuppressionsLocation != "" {
-		options.SuppressionsLocation = filepath.Clean(options.SuppressionsLocation)
+	if config.FactLimit <= 0 {
+		config.FactLimit = DefaultFactLimit
 	}
-	options.SuppressRules = slices.Clone(options.SuppressRules)
-	if options.FactLimit <= 0 {
-		options.FactLimit = DefaultFactLimit
-	}
-	policies := make(map[string]RulePolicy, len(options.Rule))
-	identityRules := map[string]any{}
-	for id, policy := range options.Rule {
+	policies := make(map[string]RulePolicy, len(config.Rule))
+	for id, policy := range config.Rule {
 		if policy.Severity == "" {
 			policy.Severity = "error"
 		}
 		if _, err := diagnostics.ParseSeverity(policy.Severity); err != nil {
-			return Options{}, "", fmt.Errorf("rule %s: %w", id, err)
+			return Config{}, fmt.Errorf("rule %s: %w", id, err)
 		}
 		if policy.Options == nil {
 			policy.Options = map[string]any{}
 		}
 		raw, err := canonical.NormalizeStructured(policy.Options)
 		if err != nil {
-			return Options{}, "", fmt.Errorf("rule %s options: %w", id, err)
+			return Config{}, fmt.Errorf("rule %s options: %w", id, err)
 		}
 		policy.Options = raw.(map[string]any)
 		policies[id] = policy
-		identityRules[id] = []any{policy.Severity, policy.Options}
 	}
-	options.Rule = policies
-	identity, err := canonical.MarshalStructured([]any{
-		"lintai-request-v2", options.RepoRoot, options.WorkspaceRoot, identityRules, options.FactLimit,
-		options.Explain, options.RulesLock, options.SuppressionsLocation,
-		options.SuppressAll, options.SuppressRules, options.PruneSuppressions,
-	})
-	if err != nil {
-		return Options{}, "", fmt.Errorf("request: %w", err)
-	}
-	return options, string(identity), nil
+	config.Rule = policies
+	return config, nil
 }
 
-func newPublishedResult(result Result, sourceDigests map[string]string, key string, observations observe.Set, reusable bool) *publishedResult {
-	published := &publishedResult{result: result, sourceDigests: sourceDigests, requestKey: key, observations: observations, reusable: reusable, byFile: make(map[string][]int)}
+func newPublishedResult(result Result, sourceDigests map[string]string, observations observe.Set, reusable bool) *publishedResult {
+	published := &publishedResult{result: result, sourceDigests: sourceDigests, observations: observations, reusable: reusable, byFile: make(map[string][]int)}
 	for _, file := range result.AnalyzedFiles {
 		published.byFile[result.files.key(file)] = nil
 	}

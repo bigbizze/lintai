@@ -30,7 +30,7 @@ func suppressionFixture(t *testing.T, files map[string]string) (string, string, 
 	testpack.Build(t, repo, workspace, entries...)
 	check := func(flags ...string) (int, []diagnostics.Diagnostic) {
 		t.Helper()
-		args := []string{"--json", "--repo-root", repo, "--workspace-root", workspace}
+		args := []string{"--json", "--workspace-root", workspace}
 		return runCode(t, append(args, flags...))
 	}
 	return repo, workspace, check
@@ -159,7 +159,7 @@ func TestSuppressionReasonsReplacementAndLock(t *testing.T) {
 	testpack.Build(t, repo, workspace, "lintai-rules/*.ts")
 	requireCode(t, check, exitViolations)
 	requireCode(t, check, exitClean, "--suppress-rule", "a")
-	code, _ := runCode(t, []string{"lock", "--repo-root", repo, "--workspace-root", workspace})
+	code, _ := runCode(t, []string{"lock", "--workspace-root", workspace})
 	if code != exitClean {
 		t.Fatalf("lock exit %d", code)
 	}
@@ -174,7 +174,7 @@ func TestSuppressionReasonsReplacementAndLock(t *testing.T) {
 		t.Fatalf("unapproved proposal changed file: %v", err)
 	}
 	requireCode(t, check, exitClean, "--suppress-all")
-	code, _ = runCode(t, []string{"lock", "--repo-root", repo, "--workspace-root", workspace})
+	code, _ = runCode(t, []string{"lock", "--workspace-root", workspace})
 	if code != exitClean {
 		t.Fatalf("lock exit %d", code)
 	}

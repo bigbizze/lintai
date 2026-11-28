@@ -28,7 +28,7 @@ func main() {
 		log.Fatal(err)
 	}
 	predicates := []facts.Predicate{{Name: "example.item", Arity: 1}}
-	generation, err := producer.Prepare(context.Background(), backend.CollectionRequest{RepoRoot: repoRoot, WorkspaceRoot: repoRoot, Predicates: predicates}, observe.Full)
+	generation, err := producer.Prepare(context.Background(), backend.CollectionRequest{WorkspaceRoot: repoRoot, Predicates: predicates}, observe.Full)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func main() {
 	if err != nil || emitted.Count(predicates[0]) != 1 {
 		log.Fatalf("external producer emission: %v", err)
 	}
-	options := engine.Options{RepoRoot: repoRoot, WorkspaceRoot: filepath.Join(repoRoot, "testdata", "fixtures", "workspace")}
+	options := engine.Config{WorkspaceRoot: filepath.Join(repoRoot, "testdata", "fixtures", "workspace")}
 	ts := typescript.New()
 	session, err := engine.Open(options, ts, producer)
 	if err != nil {

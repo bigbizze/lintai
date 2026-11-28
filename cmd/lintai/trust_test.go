@@ -120,7 +120,7 @@ func TestPortableTypeScriptApproval(t *testing.T) {
 	if code != exitViolations || len(items) != 1 || items[0].Message != "finding" {
 		t.Fatalf("relocated CLI: %d %+v", code, items)
 	}
-	opts := engine.Options{WorkspaceRoot: b, RulesLock: engine.DefaultRulesLockFile}
+	opts := engine.Config{WorkspaceRoot: b, RulesLock: engine.DefaultRulesLockFile}
 	producer := typescript.New(typescript.Options{Sources: []string{"./src/a.ts"}, SourceLinks: "links.json"})
 	s, err := engine.Open(opts, producer)
 	if err != nil {
@@ -131,7 +131,7 @@ func TestPortableTypeScriptApproval(t *testing.T) {
 	if err != nil || len(result.Diagnostics) != 1 || result.Diagnostics[0].Message != "finding" {
 		t.Fatalf("relocated Go producer: %+v %v", result, err)
 	}
-	other, err := s.BuildRulesLock(ctx, opts)
+	other, err := s.BuildRulesLock(ctx, "")
 	if err != nil {
 		t.Fatal(err)
 	}

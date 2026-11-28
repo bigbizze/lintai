@@ -162,7 +162,7 @@ func TestGenerationDemandAndFrozenEmission(t *testing.T) {
 			t.Fatalf("accepted invalid request %+v", invalid)
 		}
 	}
-	request := backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: root, Predicates: []facts.Predicate{module}}
+	request := backend.CollectionRequest{WorkspaceRoot: root, Predicates: []facts.Predicate{module}}
 	first, err := producer.Prepare(context.Background(), request, observe.Full)
 	if err != nil {
 		t.Fatal(err)

@@ -188,7 +188,7 @@ func TestBoundProducerOwnershipAndConfigurationIdentity(t *testing.T) {
 	valid := newParallelFixtureProducer()
 	invalid := newParallelFixtureProducer()
 	invalid.description.Namespace = "invalid-namespace"
-	if session, err := Open(Options{}, valid, invalid); err == nil || session != nil || valid.closed.Load() || invalid.closed.Load() {
+	if session, err := Open(Config{}, valid, invalid); err == nil || session != nil || valid.closed.Load() || invalid.closed.Load() {
 		t.Fatal("failed Open took ownership of supplied producers")
 	}
 	snapshots := make(map[string]string)
@@ -199,12 +199,12 @@ func TestBoundProducerOwnershipAndConfigurationIdentity(t *testing.T) {
 		{"null", []any(nil)}, {"null", map[string]any(nil)}, {"array", []any{}}, {"object", map[string]any{}},
 	} {
 		valid.description.EffectiveConfiguration = map[string]any{"shape": []any{tc.shape}}
-		session, err := Open(Options{}, valid)
+		session, err := Open(Config{}, valid)
 		if err != nil {
 			t.Fatal(err)
 		}
 		delete(valid.description.EffectiveConfiguration.(map[string]any), "shape")
-		facts, err := session.catalog.collect(context.Background(), Options{}, nil, nil, observe.Full)
+		facts, err := session.catalog.collect(context.Background(), "", nil, nil, observe.Full)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -241,7 +241,7 @@ func TestSourceIdentityUsesDiagnosticFileMapping(t *testing.T) {
 		return diagnostics.Diagnostic{SourceLocation: &diagnostics.SourceLocation{File: file}, Message: file}
 	}
 	result := Result{files: fileKeys{root: root, physical: root}, AnalyzedFiles: []string{"item.ts", "no-findings.ts"}, Diagnostics: []diagnostics.Diagnostic{diag(inside), diag(filepath.ToSlash(outside))}}
-	p := newPublishedResult(result, digests, "", observe.Set{}, true)
+	p := newPublishedResult(result, digests, observe.Set{}, true)
 	files := []string{"./item.ts", outside, relative, inside}
 	projected := p.projectFiles(files, false)
 	if !slices.Equal(projected.Files, files) || !slices.Equal(projected.SourceDigests, []string{a, b, "", a}) || len(projected.Diagnostics[2]) != 0 {
@@ -374,7 +374,7 @@ func TestOperationFileKeysUseTheProducersRootResolution(t *testing.T) {
 func TestProjectAllOmitsIdentityAliases(t *testing.T) {
 	root := t.TempDir()
 	result := Result{files: fileKeys{root: root, physical: root, aliases: map[string]string{"a.ts": "a.ts"}}, AnalyzedFiles: []string{"a.ts"}}
-	projected := newPublishedResult(result, nil, "", observe.Set{}, true).projectFiles(nil, true)
+	projected := newPublishedResult(result, nil, observe.Set{}, true).projectFiles(nil, true)
 	if !slices.Equal(projected.Files, []string{"a.ts"}) {
 		t.Fatalf("files: %v", projected.Files)
 	}

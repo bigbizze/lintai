@@ -25,8 +25,8 @@ const (
 )
 
 type Analyzer interface {
-	RefreshAll(ctx context.Context, options engine.Options) (engine.FilesResult, error)
-	RefreshFiles(ctx context.Context, options engine.Options, files []string) (engine.FilesResult, error)
+	RefreshAll(ctx context.Context) (engine.FilesResult, error)
+	RefreshFiles(ctx context.Context, files []string) (engine.FilesResult, error)
 	Close() error
 }
 
@@ -35,7 +35,6 @@ type AnalyzerFactory func(InitializeParams) Analyzer
 type Server struct {
 	engine      Analyzer
 	factory     AnalyzerFactory
-	options     engine.Options
 	initialized bool
 	// Log receives each analysis warning once. Nil discards them.
 	Log    io.Writer
@@ -139,11 +138,6 @@ func (s *Server) handleInitialize(rawParams json.RawMessage) (InitializeResult, 
 	if params.ProtocolVersion != ProtocolVersion {
 		return InitializeResult{}, invalidParams(fmt.Sprintf("incompatible lintai serve protocol version: server requires %d, client sent %d", ProtocolVersion, params.ProtocolVersion))
 	}
-	options := engine.Options{
-		RepoRoot: params.WorkspaceRoot, WorkspaceRoot: params.WorkspaceRoot,
-		FactLimit: params.FactLimit, RuleWorkers: params.RuleWorkers, RulesLock: params.RulesLock,
-		SuppressionsLocation: params.SuppressionsLocation,
-	}
 	if s.factory == nil {
 		return InitializeResult{}, fmt.Errorf("missing analyzer factory")
 	}
@@ -155,7 +149,7 @@ func (s *Server) handleInitialize(rawParams json.RawMessage) (InitializeResult, 
 		_ = s.engine.Close()
 	}
 	s.engine = analyzer
-	s.options, s.initialized = options, true
+	s.initialized = true
 	return InitializeResult{ProtocolVersion: ProtocolVersion}, nil
 }
 
@@ -175,7 +169,7 @@ func (s *Server) handleFilesDiagnostics(ctx context.Context, rawParams json.RawM
 	var result engine.FilesResult
 	var err error
 	if all {
-		result, err = s.engine.RefreshAll(ctx, s.options)
+		result, err = s.engine.RefreshAll(ctx)
 	} else {
 		if json.Unmarshal(params.Files, &names) != nil || names == nil {
 			return FilesDiagnosticsResult{}, invalidParams(`files must be an array of names or "all"`)
@@ -185,7 +179,7 @@ func (s *Server) handleFilesDiagnostics(ctx context.Context, rawParams json.RawM
 				return FilesDiagnosticsResult{}, invalidParams("each file is required")
 			}
 		}
-		result, err = s.engine.RefreshFiles(ctx, s.options, slices.Clone(names))
+		result, err = s.engine.RefreshFiles(ctx, slices.Clone(names))
 	}
 	if err != nil {
 		return FilesDiagnosticsResult{}, err

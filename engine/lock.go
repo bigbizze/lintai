@@ -195,7 +195,7 @@ func typeScriptPolicyConfig(root string, value any) (any, error) {
 }
 
 // policyDigest hashes effective Go policy before calling any executable entry.
-func policyDigest(options Options, catalog producerCatalog) (string, error) {
+func policyDigest(options Config, catalog producerCatalog) (string, error) {
 	policies := map[string]any{}
 	for id, policy := range options.Rule {
 		if policy.Severity != "error" || len(policy.Options) != 0 {
@@ -218,7 +218,7 @@ func policyDigest(options Options, catalog producerCatalog) (string, error) {
 	return fmt.Sprintf("sha256:%x", sha256.Sum256(raw)), nil
 }
 
-func (lock RulesLock) verify(options Options, pack string, catalog producerCatalog) error {
+func (lock RulesLock) verify(options Config, pack string, catalog producerCatalog) error {
 	if pack != lock.PackDigest {
 		return fmt.Errorf("rule pack digest changed (approved %s, found %s); review and run lintai lock", lock.PackDigest, pack)
 	}
@@ -233,20 +233,18 @@ func (lock RulesLock) verify(options Options, pack string, catalog producerCatal
 }
 
 // BuildRulesLock inspects the published pack and the same effective policy used by Check.
-func (e *Session) BuildRulesLock(ctx context.Context, options Options) (RulesLock, error) {
+// target is the destination; an empty target selects the default lock file.
+func (e *Session) BuildRulesLock(ctx context.Context, target string) (RulesLock, error) {
 	ctx, finish, err := e.beginCheck(ctx)
 	if err != nil {
 		return RulesLock{}, err
 	}
 	defer finish()
-	options, _, err = effectiveOptions(options)
-	if err != nil {
-		return RulesLock{}, err
-	}
-	target := options.RulesLock
+	options := e.config
 	if target == "" {
-		target = ResolveRulesLockPath(options.WorkspaceRoot, DefaultRulesLockFile)
+		target = DefaultRulesLockFile
 	}
+	target = filepath.Clean(ResolveRulesLockPath(options.WorkspaceRoot, target))
 	targetState, err := atomicfile.Read(target)
 	if err != nil {
 		return RulesLock{}, err
@@ -254,7 +252,7 @@ func (e *Session) BuildRulesLock(ctx context.Context, options Options) (RulesLoc
 	if targetState.Exists && !isRulesLockDocument(targetState.Data) {
 		return RulesLock{}, fmt.Errorf("%s exists and is not a lintai rules lock; refusing to overwrite it", target)
 	}
-	state, err := loadSuppressions(options)
+	state, err := loadSuppressions(options, SuppressionUpdate{})
 	if err != nil {
 		return RulesLock{}, err
 	}
@@ -283,7 +281,7 @@ func (e *Session) BuildRulesLock(ctx context.Context, options Options) (RulesLoc
 		}
 		ids[entry.metadata.ID] = struct{}{}
 	}
-	if unknown := unknownPolicyRules(options, ids, "", nil); len(unknown) > 0 {
+	if unknown := unknownPolicyRules(options, ids); len(unknown) > 0 {
 		return RulesLock{}, fmt.Errorf("%s", unknown[0].Message)
 	}
 	return RulesLock{PackDigest: catalog.digest, PolicyDigest: digest, Suppressions: state.file, target: target, targetSnapshot: targetState, source: state.path, sourceSnapshot: state.snapshot}, ctx.Err()

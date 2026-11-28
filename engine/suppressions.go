@@ -44,20 +44,20 @@ type suppressionWrite struct {
 	approvalSnapshot atomicfile.Snapshot
 }
 
-func validateSuppressionsOptions(options Options) error {
+func validateSuppressionUpdate(update SuppressionUpdate) error {
 	switch {
-	case options.SuppressAll && len(options.SuppressRules) > 0:
+	case update.All && len(update.Rules) > 0:
 		return fmt.Errorf("--suppress-all and --suppress-rule cannot be used together")
-	case (options.SuppressAll || len(options.SuppressRules) > 0) && options.PruneSuppressions:
+	case (update.All || len(update.Rules) > 0) && update.Prune:
 		return fmt.Errorf("recording and --prune-suppressions cannot be used together")
 	}
 	return nil
 }
-func loadSuppressions(options Options) (suppressionsState, error) {
-	if err := validateSuppressionsOptions(options); err != nil {
+func loadSuppressions(config Config, update SuppressionUpdate) (suppressionsState, error) {
+	if err := validateSuppressionUpdate(update); err != nil {
 		return suppressionsState{}, err
 	}
-	path := suppressions.ResolvePath(options.WorkspaceRoot, options.SuppressionsLocation)
+	path := suppressions.ResolvePath(config.WorkspaceRoot, config.SuppressionsLocation)
 	snapshot, err := atomicfile.Read(path)
 	if err != nil {
 		return suppressionsState{}, err
@@ -67,7 +67,7 @@ func loadSuppressions(options Options) (suppressionsState, error) {
 		return suppressionsState{}, err
 	}
 	if !snapshot.Exists {
-		if options.SuppressionsLocation != "" && !options.SuppressAll && len(options.SuppressRules) == 0 {
+		if config.SuppressionsLocation != "" && !update.All && len(update.Rules) == 0 {
 			return suppressionsState{}, fmt.Errorf("the suppressions file %s does not exist", path)
 		}
 		return suppressionsState{path: path, file: suppressions.File{}, snapshot: snapshot, observations: observations}, nil
@@ -227,11 +227,11 @@ func collectGroups(file suppressions.File, result Result, evidence executionEvid
 	}
 	return groups, nil
 }
-func selectedRule(options Options, rule string) bool {
-	if options.SuppressAll {
+func selectedRule(update SuppressionUpdate, rule string) bool {
+	if update.All {
 		return true
 	}
-	for _, id := range options.SuppressRules {
+	for _, id := range update.Rules {
 		if id == rule {
 			return true
 		}
@@ -256,17 +256,17 @@ func allowanceDiagnostics(path string, failures []suppressions.LimitFailure, sna
 	return items
 }
 
-func applySuppressions(options Options, state suppressionsState, run runInfo, evidence executionEvidence, result *Result) (*suppressionWrite, error) {
+func applySuppressions(config Config, update SuppressionUpdate, state suppressionsState, run runInfo, evidence executionEvidence, result *Result) (*suppressionWrite, error) {
 	result.SuppressionsPath = state.path
-	unknown := unknownSuppressRules(options, run)
+	unknown := unknownSuppressRules(update, run)
 	result.Diagnostics = append(result.Diagnostics, unknown...)
-	writing := options.SuppressAll || len(options.SuppressRules) > 0 || options.PruneSuppressions
-	blocked := len(unknown) > 0 || blockingRuleErrors(options, result.Diagnostics, run.known) > 0
+	writing := update.writing()
+	blocked := len(unknown) > 0 || blockingRuleErrors(update, result.Diagnostics, run.known) > 0
 	file := state.file
 	if writing && blocked {
 		result.Warnings = append(result.Warnings, fmt.Sprintf("lintai did not update %s because selected rules failed", state.path))
 	}
-	if writing && !blocked && !options.PruneSuppressions {
+	if writing && !blocked && !update.Prune {
 		raw, err := collectGroups(nil, *result, evidence, false)
 		if err != nil {
 			return nil, err
@@ -274,7 +274,7 @@ func applySuppressions(options Options, state suppressionsState, run runInfo, ev
 		replacements := map[string]bool{}
 		entries := map[string]*suppressions.Entry{}
 		for _, group := range raw {
-			if !selectedRule(options, group.entry.Rule) {
+			if !selectedRule(update, group.entry.Rule) {
 				continue
 			}
 			id := suppressions.EntryID(group.entry)
@@ -303,7 +303,7 @@ func applySuppressions(options Options, state suppressionsState, run runInfo, ev
 	if err != nil {
 		return nil, err
 	}
-	if writing && !blocked && options.PruneSuppressions {
+	if writing && !blocked && update.Prune {
 		pruned := suppressions.File{}
 		for _, entry := range file {
 			copyEntry := entry
@@ -339,7 +339,7 @@ func applySuppressions(options Options, state suppressionsState, run runInfo, ev
 		file = limited
 	}
 	var write *suppressionWrite
-	if writing && !blocked && (state.snapshot.Exists || !options.PruneSuppressions) {
+	if writing && !blocked && (state.snapshot.Exists || !update.Prune) {
 		data, err := suppressions.Encode(file)
 		if err != nil {
 			return nil, err
@@ -369,7 +369,7 @@ func applySuppressions(options Options, state suppressionsState, run runInfo, ev
 					result.UnusedSuppressions = append(result.UnusedSuppressions, suppressions.Unused{File: entry.File, RuleID: entry.Rule, Assertion: entry.Assertion, Description: group.Description, Allowed: group.Count, Found: found})
 				}
 			}
-			if found > group.Count && options.Explain && current != nil {
+			if found > group.Count && config.Explain && current != nil {
 				for _, index := range current.indexes {
 					result.Diagnostics[index].Explanation = append(result.Diagnostics[index].Explanation, fmt.Sprintf("suppressions: %s allows %d, found %d; all findings are reported", filepath.Base(state.path), group.Count, found))
 				}
@@ -395,9 +395,9 @@ func applySuppressions(options Options, state suppressionsState, run runInfo, ev
 	sortDiagnostics(result.Diagnostics)
 	return write, nil
 }
-func blockingRuleErrors(options Options, items []diagnostics.Diagnostic, known map[string]struct{}) int {
+func blockingRuleErrors(update SuppressionUpdate, items []diagnostics.Diagnostic, known map[string]struct{}) int {
 	selected := map[string]bool{}
-	for _, id := range options.SuppressRules {
+	for _, id := range update.Rules {
 		selected[id] = true
 	}
 	count := 0
@@ -412,13 +412,13 @@ func blockingRuleErrors(options Options, items []diagnostics.Diagnostic, known m
 	}
 	return count
 }
-func unknownSuppressRules(options Options, run runInfo) []diagnostics.Diagnostic {
+func unknownSuppressRules(update SuppressionUpdate, run runInfo) []diagnostics.Diagnostic {
 	if !run.complete {
 		return nil
 	}
 	seen := map[string]bool{}
 	var out []diagnostics.Diagnostic
-	for _, id := range options.SuppressRules {
+	for _, id := range update.Rules {
 		if _, ok := run.known[id]; ok || seen[id] {
 			continue
 		}

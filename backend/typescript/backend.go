@@ -36,16 +36,16 @@ type Backend struct {
 }
 
 type producerGeneration struct {
-	repoRoot, workspaceRoot string
-	relations               []string
-	snapshot                *lintaiapi.Snapshot
-	observations            observe.Set
-	inputRevision           string
-	scope                   map[string]any
-	description             facts.ProducerDescription
-	sources                 []ambient.Source
-	adjustments             []lintaiapi.ConfigAdjustment
-	aliases                 map[string]string
+	workspaceRoot string
+	relations     []string
+	snapshot      *lintaiapi.Snapshot
+	observations  observe.Set
+	inputRevision string
+	scope         map[string]any
+	description   facts.ProducerDescription
+	sources       []ambient.Source
+	adjustments   []lintaiapi.ConfigAdjustment
+	aliases       map[string]string
 }
 
 var _ backend.Producer = (*Backend)(nil)
@@ -146,15 +146,11 @@ func (b *Backend) Prepare(ctx context.Context, request backend.CollectionRequest
 		relations = append(relations, strings.TrimPrefix(predicate.Name, b.namespace+"."))
 	}
 	slices.Sort(relations)
-	repoRoot, err := filepath.Abs(request.RepoRoot)
-	if err != nil {
-		return nil, err
-	}
 	workspaceRoot, err := filepath.Abs(request.WorkspaceRoot)
 	if err != nil {
 		return nil, err
 	}
-	return b.generation(ctx, filepath.Clean(repoRoot), filepath.Clean(workspaceRoot), relations, mode)
+	return b.generation(ctx, filepath.Clean(workspaceRoot), relations, mode)
 }
 
 func (g *producerGeneration) Metadata() backend.GenerationMetadata {
@@ -182,9 +178,9 @@ func (b *Backend) Close() error {
 // generation is called with collectMu held. A changed relation demand needs a
 // new extraction. The prior
 // snapshot only supplies tracking keys whose captured source bytes still match.
-func (b *Backend) generation(ctx context.Context, repoRoot, workspaceRoot string, relations []string, mode observe.Mode) (*producerGeneration, error) {
+func (b *Backend) generation(ctx context.Context, workspaceRoot string, relations []string, mode observe.Mode) (*producerGeneration, error) {
 	var previousSnapshot *lintaiapi.Snapshot
-	if b.current != nil && b.current.repoRoot == repoRoot && b.current.workspaceRoot == workspaceRoot {
+	if b.current != nil && b.current.workspaceRoot == workspaceRoot {
 		previousSnapshot = b.current.snapshot
 		if slices.Equal(relations, b.current.relations) {
 			valid, err := b.validateGeneration(ctx, b.current, mode)
@@ -205,7 +201,7 @@ func (b *Backend) generation(ctx context.Context, repoRoot, workspaceRoot string
 	generation.sources = sources
 	generation.description = b.description
 	b.reportAdjustments(generation.adjustments)
-	generation.repoRoot, generation.workspaceRoot = repoRoot, workspaceRoot
+	generation.workspaceRoot = workspaceRoot
 	generation.relations = slices.Clone(relations)
 	b.current = generation
 	return b.current, nil

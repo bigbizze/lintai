@@ -15,7 +15,6 @@ type Producer interface {
 }
 
 type CollectionRequest struct {
-	RepoRoot      string
 	WorkspaceRoot string
 	Predicates    []facts.Predicate
 }

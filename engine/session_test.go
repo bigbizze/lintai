@@ -32,10 +32,10 @@ func TestSessionRetainsAndReplacesCurrentGeneration(t *testing.T) {
 	a := writeTestFile(t, workspace, "src/a.ts", original)
 	rule := writeTestFile(t, rules, "modules.ts", parallelRuleSource("fixture.modules", "Decl violation(Entity). violation(Entity) :- ts.module(Entity).", "(row) => row.Entity"))
 	var evaluations atomic.Int64
-	options := Options{RepoRoot: repo, WorkspaceRoot: testpack.Build(t, repo, workspace, rule), RuleWorkers: 1, beforeEvaluation: func() { evaluations.Add(1) }}
+	options := Config{WorkspaceRoot: testpack.Build(t, repo, workspace, rule), RuleWorkers: 1}
 	newProducer := func() *typescript.Backend { return typescript.New(typescript.Options{Files: typescript.FileScopeWalk}) }
 	session := openTestSession(t, options, newProducer())
-	defer session.Close()
+	session.hooks.beforeEvaluation = func() { evaluations.Add(1) }
 	first, err := session.Check(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -44,37 +44,22 @@ func TestSessionRetainsAndReplacesCurrentGeneration(t *testing.T) {
 		t.Fatalf("unexpected first result: %+v", first)
 	}
 	index := session.currentFacts.base
-	observation := session.executionObservation()
-	options.RuleWorkers = 2
-	warm, err := session.Check(context.Background(), options)
+	plan := session.ruleEntries["rules/modules.ts"]
+	warm, err := session.Check(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	warmObservation := session.executionObservation()
-	if !reflect.DeepEqual(first, warm) || session.currentFacts.base != index || evaluations.Load() != 2 ||
-		warmObservation.mangleCompiles != observation.mangleCompiles {
-		t.Fatalf("unchanged check did not reuse facts/plans and dispatch rules: first=%+v warm=%+v", first, warm)
+	if !reflect.DeepEqual(first, warm) || session.currentFacts.base != index || evaluations.Load() != 2 {
+		t.Fatalf("unchanged check did not reuse facts and dispatch rules: first=%+v warm=%+v", first, warm)
 	}
-	options.Rule = map[string]RulePolicy{"fixture.modules": {Severity: "warning"}}
-	warning, err := session.Check(context.Background(), options)
-	if err != nil || len(warning.Diagnostics) != 1 || warning.Diagnostics[0].Severity != diagnostics.SeverityWarning ||
-		evaluations.Load() != 3 {
-		t.Fatalf("warning check did not evaluate rules: %+v %v", warning, err)
+	if retained := session.ruleEntries["rules/modules.ts"]; plan == nil || plan.plan == nil || retained != plan {
+		t.Fatal("unchanged check did not reuse the compiled plan")
 	}
-	freshOptions := options
-	freshOptions.beforeEvaluation = nil
-	freshSession := openTestSession(t, freshOptions, newProducer())
-	freshWarning, freshErr := freshSession.Check(context.Background())
-	if closeErr := freshSession.Close(); closeErr != nil {
-		t.Fatal(closeErr)
-	}
-	if freshErr != nil || !reflect.DeepEqual(warning, freshWarning) {
-		t.Fatalf("reassembled warning differs from fresh result: %+v %+v %v", warning, freshWarning, freshErr)
-	}
-	options.Rule = nil
-	errorResult, err := session.Check(context.Background(), options)
-	if err != nil || !reflect.DeepEqual(errorResult, first) || evaluations.Load() != 4 {
-		t.Fatalf("error check did not evaluate rules: %+v %v", errorResult, err)
+	warningOptions := options
+	warningOptions.Rule = map[string]RulePolicy{"fixture.modules": {Severity: "warning"}}
+	warning, err := openTestSession(t, warningOptions, newProducer()).Check(context.Background())
+	if err != nil || len(warning.Diagnostics) != 1 || warning.Diagnostics[0].Severity != diagnostics.SeverityWarning {
+		t.Fatalf("warning policy: %+v %v", warning, err)
 	}
 	// Returned data is independent of the current result.
 	warm.Diagnostics[0].Message = "caller changed its copy"
@@ -85,14 +70,11 @@ func TestSessionRetainsAndReplacesCurrentGeneration(t *testing.T) {
 
 	assertFresh := func() Result {
 		t.Helper()
-		got, err := session.Check(context.Background(), options)
+		got, err := session.Check(context.Background())
 		if err != nil {
 			t.Fatal(err)
 		}
-		freshOptions := options
-		freshOptions.beforeEvaluation = nil
-		freshSession := openTestSession(t, freshOptions, newProducer())
-		defer freshSession.Close()
+		freshSession := openTestSession(t, options, newProducer())
 		fresh, err := freshSession.Check(context.Background())
 		if err != nil {
 			t.Fatal(err)
@@ -119,7 +101,7 @@ func TestSessionRetainsAndReplacesCurrentGeneration(t *testing.T) {
 		t.Fatalf("projection after edit: %+v", projected)
 	}
 	changed := assertFresh()
-	if changed.SnapshotVersion == first.SnapshotVersion || evaluations.Load() != 5 {
+	if changed.SnapshotVersion == first.SnapshotVersion || evaluations.Load() != 3 {
 		t.Fatal("content change did not replace the generation")
 	}
 	writeTestFile(t, workspace, "src/b.ts", "export const other = 3;\n")
@@ -127,11 +109,11 @@ func TestSessionRetainsAndReplacesCurrentGeneration(t *testing.T) {
 	if len(added.Diagnostics) != 2 {
 		t.Fatalf("new source not discovered: %+v", added.Diagnostics)
 	}
-	all, err := session.RefreshAll(context.Background(), options)
+	all, err := session.RefreshAll(context.Background())
 	if err != nil || !slices.Equal(all.Files, []string{"src/a.ts", "src/b.ts"}) || !slices.Equal(all.SourceDigests, []string{
 		fmt.Sprintf("%x", sha256.Sum256([]byte("export const value = 2;\n"))),
 		fmt.Sprintf("%x", sha256.Sum256([]byte("export const other = 3;\n"))),
-	}) || len(all.Diagnostics[0]) != 1 || len(all.Diagnostics[1]) != 1 || evaluations.Load() != 6 {
+	}) || len(all.Diagnostics[0]) != 1 || len(all.Diagnostics[1]) != 1 || evaluations.Load() != 4 {
 		t.Fatalf("all-file projection: %+v %v", all, err)
 	}
 	if err := os.Remove(a); err != nil {
@@ -144,30 +126,17 @@ func TestSessionRetainsAndReplacesCurrentGeneration(t *testing.T) {
 	if len(first.DiagnosticsFor("src/a.ts")) != 1 {
 		t.Fatal("old completed result changed after replacement")
 	}
-	otherWorkspace := t.TempDir()
-	writeTestFile(t, otherWorkspace, "src/other.ts", "export const value = 4;\n")
-	options.WorkspaceRoot = testpack.Build(t, repo, otherWorkspace, rule)
-	switched := assertFresh()
-	if len(switched.DiagnosticsFor("src/other.ts")) != 1 || slices.Contains(switched.AnalyzedFiles, "src/b.ts") {
-		t.Fatalf("workspace replacement retained old facts: %+v", switched)
-	}
 
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := session.Check(canceled, options); err == nil {
+	if _, err := session.Check(canceled); err == nil {
 		t.Fatal("canceled check succeeded")
 	}
 	if _, err := session.Current(); err == nil {
 		t.Fatal("failed refresh left a current result")
 	}
-	if _, err := session.Check(context.Background(), options); err != nil {
+	if _, err := session.Check(context.Background()); err != nil {
 		t.Fatal(err)
-	}
-	if _, err := session.Check(context.Background(), options, options); err == nil {
-		t.Fatal("check accepted multiple requests")
-	}
-	if _, err := session.Current(); err == nil {
-		t.Fatal("invalid check left a current result")
 	}
 	if err := session.Close(); err != nil {
 		t.Fatal(err)
@@ -183,10 +152,10 @@ func TestSessionRetainsAndReplacesCurrentGeneration(t *testing.T) {
 // without requiring a new producer generation.
 func TestComposedFactsCaptureCurrentEligibilityWithoutReemission(t *testing.T) {
 	producer := newParallelFixtureProducer()
-	session := openTestSession(t, Options{}, producer)
+	session := openTestSession(t, Config{}, producer)
 	defer session.Close()
 	catalog := session.catalog
-	empty, err := catalog.collect(context.Background(), Options{}, nil, nil, observe.Full)
+	empty, err := catalog.collect(context.Background(), "", nil, nil, observe.Full)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +164,7 @@ func TestComposedFactsCaptureCurrentEligibilityWithoutReemission(t *testing.T) {
 	}
 	predicate := facts.Predicate{Name: "catalog.item", Arity: 2}
 	demand := map[string]map[facts.Predicate]struct{}{"catalog": {predicate: {}}}
-	first, err := catalog.collect(context.Background(), Options{}, demand, &empty, observe.Full)
+	first, err := catalog.collect(context.Background(), "", demand, &empty, observe.Full)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +176,7 @@ func TestComposedFactsCaptureCurrentEligibilityWithoutReemission(t *testing.T) {
 		t.Fatal(err)
 	}
 	producer.observations, producer.reusable = set, true
-	next, err := catalog.collect(context.Background(), Options{}, demand, &first, observe.Full)
+	next, err := catalog.collect(context.Background(), "", demand, &first, observe.Full)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -215,7 +184,7 @@ func TestComposedFactsCaptureCurrentEligibilityWithoutReemission(t *testing.T) {
 		t.Fatal("equal identity failed to reuse facts with freshly captured eligibility")
 	}
 	producer.observations = observe.Set{}
-	immutable, err := catalog.collect(context.Background(), Options{}, demand, &next, observe.Full)
+	immutable, err := catalog.collect(context.Background(), "", demand, &next, observe.Full)
 	if err != nil || !immutable.reusableFromObservations || len(immutable.observations.Records()) != 0 {
 		t.Fatalf("immutable empty observation promise: %v", err)
 	}
@@ -241,10 +210,10 @@ func TestComposedFactsCaptureCurrentEligibilityWithoutReemission(t *testing.T) {
 		demand := map[string]map[facts.Predicate]struct{}{"ts": {module: {}}}
 		collect := func(settings typescript.Options, requested map[string]map[facts.Predicate]struct{}, previous *composedFacts) composedFacts {
 			t.Helper()
-			session := openTestSession(t, Options{}, typescript.New(settings))
+			session := openTestSession(t, Config{}, typescript.New(settings))
 			t.Cleanup(func() { _ = session.Close() })
 			catalog := session.catalog
-			result, err := catalog.collect(context.Background(), Options{RepoRoot: root, WorkspaceRoot: root}, requested, previous, observe.Full)
+			result, err := catalog.collect(context.Background(), root, requested, previous, observe.Full)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -282,7 +251,7 @@ func TestComposedFactsCaptureCurrentEligibilityWithoutReemission(t *testing.T) {
 	})
 }
 
-func openTestSession(t *testing.T, options Options, producers ...backend.Producer) *Session {
+func openTestSession(t *testing.T, options Config, producers ...backend.Producer) *Session {
 	t.Helper()
 	session, err := Open(options, producers...)
 	if err != nil {

@@ -14,7 +14,6 @@ import (
 
 	"github.com/bigbizze/lintai/backend/typescript"
 	"github.com/bigbizze/lintai/diagnostics"
-	"github.com/bigbizze/lintai/engine"
 	"github.com/bigbizze/lintai/internal/testpack"
 	"github.com/bigbizze/lintai/server"
 )
@@ -29,7 +28,6 @@ func TestFixtureRulesReportPlantedViolations(t *testing.T) {
 	}
 	args := []string{
 		"--json", "--explain",
-		"--repo-root", repoRoot,
 		"--workspace-root", testpack.Build(t, repoRoot, filepath.Join(repoRoot, "testdata/fixtures/workspace"), filepath.Join(repoRoot, "testdata/fixtures/rules/*.ts")),
 	}
 	first := runJSON(t, args)
@@ -212,7 +210,6 @@ func TestRelationExamples(t *testing.T) {
 			}
 			args := []string{
 				"--json", "--explain",
-				"--repo-root", repoRoot,
 				"--workspace-root", testpack.Build(t, repoRoot, filepath.Join(base, "workspace"), ruleGlob),
 			}
 			if family.sourceLinks != "" {
@@ -268,10 +265,10 @@ func TestServeSessionReplacesChangedProducerConfiguration(t *testing.T) {
 		}
 	}
 	setConfig("b.ts")
-	options := engine.Options{RepoRoot: repo, WorkspaceRoot: testpack.Build(t, repo, root, filepath.Join(repo, "testdata/fixtures/rules/layers.ts")), RuleWorkers: 2}
-	instance := &serveSession{params: server.InitializeParams{WorkspaceRoot: root}}
+	testpack.Build(t, repo, root, filepath.Join(repo, "testdata/fixtures/rules/layers.ts"))
+	instance := &serveSession{params: server.InitializeParams{WorkspaceRoot: root, RuleWorkers: 2}}
 	defer instance.Close()
-	first, err := instance.RefreshAll(context.Background(), options)
+	first, err := instance.RefreshAll(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +277,7 @@ func TestServeSessionReplacesChangedProducerConfiguration(t *testing.T) {
 	}
 	previous := instance.session
 	setConfig("a.ts")
-	second, err := instance.RefreshAll(context.Background(), options)
+	second, err := instance.RefreshAll(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -316,14 +313,14 @@ func TestExitCodes(t *testing.T) {
 		args []string
 		want int
 	}{
-		{"violations", []string{"--workspace-root", workspace, "--repo-root", repoRoot}, exitViolations},
-		{"parallel check", []string{"check", "--workspace-root", workspace, "--repo-root", repoRoot, "--rule-workers", "1", "--rule-workers", "2"}, exitViolations},
+		{"violations", []string{"--workspace-root", workspace}, exitViolations},
+		{"parallel check", []string{"check", "--workspace-root", workspace, "--rule-workers", "1", "--rule-workers", "2"}, exitViolations},
 		{"negative workers", []string{"--rule-workers", "-1"}, exitUsage},
 		{"noninteger workers", []string{"--rule-workers", "1.5"}, exitUsage},
-		{"clean", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--exclude", "src/pure/**"}, exitClean},
+		{"clean", []string{"--workspace-root", workspace, "--exclude", "src/pure/**"}, exitClean},
 		{"unknown flag", []string{"--no-such-flag"}, exitUsage},
-		{"bad file scope", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--files", "all"}, exitUsage},
-		{"obsolete rule glob flag", []string{"--workspace-root", workspace, "--repo-root", repoRoot, "--rules", "missing/*.ts"}, exitUsage},
+		{"bad file scope", []string{"--workspace-root", workspace, "--files", "all"}, exitUsage},
+		{"obsolete rule glob flag", []string{"--workspace-root", workspace, "--rules", "missing/*.ts"}, exitUsage},
 		{"unknown relation", []string{"facts", "--workspace-root", workspace, "--relation", "no_such_relation"}, exitUsage},
 	}
 	for _, item := range cases {
@@ -584,7 +581,7 @@ export default rule("t.expect-all").version(1).program(dl` + "`Decl a(M). a(M) :
 	}
 	var stdout bytes.Buffer
 	err = run(context.Background(), []string{
-		"--json", "--repo-root", repoRoot,
+		"--json",
 		"--workspace-root", testpack.Build(t, repoRoot, filepath.Join(repoRoot, "testdata/fixtures/workspace"), filepath.Join(rulesDir, "*.ts")),
 	}, &stdout)
 	if code := exitCode(err, io.Discard); code != exitRuleError {
@@ -734,7 +731,7 @@ export default rule("arch.dup-config").version(1).program(dl` + "`Decl v(M). v(M
 	}
 
 	stdout.Reset()
-	err = run(context.Background(), []string{"--json", "--repo-root", repoRoot, "--workspace-root", testpack.Build(t, repoRoot, workspace, "lintai-rules/alpha.ts", "lintai-rules/dup-*.ts", "lintai-rules/bad-id.ts")}, &stdout)
+	err = run(context.Background(), []string{"--json", "--workspace-root", testpack.Build(t, repoRoot, workspace, "lintai-rules/alpha.ts", "lintai-rules/dup-*.ts", "lintai-rules/bad-id.ts")}, &stdout)
 	if code := exitCode(err, io.Discard); code != exitRuleError {
 		t.Fatalf("exit code %d, want %d: %v", code, exitRuleError, err)
 	}

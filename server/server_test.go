@@ -22,7 +22,7 @@ type analyzer struct {
 	result      func([]string) engine.FilesResult
 }
 
-func (a *analyzer) RefreshFiles(_ context.Context, _ engine.Options, names []string) (engine.FilesResult, error) {
+func (a *analyzer) RefreshFiles(_ context.Context, names []string) (engine.FilesResult, error) {
 	a.files = append(a.files, names)
 	if a.fail {
 		a.fail = false
@@ -30,7 +30,7 @@ func (a *analyzer) RefreshFiles(_ context.Context, _ engine.Options, names []str
 	}
 	return a.result(names), nil
 }
-func (a *analyzer) RefreshAll(context.Context, engine.Options) (engine.FilesResult, error) {
+func (a *analyzer) RefreshAll(context.Context) (engine.FilesResult, error) {
 	a.all++
 	return a.result([]string{"a.ts", "b.ts"}), nil
 }

@@ -25,48 +25,32 @@ export default rule("fixture.generated-program").version(1)
 	.report("violation").message((row) => row.Code);
 `
 	writeTestFile(t, workspace, "lintai-rules/generated.ts", source)
-	engine := openTestSession(t, Options{}, newParallelFixtureProducer())
-	defer engine.Close()
-	options := parallelFixtureOptions(t, repoRoot, workspace)
-	options.RuleWorkers = 1
 	allRows := []any{[]any{"a"}, []any{"b"}, []any{"c"}}
-	options.Rule = map[string]RulePolicy{"fixture.generated-program": {Options: map[string]any{"onlyFirst": true, "selection": allRows}}}
-	first, _, err := engine.analyze(context.Background(), options)
-	if err != nil {
-		t.Fatal(err)
+	check := func(policy map[string]any) (*Session, Result) {
+		t.Helper()
+		options := parallelFixtureOptions(t, repoRoot, workspace)
+		options.RuleWorkers = 1
+		options.Rule = map[string]RulePolicy{"fixture.generated-program": {Options: policy}}
+		session := openTestSession(t, options, newParallelFixtureProducer())
+		result, _, err := session.analyze(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return session, result
 	}
-	if len(first.Diagnostics) != 1 || first.Diagnostics[0].Message != "a" {
+	if _, first := check(map[string]any{"onlyFirst": true, "selection": allRows}); len(first.Diagnostics) != 1 || first.Diagnostics[0].Message != "a" {
 		t.Fatalf("first generated program should report one row: %+v", first.Diagnostics)
 	}
-	firstObservation := engine.executionObservation()
-	options.Rule = map[string]RulePolicy{"fixture.generated-program": {Options: map[string]any{"onlyFirst": false, "selection": allRows}}}
-	second, _, err := engine.analyze(context.Background(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(second.Diagnostics) != 3 {
+	if _, second := check(map[string]any{"onlyFirst": false, "selection": allRows}); len(second.Diagnostics) != 3 {
 		t.Fatalf("changed generated program should report all three rows: %+v", second.Diagnostics)
 	}
-	secondObservation := engine.executionObservation()
-	if secondObservation.mangleCompiles != firstObservation.mangleCompiles+1 {
-		t.Fatalf("generated program change did not compile a new plan: first=%+v second=%+v", firstObservation, secondObservation)
-	}
-	secondPlan := engine.ruleEntries["lintai-rules/generated.ts"].plan
-	options.Rule = map[string]RulePolicy{"fixture.generated-program": {Options: map[string]any{"onlyFirst": false, "selection": []any{[]any{"b"}, []any{"c"}}}}}
-	third, _, err := engine.analyze(context.Background(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
+	session, third := check(map[string]any{"onlyFirst": false, "selection": []any{[]any{"b"}, []any{"c"}}})
 	if len(third.Diagnostics) != 2 || third.Diagnostics[0].Message != "b" || third.Diagnostics[1].Message != "c" {
 		t.Fatalf("changed generated facts should report b and c: %+v", third.Diagnostics)
 	}
-	thirdObservation := engine.executionObservation()
-	if engine.ruleEntries["lintai-rules/generated.ts"].plan == secondPlan || thirdObservation.mangleCompiles != secondObservation.mangleCompiles+1 {
-		t.Fatalf("changed facts with unchanged program did not replace the plan: second=%+v third=%+v", secondObservation, thirdObservation)
-	}
-	thirdPlan := engine.ruleEntries["lintai-rules/generated.ts"].plan
-	fourth, _, err := engine.analyze(context.Background(), options)
-	if err != nil || !reflect.DeepEqual(third.Diagnostics, fourth.Diagnostics) || engine.ruleEntries["lintai-rules/generated.ts"].plan != thirdPlan || engine.executionObservation().mangleCompiles != thirdObservation.mangleCompiles || engine.executionObservation().programBuilds != thirdObservation.programBuilds+1 {
+	thirdPlan := session.ruleEntries["lintai-rules/generated.ts"].plan
+	fourth, _, err := session.analyze(context.Background())
+	if err != nil || !reflect.DeepEqual(third.Diagnostics, fourth.Diagnostics) || session.ruleEntries["lintai-rules/generated.ts"].plan != thirdPlan {
 		t.Fatalf("unchanged output did not reuse the complete plan after fresh generation: %+v %v", fourth.Diagnostics, err)
 	}
 }
@@ -101,9 +85,8 @@ func TestRulesWithoutBaseDependenciesSkipProducerCollection(t *testing.T) {
 	workspace := t.TempDir()
 	producer := newParallelFixtureProducer()
 	writeTestFile(t, workspace, "lintai-rules/no-facts.ts", parallelRuleSource("fixture.no-facts", "Decl violation(Entity).", "(row) => row.Entity"))
-	engine := openTestSession(t, Options{}, producer)
-	defer engine.Close()
-	result, err := engine.Check(context.Background(), parallelFixtureOptions(t, repoRoot, workspace))
+	engine := openTestSession(t, parallelFixtureOptions(t, repoRoot, workspace), producer)
+	result, err := engine.Check(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -147,9 +130,8 @@ export default { get id() { throw new Error("metadata getter failed"); } };
 			t.Errorf("%s error = %q, want %q", path, messages[path], message)
 		}
 	}
-	engine := openTestSession(t, Options{}, newParallelFixtureProducer())
-	defer engine.Close()
-	result, err := engine.Check(context.Background(), options)
+	engine := openTestSession(t, options, newParallelFixtureProducer())
+	result, err := engine.Check(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}

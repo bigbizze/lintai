@@ -108,7 +108,7 @@ func runBuildRules(ctx context.Context, args []string) error {
 
 // The CLI constructs these producers for this session. Release them if
 // validation fails before Open can take ownership.
-func openSession(options engine.Options, producers ...backend.Producer) (*engine.Session, error) {
+func openSession(options engine.Config, producers ...backend.Producer) (*engine.Session, error) {
 	session, err := engine.Open(options, producers...)
 	if err != nil {
 		for _, producer := range producers {
@@ -138,7 +138,7 @@ func runSchema(ctx context.Context, args []string, stdout io.Writer) error {
 	for _, item := range settings {
 		producers = append(producers, newBackend(item))
 	}
-	session, err := openSession(engine.Options{RepoRoot: absoluteWorkspace, WorkspaceRoot: absoluteWorkspace}, producers...)
+	session, err := openSession(engine.Config{WorkspaceRoot: absoluteWorkspace}, producers...)
 	if err != nil {
 		return err
 	}
@@ -190,7 +190,7 @@ func runFacts(ctx context.Context, args []string, stdout io.Writer) error {
 	for _, item := range settings {
 		producers = append(producers, newBackend(item))
 	}
-	session, err := openSession(engine.Options{RepoRoot: absoluteWorkspace, WorkspaceRoot: absoluteWorkspace}, producers...)
+	session, err := openSession(engine.Config{WorkspaceRoot: absoluteWorkspace}, producers...)
 	if err != nil {
 		return err
 	}
@@ -250,7 +250,7 @@ func (s *serveSession) configure(ctx context.Context) (err error) {
 	if err = ctx.Err(); err != nil {
 		return err
 	}
-	if s.session == nil || !reflect.DeepEqual(settings, s.settings) {
+	if s.session == nil || !reflect.DeepEqual(settings, s.settings) || !reflect.DeepEqual(config.Rule, s.config.Rule) {
 		if s.session != nil {
 			err = s.session.Close()
 			s.session = nil
@@ -262,7 +262,10 @@ func (s *serveSession) configure(ctx context.Context) (err error) {
 		for _, item := range settings {
 			producers = append(producers, newBackend(item))
 		}
-		s.session, err = openSession(engine.Options{}, producers...)
+		s.session, err = openSession(engine.Config{
+			WorkspaceRoot: s.params.WorkspaceRoot, Rule: config.Rule, FactLimit: s.params.FactLimit,
+			RuleWorkers: s.params.RuleWorkers, RulesLock: s.params.RulesLock, SuppressionsLocation: s.params.SuppressionsLocation,
+		}, producers...)
 		if err != nil {
 			return err
 		}
@@ -272,7 +275,7 @@ func (s *serveSession) configure(ctx context.Context) (err error) {
 	return nil
 }
 
-func (s *serveSession) RefreshFiles(ctx context.Context, options engine.Options, files []string) (engine.FilesResult, error) {
+func (s *serveSession) RefreshFiles(ctx context.Context, files []string) (engine.FilesResult, error) {
 	if err := s.configure(ctx); err != nil {
 		return engine.FilesResult{}, err
 	}
@@ -280,16 +283,14 @@ func (s *serveSession) RefreshFiles(ctx context.Context, options engine.Options,
 		_ = s.Close()
 		return engine.FilesResult{}, err
 	}
-	options.Rule = s.config.Rule
-	return s.session.RefreshFiles(ctx, options, files)
+	return s.session.RefreshFiles(ctx, files)
 }
 
-func (s *serveSession) RefreshAll(ctx context.Context, options engine.Options) (engine.FilesResult, error) {
+func (s *serveSession) RefreshAll(ctx context.Context) (engine.FilesResult, error) {
 	if err := s.configure(ctx); err != nil {
 		return engine.FilesResult{}, err
 	}
-	options.Rule = s.config.Rule
-	return s.session.RefreshAll(ctx, options)
+	return s.session.RefreshAll(ctx)
 }
 
 func (s *serveSession) Close() error {
@@ -465,16 +466,15 @@ func runScope(ctx context.Context, args []string, stdout io.Writer) error {
 }
 
 type projectFlags struct {
-	flags                                                *flag.FlagSet
-	repo, root, config, files, sourceLinks, suppressions *string
-	factLimit                                            *int
-	excludes, sources                                    stringList
+	flags                                          *flag.FlagSet
+	root, config, files, sourceLinks, suppressions *string
+	factLimit                                      *int
+	excludes, sources                              stringList
 }
 
 func newProjectFlags(flags *flag.FlagSet) *projectFlags {
 	p := &projectFlags{flags: flags}
 	p.root = flags.String("workspace-root", ".", "workspace to analyze")
-	p.repo = flags.String("repo-root", "", "producer repository root (defaults to workspace)")
 	p.config = flags.String("config", "", "lintai.toml file relative to invocation directory")
 	p.files = flags.String("files", "", "source selection mode: tsconfig or walk")
 	p.sourceLinks = flags.String("source-links", "", "source-entry associations relative to workspace")
@@ -484,23 +484,22 @@ func newProjectFlags(flags *flag.FlagSet) *projectFlags {
 	flags.Var(&p.sources, "source", "select an exact workspace source file (repeatable)")
 	return p
 }
-func (p *projectFlags) open() (*engine.Session, engine.Options, error) {
+
+// open binds every parsed setting into the session configuration. The caller
+// supplies execution settings such as workers, explanations and lock selection.
+func (p *projectFlags) open(options engine.Config) (*engine.Session, engine.Config, error) {
 	if *p.factLimit <= 0 {
-		return nil, engine.Options{}, fmt.Errorf("--fact-limit must be positive")
+		return nil, engine.Config{}, fmt.Errorf("--fact-limit must be positive")
 	}
 	root, err := filepath.Abs(*p.root)
 	if err != nil {
-		return nil, engine.Options{}, err
+		return nil, engine.Config{}, err
 	}
 	settings, config, err := captureTypeScriptSettings(root, *p.config, *p.files, flagProvided(p.flags, "files"), *p.sourceLinks, flagProvided(p.flags, "source-links"), p.excludes, p.sources)
 	if err != nil {
-		return nil, engine.Options{}, err
+		return nil, engine.Config{}, err
 	}
-	repo := *p.repo
-	if repo == "" {
-		repo = root
-	}
-	options := engine.Options{RepoRoot: repo, WorkspaceRoot: root, Rule: config.Rule, FactLimit: *p.factLimit, SuppressionsLocation: *p.suppressions}
+	options.WorkspaceRoot, options.Rule, options.FactLimit, options.SuppressionsLocation = root, config.Rule, *p.factLimit, *p.suppressions
 	producers := make([]backend.Producer, 0, len(settings))
 	for _, setting := range settings {
 		producers = append(producers, newBackend(setting))
@@ -529,14 +528,18 @@ func runOnce(ctx context.Context, args []string, stdout io.Writer) error {
 	if *explain && !*jsonOutput {
 		return fmt.Errorf("--explain requires --json")
 	}
-	runner, options, err := project.open()
+	runner, _, err := project.open(engine.Config{RuleWorkers: *ruleWorkers, Explain: *explain, RulesLock: *rulesLock})
 	if err != nil {
 		return err
 	}
 	defer runner.Close()
-	options.RuleWorkers, options.Explain, options.RulesLock = *ruleWorkers, *explain, *rulesLock
-	options.SuppressAll, options.SuppressRules, options.PruneSuppressions = *suppressAll, suppressRules, *pruneSuppressions
-	result, err := runner.Check(ctx, options)
+	update := engine.SuppressionUpdate{All: *suppressAll, Rules: suppressRules, Prune: *pruneSuppressions}
+	var result engine.Result
+	if update.All || len(update.Rules) > 0 || update.Prune {
+		result, err = runner.UpdateSuppressions(ctx, update)
+	} else {
+		result, err = runner.Check(ctx)
+	}
 	if err != nil {
 		return err
 	}
@@ -616,13 +619,12 @@ func runLock(ctx context.Context, args []string, stdout io.Writer) error {
 	if flags.NArg() != 0 {
 		return fmt.Errorf("unexpected arguments: %v", flags.Args())
 	}
-	session, options, err := project.open()
+	session, options, err := project.open(engine.Config{})
 	if err != nil {
 		return err
 	}
 	defer session.Close()
-	options.RulesLock = *path
-	lock, err := session.BuildRulesLock(ctx, options)
+	lock, err := session.BuildRulesLock(ctx, *path)
 	if err != nil {
 		return err
 	}

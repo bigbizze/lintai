@@ -59,7 +59,7 @@ func (b *Backend) buildTestGeneration(ctx context.Context, repoRoot, workspaceRo
 	for _, relation := range description.BaseRelations {
 		predicates = append(predicates, relation.Predicate)
 	}
-	_, err = inspectEmission(ctx, b, backend.CollectionRequest{RepoRoot: repoRoot, WorkspaceRoot: workspaceRoot, Predicates: predicates})
+	_, err = inspectEmission(ctx, b, backend.CollectionRequest{WorkspaceRoot: workspaceRoot, Predicates: predicates})
 	if err != nil {
 		return nil, err
 	}
@@ -106,7 +106,7 @@ calculate({ value: helper("ok") });
 	}
 	collect := func(predicates []facts.Predicate) emissionView {
 		t.Helper()
-		batch, err := inspectEmission(context.Background(), producer, backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: root, Predicates: predicates})
+		batch, err := inspectEmission(context.Background(), producer, backend.CollectionRequest{WorkspaceRoot: root, Predicates: predicates})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -260,7 +260,7 @@ func TestTwoTypeScriptProducersKeepConstructionSettingsIndependent(t *testing.T)
 			requested[index] = relation.Predicate
 		}
 		batch, err := inspectEmission(context.Background(), producer, backend.CollectionRequest{
-			RepoRoot: root, WorkspaceRoot: root, Predicates: requested,
+			WorkspaceRoot: root, Predicates: requested,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -383,7 +383,7 @@ export function run(): boolean { return effect("ok"); }
 	}
 	collect := func(producer *Backend, predicates []facts.Predicate) emissionView {
 		t.Helper()
-		batch, err := inspectEmission(context.Background(), producer, backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: root, Predicates: predicates})
+		batch, err := inspectEmission(context.Background(), producer, backend.CollectionRequest{WorkspaceRoot: root, Predicates: predicates})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -610,14 +610,12 @@ export default rule("test.filtered-callback").version(1)
     indeterminate(Fn, Name) :- ts.fn(Fn, _, Name), Name = "escape", ts.site_owner(Site, Fn), ts.fn_value_escape_unknown(Site).`+"`"+`)
   .report("indeterminate").message((row) => row.Name);
 `)
-	session, err := engine.Open(engine.Options{}, New())
+	session, err := engine.Open(engine.Config{WorkspaceRoot: testpack.Build(t, repoRoot, root, "lintai-rules/*.ts")}, New())
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer session.Close()
-	result, err := session.Check(context.Background(), engine.Options{
-		RepoRoot: repoRoot, WorkspaceRoot: testpack.Build(t, repoRoot, root, "lintai-rules/*.ts"),
-	})
+	result, err := session.Check(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1496,7 +1494,7 @@ func TestSourceLinksValidationAndDemand(t *testing.T) {
 	for _, relation := range description.BaseRelations {
 		predicates[relation.Predicate.Name] = relation.Predicate
 	}
-	request := backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: root}
+	request := backend.CollectionRequest{WorkspaceRoot: root}
 	request.Predicates = []facts.Predicate{predicates["ts.module"], predicates["ts.declaration"], predicates["ts.location"], predicates["ts.config_adjusted"]}
 	if _, err := inspectEmission(context.Background(), producer, request); err == nil || !strings.Contains(err.Error(), "invalid --source-links") || producer.current != nil {
 		t.Fatalf("ordinary demand did not reject invalid source links: %v", err)
@@ -1562,7 +1560,7 @@ func TestCorrespondenceIsolationAndProjection(t *testing.T) {
 			}
 			collect := func(producer *Backend, predicates []facts.Predicate) emissionView {
 				t.Helper()
-				batch, err := inspectEmission(context.Background(), producer, backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: root, Predicates: predicates})
+				batch, err := inspectEmission(context.Background(), producer, backend.CollectionRequest{WorkspaceRoot: root, Predicates: predicates})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1698,7 +1696,7 @@ func TestCorrespondenceIsolationAndProjection(t *testing.T) {
 		byName[relation.Predicate.Name] = relation.Predicate
 	}
 	predicates := []facts.Predicate{byName["project.module_config"], byName["project.module_owner_config"], byName["project.source_endpoint"]}
-	batch, err := inspectEmission(context.Background(), custom, backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: root, Predicates: predicates})
+	batch, err := inspectEmission(context.Background(), custom, backend.CollectionRequest{WorkspaceRoot: root, Predicates: predicates})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1726,7 +1724,7 @@ func TestOutsideOwnerConfigPathJoinsAdjustments(t *testing.T) {
 		byName[relation.Predicate.Name] = relation.Predicate
 	}
 	predicates := []facts.Predicate{byName["ts.module_config"], byName["ts.module_owner_config"], byName["ts.config_adjusted"]}
-	batch, err := inspectEmission(context.Background(), producer, backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: workspace, Predicates: predicates})
+	batch, err := inspectEmission(context.Background(), producer, backend.CollectionRequest{WorkspaceRoot: workspace, Predicates: predicates})
 	if err != nil {
 		t.Fatal(err)
 	}

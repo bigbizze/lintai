@@ -38,7 +38,7 @@ func TestRelationCoverageInventory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	session := openTestSession(t, Options{}, typescript.New())
+	session := openTestSession(t, Config{}, typescript.New())
 	defer session.Close()
 	catalog := session.catalog
 	description := catalog.entries[0].description
@@ -109,7 +109,7 @@ func TestRelationCoverageInventory(t *testing.T) {
 	// An explicit helper root must select its dependencies even when no rule
 	// clause references it, and package-local premises use the producer namespace.
 	t.Run("explicit helper root in custom namespace", func(t *testing.T) {
-		custom := openTestSession(t, Options{}, typescript.New(typescript.Options{Namespace: "custom"}))
+		custom := openTestSession(t, Config{}, typescript.New(typescript.Options{Namespace: "custom"}))
 		defer custom.Close()
 		customCatalog := custom.catalog
 		customDescription := customCatalog.entries[0].description
