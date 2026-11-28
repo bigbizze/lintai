@@ -310,10 +310,16 @@ func TestOperationUsesOneWorkspace(t *testing.T) {
 		}
 	}
 	link := filepath.Join(parent, "current")
+	producer := &movingProducer{parallelFixtureProducer: newParallelFixtureProducer()}
+	// A session needs an existing directory as its root.
+	for _, root := range []string{link, filepath.Join(parent, "a", "lintai-rules", "root.ts")} {
+		if _, err := Open(Config{WorkspaceRoot: root}, producer); err == nil {
+			t.Fatalf("session opened at %s", root)
+		}
+	}
 	if err := os.Symlink(filepath.Join(parent, "a"), link); err != nil {
 		t.Skip(err)
 	}
-	producer := &movingProducer{parallelFixtureProducer: newParallelFixtureProducer()}
 	producer.move = func() {
 		producer.move = nil
 		if err := os.Remove(link); err != nil {

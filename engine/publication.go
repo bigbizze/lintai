@@ -3,6 +3,7 @@ package engine
 import (
 	"fmt"
 	"maps"
+	"os"
 	"path/filepath"
 	"slices"
 
@@ -55,12 +56,16 @@ func normalizeConfig(config Config) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	// A root that does not resolve is used as given, so producers that read no
-	// files do not need it to exist.
-	config.WorkspaceRoot = given
-	if physical, err := filepath.EvalSymlinks(given); err == nil {
-		config.WorkspaceRoot = physical
+	physical, err := filepath.EvalSymlinks(given)
+	if err != nil {
+		return Config{}, fmt.Errorf("workspace root: %w", err)
 	}
+	if info, err := os.Stat(physical); err != nil {
+		return Config{}, fmt.Errorf("workspace root: %w", err)
+	} else if !info.IsDir() {
+		return Config{}, fmt.Errorf("workspace root %s is not a directory", given)
+	}
+	config.WorkspaceRoot = physical
 	if config.RulesLock != "" {
 		config.RulesLock = filepath.Clean(RebasePath(given, config.WorkspaceRoot, ResolveRulesLockPath(config.WorkspaceRoot, config.RulesLock)))
 	}
