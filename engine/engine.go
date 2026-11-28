@@ -382,13 +382,12 @@ func (e *Session) Current() (Result, error) {
 }
 
 // DiagnosticsFor reads this completed result without performing a check.
+// It looks up file by the same identity as a projection.
 func (r Result) DiagnosticsFor(file string) []diagnostics.Diagnostic {
+	published := newPublishedResult(r, nil, observe.Set{}, false)
 	items := make([]diagnostics.Diagnostic, 0)
-	key := r.files.key(file)
-	for _, item := range r.Diagnostics {
-		if item.SourceLocation != nil && r.files.key(item.SourceLocation.File) == key {
-			items = append(items, item)
-		}
+	for _, index := range published.byFile[published.lookup(file)] {
+		items = append(items, r.Diagnostics[index])
 	}
 	return cloneDiagnostics(items)
 }

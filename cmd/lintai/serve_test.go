@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -254,6 +255,56 @@ func TestServeConfigurationAndRPCRecovery(t *testing.T) {
 			if _, err := os.Stat(filepath.Join(workspace, name)); !os.IsNotExist(err) {
 				t.Fatalf("%s written into %s: %v", name, workspace, err)
 			}
+		}
+	}
+
+	// One identity for every spelling: the configured root is a symlink, the
+	// workspace contains a symlink to itself, another symlink outside reaches
+	// it, and a source imports a file outside the workspace.
+	parent := t.TempDir()
+	workspaceDir := filepath.Join(parent, "workspace")
+	write(filepath.Join(parent, "deps", "shared.ts"), "export function helper() { return 2; }\n")
+	write(filepath.Join(workspaceDir, "src", "a.ts"), "import { helper } from \"../../deps/shared\";\nexport const a = helper();\n")
+	write(filepath.Join(workspaceDir, "lintai.toml"), "[workspace]\nexclude = [\"rules/**\"]\n[producers.ts]\nfiles = \"walk\"\n")
+	spellingRule := filepath.Join(workspaceDir, "rules", "example.ts")
+	write(spellingRule, "import {dl,rule} from '@lintai/sdk'; export default rule('example.spellings').version(1).program(dl`Decl violation(E). violation(E) :- ts.module(E). violation(E) :- ts.declaration_origin(E, /declaration_file, _).`).report('violation').message(() => 'located');")
+	testpack.Build(t, repo, workspaceDir, spellingRule)
+	configured, elsewhere := filepath.Join(parent, "current"), filepath.Join(t.TempDir(), "elsewhere")
+	for link, target := range map[string]string{configured: workspaceDir, elsewhere: workspaceDir, filepath.Join(workspaceDir, "alternate"): workspaceDir} {
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	workspacePhysical, _ := filepath.EvalSymlinks(workspaceDir)
+	sharedPhysical, _ := filepath.EvalSymlinks(filepath.Join(parent, "deps", "shared.ts"))
+	spellings := &serveSession{params: server.InitializeParams{WorkspaceRoot: configured, RuleWorkers: 1}}
+	defer spellings.Close()
+	all, err := spellings.RefreshAll(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	published := map[string]int{}
+	for _, group := range all.Files {
+		published[group.File] = len(group.Diagnostics)
+	}
+	if published["src/a.ts"] != 1 || published[filepath.ToSlash(sharedPhysical)] != 1 {
+		t.Fatalf("all files: %v", published)
+	}
+	requested := []string{
+		"src/a.ts", "alternate/src/a.ts", filepath.Join(configured, "src", "a.ts"), filepath.Join(elsewhere, "src", "a.ts"), filepath.Join(workspacePhysical, "src", "a.ts"),
+		"../deps/shared.ts", sharedPhysical, filepath.Join(parent, "deps", "shared.ts"), filepath.Join(configured, "..", "deps", "shared.ts"),
+	}
+	selected, err := spellings.RefreshFiles(context.Background(), requested)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, group := range selected.Files {
+		want := all.Files[slices.IndexFunc(all.Files, func(g engine.FileGroup) bool { return g.File == "src/a.ts" })].SourceDigest
+		if i >= 5 {
+			want = all.Files[slices.IndexFunc(all.Files, func(g engine.FileGroup) bool { return g.File == filepath.ToSlash(sharedPhysical) })].SourceDigest
+		}
+		if group.File != requested[i] || len(group.Diagnostics) != 1 || group.SourceDigest == "" || group.SourceDigest != want {
+			t.Fatalf("%s: %+v", requested[i], group)
 		}
 	}
 }

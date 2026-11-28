@@ -136,7 +136,8 @@ func verifiedSourceDigests(result Result, evidence *executionEvidence) map[strin
 // A relative name that leaves the workspace is resolved from the physical root,
 // as producers and the operating system resolve it, and a name outside the
 // workspace keys as that absolute path. An exact-source alias then maps to its
-// canonical file.
+// canonical file. A requested name that is still not published is looked up
+// once more through its resolved directories; see resolved.
 type fileKeys struct {
 	root, physical string
 	aliases        map[string]string
@@ -170,6 +171,40 @@ func (k fileKeys) key(file string) string {
 	return key
 }
 
+// resolved keys a name whose directories reach a file through symlinks, such
+// as another link to the workspace or to a directory outside it. The nearest
+// existing directory of the name is resolved, so the name keys as the file it
+// reaches. Only directories are resolved; the file is not opened.
+func (k fileKeys) resolved(file string) string {
+	name := filepath.Clean(filepath.FromSlash(file))
+	if !filepath.IsAbs(name) {
+		name = filepath.Join(k.physical, name)
+	}
+	for dir := filepath.Dir(name); filepath.IsAbs(dir); dir = filepath.Dir(dir) {
+		if real, err := filepath.EvalSymlinks(dir); err == nil {
+			if relative, err := filepath.Rel(dir, name); err == nil {
+				return k.key(filepath.Join(real, relative))
+			}
+			break
+		}
+		if filepath.Dir(dir) == dir {
+			break
+		}
+	}
+	return k.key(file)
+}
+
+// lookup returns the published key of a requested name. A name that is not a
+// published spelling, including an exact-source alias, is looked up again
+// through its resolved directories.
+func (p *publishedResult) lookup(file string) string {
+	key := p.result.files.key(file)
+	if _, published := p.byFile[key]; published {
+		return key
+	}
+	return p.result.files.resolved(file)
+}
+
 // read is the path to open for a file named by a configured-root spelling, so
 // every read of one operation goes through the same physical root.
 func (k fileKeys) read(path string) string {
@@ -198,7 +233,7 @@ func (p *publishedResult) projectFiles(files []string, all bool) FilesResult {
 		}
 	}
 	for _, file := range files {
-		key := p.result.files.key(file)
+		key := p.lookup(file)
 		group := FileGroup{File: file, Diagnostics: []diagnostics.Diagnostic{}}
 		indexes, captured := p.byFile[key]
 		if captured {
