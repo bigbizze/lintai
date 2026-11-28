@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -206,7 +205,7 @@ func TestBoundProducerOwnershipAndConfigurationIdentity(t *testing.T) {
 			t.Fatal(err)
 		}
 		delete(valid.description.EffectiveConfiguration.(map[string]any), "shape")
-		facts, err := session.catalog.collect(context.Background(), fileKeys{}, nil, nil, observe.Full)
+		facts, err := session.catalog.collect(context.Background(), "", nil, nil, observe.Full)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -224,40 +223,34 @@ func TestBoundProducerOwnershipAndConfigurationIdentity(t *testing.T) {
 	}
 }
 
-func TestSourceIdentityUsesDiagnosticFileMapping(t *testing.T) {
+func TestDocumentNamesAndLookup(t *testing.T) {
 	root := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "item.ts")
 	inside := filepath.Join(root, "item.ts")
-	relative := strings.TrimLeft(filepath.ToSlash(outside), "/")
-	if volume := filepath.VolumeName(outside); volume != "" {
-		relative = strings.TrimLeft(strings.TrimPrefix(filepath.ToSlash(outside), volume), "/")
-	}
 	a, b := strings.Repeat("a", 64), strings.Repeat("b", 64)
 	metadata := backend.GenerationMetadata{InputRevision: "1", SourceDigests: map[string]string{inside: a, outside: b}}
 	digests := make(map[string]string)
-	if _, err := captureGenerationMetadata(metadata, fileKeys{root: root, physical: root}, "p", digests, map[string]map[string]struct{}{}); err != nil {
+	if _, _, err := captureGenerationMetadata(metadata, root, "p", digests, map[string]map[string]struct{}{}); err != nil {
 		t.Fatal(err)
 	}
-	metadata.SourceDigests[inside] = b
+	if digests["item.ts"] != a || digests[filepath.ToSlash(outside)] != b {
+		t.Fatalf("digests are not keyed by document: %v", digests)
+	}
 	diag := func(file string) diagnostics.Diagnostic {
 		return diagnostics.Diagnostic{SourceLocation: &diagnostics.SourceLocation{File: file}, Message: file}
 	}
-	result := Result{files: fileKeys{root: root, physical: root}, AnalyzedFiles: []string{"item.ts", "no-findings.ts"}, Diagnostics: []diagnostics.Diagnostic{diag(inside), diag(filepath.ToSlash(outside))}}
-	p := newPublishedResult(result, digests, observe.Set{}, true)
-	files := []string{"./item.ts", outside, relative, inside}
-	projected := p.projectFiles(files, false)
-	if !slices.Equal(groupFiles(projected), files) || !slices.Equal(groupDigests(projected), []string{a, b, "", a}) || len(projected.Files[2].Diagnostics) != 0 {
-		t.Fatalf("projected: %+v", projected)
-	}
-	for i, file := range files {
-		if !slices.EqualFunc(result.DiagnosticsFor(file), projected.Files[i].Diagnostics, func(a, b diagnostics.Diagnostic) bool { return a.Message == b.Message }) {
-			t.Fatalf("inconsistent grouping for %s", file)
+	result := newPublishedResult(Result{AnalyzedFiles: []string{"item.ts", "no-findings.ts"}, Diagnostics: []diagnostics.Diagnostic{diag("item.ts"), diag(filepath.ToSlash(outside))}}, root, digests, observe.Set{}, true)
+	for _, file := range []string{"item.ts", "./item.ts", inside, outside} {
+		if len(result.result.DiagnosticsFor(file)) != 1 {
+			t.Fatalf("no findings for %s", file)
 		}
 	}
-	if len(p.projectFiles(nil, true).Files) != 3 {
-		t.Fatal("all must include analyzed and diagnostic-bearing groups")
+	all := result.project(nil, true)
+	if !slices.Equal(groupFiles(all), []string{filepath.ToSlash(outside), "item.ts", "no-findings.ts"}) || !slices.Equal(groupDigests(all), []string{b, a, ""}) {
+		t.Fatalf("all documents: %+v", all)
 	}
-	if _, err := captureGenerationMetadata(metadata, fileKeys{root: root, physical: root}, "p", digests, map[string]map[string]struct{}{}); err == nil {
+	metadata.SourceDigests[inside] = b
+	if _, _, err := captureGenerationMetadata(metadata, root, "p", digests, map[string]map[string]struct{}{}); err == nil {
 		t.Fatal("conflicting identity accepted")
 	}
 }
@@ -266,89 +259,21 @@ func TestSourceDigestRequiresRangeOwner(t *testing.T) {
 	root := t.TempDir()
 	digests, owners := map[string]string{}, map[string]map[string]struct{}{}
 	current := strings.Repeat("c", 64)
-	if _, err := captureGenerationMetadata(backend.GenerationMetadata{InputRevision: "1", SourceDigests: map[string]string{"a.ts": current}}, fileKeys{root: root, physical: root}, "b", digests, owners); err != nil {
+	if _, _, err := captureGenerationMetadata(backend.GenerationMetadata{InputRevision: "1", SourceDigests: map[string]string{"a.ts": current}}, root, "b", digests, owners); err != nil {
 		t.Fatal(err)
 	}
 	finding := func(anchor string) diagnostics.Diagnostic {
 		return diagnostics.Diagnostic{SourceLocation: &diagnostics.SourceLocation{File: "a.ts", StartLine: 2}, EntityIdentity: &diagnostics.EntityIdentity{SemanticKey: anchor}}
 	}
-	result := Result{files: fileKeys{root: root, physical: root}}
+	var result Result
 	evidence := &executionEvidence{sourceDigests: digests, digestOwners: owners, anchorOwners: map[string]string{"a:x": "a", "b:x": "b"}}
 	result.Diagnostics = []diagnostics.Diagnostic{finding("b:x")}
-	if got := verifiedSourceDigests(result, evidence)["a.ts"]; got != current {
+	if got := verifiedSourceDigests(result, root, evidence)["a.ts"]; got != current {
 		t.Fatalf("owner-captured digest dropped: %q", got)
 	}
 	result.Diagnostics = append(result.Diagnostics, finding("a:x"))
-	if got, ok := verifiedSourceDigests(result, evidence)["a.ts"]; ok {
+	if got, ok := verifiedSourceDigests(result, root, evidence)["a.ts"]; ok {
 		t.Fatalf("range from producer without a capture was verified by another producer's digest %q", got)
-	}
-}
-
-func TestFileKeysAcceptEverySourceSpelling(t *testing.T) {
-	physical := t.TempDir()
-	link := filepath.Join(t.TempDir(), "link")
-	if err := os.Symlink(physical, link); err != nil {
-		t.Skip(err)
-	}
-	keys := newFileKeys(link, map[string]string{"alias/a.js": "src/a.js"})
-	for _, spelling := range []string{"src/a.js", "alias/a.js", filepath.Join(link, "src", "a.js"), filepath.Join(link, "alias", "a.js")} {
-		if got := keys.key(spelling); got != "src/a.js" {
-			t.Fatalf("%s -> %s", spelling, got)
-		}
-	}
-	resolved, err := filepath.EvalSymlinks(physical)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := keys.key(filepath.Join(resolved, "src", "a.js")); got != "src/a.js" {
-		t.Fatalf("physical spelling -> %s", got)
-	}
-
-	// The configured root is a symlink inside its target, and a finding is in
-	// a file outside the workspace. A request keeps its spellings, order and
-	// duplicates, and every spelling of one file finds the same findings.
-	nested := filepath.Join(physical, "current")
-	if err := os.Symlink(physical, nested); err != nil {
-		t.Fatal(err)
-	}
-	located := func(file string) diagnostics.Diagnostic {
-		return diagnostics.Diagnostic{SourceLocation: &diagnostics.SourceLocation{File: file}}
-	}
-	result := Result{files: newFileKeys(nested, nil), Diagnostics: []diagnostics.Diagnostic{located("src/a.js"), located("../deps/shared.ts")}}
-	shared := filepath.Join(filepath.Dir(resolved), "deps", "shared.ts")
-	requested := []string{"src/a.js", filepath.Join(nested, "src", "a.js"), filepath.Join(resolved, "src", "a.js"), "../deps/shared.ts", shared, "src/a.js"}
-	published := newPublishedResult(result, nil, observe.Set{}, true)
-	projected := published.projectFiles(requested, false)
-	if !slices.Equal(groupFiles(projected), requested) {
-		t.Fatalf("requested spellings not kept: %v", groupFiles(projected))
-	}
-	for i, group := range projected.Files {
-		if len(group.Diagnostics) != 1 || len(result.DiagnosticsFor(requested[i])) != 1 {
-			t.Fatalf("%s: %d findings", group.File, len(group.Diagnostics))
-		}
-	}
-	all := published.projectFiles(nil, true)
-	if want := slices.Sorted(slices.Values([]string{"src/a.js", filepath.ToSlash(shared)})); !slices.Equal(groupFiles(all), want) || len(all.Files[0].Diagnostics) != 1 || len(all.Files[1].Diagnostics) != 1 {
-		t.Fatalf("all files: %+v", all.Files)
-	}
-}
-
-func TestSourceDigestUsesOneFileKeyForEverySpelling(t *testing.T) {
-	root := t.TempDir()
-	keys := fileKeys{root: root, physical: root, aliases: map[string]string{"alias/a.ts": "src/a.ts"}}
-	old, current := strings.Repeat("a", 64), strings.Repeat("c", 64)
-	digests, owners := map[string]string{}, map[string]map[string]struct{}{}
-	if _, err := captureGenerationMetadata(backend.GenerationMetadata{InputRevision: "1", SourceDigests: map[string]string{"alias/a.ts": old, "src/a.ts": current}}, keys, "p", digests, owners); err == nil {
-		t.Fatal("two captures of one file were accepted")
-	}
-	digests, owners = map[string]string{}, map[string]map[string]struct{}{}
-	if _, err := captureGenerationMetadata(backend.GenerationMetadata{InputRevision: "1", SourceDigests: map[string]string{"alias/a.ts": current}}, keys, "p", digests, owners); err != nil {
-		t.Fatal(err)
-	}
-	result := Result{files: keys, Diagnostics: []diagnostics.Diagnostic{{SourceLocation: &diagnostics.SourceLocation{File: "src/a.ts", StartLine: 1}, EntityIdentity: &diagnostics.EntityIdentity{SemanticKey: "p:x"}}}}
-	evidence := &executionEvidence{sourceDigests: digests, digestOwners: owners, anchorOwners: map[string]string{"p:x": "p"}}
-	if got := verifiedSourceDigests(result, evidence)["src/a.ts"]; got != current {
-		t.Fatalf("alias-supplied digest not verified for its canonical file: %q", got)
 	}
 }
 
@@ -437,118 +362,75 @@ func TestOperationUsesOneWorkspace(t *testing.T) {
 	}
 }
 
-func TestProjectAllOmitsIdentityAliases(t *testing.T) {
-	root := t.TempDir()
-	result := Result{files: fileKeys{root: root, physical: root, aliases: map[string]string{"a.ts": "a.ts"}}, AnalyzedFiles: []string{"a.ts"}}
-	projected := newPublishedResult(result, nil, observe.Set{}, true).projectFiles(nil, true)
-	if !slices.Equal(groupFiles(projected), []string{"a.ts"}) || len(projected.Aliases) != 0 {
-		t.Fatalf("files: %v", projected.Files)
-	}
-}
-
-type aliasValidationProducer struct {
+// documentProducer reports its anchors under one file name, declares the
+// document that name reached and the digest of the text it read.
+type documentProducer struct {
 	*parallelFixtureProducer
-	analyzed []string
-	aliases  map[string]string
+	file, document, digest string
 }
 
-func (producer *aliasValidationProducer) Prepare(ctx context.Context, request backend.CollectionRequest, mode observe.Mode) (backend.Generation, error) {
+func (producer *documentProducer) Prepare(ctx context.Context, request backend.CollectionRequest, mode observe.Mode) (backend.Generation, error) {
 	generation, err := producer.parallelFixtureProducer.Prepare(ctx, request, mode)
 	if err != nil {
 		return nil, err
 	}
 	prepared := generation.(*parallelGeneration)
-	prepared.metadata.AnalyzedFiles = slices.Clone(producer.analyzed)
-	prepared.metadata.FileAliases = maps.Clone(producer.aliases)
+	prepared.metadata.InputRevision += producer.document + producer.digest
+	prepared.metadata.AnalyzedFiles = []string{producer.file}
+	prepared.metadata.SourceDigests = map[string]string{producer.file: producer.digest}
+	if producer.document != "" {
+		prepared.metadata.Documents = map[string]string{producer.file: producer.document}
+	}
 	return prepared, nil
 }
 
-func TestResolveFileAliasesIsOrderIndependentAndRejectsAmbiguity(t *testing.T) {
-	root := t.TempDir()
-	keys := fileKeys{root: root, physical: root}
-	analyzed := map[string]struct{}{"a/shared.ts": {}, "b/shared.ts": {}}
-	declare := func(namespace, alias, file string) aliasDeclaration {
-		return aliasDeclaration{namespace, alias, file}
+func TestProducersReportingOneDocumentJoin(t *testing.T) {
+	repo, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
 	}
-	coalesced := []aliasDeclaration{declare("p", "link.ts", "a/shared.ts"), declare("q", "link.ts", "a/shared.ts"), declare("q", "a/shared.ts", "a/shared.ts")}
-	for _, declarations := range [][]aliasDeclaration{coalesced, {coalesced[2], coalesced[1], coalesced[0]}} {
-		got, err := resolveFileAliases(keys, slices.Clone(declarations), analyzed, false)
-		if err != nil || len(got) != 1 || got["link.ts"] != "a/shared.ts" {
-			t.Fatalf("aliases = %v, %v", got, err)
-		}
+	workspace := t.TempDir()
+	for _, namespace := range []string{"catalog", "other"} {
+		program := "Decl violation(Entity, Code). violation(Entity, Code) :- " + namespace + ".usable(Entity, Code)."
+		writeTestFile(t, workspace, "lintai-rules/"+namespace+".ts", parallelRuleSource("fixture."+namespace, program, "(row) => row.Code"))
 	}
-	for name, declarations := range map[string][]aliasDeclaration{
-		"conflict": {declare("p", "shared.ts", "a/shared.ts"), declare("q", "shared.ts", "b/shared.ts")},
-		"chain":    {declare("p", "x.ts", "y.ts"), declare("q", "y.ts", "a/shared.ts")},
-		"cycle":    {declare("p", "x.ts", "y.ts"), declare("q", "y.ts", "x.ts")},
-		"shadow":   {declare("p", "b/shared.ts", "a/shared.ts")},
-	} {
-		for _, order := range [][]aliasDeclaration{declarations, {declarations[len(declarations)-1], declarations[0]}} {
-			if _, err := resolveFileAliases(keys, slices.Clone(order), analyzed, false); err == nil {
-				t.Errorf("%s: expected an error", name)
-			}
-		}
+	options := parallelFixtureOptions(t, repo, workspace)
+	physical, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	t.Run("shadow of a diagnostic range outside analyzed files", func(t *testing.T) {
-		repo, err := filepath.Abs("..")
-		if err != nil {
-			t.Fatal(err)
-		}
-		workspace := t.TempDir()
-		program := "Decl violation(Entity, Code). violation(Entity, Code) :- catalog.usable(Entity, Code), other.item(_, Code)."
-		writeTestFile(t, workspace, "lintai-rules/alias.ts", parallelRuleSource("fixture.alias", program, "(row) => row.Code"))
-
-		catalog := &aliasValidationProducer{parallelFixtureProducer: newParallelFixtureProducer()}
-		other := &aliasValidationProducer{
-			parallelFixtureProducer: newParallelFixtureProducer(),
-			analyzed:                []string{"other.sql"},
-			aliases:                 map[string]string{"catalog/items.sql": "other.sql"},
-		}
-		other.description.Namespace = "other"
-		other.description.BaseRelations[0].Predicate.Name = "other.item"
-		other.description.Helpers[0].Predicate.Name = "other.usable"
-		other.description.Schema.Prelude = strings.ReplaceAll(other.description.Schema.Prelude, "catalog.item", "other.item")
-		for id, support := range other.anchors {
-			support.Location.File = "other.sql"
-			other.anchors[id] = support
-		}
-		session := openTestSession(t, parallelFixtureOptions(t, repo, workspace), catalog, other)
-		assertShadow := func() {
-			t.Helper()
-			result, err := session.RefreshAll(context.Background())
-			if err == nil || !strings.Contains(err.Error(), `producer "other"`) || !strings.Contains(err.Error(), "catalog/items.sql") || !strings.Contains(err.Error(), "other.sql") || len(result.Files) != 0 {
-				t.Fatalf("expected a producer error rejecting the diagnostic file alias, got %+v, %v", result, err)
-			}
-		}
-
-		assertShadow()
-		other.aliases = nil
-		result, err := session.RefreshAll(context.Background())
-		if err != nil || !slices.Equal(groupFiles(result), []string{"catalog/items.sql", "other.sql"}) || len(result.Files[0].Diagnostics) != 3 || len(result.WorkspaceProblems) != 0 {
-			t.Fatalf("expected the unaliased diagnostic file after recovery, got %+v, %v", result, err)
-		}
-		catalogEmits, otherEmits := catalog.emitCalls.Load(), other.emitCalls.Load()
-		other.aliases = map[string]string{"catalog/items.sql": "other.sql"}
-		assertShadow()
-		if catalog.emitCalls.Load() != catalogEmits || other.emitCalls.Load() != otherEmits {
-			t.Fatal("unchanged generation should reuse cached anchors when validating aliases")
-		}
-		for name, aliases := range map[string]map[string]string{
-			"empty alias":                      {"": "other.sql"},
-			"empty destination":                {"link.sql": ""},
-			"destination is not an input file": {"link.sql": "missing.sql"},
-		} {
-			other.aliases = aliases
-			if result, err := session.RefreshAll(context.Background()); err == nil || !strings.Contains(err.Error(), `producer "other"`) || len(result.Files) != 0 {
-				t.Fatalf("%s: expected a producer error, got %+v, %v", name, result, err)
-			}
-		}
-		other.aliases = map[string]string{"link.sql": "other.sql"}
-		if result, err := session.RefreshAll(context.Background()); err != nil || result.Aliases["link.sql"] != "other.sql" {
-			t.Fatalf("expected the alias of an analyzed file, got %+v, %v", result, err)
-		}
-	})
+	digest := strings.Repeat("d", 64)
+	catalog := &documentProducer{parallelFixtureProducer: newParallelFixtureProducer(), file: "catalog/items.sql", digest: digest}
+	// The second producer reached the same file through a link.
+	other := &documentProducer{parallelFixtureProducer: newParallelFixtureProducer(), file: "link/items.sql", document: filepath.Join(physical, "catalog", "items.sql"), digest: digest}
+	other.description.Namespace = "other"
+	other.description.BaseRelations[0].Predicate.Name = "other.item"
+	other.description.Helpers[0].Predicate.Name = "other.usable"
+	other.description.Schema.Prelude = strings.ReplaceAll(other.description.Schema.Prelude, "catalog.item", "other.item")
+	for id, support := range other.anchors {
+		support.Location.File = "link/items.sql"
+		other.anchors[id] = support
+	}
+	session := openTestSession(t, options, catalog, other)
+	result, err := session.RefreshAll(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(groupFiles(result), []string{"catalog/items.sql"}) || len(result.Files[0].Diagnostics) != 6 || result.Files[0].SourceDigest != digest {
+		t.Fatalf("expected one group for the document: %+v", result.Files)
+	}
+	checked, err := session.Check(context.Background())
+	if err != nil || len(checked.DiagnosticsFor(filepath.Join(physical, "catalog", "items.sql"))) != 6 || slices.ContainsFunc(checked.AnalyzedFiles, func(file string) bool { return file != "catalog/items.sql" }) {
+		t.Fatalf("lookup by the physical path: %+v, %v", checked, err)
+	}
+	other.digest = strings.Repeat("e", 64)
+	if _, err := session.RefreshAll(context.Background()); err == nil || !strings.Contains(err.Error(), "conflicting source identities") {
+		t.Fatalf("conflicting text claims were accepted: %v", err)
+	}
+	other.digest, other.document = digest, "catalog/items.sql"
+	if _, err := session.RefreshAll(context.Background()); err == nil || !strings.Contains(err.Error(), "not an absolute path") {
+		t.Fatalf("relative document accepted: %v", err)
+	}
 }
 
 func groupFiles(result FilesResult) []string {

@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"maps"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -27,7 +26,6 @@ import (
 type composedFacts struct {
 	sourceDigests            map[string]string
 	digestOwners             map[string]map[string]struct{}
-	files                    fileKeys
 	base                     factstore.ReadOnlyFactStore
 	anchors                  map[string]facts.AnchorSupport
 	anchorOwners             map[string]string
@@ -130,7 +128,7 @@ func bindProducers(producers []backend.Producer) (producerCatalog, error) {
 		copy.DeclaredAtom.Predicate = key
 		schemaDecls[key] = copy
 	}
-	identity, err := catalogIdentity(entries, nil)
+	identity, err := catalogIdentity(entries, "")
 	if err != nil {
 		return producerCatalog{}, err
 	}
@@ -146,12 +144,12 @@ func bindProducers(producers []backend.Producer) (producerCatalog, error) {
 
 // The compiled plan uses the bound descriptions. Approval additionally resolves
 // project path settings relative to the workspace owning the operation.
-func catalogIdentity(entries []producerEntry, approvalRoot *fileKeys) (string, error) {
+func catalogIdentity(entries []producerEntry, approvalRoot string) (string, error) {
 	identityRecords := make([]any, 0, len(entries)+1)
 	for _, entry := range entries {
 		description := entry.description
-		if approvalRoot != nil && description.ImplementationID == "lintai.typescript" {
-			config, err := typeScriptPolicyConfig(*approvalRoot, description.EffectiveConfiguration)
+		if approvalRoot != "" && description.ImplementationID == "lintai.typescript" {
+			config, err := typeScriptPolicyConfig(approvalRoot, description.EffectiveConfiguration)
 			if err != nil {
 				return "", err
 			}
@@ -220,12 +218,13 @@ func withoutPackageDeclaration(source string) string {
 }
 
 // collect prepares selected generations, establishes identity, then emits only on a miss.
-func (catalog producerCatalog) collect(ctx context.Context, root fileKeys, requestedByNamespace map[string]map[facts.Predicate]struct{}, current *composedFacts, mode observe.Mode) (composedFacts, error) {
+func (catalog producerCatalog) collect(ctx context.Context, root string, requestedByNamespace map[string]map[facts.Predicate]struct{}, current *composedFacts, mode observe.Mode) (composedFacts, error) {
 	type prepared struct {
 		entry      producerEntry
 		requested  []facts.Predicate
 		generation backend.Generation
 		metadata   backend.GenerationMetadata
+		documents  documents
 	}
 	preparedGenerations := make([]prepared, 0, len(catalog.entries))
 	records := make([]any, 0, len(catalog.entries))
@@ -254,53 +253,23 @@ func (catalog producerCatalog) collect(ctx context.Context, root fileKeys, reque
 			}
 			return requested[i].Arity < requested[j].Arity
 		})
-		generation, err := entry.producer.Prepare(ctx, backend.CollectionRequest{WorkspaceRoot: root.root, Predicates: slices.Clone(requested)}, mode)
+		generation, err := entry.producer.Prepare(ctx, backend.CollectionRequest{WorkspaceRoot: root, Predicates: slices.Clone(requested)}, mode)
 		if err != nil {
 			return composedFacts{}, fmt.Errorf("prepare producer %q: %w", description.Namespace, err)
 		}
 		if nilImplementation(generation) {
 			return composedFacts{}, fmt.Errorf("producer %q returned a nil generation", description.Namespace)
 		}
-		preparedGenerations = append(preparedGenerations, prepared{entry, requested, generation, generation.Metadata()})
-	}
-	keys := fileKeys{root: root.root, physical: root.physical}
-	declarations := make([]aliasDeclaration, 0)
-	published := make(map[string]struct{})
-	for _, item := range preparedGenerations {
-		for _, file := range item.metadata.AnalyzedFiles {
-			published[file] = struct{}{}
-		}
-		for alias, file := range item.metadata.FileAliases {
-			declarations = append(declarations, aliasDeclaration{item.entry.description.Namespace, alias, file})
-		}
-	}
-	aliases, err := resolveFileAliases(keys, declarations, published, false)
-	if err != nil {
-		return composedFacts{}, err
-	}
-	keys.aliases = aliases
-	// Anchors arrive during emission, after alias declarations have been read.
-	// Check their canonical filenames with the same unaliased mapping used for
-	// analyzed files, including when a matching snapshot reuses old facts, and
-	// then require every alias destination to be an analyzed or anchored file.
-	validateAnchorAliases := func(anchors map[string]facts.AnchorSupport) error {
-		if len(keys.aliases) == 0 {
-			return nil
-		}
-		for _, support := range anchors {
-			published[support.Location.File] = struct{}{}
-		}
-		_, err := resolveFileAliases(keys, declarations, published, true)
-		return err
+		preparedGenerations = append(preparedGenerations, prepared{entry: entry, requested: requested, generation: generation, metadata: generation.Metadata()})
 	}
 	for i := range preparedGenerations {
 		item := &preparedGenerations[i]
 		namespace := item.entry.description.Namespace
-		metadata, err := captureGenerationMetadata(item.metadata, keys, namespace, sourceDigests, digestOwners)
+		metadata, documents, err := captureGenerationMetadata(item.metadata, root, namespace, sourceDigests, digestOwners)
 		if err != nil {
 			return composedFacts{}, fmt.Errorf("producer %q generation metadata: %w", namespace, err)
 		}
-		item.metadata = metadata
+		item.metadata, item.documents = metadata, documents
 		observations = append(observations, metadata.Observations)
 		reusable = reusable && metadata.ReusableFromObservations
 		predicates := make([]any, len(item.requested))
@@ -317,11 +286,8 @@ func (catalog producerCatalog) collect(ctx context.Context, root fileKeys, reque
 	snapshotID := "sha256:" + hex.EncodeToString(digest[:])
 	captured := observe.Union(observations...)
 	if current != nil && current.snapshotID == snapshotID {
-		if err := validateAnchorAliases(current.anchors); err != nil {
-			return composedFacts{}, err
-		}
 		reused := *current
-		reused.sourceDigests, reused.digestOwners, reused.files = sourceDigests, digestOwners, keys
+		reused.sourceDigests, reused.digestOwners = sourceDigests, digestOwners
 		reused.observations, reused.reusableFromObservations = captured, reusable
 		return reused, nil
 	}
@@ -358,6 +324,7 @@ func (catalog producerCatalog) collect(ctx context.Context, root fileKeys, reque
 			}
 		}
 		for id, support := range validated.Anchors() {
+			support.Location.File = item.documents.name(support.Location.File)
 			anchors[id] = support
 			anchorOwners[id] = namespace
 		}
@@ -367,35 +334,57 @@ func (catalog producerCatalog) collect(ctx context.Context, root fileKeys, reque
 			producerFiles[namespace][file] = struct{}{}
 		}
 	}
-	if err := validateAnchorAliases(anchors); err != nil {
-		return composedFacts{}, err
-	}
-	return composedFacts{sourceDigests: sourceDigests, digestOwners: digestOwners, files: keys, base: base, anchors: anchors, anchorOwners: anchorOwners, producerFiles: producerFiles, reportable: reportable, factCounts: factCounts, analyzedFiles: analyzedFiles, namespaces: namespaces, snapshotID: snapshotID, observations: captured, reusableFromObservations: reusable}, nil
+	return composedFacts{sourceDigests: sourceDigests, digestOwners: digestOwners, base: base, anchors: anchors, anchorOwners: anchorOwners, producerFiles: producerFiles, reportable: reportable, factCounts: factCounts, analyzedFiles: analyzedFiles, namespaces: namespaces, snapshotID: snapshotID, observations: captured, reusableFromObservations: reusable}, nil
 }
 
-// captureGenerationMetadata records each source digest under the operation's
-// file key together with the producer that captured it, so projection can
-// verify a range only against text its own producer observed.
-func captureGenerationMetadata(metadata backend.GenerationMetadata, keys fileKeys, namespace string, sourceDigests map[string]string, digestOwners map[string]map[string]struct{}) (backend.GenerationMetadata, error) {
+// documents replaces each file name a generation reports with the name of
+// the document the producer declared for it. Other names stay as reported.
+type documents struct {
+	root     string
+	declared map[string]string
+}
+
+func (d documents) name(file string) string {
+	if document, ok := d.declared[documentName(d.root, file)]; ok {
+		return document
+	}
+	return file
+}
+
+// captureGenerationMetadata records each source digest under its document
+// together with the producer that captured it, so projection can verify a
+// range only against text its own producer observed. Two producers that claim
+// different text for one document are rejected.
+func captureGenerationMetadata(metadata backend.GenerationMetadata, root, namespace string, sourceDigests map[string]string, digestOwners map[string]map[string]struct{}) (backend.GenerationMetadata, documents, error) {
+	docs := documents{root: root, declared: make(map[string]string, len(metadata.Documents))}
 	if metadata.InputRevision == "" {
-		return backend.GenerationMetadata{}, fmt.Errorf("input revision is empty")
+		return backend.GenerationMetadata{}, docs, fmt.Errorf("input revision is empty")
 	}
 	scope, err := canonical.NormalizeStructured(metadata.Scope)
 	if err != nil {
-		return backend.GenerationMetadata{}, fmt.Errorf("scope: %w", err)
+		return backend.GenerationMetadata{}, docs, fmt.Errorf("scope: %w", err)
 	}
 	metadata.Scope = scope
+	for file, document := range metadata.Documents {
+		if _, err := generationFilePath(file); err != nil {
+			return backend.GenerationMetadata{}, docs, err
+		}
+		if _, err := generationFilePath(document); err != nil || !filepath.IsAbs(filepath.FromSlash(document)) {
+			return backend.GenerationMetadata{}, docs, fmt.Errorf("document of %q is not an absolute path: %q", file, document)
+		}
+		docs.declared[documentName(root, file)] = documentName(root, document)
+	}
+	metadata.Documents = nil
 	for file, digest := range metadata.SourceDigests {
-		file, err := generationFilePath(file)
-		if err != nil {
-			return backend.GenerationMetadata{}, err
+		if _, err := generationFilePath(file); err != nil {
+			return backend.GenerationMetadata{}, docs, err
 		}
 		if _, err := hex.DecodeString(digest); err != nil || len(digest) != 2*sha256.Size || digest != strings.ToLower(digest) {
-			return backend.GenerationMetadata{}, fmt.Errorf("invalid source digest for %q", file)
+			return backend.GenerationMetadata{}, docs, fmt.Errorf("invalid source digest for %q", file)
 		}
-		key := keys.key(file)
+		key := documentName(root, docs.name(file))
 		if previous, exists := sourceDigests[key]; exists && previous != digest {
-			return backend.GenerationMetadata{}, fmt.Errorf("conflicting source identities for %q", key)
+			return backend.GenerationMetadata{}, docs, fmt.Errorf("conflicting source identities for %q", key)
 		}
 		sourceDigests[key] = digest
 		if digestOwners[key] == nil {
@@ -409,63 +398,13 @@ func captureGenerationMetadata(metadata backend.GenerationMetadata, keys fileKey
 	for _, file := range metadata.AnalyzedFiles {
 		file, err := generationFilePath(file)
 		if err != nil {
-			return backend.GenerationMetadata{}, err
+			return backend.GenerationMetadata{}, docs, err
 		}
-		files = append(files, file)
+		files = append(files, docs.name(file))
 	}
 	sort.Strings(files)
 	metadata.AnalyzedFiles = slices.Compact(files)
-	return metadata, nil
-}
-
-type aliasDeclaration struct{ namespace, alias, file string }
-
-// resolveFileAliases validates every declared alias against the captured root
-// before any mapping is applied, so the result does not depend on producer or
-// map order. Equal declarations coalesce and identity aliases are dropped.
-// Invalid names, different destinations for one alias, alias chains and
-// cycles, and aliases that shadow a declared canonical file are errors. When
-// files holds every analyzed and anchored file, each destination must be one.
-func resolveFileAliases(keys fileKeys, declarations []aliasDeclaration, files map[string]struct{}, complete bool) (map[string]string, error) {
-	base := fileKeys{root: keys.root, physical: keys.physical}
-	canonicalFiles := make(map[string]struct{}, len(files))
-	for file := range files {
-		canonicalFiles[base.key(file)] = struct{}{}
-	}
-	aliases := make(map[string]string)
-	owners := make(map[string]string)
-	slices.SortFunc(declarations, func(a, b aliasDeclaration) int {
-		return strings.Compare(a.namespace+"\x00"+a.alias+"\x00"+a.file, b.namespace+"\x00"+b.alias+"\x00"+b.file)
-	})
-	for _, declaration := range declarations {
-		for _, name := range []string{declaration.alias, declaration.file} {
-			if _, err := generationFilePath(name); err != nil {
-				return nil, fmt.Errorf("producer %q file alias: %w", declaration.namespace, err)
-			}
-		}
-		alias, file := base.key(declaration.alias), base.key(declaration.file)
-		if alias == file {
-			continue
-		}
-		if previous, exists := aliases[alias]; exists && previous != file {
-			return nil, fmt.Errorf("producers %q and %q name %q as both %q and %q", owners[alias], declaration.namespace, alias, previous, file)
-		}
-		aliases[alias] = file
-		owners[alias] = declaration.namespace
-	}
-	for _, alias := range slices.Sorted(maps.Keys(aliases)) {
-		file := aliases[alias]
-		if _, chained := aliases[file]; chained {
-			return nil, fmt.Errorf("producer %q names %q as an alias of %q, which is itself an alias", owners[alias], alias, file)
-		}
-		if _, shadows := canonicalFiles[alias]; shadows {
-			return nil, fmt.Errorf("producer %q names %q as an alias of %q, but %q is an analyzed file", owners[alias], alias, file, alias)
-		}
-		if _, known := canonicalFiles[file]; complete && !known {
-			return nil, fmt.Errorf("producer %q names %q as an alias of %q, which is not an analyzed or reported file", owners[alias], alias, file)
-		}
-	}
-	return aliases, nil
+	return metadata, docs, nil
 }
 
 func generationFilePath(file string) (string, error) {

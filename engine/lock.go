@@ -144,7 +144,7 @@ func ReadRulesLock(path string) (RulesLock, error) {
 
 // Path settings are interpreted using the same workspace as producer preparation.
 // Preserve application strings in all other producer and rule options.
-func typeScriptPolicyConfig(root fileKeys, value any) (any, error) {
+func typeScriptPolicyConfig(root string, value any) (any, error) {
 	raw, ok := value.(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("invalid TypeScript producer configuration")
@@ -157,7 +157,7 @@ func typeScriptPolicyConfig(root fileKeys, value any) (any, error) {
 		if !filepath.IsAbs(path) {
 			return filepath.ToSlash(filepath.Clean(path)), nil
 		}
-		relative, err := filepath.Rel(root.physical, path)
+		relative, err := filepath.Rel(root, path)
 		if err != nil {
 			return "", err
 		}
@@ -186,7 +186,7 @@ func typeScriptPolicyConfig(root fileKeys, value any) (any, error) {
 }
 
 // policyDigest hashes effective Go policy before calling any executable entry.
-func policyDigest(options Config, root fileKeys, catalog producerCatalog) (string, error) {
+func policyDigest(options Config, catalog producerCatalog) (string, error) {
 	policies := map[string]any{}
 	for id, policy := range options.Rule {
 		if policy.Severity != "error" || len(policy.Options) != 0 {
@@ -198,7 +198,7 @@ func policyDigest(options Config, root fileKeys, catalog producerCatalog) (strin
 	if err != nil {
 		return "", fmt.Errorf("suppression policy location: %w", err)
 	}
-	identity, err := catalogIdentity(catalog.entries, &root)
+	identity, err := catalogIdentity(catalog.entries, options.WorkspaceRoot)
 	if err != nil {
 		return "", err
 	}
@@ -209,11 +209,11 @@ func policyDigest(options Config, root fileKeys, catalog producerCatalog) (strin
 	return fmt.Sprintf("sha256:%x", sha256.Sum256(raw)), nil
 }
 
-func (lock RulesLock) verify(options Config, root fileKeys, pack string, catalog producerCatalog) error {
+func (lock RulesLock) verify(options Config, pack string, catalog producerCatalog) error {
 	if pack != lock.PackDigest {
 		return fmt.Errorf("rule pack digest changed (approved %s, found %s); review and run lintai lock", lock.PackDigest, pack)
 	}
-	policy, err := policyDigest(options, root, catalog)
+	policy, err := policyDigest(options, catalog)
 	if err != nil {
 		return err
 	}
@@ -254,7 +254,7 @@ func (e *Session) ApproveRules(ctx context.Context, target string) (RulesLock, e
 	if targetState.Exists && !isRulesLockDocument(targetState.Data) {
 		return RulesLock{}, fmt.Errorf("%s exists and is not a lintai rules lock; refusing to overwrite it", target)
 	}
-	digest, err := policyDigest(options, e.files(), e.catalog)
+	digest, err := policyDigest(options, e.catalog)
 	if err != nil {
 		return RulesLock{}, err
 	}

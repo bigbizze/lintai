@@ -299,15 +299,11 @@ func (s *serveSession) configure(ctx context.Context) (err error) {
 	return nil
 }
 
-func (s *serveSession) RefreshFiles(ctx context.Context, files []string) (engine.FilesResult, error) {
+func (s *serveSession) RefreshFile(ctx context.Context, file string) (engine.FilesResult, error) {
 	if err := s.configure(ctx); err != nil {
 		return engine.FilesResult{}, err
 	}
-	if err := ctx.Err(); err != nil {
-		_ = s.Close()
-		return engine.FilesResult{}, err
-	}
-	return s.session.RefreshFiles(ctx, files)
+	return s.session.RefreshFile(ctx, file)
 }
 
 func (s *serveSession) RefreshAll(ctx context.Context) (engine.FilesResult, error) {

@@ -736,7 +736,7 @@ export function choose(flag: boolean) {
 	for _, relation := range catalog.entries[0].description.BaseRelations {
 		requested["ts"][relation.Predicate] = struct{}{}
 	}
-	assembled, err := catalog.collect(context.Background(), newFileKeys(root, nil), requested, nil, observe.Full)
+	assembled, err := catalog.collect(context.Background(), root, requested, nil, observe.Full)
 	if err != nil {
 		t.Fatal(err)
 	}

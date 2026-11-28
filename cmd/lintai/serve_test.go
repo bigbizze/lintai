@@ -84,55 +84,67 @@ func TestServeConfigurationAndRPCRecovery(t *testing.T) {
 		}
 		return response
 	}
-	batch := func(names ...string) server.FilesDiagnosticsResult {
+	decode := func(response jsonrpc.Response, target any) {
 		t.Helper()
-		response := call("diagnostics/files", map[string]any{"files": names})
 		if response.Error != nil {
-			t.Fatalf("batch: %+v", response.Error)
+			t.Fatalf("request: %+v", response.Error)
 		}
-		var result server.FilesDiagnosticsResult
 		raw, _ := json.Marshal(response.Result)
-		if err := json.Unmarshal(raw, &result); err != nil {
+		if err := json.Unmarshal(raw, target); err != nil {
 			t.Fatal(err)
 		}
+	}
+	file := func(name string) server.DocumentResult {
+		t.Helper()
+		var result server.DocumentResult
+		decode(call("diagnostics/document", map[string]any{"file": name}), &result)
 		return result
 	}
-	file := func(name string) server.FilesDiagnosticsResult { return batch(name) }
+	workspaceFindings := func() (server.WorkspaceResult, map[string]server.FileFindings) {
+		t.Helper()
+		var result server.WorkspaceResult
+		decode(call("diagnostics/workspace", map[string]any{}), &result)
+		groups := map[string]server.FileFindings{}
+		for _, group := range result.Files {
+			groups[group.File] = group
+		}
+		return result, groups
+	}
 
 	init := call("initialize", server.InitializeParams{ProtocolVersion: server.ProtocolVersion, WorkspaceRoot: root, RuleWorkers: 1})
 	if init.Error != nil || composition == nil || composition.session != nil {
 		t.Fatalf("handshake analyzed: %+v", init)
 	}
-	bad := call("diagnostics/files", map[string]any{"files": []string{"a.ts"}})
+	bad := call("diagnostics/document", map[string]any{"file": "a.ts"})
 	if bad.Error == nil || bad.Error.Code != -32010 || !strings.Contains(bad.Error.Message, "config") || composition.session != nil {
 		t.Fatalf("invalid config: %+v", bad)
 	}
 	write(configPath, config("b.ts"))
-	if got := file("a.ts"); len(got.Files[0].Findings) != 1 || len(got.Problems) != 0 || string(composition.settings[0].Files) != "walk" {
+	if got := file("a.ts"); len(got.Findings) != 1 || len(got.Problems) != 0 || string(composition.settings[0].Files) != "walk" {
 		t.Fatalf("initial configured result or explicit file mode: %+v settings=%+v", got, composition.settings)
 	}
-	if got := file("b.ts"); len(got.Files[0].Findings) != 0 {
+	if got := file("b.ts"); len(got.Findings) != 0 {
 		t.Fatalf("excluded source: %+v", got)
 	}
-	initialBatch := batch("a.ts", "b.ts", "a.ts")
-	if len(initialBatch.Files) != 3 || initialBatch.Files[0].SourceDigest == "" || initialBatch.Files[0].SourceDigest != initialBatch.Files[2].SourceDigest || len(initialBatch.Files[0].Findings) != 1 || len(initialBatch.Files[1].Findings) != 0 || len(initialBatch.Files[2].Findings) != 1 {
-		t.Fatalf("batch projections: %+v", initialBatch)
+	_, groups := workspaceFindings()
+	if groups["a.ts"].SourceDigest == "" || len(groups["a.ts"].Findings) != 1 || len(groups["b.ts"].Findings) != 0 {
+		t.Fatalf("workspace result: %+v", groups)
 	}
-	for _, projected := range initialBatch.Files {
-		individual := file(projected.File)
-		left, _ := json.Marshal(projected.Findings)
-		right, _ := json.Marshal(individual.Files[0].Findings)
-		if string(left) != string(right) || initialBatch.SnapshotVersion != individual.SnapshotVersion {
-			t.Fatalf("batch/file mismatch: %s / %s", left, right)
+	for name, group := range groups {
+		individual := file(name)
+		left, _ := json.Marshal(group.Findings)
+		right, _ := json.Marshal(individual.Findings)
+		if string(left) != string(right) || group.SourceDigest != individual.SourceDigest {
+			t.Fatalf("workspace/document mismatch: %s / %s", left, right)
 		}
 	}
 	initial := composition.session
 	write(configPath, config("b.ts")+"# comment only\n")
-	if got := file("a.ts"); len(got.Files[0].Findings) != 1 || composition.session != initial {
+	if got := file("a.ts"); len(got.Findings) != 1 || composition.session != initial {
 		t.Fatalf("equal settings replaced session: %+v", got)
 	}
 	write(configPath, config("a.ts"))
-	if got := file("b.ts"); len(got.Files[0].Findings) != 1 || composition.session == initial {
+	if got := file("b.ts"); len(got.Findings) != 1 || composition.session == initial {
 		t.Fatalf("scope replacement: %+v", got)
 	}
 	if _, err := initial.Current(); err == nil {
@@ -140,7 +152,7 @@ func TestServeConfigurationAndRPCRecovery(t *testing.T) {
 	}
 	prior := composition.session
 	write(configPath, "[workspace\n")
-	broken := call("diagnostics/files", map[string]any{"files": []string{"a.ts", "b.ts"}})
+	broken := call("diagnostics/workspace", map[string]any{})
 	if broken.Error == nil || broken.Error.Code != -32010 || composition.session != nil {
 		t.Fatalf("invalid config did not clear the previous session: %+v", broken)
 	}
@@ -148,28 +160,28 @@ func TestServeConfigurationAndRPCRecovery(t *testing.T) {
 		t.Fatal("invalid config retained the prior session")
 	}
 	write(configPath, config("a.ts"))
-	if got := batch("a.ts", "b.ts"); len(got.Files[0].Findings) != 0 || len(got.Files[1].Findings) != 1 {
+	if _, got := workspaceFindings(); len(got["a.ts"].Findings) != 0 || len(got["b.ts"].Findings) != 1 {
 		t.Fatalf("configuration recovery: %+v", got)
 	}
 	if removed := call("reanalyze", nil); removed.Error == nil || removed.Error.Code != -32601 {
 		t.Fatalf("reanalyze must be unknown: %+v", removed)
 	}
 	write(rulePath, "throw new Error('invalid entry');")
-	if got := file("b.ts"); len(got.Files[0].Findings) != 1 || len(got.Problems) != 0 {
+	if got := file("b.ts"); len(got.Findings) != 1 || len(got.Problems) != 0 {
 		t.Fatalf("unbuilt source edit affected publication: %+v", got)
 	}
 	build()
-	if got := batch("a.ts", "b.ts"); len(got.Problems) == 0 {
+	if got, _ := workspaceFindings(); len(got.Problems) == 0 {
 		t.Fatalf("syntax error not reported: %+v", got)
 	}
 	write(rulePath, rule)
 	build()
-	if got := batch("a.ts", "b.ts"); len(got.Files[1].Findings) != 1 || len(got.Problems) != 0 {
+	if got, groups := workspaceFindings(); len(groups["b.ts"].Findings) != 1 || len(got.Problems) != 0 {
 		t.Fatalf("rule recovery: %+v", got)
 	}
 	previous := composition.session
 	write(configPath, config("a.ts")+"source_links = \"links.json\"\n")
-	if got := file("b.ts"); len(got.Files[0].Findings) != 1 || composition.session == previous || composition.settings[0].SourceLinks != "links.json" {
+	if got := file("b.ts"); len(got.Findings) != 1 || composition.session == previous || composition.settings[0].SourceLinks != "links.json" {
 		t.Fatalf("source links replacement: %+v settings=%+v", got, composition.settings)
 	}
 	previous = composition.session
@@ -241,53 +253,36 @@ func TestServeConfigurationAndRPCRecovery(t *testing.T) {
 		t.Fatalf("one-shot workspace: %s, %+v, %v", options.WorkspaceRoot, checked, err)
 	}
 
-	// One identity for every spelling: the configured root is a symlink, the
-	// workspace contains a symlink to itself, another symlink outside reaches
-	// it, and a source imports a file outside the workspace.
+	// A document is found by its name in the physical workspace or by its
+	// physical path, including an imported file outside the workspace.
 	parent := t.TempDir()
 	workspaceDir := filepath.Join(parent, "workspace")
 	write(filepath.Join(parent, "deps", "shared.ts"), "export function helper() { return 2; }\n")
 	write(filepath.Join(workspaceDir, "src", "a.ts"), "import { helper } from \"../../deps/shared\";\nexport const a = helper();\n")
 	write(filepath.Join(workspaceDir, "lintai.toml"), "[workspace]\nexclude = [\"rules/**\"]\n[producers.ts]\nfiles = \"walk\"\n")
-	spellingRule := filepath.Join(workspaceDir, "rules", "example.ts")
-	write(spellingRule, "import {dl,rule} from '@lintai/sdk'; export default rule('example.spellings').version(1).program(dl`Decl violation(E). violation(E) :- ts.module(E). violation(E) :- ts.declaration_origin(E, /declaration_file, _).`).report('violation').message(() => 'located');")
-	testpack.Build(t, repo, workspaceDir, spellingRule)
-	configured, elsewhere := filepath.Join(parent, "current"), filepath.Join(t.TempDir(), "elsewhere")
-	for link, target := range map[string]string{configured: workspaceDir, elsewhere: workspaceDir, filepath.Join(workspaceDir, "alternate"): workspaceDir} {
-		if err := os.Symlink(target, link); err != nil {
-			t.Fatal(err)
-		}
+	documentRule := filepath.Join(workspaceDir, "rules", "example.ts")
+	write(documentRule, "import {dl,rule} from '@lintai/sdk'; export default rule('example.documents').version(1).program(dl`Decl violation(E). violation(E) :- ts.module(E). violation(E) :- ts.declaration_origin(E, /declaration_file, _).`).report('violation').message(() => 'located');")
+	testpack.Build(t, repo, workspaceDir, documentRule)
+	configured := filepath.Join(parent, "current")
+	if err := os.Symlink(workspaceDir, configured); err != nil {
+		t.Fatal(err)
 	}
 	workspacePhysical, _ := filepath.EvalSymlinks(workspaceDir)
 	sharedPhysical, _ := filepath.EvalSymlinks(filepath.Join(parent, "deps", "shared.ts"))
-	spellings := &serveSession{params: server.InitializeParams{WorkspaceRoot: configured, RuleWorkers: 1}}
-	defer spellings.Close()
-	all, err := spellings.RefreshAll(context.Background())
+	documents := &serveSession{params: server.InitializeParams{WorkspaceRoot: configured, RuleWorkers: 1}}
+	defer documents.Close()
+	all, err := documents.RefreshAll(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	published := map[string]int{}
-	for _, group := range all.Files {
-		published[group.File] = len(group.Diagnostics)
-	}
-	if published["src/a.ts"] != 1 || published[filepath.ToSlash(sharedPhysical)] != 1 {
-		t.Fatalf("all files: %v", published)
-	}
-	requested := []string{
-		"src/a.ts", "alternate/src/a.ts", filepath.Join(configured, "src", "a.ts"), filepath.Join(elsewhere, "src", "a.ts"), filepath.Join(workspacePhysical, "src", "a.ts"),
-		"../deps/shared.ts", sharedPhysical, filepath.Join(parent, "deps", "shared.ts"), filepath.Join(configured, "..", "deps", "shared.ts"),
-	}
-	selected, err := spellings.RefreshFiles(context.Background(), requested)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i, group := range selected.Files {
-		want := all.Files[slices.IndexFunc(all.Files, func(g engine.FileGroup) bool { return g.File == "src/a.ts" })].SourceDigest
-		if i >= 5 {
-			want = all.Files[slices.IndexFunc(all.Files, func(g engine.FileGroup) bool { return g.File == filepath.ToSlash(sharedPhysical) })].SourceDigest
+	for _, document := range []string{filepath.Join(workspacePhysical, "src", "a.ts"), sharedPhysical} {
+		group, err := documents.RefreshFile(context.Background(), document)
+		if err != nil {
+			t.Fatal(err)
 		}
-		if group.File != requested[i] || len(group.Diagnostics) != 1 || group.SourceDigest == "" || group.SourceDigest != want {
-			t.Fatalf("%s: %+v", requested[i], group)
+		index := slices.IndexFunc(all.Files, func(g engine.FileGroup) bool { return g.File == group.Files[0].File })
+		if index < 0 || len(group.Files[0].Diagnostics) != 1 || group.Files[0].SourceDigest == "" || group.Files[0].SourceDigest != all.Files[index].SourceDigest {
+			t.Fatalf("%s: %+v in %+v", document, group.Files, all.Files)
 		}
 	}
 }

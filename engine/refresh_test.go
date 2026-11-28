@@ -9,7 +9,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -108,7 +107,11 @@ func TestRefreshPublicationAndReuse(t *testing.T) {
 	if err != nil || len(warm.Diagnostics) != 3 || counts() != before {
 		t.Fatalf("unchanged refresh did work: before %s after %s result=%+v err=%v", before, counts(), warm, err)
 	}
-	absolute, err := refreshOne(context.Background(), session, filepath.Join(workspace, "catalog/items.sql"))
+	physical, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	absolute, err := refreshOne(context.Background(), session, filepath.Join(physical, "catalog/items.sql"))
 	if err != nil || len(absolute.Diagnostics) != 3 || counts() != before {
 		t.Fatalf("absolute file projection: %+v %v", absolute, err)
 	}
@@ -124,25 +127,9 @@ func TestRefreshPublicationAndReuse(t *testing.T) {
 		t.Fatalf("projection or detachment: %+v %+v %v %v", other, current, err, currentErr)
 	}
 
-	files := []string{"catalog/items.sql", "another.ts", "catalog/items.sql"}
-	batch, err := session.RefreshFiles(context.Background(), files)
-	if err != nil || !slices.Equal(groupFiles(batch), files) || batch.SnapshotVersion != current.SnapshotVersion || counts() != before {
-		t.Fatalf("batch refresh: %+v %v", batch, err)
-	}
-	for i, file := range files {
-		want := current.DiagnosticsFor(file)
-		if len(batch.Files[i].Diagnostics) != len(want) || (len(want) > 0 && !reflect.DeepEqual(batch.Files[i].Diagnostics, want)) {
-			t.Fatalf("batch projection %d: got %+v want %+v", i, batch.Files[i].Diagnostics, want)
-		}
-	}
-	batch.Files[0].Diagnostics[0].Message = "batch mutation"
-	if batch.Files[2].Diagnostics[0].Message == "batch mutation" {
-		t.Fatal("duplicate file projections share mutable diagnostics")
-	}
-
 	policy := writeTestFile(t, workspace, "lintai-suppressions.json", "invalid")
-	if result, err := session.RefreshFiles(context.Background(), files); err == nil || len(result.Files) != 0 {
-		t.Fatal("changed suppressions returned an old batch")
+	if result, err := session.RefreshAll(context.Background()); err == nil || len(result.Files) != 0 {
+		t.Fatal("changed suppressions returned an old result")
 	}
 	if _, err := session.Current(); err == nil {
 		t.Fatal("failed policy read left an old success")
@@ -150,8 +137,8 @@ func TestRefreshPublicationAndReuse(t *testing.T) {
 	if err := os.Remove(policy); err != nil {
 		t.Fatal(err)
 	}
-	if result, err := session.RefreshFiles(context.Background(), files); err != nil || len(result.Files[0].Diagnostics) != 3 {
-		t.Fatalf("batch recovery: %+v %v", result, err)
+	if result, err := refreshOne(context.Background(), session, "catalog/items.sql"); err != nil || len(result.Diagnostics) != 3 {
+		t.Fatalf("recovery: %+v %v", result, err)
 	}
 	warningOptions := options
 	warningOptions.Rule = map[string]RulePolicy{"fixture.refresh": {Severity: "warning"}}
@@ -366,7 +353,7 @@ type refreshedFile struct {
 }
 
 func refreshOne(ctx context.Context, session *Session, file string) (refreshedFile, error) {
-	result, err := session.RefreshFiles(ctx, []string{file})
+	result, err := session.RefreshFile(ctx, file)
 	if err != nil {
 		return refreshedFile{}, err
 	}

@@ -45,7 +45,6 @@ type producerGeneration struct {
 	description   facts.ProducerDescription
 	sources       []ambient.Source
 	adjustments   []lintaiapi.ConfigAdjustment
-	aliases       map[string]string
 }
 
 var _ backend.Producer = (*Backend)(nil)
@@ -158,7 +157,7 @@ func (g *producerGeneration) Metadata() backend.GenerationMetadata {
 	for _, module := range g.snapshot.Modules {
 		files = append(files, module.Path)
 	}
-	return backend.GenerationMetadata{InputRevision: g.inputRevision, Scope: cloneProducerValue(g.scope), AnalyzedFiles: files, SourceDigests: maps.Clone(g.snapshot.SourceDigests), FileAliases: maps.Clone(g.aliases), Observations: g.observations, ReusableFromObservations: true}
+	return backend.GenerationMetadata{InputRevision: g.inputRevision, Scope: cloneProducerValue(g.scope), AnalyzedFiles: files, SourceDigests: maps.Clone(g.snapshot.SourceDigests), Observations: g.observations, ReusableFromObservations: true}
 }
 
 func (g *producerGeneration) Emit(ctx context.Context, builder *facts.Builder) error {

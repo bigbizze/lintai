@@ -95,9 +95,9 @@ func TestSessionRetainsAndReplacesCurrentGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Projection reads the completed capture after disk has changed.
-	projected := session.currentResult.projectFiles([]string{a, "src/a.ts", "src/b.ts"}, false)
+	projected := session.currentResult.project([]string{"src/a.ts", "src/b.ts"}, false)
 	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(original)))
-	if !slices.Equal(groupDigests(projected), []string{digest, digest, ""}) || len(projected.Files[0].Diagnostics) != 1 {
+	if !slices.Equal(groupDigests(projected), []string{digest, ""}) || len(projected.Files[0].Diagnostics) != 1 {
 		t.Fatalf("projection after edit: %+v", projected)
 	}
 	changed := assertFresh()
@@ -155,7 +155,7 @@ func TestComposedFactsCaptureCurrentEligibilityWithoutReemission(t *testing.T) {
 	session := openTestSession(t, Config{}, producer)
 	defer session.Close()
 	catalog := session.catalog
-	empty, err := catalog.collect(context.Background(), fileKeys{}, nil, nil, observe.Full)
+	empty, err := catalog.collect(context.Background(), "", nil, nil, observe.Full)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +164,7 @@ func TestComposedFactsCaptureCurrentEligibilityWithoutReemission(t *testing.T) {
 	}
 	predicate := facts.Predicate{Name: "catalog.item", Arity: 2}
 	demand := map[string]map[facts.Predicate]struct{}{"catalog": {predicate: {}}}
-	first, err := catalog.collect(context.Background(), fileKeys{}, demand, &empty, observe.Full)
+	first, err := catalog.collect(context.Background(), "", demand, &empty, observe.Full)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +176,7 @@ func TestComposedFactsCaptureCurrentEligibilityWithoutReemission(t *testing.T) {
 		t.Fatal(err)
 	}
 	producer.observations, producer.reusable = set, true
-	next, err := catalog.collect(context.Background(), fileKeys{}, demand, &first, observe.Full)
+	next, err := catalog.collect(context.Background(), "", demand, &first, observe.Full)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,15 +184,15 @@ func TestComposedFactsCaptureCurrentEligibilityWithoutReemission(t *testing.T) {
 		t.Fatal("equal identity failed to reuse facts with freshly captured eligibility")
 	}
 	producer.observations = observe.Set{}
-	immutable, err := catalog.collect(context.Background(), fileKeys{}, demand, &next, observe.Full)
+	immutable, err := catalog.collect(context.Background(), "", demand, &next, observe.Full)
 	if err != nil || !immutable.reusableFromObservations || len(immutable.observations.Records()) != 0 {
 		t.Fatalf("immutable empty observation promise: %v", err)
 	}
-	if _, err := captureGenerationMetadata(backend.GenerationMetadata{}, fileKeys{}, "p", nil, nil); err == nil {
+	if _, _, err := captureGenerationMetadata(backend.GenerationMetadata{}, "", "p", nil, nil); err == nil {
 		t.Fatal("empty revision accepted")
 	}
 	scope := map[string]any{"items": []any{"original"}}
-	metadata, err := captureGenerationMetadata(backend.GenerationMetadata{InputRevision: "opaque", Scope: scope, AnalyzedFiles: []string{"src/./a.ts", "src/a.ts"}}, fileKeys{}, "p", nil, nil)
+	metadata, _, err := captureGenerationMetadata(backend.GenerationMetadata{InputRevision: "opaque", Scope: scope, AnalyzedFiles: []string{"src/./a.ts", "src/a.ts"}}, "", "p", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +213,7 @@ func TestComposedFactsCaptureCurrentEligibilityWithoutReemission(t *testing.T) {
 			session := openTestSession(t, Config{}, typescript.New(settings))
 			t.Cleanup(func() { _ = session.Close() })
 			catalog := session.catalog
-			result, err := catalog.collect(context.Background(), newFileKeys(root, nil), requested, previous, observe.Full)
+			result, err := catalog.collect(context.Background(), root, requested, previous, observe.Full)
 			if err != nil {
 				t.Fatal(err)
 			}

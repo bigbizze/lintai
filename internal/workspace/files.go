@@ -39,9 +39,6 @@ type ScopePlan struct {
 	Pruned       []string
 	Observations observe.Set
 	Matches      []ScopeMatch
-	// ExactAliases maps each accepted exact-source spelling that differs from
-	// its canonical file to that file, both workspace-relative.
-	ExactAliases map[string]string
 }
 
 // PlanSources applies built-in, configured and invocation selection layers,
@@ -85,12 +82,11 @@ func PlanSources(root string, options ScopeOptions) (*ScopePlan, error) {
 		}
 	}
 	plan := &ScopePlan{Root: filepath.Clean(absoluteRoot)}
-	exact, aliases, err := resolveExactSources(absoluteRoot, options.Sources, &observations)
+	exact, err := resolveExactSources(absoluteRoot, options.Sources, &observations)
 	if err != nil {
 		return nil, err
 	}
 	plan.ExactFiles = exact
-	plan.ExactAliases = aliases
 	exactRelative := make([]string, 0, len(exact))
 	for _, path := range exact {
 		exactRelative = append(exactRelative, relativeSlash(absoluteRoot, path))
@@ -204,54 +200,46 @@ func validatePatterns(options ScopeOptions) error {
 	return nil
 }
 
-// resolveExactSources resolves each exact source once and records the
-// configured spelling of every source whose target differs from it.
-func resolveExactSources(root string, names []string, observations *[]observe.Record) ([]string, map[string]string, error) {
+// resolveExactSources resolves each exact source once to the file it names.
+func resolveExactSources(root string, names []string, observations *[]observe.Record) ([]string, error) {
 	byPath := make(map[string]struct{}, len(names))
-	var aliases map[string]string
 	for _, name := range names {
 		if name == "" {
-			return nil, nil, fmt.Errorf("exact source path must not be empty")
+			return nil, fmt.Errorf("exact source path must not be empty")
 		}
 		path := name
 		if !filepath.IsAbs(path) {
 			if filepath.IsAbs(filepath.FromSlash(name)) {
-				return nil, nil, fmt.Errorf("exact source %q is not workspace-relative", name)
+				return nil, fmt.Errorf("exact source %q is not workspace-relative", name)
 			}
 			path = filepath.Join(root, filepath.FromSlash(name))
 		}
 		path = filepath.Clean(path)
 		if !withinRoot(root, path) || isGitMetadata(relativeSlash(root, path)) {
-			return nil, nil, fmt.Errorf("exact source %q is outside the workspace or inside .git", name)
+			return nil, fmt.Errorf("exact source %q is outside the workspace or inside .git", name)
 		}
 		resolved, err := filepath.EvalSymlinks(path)
 		if err != nil {
-			return nil, nil, fmt.Errorf("exact source %q: %w", name, err)
+			return nil, fmt.Errorf("exact source %q: %w", name, err)
 		}
 		resolved = filepath.Clean(resolved)
 		*observations = append(*observations, observe.Record{Kind: observe.Resolved, Path: path, Value: observe.Value(resolved)}, observe.Record{Kind: observe.State, Path: path, Op: observe.RegularFile, Value: observe.True})
 		if !withinRoot(root, resolved) || isGitMetadata(relativeSlash(root, resolved)) {
-			return nil, nil, fmt.Errorf("exact source %q resolves outside the workspace or inside .git", name)
+			return nil, fmt.Errorf("exact source %q resolves outside the workspace or inside .git", name)
 		}
 		info, err := os.Stat(resolved)
 		if err != nil {
-			return nil, nil, fmt.Errorf("exact source %q: %w", name, err)
+			return nil, fmt.Errorf("exact source %q: %w", name, err)
 		}
 		if !info.Mode().IsRegular() {
-			return nil, nil, fmt.Errorf("exact source %q is not a regular file", name)
+			return nil, fmt.Errorf("exact source %q is not a regular file", name)
 		}
 		if !isSupportedExactSource(resolved) {
-			return nil, nil, fmt.Errorf("exact source %q has an unsupported extension", name)
+			return nil, fmt.Errorf("exact source %q has an unsupported extension", name)
 		}
 		byPath[resolved] = struct{}{}
-		if resolved != path {
-			if aliases == nil {
-				aliases = make(map[string]string)
-			}
-			aliases[relativeSlash(root, path)] = relativeSlash(root, resolved)
-		}
 	}
-	return sortedPaths(byPath), aliases, nil
+	return sortedPaths(byPath), nil
 }
 
 func isSupportedExactSource(path string) bool {

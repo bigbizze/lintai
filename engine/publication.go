@@ -5,30 +5,26 @@ import (
 	"maps"
 	"path/filepath"
 	"slices"
-	"strings"
 
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/internal/canonical"
 	"github.com/bigbizze/lintai/observe"
 )
 
-// FileGroup is one projected file: the spelling it was requested or
-// published under, the SHA-256 of the analyzed logical text in lowercase
-// hexadecimal (empty when no source identity was verified), and its findings.
+// FileGroup is one document: its name under the physical workspace root, the
+// SHA-256 of the analyzed logical text in lowercase hexadecimal (empty when no
+// source identity was verified), and its findings.
 type FileGroup struct {
 	File         string
 	SourceDigest string
 	Diagnostics  []diagnostics.Diagnostic
 }
 
-// FilesResult contains ordered file groups and workspace problems from one
-// completed publication. PhysicalRoot is the workspace root the analysis
-// resolved once and read all workspace files through. Aliases maps each
-// accepted alternative name of a returned all-files group to its canonical name.
+// FilesResult contains document groups and workspace problems from one
+// completed publication. PhysicalRoot is the session's workspace directory.
 type FilesResult struct {
 	Files             []FileGroup
 	PhysicalRoot      string
-	Aliases           map[string]string
 	WorkspaceProblems []diagnostics.Diagnostic
 	SnapshotVersion   string
 	RulesLoaded       int
@@ -40,8 +36,14 @@ type publishedResult struct {
 	sourceDigests map[string]string
 	observations  observe.Set
 	reusable      bool
-	byFile        map[string][]int
-	unlocated     []int
+}
+
+// fileIndex groups the diagnostics of one completed result by document. It
+// is built once and read by every lookup of that result.
+type fileIndex struct {
+	root      string
+	byFile    map[string][]int
+	unlocated []int
 }
 
 // normalizeConfig detaches the session policy and resolves its paths once.
@@ -92,29 +94,30 @@ func normalizeConfig(config Config) (Config, error) {
 	return config, nil
 }
 
-func newPublishedResult(result Result, sourceDigests map[string]string, observations observe.Set, reusable bool) *publishedResult {
-	published := &publishedResult{result: result, sourceDigests: sourceDigests, observations: observations, reusable: reusable, byFile: make(map[string][]int)}
+func newPublishedResult(result Result, root string, sourceDigests map[string]string, observations observe.Set, reusable bool) *publishedResult {
+	index := &fileIndex{root: root, byFile: make(map[string][]int)}
 	for _, file := range result.AnalyzedFiles {
-		published.byFile[result.files.key(file)] = nil
+		index.byFile[documentName(root, file)] = nil
 	}
 	for i, item := range result.Diagnostics {
 		if item.DiagnosticKind == diagnostics.KindRuleExecutionError {
-			published.reusable = false
+			reusable = false
 		}
 		if item.SourceLocation == nil {
-			published.unlocated = append(published.unlocated, i)
+			index.unlocated = append(index.unlocated, i)
 		} else {
-			file := result.files.key(item.SourceLocation.File)
-			published.byFile[file] = append(published.byFile[file], i)
+			file := documentName(root, item.SourceLocation.File)
+			index.byFile[file] = append(index.byFile[file], i)
 		}
 	}
-	return published
+	result.index = index
+	return &publishedResult{result: result, sourceDigests: sourceDigests, observations: observations, reusable: reusable}
 }
 
-// verifiedSourceDigests keeps a file's digest only when every producer that
-// owns a reported range in that file captured the same text. Otherwise the
-// host receives no digest and treats the group as unverified.
-func verifiedSourceDigests(result Result, evidence *executionEvidence) map[string]string {
+// verifiedSourceDigests keeps a document's digest only when every producer
+// that owns a reported range in it captured the same text. Otherwise the host
+// receives no digest and treats the group as unverified.
+func verifiedSourceDigests(result Result, root string, evidence *executionEvidence) map[string]string {
 	verified := maps.Clone(evidence.sourceDigests)
 	for _, item := range result.Diagnostics {
 		if item.SourceLocation == nil || item.EntityIdentity == nil {
@@ -124,131 +127,59 @@ func verifiedSourceDigests(result Result, evidence *executionEvidence) map[strin
 		if !anchored {
 			continue
 		}
-		key := result.files.key(item.SourceLocation.File)
-		if _, captured := evidence.digestOwners[key][owner]; !captured {
-			delete(verified, key)
+		file := documentName(root, item.SourceLocation.File)
+		if _, captured := evidence.digestOwners[file][owner]; !captured {
+			delete(verified, file)
 		}
 	}
 	return verified
 }
 
-// fileKeys maps every accepted spelling of a published file to one key. The
-// physical root is resolved once for the operation. An absolute name inside the
-// configured root, or else inside the physical root, becomes workspace-relative.
-// A relative name that leaves the workspace is resolved from the physical root,
-// as producers and the operating system resolve it, and a name outside the
-// workspace keys as that absolute path. An exact-source alias then maps to its
-// canonical file. A requested name that is still not published is looked up
-// once more through its resolved directories; see resolved.
-type fileKeys struct {
-	root, physical string
-	aliases        map[string]string
-}
-
-func newFileKeys(root string, aliases map[string]string) fileKeys {
-	physical, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		physical = root
-	}
-	return fileKeys{root: root, physical: filepath.Clean(physical), aliases: aliases}
-}
-
-func (k fileKeys) key(file string) string {
-	name := filepath.Clean(filepath.FromSlash(file))
-	if !filepath.IsAbs(name) && !insideRoot(name) {
-		name = filepath.Join(k.physical, name)
-	}
-	if filepath.IsAbs(name) {
-		for _, root := range []string{k.root, k.physical} {
-			if relative, err := filepath.Rel(root, name); err == nil && insideRoot(relative) {
-				name = relative
-				break
-			}
-		}
-	}
-	key := filepath.ToSlash(name)
-	if canonical, ok := k.aliases[key]; ok {
-		return canonical
-	}
-	return key
-}
-
-// resolved keys a name whose directories reach a file through symlinks, such
-// as another link to the workspace or to a directory outside it. The nearest
-// existing directory of the name is resolved, so the name keys as the file it
-// reaches. Only directories are resolved; the file is not opened.
-func (k fileKeys) resolved(file string) string {
+// documentName names a file under the physical workspace root: relative to
+// the root inside it, otherwise its clean absolute path, with forward slashes.
+// A relative name is based at the root.
+func documentName(root, file string) string {
 	name := filepath.Clean(filepath.FromSlash(file))
 	if !filepath.IsAbs(name) {
-		name = filepath.Join(k.physical, name)
+		name = filepath.Join(root, name)
 	}
-	for dir := filepath.Dir(name); filepath.IsAbs(dir); dir = filepath.Dir(dir) {
-		if real, err := filepath.EvalSymlinks(dir); err == nil {
-			if relative, err := filepath.Rel(dir, name); err == nil {
-				return k.key(filepath.Join(real, relative))
-			}
-			break
-		}
-		if filepath.Dir(dir) == dir {
-			break
-		}
+	if relative, err := filepath.Rel(root, name); err == nil && filepath.IsLocal(relative) {
+		name = relative
 	}
-	return k.key(file)
+	return filepath.ToSlash(name)
 }
 
-// lookup returns the published key of a requested name. A name that is not a
-// published spelling, including an exact-source alias, is looked up again
-// through its resolved directories.
-func (p *publishedResult) lookup(file string) string {
-	key := p.result.files.key(file)
-	if _, published := p.byFile[key]; published {
-		return key
+func (p *publishedResult) group(file string) FileGroup {
+	index := p.result.index
+	group := FileGroup{File: file, Diagnostics: []diagnostics.Diagnostic{}}
+	indexes, captured := index.byFile[file]
+	if captured {
+		group.SourceDigest = p.sourceDigests[file]
 	}
-	return p.result.files.resolved(file)
-}
-
-// read is the path to open for a file named by a configured-root spelling, so
-// every read of one operation goes through the same physical root.
-func (k fileKeys) read(path string) string {
-	if relative, err := filepath.Rel(k.root, path); err == nil && insideRoot(relative) {
-		return filepath.Join(k.physical, relative)
+	for _, i := range indexes {
+		group.Diagnostics = append(group.Diagnostics, p.result.Diagnostics[i])
 	}
-	return path
+	group.Diagnostics = cloneDiagnostics(group.Diagnostics)
+	return group
 }
 
-func insideRoot(relative string) bool {
-	return relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
-}
-
-func (p *publishedResult) projectFiles(files []string, all bool) FilesResult {
+// project returns the named documents, or every document when all is set,
+// with the workspace problems of the publication.
+func (p *publishedResult) project(files []string, all bool) FilesResult {
+	index := p.result.index
+	if all {
+		files = slices.Sorted(maps.Keys(index.byFile))
+	}
 	result := FilesResult{
-		Files: make([]FileGroup, 0, len(files)), PhysicalRoot: p.result.files.physical, Aliases: map[string]string{},
+		Files: make([]FileGroup, 0, len(files)), PhysicalRoot: index.root,
 		SnapshotVersion: p.result.SnapshotVersion, RulesLoaded: p.result.RulesLoaded,
 		Warnings: slices.Clone(p.result.Warnings),
 	}
-	if all {
-		files = slices.Sorted(maps.Keys(p.byFile))
-		for alias, file := range p.result.files.aliases {
-			if _, published := p.byFile[file]; published && alias != file {
-				result.Aliases[alias] = file
-			}
-		}
-	}
 	for _, file := range files {
-		key := p.lookup(file)
-		group := FileGroup{File: file, Diagnostics: []diagnostics.Diagnostic{}}
-		indexes, captured := p.byFile[key]
-		if captured {
-			group.SourceDigest = p.sourceDigests[key]
-		}
-		for _, index := range indexes {
-			group.Diagnostics = append(group.Diagnostics, p.result.Diagnostics[index])
-		}
-		group.Diagnostics = cloneDiagnostics(group.Diagnostics)
-		result.Files = append(result.Files, group)
+		result.Files = append(result.Files, p.group(file))
 	}
-	for _, index := range p.unlocated {
-		result.WorkspaceProblems = append(result.WorkspaceProblems, p.result.Diagnostics[index])
+	for _, i := range index.unlocated {
+		result.WorkspaceProblems = append(result.WorkspaceProblems, p.result.Diagnostics[i])
 	}
 	result.WorkspaceProblems = cloneDiagnostics(result.WorkspaceProblems)
 	return result

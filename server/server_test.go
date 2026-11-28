@@ -16,34 +16,35 @@ import (
 )
 
 type analyzer struct {
-	files       [][]string
+	files       []string
 	all, closed int
 	fail        bool
-	result      func([]string) engine.FilesResult
 }
 
-func (a *analyzer) RefreshFiles(_ context.Context, names []string) (engine.FilesResult, error) {
-	a.files = append(a.files, names)
+func (a *analyzer) result(names ...string) engine.FilesResult {
+	groups := make([]engine.FileGroup, len(names))
+	for i, name := range names {
+		groups[i] = engine.FileGroup{File: name, SourceDigest: "digest"}
+	}
+	return engine.FilesResult{Files: groups, PhysicalRoot: "/workspace", SnapshotVersion: "snapshot", WorkspaceProblems: []diagnostics.Diagnostic{{DiagnosticKind: diagnostics.KindRuleExecutionError, RuleID: "broken", Phase: "config", Message: "invalid"}}}
+}
+
+func (a *analyzer) RefreshFile(_ context.Context, name string) (engine.FilesResult, error) {
+	a.files = append(a.files, name)
 	if a.fail {
 		a.fail = false
 		return engine.FilesResult{}, errors.New("broken input")
 	}
-	return a.result(names), nil
+	return a.result(name), nil
 }
 func (a *analyzer) RefreshAll(context.Context) (engine.FilesResult, error) {
 	a.all++
-	return a.result([]string{"a.ts", "b.ts"}), nil
+	return a.result("a.ts", "b.ts"), nil
 }
 func (a *analyzer) Close() error { a.closed++; return nil }
 
 func TestFramedOperations(t *testing.T) {
-	a := &analyzer{fail: true, result: func(names []string) engine.FilesResult {
-		groups := make([]engine.FileGroup, len(names))
-		for i, name := range names {
-			groups[i] = engine.FileGroup{File: name}
-		}
-		return engine.FilesResult{Files: groups, SnapshotVersion: "snapshot", WorkspaceProblems: []diagnostics.Diagnostic{{DiagnosticKind: diagnostics.KindRuleExecutionError, RuleID: "broken", Phase: "config", Message: "invalid"}}}
-	}}
+	a := &analyzer{fail: true}
 	var input, output bytes.Buffer
 	id := 0
 	write := func(method string, params any) {
@@ -54,18 +55,21 @@ func TestFramedOperations(t *testing.T) {
 		}
 		fmt.Fprintf(&input, "Content-Length: %d\r\n\r\n%s", len(payload), payload)
 	}
-	write("initialize", InitializeParams{ProtocolVersion: 2})
-	write("diagnostics/files", map[string]any{"files": "all"})
+	write("initialize", InitializeParams{ProtocolVersion: 4})
+	write("diagnostics/workspace", map[string]any{})
 	write("initialize", InitializeParams{ProtocolVersion: ProtocolVersion})
-	for _, selector := range []any{nil, "everything", []string{" "}, []string{}, []string{}, "all", []string{"b.ts", "/absolute/a.ts", "b.ts"}} {
-		write("diagnostics/files", map[string]any{"files": selector})
-	}
+	write("diagnostics/document", map[string]any{"file": " "})
+	write("diagnostics/document", map[string]any{"file": "/workspace/a.ts"})
+	write("diagnostics/document", map[string]any{"file": "/workspace/a.ts"})
+	write("diagnostics/workspace", map[string]any{})
+	write("diagnostics/files", map[string]any{"files": "all"})
 	write("shutdown", map[string]any{})
 	if err := NewWithFactory(func(InitializeParams) Analyzer { return a }).Serve(context.Background(), &input, &output); err != nil {
 		t.Fatal(err)
 	}
 	reader := bufio.NewReader(&output)
-	for i, code := range []int{errCodeInvalidParams, errCodeNotInitialized, 0, errCodeInvalidParams, errCodeInvalidParams, errCodeInvalidParams, errCodeAnalysis, 0, 0, 0, 0} {
+	problems := []string{"[lintai] rule broken could not run (phase config): invalid"}
+	for i, code := range []int{errCodeInvalidParams, errCodeNotInitialized, 0, errCodeInvalidParams, errCodeAnalysis, 0, 0, errCodeMethodNotFound, 0} {
 		response, err := jsonrpc.ReadResponse(reader)
 		if err != nil {
 			t.Fatal(err)
@@ -79,52 +83,28 @@ func TestFramedOperations(t *testing.T) {
 		if response.Error != nil {
 			t.Fatalf("request %d: %+v", i, response.Error)
 		}
-		if i == 2 && response.Result.(map[string]any)["protocolVersion"] != float64(ProtocolVersion) {
-			t.Fatal(response)
-		}
-		if i < 7 || i > 9 {
-			continue
-		}
 		body, err := json.Marshal(response.Result)
 		if err != nil {
 			t.Fatal(err)
 		}
-		var result FilesDiagnosticsResult
-		if err = json.Unmarshal(body, &result); err != nil {
-			t.Fatal(err)
-		}
-		want := [][]string{{}, {"a.ts", "b.ts"}, {"b.ts", "/absolute/a.ts", "b.ts"}}[i-7]
-		if result.Files == nil || len(result.Files) != len(want) || result.SnapshotVersion != "snapshot" || !reflect.DeepEqual(result.Problems, []string{"[lintai] rule broken could not run (phase config): invalid"}) {
-			t.Fatalf("request %d: %s", i, body)
-		}
-		for j, group := range result.Files {
-			if group.File != want[j] || group.Findings == nil {
-				t.Fatalf("request %d: %+v", i, group)
+		switch i {
+		case 2:
+			if response.Result.(map[string]any)["protocolVersion"] != float64(ProtocolVersion) {
+				t.Fatal(response)
+			}
+		case 5:
+			var result DocumentResult
+			if err := json.Unmarshal(body, &result); err != nil || result.SourceDigest != "digest" || result.Findings == nil || !reflect.DeepEqual(result.Problems, problems) {
+				t.Fatalf("document: %s", body)
+			}
+		case 6:
+			var result WorkspaceResult
+			if err := json.Unmarshal(body, &result); err != nil || len(result.Files) != 2 || result.Files[1].File != "b.ts" || result.PhysicalRoot != "/workspace" || !reflect.DeepEqual(result.Problems, problems) {
+				t.Fatalf("workspace: %s", body)
 			}
 		}
 	}
-	if a.all != 1 || len(a.files) != 3 || a.closed != 1 {
+	if a.all != 1 || len(a.files) != 2 || a.closed != 1 {
 		t.Fatalf("unexpected analyzer calls: %+v", a)
-	}
-}
-
-func TestInvalidAnalyzerGroups(t *testing.T) {
-	for _, tc := range []struct {
-		selector string
-		result   engine.FilesResult
-	}{
-		{`["a"]`, engine.FilesResult{}},
-		{`["a"]`, engine.FilesResult{Files: []engine.FileGroup{{File: "wrong"}}}},
-		{`"all"`, engine.FilesResult{Files: []engine.FileGroup{{File: " "}}}},
-		{`"all"`, engine.FilesResult{Files: []engine.FileGroup{{File: "a"}, {File: "a"}}}},
-		{`"all"`, engine.FilesResult{Files: []engine.FileGroup{{File: "a"}}, Aliases: map[string]string{"a": "a"}}},
-		{`"all"`, engine.FilesResult{Files: []engine.FileGroup{{File: "a"}}, Aliases: map[string]string{"b": "c"}}},
-		{`["a"]`, engine.FilesResult{Files: []engine.FileGroup{{File: "a"}}, Aliases: map[string]string{"b": "a"}}},
-	} {
-		instance := &Server{engine: &analyzer{result: func([]string) engine.FilesResult { return tc.result }}, initialized: true}
-		_, err := instance.handleFilesDiagnostics(context.Background(), json.RawMessage(`{"files":`+tc.selector+`}`))
-		if err == nil {
-			t.Errorf("accepted invalid analyzer result %+v", tc)
-		}
 	}
 }

@@ -57,7 +57,7 @@ func (update SuppressionUpdate) writing() bool {
 }
 
 type Result struct {
-	files           fileKeys
+	index           *fileIndex
 	Diagnostics     []diagnostics.Diagnostic
 	SnapshotVersion string
 	RulesLoaded     int
@@ -214,14 +214,15 @@ func (e *Session) check(ctx context.Context, update SuppressionUpdate) (Result, 
 	return cloneResult(result.result), nil
 }
 
-// RefreshFiles validates or reanalyzes once, then projects all files from the
-// same completed publication. The order and duplicates in files are retained.
-func (e *Session) RefreshFiles(ctx context.Context, files []string) (FilesResult, error) {
-	return e.refresh(ctx, slices.Clone(files), false)
+// RefreshFile validates or reanalyzes once and returns one document of the
+// completed publication with its workspace problems. file is a name under the
+// workspace root or an absolute path; the group carries the document name.
+func (e *Session) RefreshFile(ctx context.Context, file string) (FilesResult, error) {
+	return e.refresh(ctx, []string{documentName(e.config.WorkspaceRoot, file)}, false)
 }
 
-// RefreshAll validates once and projects every analyzed or diagnostic-bearing
-// file of the resulting publication, in normalized filename order.
+// RefreshAll validates once and returns every analyzed or diagnostic-bearing
+// document of the resulting publication, in name order.
 func (e *Session) RefreshAll(ctx context.Context) (FilesResult, error) {
 	return e.refresh(ctx, nil, true)
 }
@@ -256,7 +257,7 @@ func (e *Session) refresh(ctx context.Context, files []string, all bool) (FilesR
 				return FilesResult{}, err
 			}
 			success = true
-			return current.projectFiles(files, all), nil
+			return current.project(files, all), nil
 		}
 	}
 	e.clearPublished()
@@ -265,7 +266,7 @@ func (e *Session) refresh(ctx context.Context, files []string, all bool) (FilesR
 		return FilesResult{}, err
 	}
 	success = true
-	return current.projectFiles(files, all), nil
+	return current.project(files, all), nil
 }
 
 func (e *Session) clearPublished() {
@@ -279,15 +280,9 @@ func (e *Session) clearCurrent() {
 	e.currentFacts = nil
 }
 
-// files names the files of the session's physical workspace root.
-func (e *Session) files() fileKeys {
-	return fileKeys{root: e.config.WorkspaceRoot, physical: e.config.WorkspaceRoot}
-}
-
 // runAndPublish is called by the active operation.
 func (e *Session) runAndPublish(checkCtx context.Context, update SuppressionUpdate, mode observe.Mode) (*publishedResult, error) {
 	config := e.config
-	root := e.files()
 	state, err := loadSuppressions(config, update)
 	var result Result
 	var run runInfo
@@ -302,7 +297,7 @@ func (e *Session) runAndPublish(checkCtx context.Context, update SuppressionUpda
 		result.Diagnostics = []diagnostics.Diagnostic{errorDiagnostic("rules-lock", "integrity", 0, "", nil, err.Error())}
 		err = nil
 	} else {
-		result, run, evidence, err = e.analyzeWithEvidence(checkCtx, mode, state, root)
+		result, run, evidence, err = e.analyzeWithEvidence(checkCtx, mode, state)
 		if err != nil {
 			return nil, err
 		}
@@ -318,11 +313,7 @@ func (e *Session) runAndPublish(checkCtx context.Context, update SuppressionUpda
 		return nil, err
 	}
 	reusable := evidence.reusable && !update.writing()
-	result.files = evidence.files
-	if result.files.root == "" {
-		result.files = root
-	}
-	published := newPublishedResult(result, verifiedSourceDigests(result, &evidence), observe.Union(evidence.observations, state.observations), reusable)
+	published := newPublishedResult(result, config.WorkspaceRoot, verifiedSourceDigests(result, config.WorkspaceRoot, &evidence), observe.Union(evidence.observations, state.observations), reusable)
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
@@ -358,11 +349,13 @@ func (e *Session) Current() (Result, error) {
 }
 
 // DiagnosticsFor reads this completed result without performing a check.
-// It looks up file by the same identity as a projection.
+// file is a document name under the workspace root or an absolute path.
 func (r Result) DiagnosticsFor(file string) []diagnostics.Diagnostic {
-	published := newPublishedResult(r, nil, observe.Set{}, false)
 	items := make([]diagnostics.Diagnostic, 0)
-	for _, index := range published.byFile[published.lookup(file)] {
+	if r.index == nil {
+		return items
+	}
+	for _, index := range r.index.byFile[documentName(r.index.root, file)] {
 		items = append(items, r.Diagnostics[index])
 	}
 	return cloneDiagnostics(items)
@@ -397,7 +390,7 @@ func cloneResult(result Result) Result {
 	return result
 }
 
-func (e *Session) analyzeWithEvidence(ctx context.Context, mode observe.Mode, state suppressionsState, root fileKeys) (Result, runInfo, executionEvidence, error) {
+func (e *Session) analyzeWithEvidence(ctx context.Context, mode observe.Mode, state suppressionsState) (Result, runInfo, executionEvidence, error) {
 	config := e.config
 	run := runInfo{
 		evaluated:  make(map[string]struct{}),
@@ -429,7 +422,7 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, mode observe.Mode, st
 		if err != nil {
 			return integrity(err)
 		}
-		if err := lock.verify(config, root, ruleCatalog.digest, producerCatalog); err != nil {
+		if err := lock.verify(config, ruleCatalog.digest, producerCatalog); err != nil {
 			return integrity(err)
 		}
 		if _, failures := suppressions.Limit(state.file, lock.Suppressions); len(failures) > 0 {
@@ -457,7 +450,7 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, mode observe.Mode, st
 	if e.hooks.beforeCollect != nil {
 		e.hooks.beforeCollect()
 	}
-	assembled, err := producerCatalog.collect(ctx, root, requested, e.currentFacts, mode)
+	assembled, err := producerCatalog.collect(ctx, config.WorkspaceRoot, requested, e.currentFacts, mode)
 	if err != nil {
 		return Result{}, run, evidence, err
 	}
@@ -473,7 +466,6 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, mode observe.Mode, st
 	run.producerNames = producerNames
 	evidence.sourceDigests = assembled.sourceDigests
 	evidence.digestOwners = assembled.digestOwners
-	evidence.files = assembled.files
 	evidence.anchors = assembled.anchors
 	evidence.anchorOwners = assembled.anchorOwners
 	run.files = assembled.analyzedFiles
@@ -532,7 +524,7 @@ func (e *Session) analyze(ctx context.Context) (Result, runInfo, error) {
 	if err != nil {
 		return Result{}, runInfo{}, err
 	}
-	result, run, _, err := e.analyzeWithEvidence(ctx, observe.Full, state, e.files())
+	result, run, _, err := e.analyzeWithEvidence(ctx, observe.Full, state)
 	return result, run, err
 }
 
@@ -548,7 +540,6 @@ type ruleOutcome struct {
 type executionEvidence struct {
 	sourceDigests map[string]string
 	digestOwners  map[string]map[string]struct{}
-	files         fileKeys
 	findings      []violation
 	anchors       map[string]facts.AnchorSupport
 	anchorOwners  map[string]string

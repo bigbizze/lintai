@@ -34,7 +34,7 @@ func TestParallelRuleExecutionContract(t *testing.T) {
 		config := parallelFixtureOptions(t, repoRoot, workspace)
 		config.RuleWorkers, config.FactLimit, config.Explain = workers, 8, true
 		session := openTestSession(t, config, newParallelFixtureProducer())
-		result, info, evidence, err := session.analyzeWithEvidence(context.Background(), observe.Full, suppressionsState{}, newFileKeys(session.config.WorkspaceRoot, nil))
+		result, info, evidence, err := session.analyzeWithEvidence(context.Background(), observe.Full, suppressionsState{})
 		if err != nil {
 			t.Fatal(err)
 		}

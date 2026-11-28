@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"slices"
 	"strings"
 
 	"github.com/bigbizze/lintai/diagnostics"
@@ -14,7 +13,7 @@ import (
 	"github.com/bigbizze/lintai/jsonrpc"
 )
 
-const ProtocolVersion = 4
+const ProtocolVersion = 5
 
 const (
 	errCodeInvalidRequest = -32600
@@ -24,9 +23,11 @@ const (
 	errCodeAnalysis       = -32010
 )
 
+// Analyzer serves the session's workspace. RefreshFile returns the group of
+// one document as the first file of its result.
 type Analyzer interface {
 	RefreshAll(ctx context.Context) (engine.FilesResult, error)
-	RefreshFiles(ctx context.Context, files []string) (engine.FilesResult, error)
+	RefreshFile(ctx context.Context, file string) (engine.FilesResult, error)
 	Close() error
 }
 
@@ -54,13 +55,19 @@ type InitializeResult struct {
 	ProtocolVersion int `json:"protocolVersion"`
 }
 
-// FilesDiagnosticsResult preserves the order and duplicates in the request.
-type FilesDiagnosticsResult struct {
-	SnapshotVersion string            `json:"snapshotVersion"`
-	Problems        []string          `json:"problems"`
-	PhysicalRoot    string            `json:"physicalRoot"`
-	Aliases         map[string]string `json:"aliases"`
-	Files           []FileFindings    `json:"files"`
+// WorkspaceResult holds every document of one analysis. A file is named
+// relative to PhysicalRoot inside it and by its absolute path outside it.
+type WorkspaceResult struct {
+	Problems     []string       `json:"problems"`
+	PhysicalRoot string         `json:"physicalRoot"`
+	Files        []FileFindings `json:"files"`
+}
+
+// DocumentResult holds one document of an analysis and its workspace problems.
+type DocumentResult struct {
+	Problems     []string  `json:"problems"`
+	SourceDigest string    `json:"sourceDigest"`
+	Findings     []Finding `json:"findings"`
 }
 
 type FileFindings struct {
@@ -123,8 +130,10 @@ func (s *Server) handleRequest(ctx context.Context, request jsonrpc.Request) (js
 	switch request.Method {
 	case "initialize":
 		response.Result, err = s.handleInitialize(request.Params)
-	case "diagnostics/files":
-		response.Result, err = s.handleFilesDiagnostics(ctx, request.Params)
+	case "diagnostics/workspace":
+		response.Result, err = s.handleWorkspace(ctx, request.Params)
+	case "diagnostics/document":
+		response.Result, err = s.handleDocument(ctx, request.Params)
 	case "shutdown":
 		response.Result = map[string]any{}
 		return response, true
@@ -165,63 +174,49 @@ func (s *Server) handleInitialize(rawParams json.RawMessage) (InitializeResult, 
 	return InitializeResult{ProtocolVersion: ProtocolVersion}, nil
 }
 
-func (s *Server) handleFilesDiagnostics(ctx context.Context, rawParams json.RawMessage) (FilesDiagnosticsResult, error) {
+func (s *Server) handleWorkspace(ctx context.Context, rawParams json.RawMessage) (WorkspaceResult, error) {
 	if !s.initialized {
-		return FilesDiagnosticsResult{}, fmt.Errorf("server not initialized")
+		return WorkspaceResult{}, fmt.Errorf("server not initialized")
 	}
-	var params struct {
-		Files json.RawMessage `json:"files"`
-	}
+	var params struct{}
 	if err := decodeParams(rawParams, &params); err != nil {
-		return FilesDiagnosticsResult{}, err
+		return WorkspaceResult{}, err
 	}
-	var names []string
-	var selector string
-	all := json.Unmarshal(params.Files, &selector) == nil && selector == "all"
-	var result engine.FilesResult
-	var err error
-	if all {
-		result, err = s.engine.RefreshAll(ctx)
-	} else {
-		if json.Unmarshal(params.Files, &names) != nil || names == nil {
-			return FilesDiagnosticsResult{}, invalidParams(`files must be an array of names or "all"`)
-		}
-		for _, name := range names {
-			if strings.TrimSpace(name) == "" {
-				return FilesDiagnosticsResult{}, invalidParams("each file is required")
-			}
-		}
-		result, err = s.engine.RefreshFiles(ctx, slices.Clone(names))
-	}
+	result, err := s.engine.RefreshAll(ctx)
 	if err != nil {
-		return FilesDiagnosticsResult{}, err
+		return WorkspaceResult{}, err
 	}
-	if !all && len(result.Files) != len(names) {
-		return FilesDiagnosticsResult{}, fmt.Errorf("analyzer returned inconsistent file groups for diagnostics/files")
-	}
-	seen := make(map[string]bool)
 	files := make([]FileFindings, len(result.Files))
 	for i, group := range result.Files {
-		if all {
-			if strings.TrimSpace(group.File) == "" || seen[group.File] {
-				return FilesDiagnosticsResult{}, fmt.Errorf("analyzer returned invalid file name %q for all files", group.File)
-			}
-			seen[group.File] = true
-		} else if group.File != names[i] {
-			return FilesDiagnosticsResult{}, fmt.Errorf("analyzer returned inconsistent file groups for diagnostics/files")
-		}
 		files[i] = FileFindings{File: group.File, SourceDigest: group.SourceDigest, Findings: findings(group.Diagnostics)}
 	}
-	aliases := map[string]string{}
-	for alias, file := range result.Aliases {
-		if !all || seen[alias] || !seen[file] {
-			return FilesDiagnosticsResult{}, fmt.Errorf("analyzer returned an ambiguous alias %q", alias)
-		}
-		aliases[alias] = file
+	s.logWarnings(result.Warnings)
+	return WorkspaceResult{Problems: problemStrings(result.WorkspaceProblems), PhysicalRoot: result.PhysicalRoot, Files: files}, nil
+}
+
+func (s *Server) handleDocument(ctx context.Context, rawParams json.RawMessage) (DocumentResult, error) {
+	if !s.initialized {
+		return DocumentResult{}, fmt.Errorf("server not initialized")
+	}
+	var params struct {
+		File string `json:"file"`
+	}
+	if err := decodeParams(rawParams, &params); err != nil {
+		return DocumentResult{}, err
+	}
+	if strings.TrimSpace(params.File) == "" {
+		return DocumentResult{}, invalidParams("file is required")
+	}
+	result, err := s.engine.RefreshFile(ctx, params.File)
+	if err != nil {
+		return DocumentResult{}, err
+	}
+	document := DocumentResult{Problems: problemStrings(result.WorkspaceProblems), Findings: []Finding{}}
+	if len(result.Files) > 0 {
+		document.SourceDigest, document.Findings = result.Files[0].SourceDigest, findings(result.Files[0].Diagnostics)
 	}
 	s.logWarnings(result.Warnings)
-	return FilesDiagnosticsResult{SnapshotVersion: result.SnapshotVersion, Problems: problemStrings(result.WorkspaceProblems),
-		PhysicalRoot: result.PhysicalRoot, Aliases: aliases, Files: files}, nil
+	return document, nil
 }
 
 func findings(items []diagnostics.Diagnostic) []Finding {

@@ -56,7 +56,7 @@ func run() error {
 	}
 	digest := fmt.Sprintf("%x", sha256.Sum256(source))
 	check := func() (engine.FilesResult, error) {
-		result, err := session.RefreshFiles(ctx, []string{"src/handler.ts"})
+		result, err := session.RefreshFile(ctx, "src/handler.ts")
 		if err != nil {
 			return result, err
 		}
