@@ -1,5 +1,7 @@
 # lintai: an example for every relation, and a docs cleanup
 
+> Status: completed and superseded in part. The Markdown inventory, its `LINTAI_UPDATE_GOLDEN` comparison and the coverage report were later removed. `TestRelationCoverageInventory` now only checks that every base relation is used by a fixture rule or allowlisted in `testdata/fixtures/relation-examples/uncovered.json`.
+
 > **Superseded work order.** This document records the pre-owner-context 0.9.0 inventory and cleanup instructions. Its catalog size, old conflict predicates, and directions not to change relation meanings are historical and are not active requirements. Use [the owner-context implementation specification](lintai-owner-context-implementation.md), especially sections 4 and 10.3, for the current vocabulary, populations, examples, and documentation contract. The original text below is retained as history.
 
 You are working in a clone of `bigbizze/lintai` at 0.9.0 (`4bda7a8`). This document is the full specification for this work. Create a new feature branch from `main` for it. Before writing code, copy this document into the repository as `specs/relation-examples-and-docs-cleanup.md`.

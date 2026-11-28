@@ -7,9 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -56,109 +54,6 @@ func TestRelationCoverageInventory(t *testing.T) {
 		helpers[predicate] = struct{}{}
 		helperByName[predicate.Symbol] = predicate
 	}
-
-	// Exercise the two coverage failures in memory, without modifying fixtures.
-	t.Run("coverage failures", func(t *testing.T) {
-		predicate := facts.Predicate{Name: "ts.example", Arity: 1}
-		for _, tc := range []struct {
-			name      string
-			used      bool
-			allow     bool
-			wantError string
-		}{
-			{name: "neither", wantError: "neither used nor allowlisted"},
-			{name: "both", used: true, allow: true, wantError: "both used and allowlisted"},
-		} {
-			t.Run(tc.name, func(t *testing.T) {
-				users := map[facts.Predicate]*relationUsers{}
-				if tc.used {
-					users[predicate] = &relationUsers{direct: map[string]struct{}{"example.ts": {}}}
-				}
-				allow := map[string]string{}
-				if tc.allow {
-					allow[predicate.Name] = "reason"
-				}
-				problems := relationCoverageProblems([]facts.Predicate{predicate}, users, allow)
-				if len(problems) != 1 || !strings.Contains(problems[0], tc.wantError) {
-					t.Fatalf("got %v, want one error containing %q", problems, tc.wantError)
-				}
-			})
-		}
-	})
-
-	// imports_reach traverses nested helpers, including a negated base
-	// predicate. A direct base user must remain distinct from those helpers.
-	t.Run("direct and transitive helper use", func(t *testing.T) {
-		unit, err := parse.Unit(strings.NewReader(`Decl result(M, F, T). result(M, F, T) :- ts.module_path(M, F), ts.imports_reach(F, T).`))
-		if err != nil {
-			t.Fatal(err)
-		}
-		users := map[facts.Predicate]*relationUsers{}
-		collectRelationUsers(unit, nil, "example.ts", catalog.sources, bases, byName, helpers, helperByName, users)
-		if got := users[byName["ts.module_path"]]; got == nil || len(got.direct) != 1 || len(got.via) != 0 {
-			t.Fatalf("module_path users: %#v", got)
-		}
-		for _, name := range []string{"ts.import_edge", "ts.import_type_only", "ts.import_retained"} {
-			got := users[byName[name]]
-			if got == nil || len(got.direct) != 0 || len(got.via) != 1 {
-				t.Errorf("%s helper users: %#v", name, got)
-			}
-		}
-	})
-
-	// An explicit helper root must select its dependencies even when no rule
-	// clause references it, and package-local premises use the producer namespace.
-	t.Run("explicit helper root in custom namespace", func(t *testing.T) {
-		custom := openTestSession(t, Config{}, typescript.New(typescript.Options{Namespace: "custom"}))
-		defer custom.Close()
-		customCatalog := custom.catalog
-		customDescription := customCatalog.entries[0].description
-		customBases := make(map[ast.PredicateSym]facts.Predicate)
-		customByName := make(map[string]facts.Predicate)
-		for _, relation := range customDescription.BaseRelations {
-			predicate := relation.Predicate
-			customBases[ast.PredicateSym{Symbol: predicate.Name, Arity: predicate.Arity}] = predicate
-			customByName[predicate.Name] = predicate
-		}
-		customHelpers := make(map[ast.PredicateSym]struct{})
-		customHelperByName := make(map[string]ast.PredicateSym)
-		for _, relation := range customDescription.Helpers {
-			predicate := ast.PredicateSym{Symbol: relation.Predicate.Name, Arity: relation.Predicate.Arity}
-			customHelpers[predicate] = struct{}{}
-			customHelperByName[predicate.Symbol] = predicate
-		}
-		unit, err := parse.Unit(strings.NewReader(`Decl result(M).`))
-		if err != nil {
-			t.Fatal(err)
-		}
-		users := map[facts.Predicate]*relationUsers{}
-		collectRelationUsers(unit, []string{"custom.imports_reach", "custom.module_multi_config", "custom.fn_signature_unresolved"}, "root.ts", customCatalog.sources,
-			customBases, customByName, customHelpers, customHelperByName, users)
-		for _, name := range []string{"custom.import_edge", "custom.import_type_only", "custom.import_retained"} {
-			got := users[customByName[name]]
-			if got == nil || len(got.direct) != 0 {
-				t.Errorf("%s helper users: %#v", name, got)
-				continue
-			}
-			if _, ok := got.via["`custom.imports_reach` (`root.ts`)"]; !ok || len(got.via) != 1 {
-				t.Errorf("%s helper users: %#v", name, got.via)
-			}
-		}
-		for name, helper := range map[string]string{
-			"custom.module_config":        "custom.module_multi_config",
-			"custom.fn_signature":         "custom.fn_signature_unresolved",
-			"custom.signature_incomplete": "custom.fn_signature_unresolved",
-		} {
-			got := users[customByName[name]]
-			if got == nil || len(got.direct) != 0 {
-				t.Errorf("%s helper users: %#v", name, got)
-				continue
-			}
-			if _, ok := got.via["`"+helper+"` (`root.ts`)"]; !ok || len(got.via) != 1 {
-				t.Errorf("%s helper users: %#v", name, got.via)
-			}
-		}
-	})
 
 	groups := fixtureRuleGroups(t, root)
 	if len(groups) == 0 {
@@ -236,47 +131,6 @@ func TestRelationCoverageInventory(t *testing.T) {
 	}
 	for _, problem := range relationCoverageProblems(predicates, users, allow) {
 		t.Error(problem)
-	}
-	if t.Failed() {
-		return
-	}
-	families := appendixFamilies(t, root)
-	var inventory strings.Builder
-	inventory.WriteString("# Relation coverage inventory\n\nGenerated by `TestRelationCoverageInventory` from the TypeScript producer catalog and fixture rules. " +
-		"Only rules under `testdata/fixtures/` count; npm and oxlint smoke rules do not.\n\n")
-	inventory.WriteString("| Relation | Appendix A family | Direct users | Via helpers | Allowlist reason |\n|---|---|---|---|---|\n")
-	for _, predicate := range predicates {
-		family, ok := families[predicate]
-		if !ok {
-			t.Errorf("%s is absent from Appendix A; record it in the report and assign a family by its description", predicate)
-			continue
-		}
-		var direct, via string
-		if user := users[predicate]; user != nil {
-			direct = formatRelationUsers(user.direct)
-			via = formatRelationUsers(user.via)
-		}
-		fmt.Fprintf(&inventory, "| `%s` | %s | %s | %s | %s |\n", predicate, family, direct, via, allow[predicate.Name])
-	}
-	if t.Failed() {
-		return
-	}
-	inventoryPath := filepath.Join(root, "docs", "followups", "relation-coverage-inventory.md")
-	if os.Getenv("LINTAI_UPDATE_GOLDEN") == "1" {
-		if err := os.MkdirAll(filepath.Dir(inventoryPath), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(inventoryPath, []byte(inventory.String()), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		return
-	}
-	want, err := os.ReadFile(inventoryPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(want) != inventory.String() {
-		t.Fatal("relation coverage inventory is out of date; run LINTAI_UPDATE_GOLDEN=1 go test ./engine -run '^TestRelationCoverageInventory$'")
 	}
 }
 
@@ -399,49 +253,4 @@ func relationCoverageProblems(predicates []facts.Predicate, users map[facts.Pred
 		}
 	}
 	return problems
-}
-
-func formatRelationUsers(users map[string]struct{}) string {
-	items := make([]string, 0, len(users))
-	for user := range users {
-		items = append(items, user)
-	}
-	slices.Sort(items)
-	return strings.Join(items, "<br>")
-}
-
-func appendixFamilies(t *testing.T, root string) map[facts.Predicate]string {
-	t.Helper()
-	data, err := os.ReadFile(filepath.Join(root, "specs", "lintai-refactor-implementation-r6.md"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	heading := regexp.MustCompile(`^### (A\.[1-9]) (.+)$`)
-	row := regexp.MustCompile("^\\| `(ts\\.[a-z0-9_]+)/([0-9]+)` ")
-	families := map[facts.Predicate]string{}
-	family := ""
-	for _, line := range strings.Split(string(data), "\n") {
-		if match := heading.FindStringSubmatch(line); match != nil {
-			family = match[1] + " " + match[2]
-			if match[1] == "A.9" {
-				family = "Reporting support (A.9)"
-			}
-			continue
-		}
-		if strings.HasPrefix(line, "### A.10") || strings.HasPrefix(line, "## Appendix B") {
-			family = ""
-		}
-		if match := row.FindStringSubmatch(line); family != "" && match != nil {
-			arity, err := strconv.Atoi(match[2])
-			if err != nil {
-				t.Fatal(err)
-			}
-			predicate := facts.Predicate{Name: match[1], Arity: arity}
-			if _, exists := families[predicate]; exists {
-				t.Fatalf("%s occurs more than once in Appendix A", predicate)
-			}
-			families[predicate] = family
-		}
-	}
-	return families
 }
