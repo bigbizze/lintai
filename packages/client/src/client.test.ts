@@ -389,9 +389,11 @@ test("every spelling of a file is sent as supplied and found under one identity"
 	const outside = path.join(real, "deps", "shared.js");
 	mkdirSync(path.join(physical, "src"), { recursive: true });
 	mkdirSync(path.dirname(outside));
-	// The logical root reaches the workspace through a symlinked parent.
+	// The logical root is a symlink in another parent directory, and a second
+	// symlink gives the outside file another absolute spelling.
+	const workspaceRoot = path.join(base, "ws");
+	symlinkSync(physical, workspaceRoot, "dir");
 	symlinkSync(real, path.join(base, "link"), "dir");
-	const workspaceRoot = path.join(base, "link", "ws");
 	symlinkSync(physical, path.join(physical, "interior"), "dir");
 	symlinkSync(physical, path.join(base, "alternate"), "dir");
 	const serve = fakeServe(

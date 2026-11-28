@@ -244,14 +244,15 @@ function inside(root: string, file: string): string | undefined {
 
 // One identity for every spelling of a file: workspace-relative against the
 // logical root and the physical root frozen with the capture, otherwise the
-// absolute path through its resolved directory. Only a directory resolving to
+// absolute path through its resolved directory. A relative name starts at the
+// physical root, as the operating system resolves `../`. Only a directory resolving to
 // that frozen root can be an alternative workspace spelling. Alternative
 // spellings are verified on every lookup, since their symlinks can be
 // retargeted; never resolve the logical root again or open the source.
 export function fileNames(logicalRoot: string, physicalRoot: string) {
 	const roots = [logicalRoot, ...(physicalRoot ? [physicalRoot] : [])];
 	return (file: string): string => {
-		const absolute = path.resolve(logicalRoot, file);
+		const absolute = path.resolve(physicalRoot || logicalRoot, file);
 		for (const root of roots) {
 			const name = inside(root, absolute);
 			if (name !== undefined) return name;

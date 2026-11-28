@@ -62,16 +62,15 @@ function register(
 	groups: [string, CapturedFile][],
 ) {
 	const key = fileNames(logicalRoot, physicalRoot);
+	const spelling = (file: string) => path.resolve(physicalRoot || logicalRoot, file);
 	const bySpelling = new Map<string, CapturedFile>();
 	const byKey = new Map<string, CapturedFile>();
 	for (const [file, group] of groups) {
-		const spelling = path.resolve(logicalRoot, file);
-		if (!bySpelling.has(spelling)) bySpelling.set(spelling, group);
-		const name = key(file);
+		const [exact, name] = [spelling(file), key(file)];
+		if (!bySpelling.has(exact)) bySpelling.set(exact, group);
 		if (!byKey.has(name)) byKey.set(name, group);
 	}
-	const find = (file: string) =>
-		bySpelling.get(path.resolve(logicalRoot, file)) ?? byKey.get(key(file));
+	const find = (file: string) => bySpelling.get(spelling(file)) ?? byKey.get(key(file));
 	lookups.set(capture, { selected, key, find });
 	return capture;
 }
