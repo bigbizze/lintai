@@ -55,21 +55,33 @@ func TestFramedOperations(t *testing.T) {
 		}
 		fmt.Fprintf(&input, "Content-Length: %d\r\n\r\n%s", len(payload), payload)
 	}
-	write("initialize", InitializeParams{ProtocolVersion: 4})
+	write("initialize", InitializeParams{ProtocolVersion: ProtocolVersion - 1, WorkspaceRoot: "/workspace"})
 	write("diagnostics/workspace", map[string]any{})
-	write("initialize", InitializeParams{ProtocolVersion: ProtocolVersion})
+	write("initialize", InitializeParams{ProtocolVersion: ProtocolVersion, WorkspaceRoot: "/missing"})
+	write("initialize", InitializeParams{ProtocolVersion: ProtocolVersion, WorkspaceRoot: "/workspace"})
+	write("initialize", InitializeParams{ProtocolVersion: ProtocolVersion, WorkspaceRoot: "/other"})
 	write("diagnostics/document", map[string]any{"file": " "})
 	write("diagnostics/document", map[string]any{"file": "/workspace/a.ts"})
 	write("diagnostics/document", map[string]any{"file": "/workspace/a.ts"})
 	write("diagnostics/workspace", map[string]any{})
 	write("diagnostics/files", map[string]any{"files": "all"})
 	write("shutdown", map[string]any{})
-	if err := NewWithFactory(func(InitializeParams) Analyzer { return a }).Serve(context.Background(), &input, &output); err != nil {
+	var bound []string
+	factory := func(params InitializeParams) (Analyzer, error) {
+		if params.WorkspaceRoot == "/missing" {
+			return nil, errors.New("workspace root /missing does not exist")
+		}
+		bound = append(bound, params.WorkspaceRoot)
+		return a, nil
+	}
+	if err := NewWithFactory(factory).Serve(context.Background(), &input, &output); err != nil {
 		t.Fatal(err)
 	}
 	reader := bufio.NewReader(&output)
 	problems := []string{"[lintai] rule broken could not run (phase config): invalid"}
-	for i, code := range []int{errCodeInvalidParams, errCodeNotInitialized, 0, errCodeInvalidParams, errCodeAnalysis, 0, 0, errCodeMethodNotFound, 0} {
+	// An old version and a failed bind leave the connection unbound. A second
+	// initialize cannot replace the bound workspace.
+	for i, code := range []int{errCodeInvalidParams, errCodeNotInitialized, errCodeAnalysis, 0, errCodeInvalidRequest, errCodeInvalidParams, errCodeAnalysis, 0, 0, errCodeMethodNotFound, 0} {
 		response, err := jsonrpc.ReadResponse(reader)
 		if err != nil {
 			t.Fatal(err)
@@ -88,23 +100,23 @@ func TestFramedOperations(t *testing.T) {
 			t.Fatal(err)
 		}
 		switch i {
-		case 2:
+		case 3:
 			if response.Result.(map[string]any)["protocolVersion"] != float64(ProtocolVersion) {
 				t.Fatal(response)
 			}
-		case 5:
+		case 7:
 			var result DocumentResult
-			if err := json.Unmarshal(body, &result); err != nil || result.SourceDigest != "digest" || result.PhysicalRoot != "/workspace" || result.Findings == nil || !reflect.DeepEqual(result.Problems, problems) {
+			if err := json.Unmarshal(body, &result); err != nil || result.SourceDigest != "digest" || result.Findings == nil || !reflect.DeepEqual(result.Problems, problems) || bytes.Contains(body, []byte("physicalRoot")) {
 				t.Fatalf("document: %s", body)
 			}
-		case 6:
+		case 8:
 			var result WorkspaceResult
 			if err := json.Unmarshal(body, &result); err != nil || len(result.Files) != 2 || result.Files[1].File != "b.ts" || result.PhysicalRoot != "/workspace" || !reflect.DeepEqual(result.Problems, problems) {
 				t.Fatalf("workspace: %s", body)
 			}
 		}
 	}
-	if a.all != 1 || len(a.files) != 2 || a.closed != 1 {
+	if a.all != 1 || len(a.files) != 2 || a.closed != 1 || !reflect.DeepEqual(bound, []string{"/workspace"}) {
 		t.Fatalf("unexpected analyzer calls: %+v", a)
 	}
 }

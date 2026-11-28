@@ -26,15 +26,23 @@ func TestLockedChecksRejectChangesBeforeAnyVM(t *testing.T) {
 		}
 		writeTestFile(t, root, rulepack.Path, string(data))
 	}
-	saveAllowances := func(count int, reason string) {
-		file := suppressions.File{{File: "src/a.ts", Rule: "test", Assertion: suppressions.Assertion{Name: "v", Arity: 2},
-			Groups: []suppressions.Group{{Namespace: "ts", Count: count, Description: "existing", Reasons: []suppressions.Reason{{Name: "Reason", Value: [2]string{"s", reason}}}}}}}
+	allowance := func(file string, count int, reason string) suppressions.Entry {
+		return suppressions.Entry{File: file, Rule: "test", Assertion: suppressions.Assertion{Name: "v", Arity: 2},
+			Groups: []suppressions.Group{{Namespace: "ts", Count: count, Description: "existing", Reasons: []suppressions.Reason{{Name: "Reason", Value: [2]string{"s", reason}}}}}}
+	}
+	saveEntries := func(file ...suppressions.Entry) {
 		data, err := suppressions.Encode(file)
 		if err != nil {
 			t.Fatal(err)
 		}
 		writeTestFile(t, root, suppressions.DefaultFile, string(data))
 	}
+	saveAllowances := func(count int, reason string) { saveEntries(allowance("src/a.ts", count, reason)) }
+	physical, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	absolute := filepath.ToSlash(filepath.Join(physical, "src", "a.ts"))
 	savePack(pack)
 	// A target is compared by the file it names, before the file exists.
 	if err := os.Symlink(root, filepath.Join(root, "linked")); err != nil {
@@ -130,6 +138,7 @@ func TestLockedChecksRejectChangesBeforeAnyVM(t *testing.T) {
 		}},
 		{"severity", func(o *Config, _ *rulepack.Pack) { o.Rule = map[string]RulePolicy{"test": {Severity: "off"}} }},
 		{"allowance count", func(_ *Config, _ *rulepack.Pack) { saveAllowances(3, "original") }},
+		{"equivalent allowance count", func(_ *Config, _ *rulepack.Pack) { saveEntries(allowance(absolute, 3, "original")) }},
 		{"allowance reason", func(_ *Config, _ *rulepack.Pack) { saveAllowances(1, "different") }},
 		{"missing lock", func(_ *Config, _ *rulepack.Pack) {
 			if err := os.Remove(lockPath); err != nil {
@@ -161,6 +170,58 @@ func TestLockedChecksRejectChangesBeforeAnyVM(t *testing.T) {
 	if err != nil || len(result.Diagnostics) != 0 || result.RulesLoaded != 1 {
 		t.Fatalf("tightened allowance: %+v %v", result, err)
 	}
+	// The equivalent absolute spelling has the approved count of the relative
+	// one, and approval saves the relative spelling.
+	saveEntries(allowance(absolute, 2, "original"))
+	result, err = session.Check(ctx)
+	if err != nil || len(result.Diagnostics) != 0 || result.RulesLoaded != 1 {
+		t.Fatalf("equivalent allowance: %+v %v", result, err)
+	}
+	externalLock := filepath.Join(t.TempDir(), "respelled.lock.json")
+	if _, err := session.ApproveRules(ctx, externalLock); err != nil {
+		t.Fatal(err)
+	}
+	if lock, err := ReadRulesLock(externalLock); err != nil || len(lock.Suppressions) != 1 || lock.Suppressions[0].File != "src/a.ts" {
+		t.Fatalf("approval did not save the relative spelling: %+v %v", lock, err)
+	}
+	lock, err := ReadRulesLock(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock.Suppressions[0].File = absolute
+	respelled, err := encodeRulesLock(lockPath, lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, root, DefaultRulesLockFile, string(respelled))
+	saveAllowances(2, "original")
+	result, err = session.Check(ctx)
+	if err != nil || len(result.Diagnostics) != 0 || result.RulesLoaded != 1 {
+		t.Fatalf("equivalent spelling in approval: %+v %v", result, err)
+	}
+	// Equivalent duplicate entries are an invalid policy in the suppressions
+	// file and in the lock, so their counts never combine.
+	saveEntries(allowance("src/a.ts", 1, "original"), allowance(absolute, 1, "original"))
+	result, err = session.Check(ctx)
+	if err != nil || len(result.Diagnostics) != 1 || result.Diagnostics[0].Phase != "integrity" || !strings.Contains(result.Diagnostics[0].Message, "invalid policy") || result.RulesLoaded != 0 {
+		t.Fatalf("duplicate equivalent allowances: %+v %v", result, err)
+	}
+	lock, err = ReadRulesLock(lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock.Suppressions = suppressions.File{allowance("src/a.ts", 1, "original"), allowance(absolute, 1, "original")}
+	duplicated, err := encodeRulesLock(lockPath, lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, root, DefaultRulesLockFile, string(duplicated))
+	saveAllowances(2, "original")
+	result, err = session.Check(ctx)
+	if err != nil || len(result.Diagnostics) != 1 || result.Diagnostics[0].Phase != "integrity" || !strings.Contains(result.Diagnostics[0].Message, "invalid policy") || result.RulesLoaded != 0 {
+		t.Fatalf("duplicate equivalent approvals: %+v %v", result, err)
+	}
+	writeTestFile(t, root, DefaultRulesLockFile, string(approved))
 	if err := os.Remove(filepath.Join(root, rulepack.Path)); err != nil {
 		t.Fatal(err)
 	}

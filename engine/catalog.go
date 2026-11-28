@@ -324,13 +324,13 @@ func (catalog producerCatalog) collect(ctx context.Context, root string, request
 			}
 		}
 		for id, support := range validated.Anchors() {
-			support.Location.File = item.documents.name(support.Location.File)
+			support.Location.File = reportingName(root, item.documents.name(support.Location.File))
 			anchors[id] = support
 			anchorOwners[id] = namespace
 		}
 		producerFiles[namespace] = make(map[string]struct{})
 		for _, file := range item.metadata.AnalyzedFiles {
-			analyzedFiles[file] = struct{}{}
+			analyzedFiles[reportingName(root, file)] = struct{}{}
 			producerFiles[namespace][documentName(root, file)] = struct{}{}
 		}
 	}
@@ -372,7 +372,13 @@ func captureGenerationMetadata(metadata backend.GenerationMetadata, root, namesp
 		if _, err := generationFilePath(document); err != nil || !filepath.IsAbs(filepath.FromSlash(document)) {
 			return backend.GenerationMetadata{}, docs, fmt.Errorf("document of %q is not an absolute path: %q", file, document)
 		}
-		docs.declared[documentName(root, file)] = documentName(root, document)
+		name, destination := documentName(root, file), documentName(root, document)
+		if previous, declared := docs.declared[name]; declared && previous != destination {
+			conflict := []string{previous, destination}
+			slices.Sort(conflict)
+			return backend.GenerationMetadata{}, docs, fmt.Errorf("document %q is declared as both %q and %q", name, conflict[0], conflict[1])
+		}
+		docs.declared[name] = destination
 	}
 	metadata.Documents = nil
 	for file, digest := range metadata.SourceDigests {

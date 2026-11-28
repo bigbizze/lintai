@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -13,7 +14,7 @@ import (
 	"github.com/bigbizze/lintai/jsonrpc"
 )
 
-const ProtocolVersion = 5
+const ProtocolVersion = 6
 
 const (
 	errCodeInvalidRequest = -32600
@@ -23,15 +24,17 @@ const (
 	errCodeAnalysis       = -32010
 )
 
-// Analyzer serves the session's workspace. RefreshFile returns the group of
-// one document as the first file of its result.
+// Analyzer serves the workspace its connection bound at initialization.
+// RefreshFile returns the group of one document as the first file of its result.
 type Analyzer interface {
 	RefreshAll(ctx context.Context) (engine.FilesResult, error)
 	RefreshFile(ctx context.Context, file string) (engine.FilesResult, error)
 	Close() error
 }
 
-type AnalyzerFactory func(InitializeParams) Analyzer
+// AnalyzerFactory binds the workspace of a connection. An error leaves the
+// connection unbound.
+type AnalyzerFactory func(InitializeParams) (Analyzer, error)
 
 type Server struct {
 	engine      Analyzer
@@ -42,9 +45,14 @@ type Server struct {
 	warned map[string]struct{}
 }
 
+// InitializeParams selects the workspace of a connection. WorkspaceAlias is
+// the spelling the client's settings use for that workspace when it differs
+// from WorkspaceRoot. It only rebases absolute paths under it and never selects
+// the workspace.
 type InitializeParams struct {
 	ProtocolVersion      int    `json:"protocolVersion"`
 	WorkspaceRoot        string `json:"workspaceRoot"`
+	WorkspaceAlias       string `json:"workspaceAlias,omitempty"`
 	FactLimit            int    `json:"factLimit,omitempty"`
 	RuleWorkers          int    `json:"ruleWorkers,omitempty"`
 	RulesLock            string `json:"rulesLock,omitempty"`
@@ -63,11 +71,9 @@ type WorkspaceResult struct {
 	Files        []FileFindings `json:"files"`
 }
 
-// DocumentResult holds one document of an analysis, its workspace problems and
-// the physical root of the workspace the analysis used.
+// DocumentResult holds one document of an analysis and its workspace problems.
 type DocumentResult struct {
 	Problems     []string  `json:"problems"`
-	PhysicalRoot string    `json:"physicalRoot"`
 	SourceDigest string    `json:"sourceDigest"`
 	Findings     []Finding `json:"findings"`
 }
@@ -161,15 +167,18 @@ func (s *Server) handleInitialize(rawParams json.RawMessage) (InitializeResult, 
 	if params.ProtocolVersion != ProtocolVersion {
 		return InitializeResult{}, invalidParams(fmt.Sprintf("incompatible lintai serve protocol version: server requires %d, client sent %d", ProtocolVersion, params.ProtocolVersion))
 	}
+	if s.initialized {
+		return InitializeResult{}, errAlreadyInitialized
+	}
 	if s.factory == nil {
 		return InitializeResult{}, fmt.Errorf("missing analyzer factory")
 	}
-	analyzer := s.factory(params)
+	analyzer, err := s.factory(params)
+	if err != nil {
+		return InitializeResult{}, err
+	}
 	if analyzer == nil {
 		return InitializeResult{}, fmt.Errorf("analyzer factory returned nil")
-	}
-	if s.engine != nil {
-		_ = s.engine.Close()
 	}
 	s.engine = analyzer
 	s.initialized = true
@@ -213,7 +222,7 @@ func (s *Server) handleDocument(ctx context.Context, rawParams json.RawMessage) 
 	if err != nil {
 		return DocumentResult{}, err
 	}
-	document := DocumentResult{Problems: problemStrings(result.WorkspaceProblems), PhysicalRoot: result.PhysicalRoot, Findings: []Finding{}}
+	document := DocumentResult{Problems: problemStrings(result.WorkspaceProblems), Findings: []Finding{}}
 	if len(result.Files) > 0 {
 		document.SourceDigest, document.Findings = result.Files[0].SourceDigest, findings(result.Files[0].Diagnostics)
 	}
@@ -268,6 +277,8 @@ func (s *Server) logWarnings(warnings []string) {
 	}
 }
 
+var errAlreadyInitialized = errors.New("server already initialized: a connection binds one workspace")
+
 func invalidParams(message string) error { return fmt.Errorf("invalid params: %s", message) }
 func decodeParams(raw json.RawMessage, target any) error {
 	if len(raw) == 0 || string(raw) == "null" {
@@ -281,6 +292,8 @@ func decodeParams(raw json.RawMessage, target any) error {
 func classifyError(err error) *jsonrpc.ResponseError {
 	message := err.Error()
 	switch {
+	case errors.Is(err, errAlreadyInitialized):
+		return &jsonrpc.ResponseError{Code: errCodeInvalidRequest, Message: message}
 	case strings.HasPrefix(message, "invalid params:"):
 		return &jsonrpc.ResponseError{Code: errCodeInvalidParams, Message: message}
 	case message == "server not initialized":

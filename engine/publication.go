@@ -13,9 +13,10 @@ import (
 	"github.com/bigbizze/lintai/observe"
 )
 
-// FileGroup is one document: its name under the physical workspace root, the
-// SHA-256 of the analyzed logical text in lowercase hexadecimal (empty when no
-// source identity was verified), and its findings.
+// FileGroup is one document: its name relative to the physical workspace root
+// inside it or its clean absolute name outside it, the SHA-256 of the analyzed
+// logical text in lowercase hexadecimal (empty when no source identity was
+// verified), and its findings.
 type FileGroup struct {
 	File         string
 	SourceDigest string
@@ -151,6 +152,20 @@ func documentName(root, file string) string {
 		name = relative
 	}
 	return filepath.ToSlash(name)
+}
+
+// reportingName names a document in native output and saved allowances:
+// relative to the root, with ".." elements for a file outside it, or the
+// clean absolute path when no relative path exists, as for a file on another
+// volume. A relative name is based at the root.
+func reportingName(root, file string) string {
+	name := documentName(root, file)
+	if filepath.IsAbs(filepath.FromSlash(name)) {
+		if relative, err := filepath.Rel(root, filepath.FromSlash(name)); err == nil {
+			return filepath.ToSlash(relative)
+		}
+	}
+	return name
 }
 
 func (p *publishedResult) group(file string) FileGroup {

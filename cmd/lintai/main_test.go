@@ -267,7 +267,10 @@ func TestServeSessionReplacesChangedProducerConfiguration(t *testing.T) {
 	}
 	setConfig("b.ts")
 	testpack.Build(t, repo, root, filepath.Join(repo, "testdata/fixtures/rules/layers.ts"))
-	instance := &serveSession{params: server.InitializeParams{WorkspaceRoot: root, RuleWorkers: 2}}
+	instance, err := bindServeSession(server.InitializeParams{WorkspaceRoot: root, RuleWorkers: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer instance.Close()
 	first, err := instance.RefreshAll(context.Background())
 	if err != nil {
@@ -276,17 +279,13 @@ func TestServeSessionReplacesChangedProducerConfiguration(t *testing.T) {
 	if !slices.Contains(names(first), "a.ts") || slices.Contains(names(first), "b.ts") {
 		t.Fatalf("initial scope: %v", first.Files)
 	}
-	previous := instance.session
 	setConfig("a.ts")
 	second, err := instance.RefreshAll(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if instance.session == previous || slices.Contains(names(second), "a.ts") || !slices.Contains(names(second), "b.ts") {
+	if slices.Contains(names(second), "a.ts") || !slices.Contains(names(second), "b.ts") {
 		t.Fatalf("changed configuration retained old producer scope: %v", second.Files)
-	}
-	if _, err := previous.Current(); err == nil {
-		t.Fatal("old producer session was not closed")
 	}
 }
 

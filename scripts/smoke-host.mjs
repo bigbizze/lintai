@@ -31,7 +31,7 @@ export async function trackServer(root, config) {
 		observer,
 		`#!/usr/bin/env node
 import {spawn} from "node:child_process";
-import {appendFileSync} from "node:fs";
+import {appendFileSync, existsSync, unlinkSync} from "node:fs";
 import {resolveNativeBinary} from "@lintai/cli";
 const child = spawn(resolveNativeBinary(), process.argv.slice(2), {stdio:["pipe","pipe","inherit"]});
 let pending = Buffer.alloc(0);
@@ -44,6 +44,11 @@ process.stdin.on("data", chunk => {
 		if (pending.length < end + 4 + size) break;
 		const {method,params} = JSON.parse(pending.subarray(end + 4, end + 4 + size));
 		appendFileSync(${JSON.stringify(log)}, JSON.stringify({pid:child.pid,method,file:params.file})+"\\n");
+		if (method.startsWith("diagnostics/") && existsSync(${JSON.stringify(path.join(root, "disconnect-serve"))})) {
+			unlinkSync(${JSON.stringify(path.join(root, "disconnect-serve"))});
+			child.kill();
+			process.exit(0);
+		}
 		pending = pending.subarray(end + 4 + size);
 	}
 });
