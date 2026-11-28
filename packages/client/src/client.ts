@@ -1,4 +1,4 @@
-import { constants, accessSync, existsSync, readFileSync, statSync } from "node:fs";
+import { constants, accessSync, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import path from "node:path";
 
 import { FrameDecoder, encodeFrame } from "./frames.js";
@@ -62,6 +62,7 @@ export class LintAIClient {
 		const { workspaceRoot, binary, ruleWorkers, factLimit, rulesLock, suppressionsLocation } =
 			this.options;
 		const executable = binary ?? findBinary(workspaceRoot);
+		let initialized = !!this.transport;
 		try {
 			if (!this.transport) {
 				this.transport = this.spawnServe(executable, ["serve"], workspaceRoot);
@@ -79,12 +80,16 @@ export class LintAIClient {
 						`incompatible lintai serve protocol: expected ${protocolVersion}, received ${result?.protocolVersion}`,
 					);
 				}
+				initialized = true;
 			}
 			const result = this.request("diagnostics/files", { files });
-			validateFilesAnalysis(result, files);
+			validateFilesAnalysis(result, files, workspaceRoot);
 			return result;
 		} catch (error) {
-			if (error instanceof AnalysisError) throw error;
+			if (error instanceof AnalysisError) {
+				if (!initialized) this.disconnect(true);
+				throw error;
+			}
 			this.disconnect(true);
 			throw new Error(
 				`lintai serve (${executable}) failed: ${error instanceof Error ? error.message : error}`,
@@ -114,7 +119,10 @@ export class LintAIClient {
 			if (response.error !== undefined) {
 				if (typeof response.error?.message !== "string" || typeof response.error?.code !== "number")
 					throw new Error(`invalid lintai serve error for ${method}`);
-				if (method === "diagnostics/files" && response.error.code === -32010)
+				if (
+					(method === "initialize" || method === "diagnostics/files") &&
+					response.error.code === -32010
+				)
 					throw new AnalysisError(response.error.message);
 				throw new Error(`${method}: ${response.error.message}`);
 			}
@@ -160,11 +168,17 @@ const isFinding = (value: unknown): value is Finding => {
 		(item.range === undefined ||
 			(Array.isArray(item.range) &&
 				item.range.length === 4 &&
-				item.range.every((n) => Number.isInteger(n) && n >= 1)))
+				item.range.every((n) => Number.isInteger(n) && n >= 1) &&
+				(item.range[0] < item.range[2] ||
+					(item.range[0] === item.range[2] && item.range[1] <= item.range[3]))))
 	);
 };
 
-function validateFilesAnalysis(value: unknown, files: Selector): asserts value is FilesAnalysis {
+function validateFilesAnalysis(
+	value: unknown,
+	files: Selector,
+	workspaceRoot: string,
+): asserts value is FilesAnalysis {
 	const result = value as FilesAnalysis;
 	const valid =
 		!!result &&
@@ -187,19 +201,78 @@ function validateFilesAnalysis(value: unknown, files: Selector): asserts value i
 				Array.isArray(group.findings) &&
 				group.findings.every(isFinding),
 		);
-	if (!valid) throw new Error("invalid lintai diagnostics/files response");
+	if (!valid || (!result.snapshotVersion && result.problems.length === 0))
+		throw new Error("invalid lintai diagnostics/files response");
 	const names = new Set(result.files.map((group) => group.file));
 	const aliases = Object.entries(result.aliases);
-	if (
-		files === "all"
-			? names.size !== result.files.length ||
-				aliases.some(([alias, file]) => names.has(alias) || !names.has(file))
-			: aliases.length !== 0 ||
-				files.length !== result.files.length ||
-				result.files.some((group, i) => group.file !== files[i])
-	) {
+	let unexpected: boolean;
+	if (files === "all") {
+		const key = fileNames(workspaceRoot, result.physicalRoot);
+		const normalizedNames = new Set(result.files.map((group) => key(group.file)));
+		const normalizedAliases = new Map<string, string>();
+		unexpected =
+			normalizedNames.size !== result.files.length ||
+			aliases.some(([alias, file]) => {
+				const name = key(alias);
+				const previous = normalizedAliases.get(name);
+				normalizedAliases.set(name, file);
+				return (
+					!alias.trim() ||
+					!names.has(file) ||
+					normalizedNames.has(name) ||
+					(previous !== undefined && previous !== file)
+				);
+			});
+	} else {
+		unexpected =
+			aliases.length !== 0 ||
+			files.length !== result.files.length ||
+			result.files.some((group, i) => group.file !== files[i]);
+	}
+	if (unexpected) {
 		throw new Error("unexpected file groups in lintai diagnostics/files response");
 	}
+}
+
+const portable = (name: string) => name.split(path.sep).join("/");
+function inside(root: string, file: string): string | undefined {
+	const relative = path.relative(root, file);
+	return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)
+		? portable(relative)
+		: undefined;
+}
+
+// Normalize against the logical root and the physical root frozen with the
+// capture. Only a directory resolving to that frozen root can be an alternative
+// workspace spelling; never resolve the logical root again or open the source.
+export function fileNames(logicalRoot: string, physicalRoot: string) {
+	const roots = [logicalRoot, ...(physicalRoot ? [physicalRoot] : [])];
+	const checked = new Set<string>();
+	return (file: string): string => {
+		const absolute = path.resolve(logicalRoot, file);
+		for (const root of roots) {
+			const name = inside(root, absolute);
+			if (name !== undefined) return name;
+		}
+		if (physicalRoot && path.isAbsolute(file)) {
+			let dir = path.dirname(absolute);
+			while (!checked.has(dir)) {
+				checked.add(dir);
+				try {
+					if (realpathSync.native(dir) === physicalRoot) {
+						roots.push(dir);
+						return portable(path.relative(dir, absolute));
+					}
+				} catch {
+					/* continue with the parent of a missing directory */
+				}
+				const parent = path.dirname(dir);
+				if (parent === dir) break;
+				dir = parent;
+			}
+		}
+		return portable(path.normalize(file));
+	};
 }
 
 export function findWorkspaceRoot(from: string): string {

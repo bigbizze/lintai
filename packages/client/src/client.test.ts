@@ -1,12 +1,22 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { chmodSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { LintAIClient, findBinary } from "./client.js";
 import { FrameDecoder, encodeFrame } from "./frames.js";
+import { createLintaiSession } from "./plugin.js";
 import { NativeServeTransport } from "./transport.js";
 
 test("split headers, split UTF-8 payloads and adjacent frames", () => {
@@ -20,10 +30,24 @@ test("split headers, split UTF-8 payloads and adjacent frames", () => {
 	assert.throws(() => decoder.push(Buffer.from("Content-Length: -1\r\n\r\n")), /invalid frame/);
 });
 
-test("malformed file groups close the connection and the next request can reconnect", () => {
+const group = (file: string) => ({ file, sourceDigest: "", findings: [] });
+const analysis = (files: string[]) => ({
+	snapshotVersion: "snap",
+	problems: [] as string[],
+	physicalRoot: "",
+	aliases: {} as Record<string, string>,
+	files: files.map(group),
+});
+
+function reconnectAfterMalformed(
+	selector: readonly string[] | "all",
+	malformed: unknown,
+	recovered: unknown,
+	workspaceRoot = process.cwd(),
+) {
 	let connection = 0;
-	let closed = 0;
-	const client = new LintAIClient({ workspaceRoot: process.cwd() }, () => {
+	const closed: boolean[] = [];
+	const client = new LintAIClient({ workspaceRoot }, () => {
 		connection++;
 		let current: { id: number; method: string };
 		const decoder = new FrameDecoder();
@@ -35,19 +59,13 @@ test("malformed file groups close the connection and the next request can reconn
 				const result =
 					current.method === "initialize"
 						? { protocolVersion: 4 }
-						: {
-								snapshotVersion: "snap",
-								problems: [],
-								physicalRoot: "",
-								aliases: {},
-								files: [
-									{ file: connection === 1 ? "old.ts" : "a.ts", sourceDigest: "", findings: [] },
-								],
-							};
+						: connection === 1
+							? malformed
+							: recovered;
 				return encodeFrame({ jsonrpc: "2.0", id: current.id, result });
 			},
-			close() {
-				closed++;
+			close(failed) {
+				closed.push(!!failed);
 			},
 			failure() {
 				return undefined;
@@ -55,15 +73,177 @@ test("malformed file groups close the connection and the next request can reconn
 		};
 	});
 	try {
-		assert.throws(() => client.getFilesAnalysis(["a.ts"]), /unexpected file groups/);
-		assert.equal(closed, 1);
-		assert.equal(client.getFilesAnalysis(["a.ts"]).files[0].file, "a.ts");
+		assert.throws(
+			() => client.getFilesAnalysis(selector),
+			/lintai serve \(.*\) failed: (invalid|unexpected) /,
+		);
+		assert.deepEqual(closed, [true]);
+		assert.deepEqual(client.getFilesAnalysis(selector), recovered);
 		assert.equal(connection, 2);
 	} finally {
 		client.dispose();
 		client.dispose();
 	}
-	assert.equal(closed, 2);
+	assert.deepEqual(closed, [true, false]);
+}
+
+test("malformed file groups close the connection and the next request can reconnect", () => {
+	reconnectAfterMalformed(
+		["a.ts", "a.ts"],
+		analysis(["a.ts", "old.ts"]),
+		analysis(["a.ts", "a.ts"]),
+	);
+});
+
+test("all-files groups must have distinct normalized names", () => {
+	const physicalRoot = path.join(path.dirname(process.cwd()), "lintai-physical-root");
+	const recovered = { ...analysis(["a.ts", "b.ts"]), physicalRoot };
+	for (const name of [
+		"./a.ts",
+		path.join(process.cwd(), "a.ts"),
+		path.join(physicalRoot, "a.ts"),
+	]) {
+		reconnectAfterMalformed("all", { ...analysis(["a.ts", name]), physicalRoot }, recovered);
+	}
+});
+
+test("normalized aliases cannot shadow groups or conflict with one another", () => {
+	const physicalRoot = path.join(path.dirname(process.cwd()), "lintai-physical-root");
+	const recovered = {
+		...analysis(["a.ts", "b.ts"]),
+		physicalRoot,
+		aliases: { "link.ts": "a.ts", "./link.ts": "a.ts" },
+	};
+	for (const aliases of [
+		{ "./a.ts": "b.ts" },
+		{ [path.join(process.cwd(), "a.ts")]: "b.ts" },
+		{ [path.join(physicalRoot, "a.ts")]: "b.ts" },
+		{ "link.ts": "a.ts", "./link.ts": "b.ts" },
+		{ "link.ts": "missing.ts" },
+		{ "": "a.ts" },
+	]) {
+		reconnectAfterMalformed("all", { ...recovered, aliases }, recovered);
+	}
+
+	const root = mkdtempSync(path.join(tmpdir(), "lintai-alias-"));
+	try {
+		const workspaceRoot = path.join(root, "workspace");
+		mkdirSync(workspaceRoot);
+		const frozenRoot = realpathSync.native(workspaceRoot);
+		const alternate = path.join(root, "alternate");
+		symlinkSync(frozenRoot, alternate, "dir");
+		const result = { ...analysis(["a.ts", "b.ts"]), physicalRoot: frozenRoot };
+		reconnectAfterMalformed(
+			"all",
+			{ ...result, aliases: { [path.join(alternate, "a.ts")]: "b.ts" } },
+			result,
+			workspaceRoot,
+		);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("finding ranges must have ordered start and end coordinates", () => {
+	const finding = { ruleId: "rule", assertionId: "assertion", severity: "warning", message: "m" };
+	const recovered = {
+		...analysis(["a.ts"]),
+		files: [
+			{
+				...group("a.ts"),
+				findings: [
+					{ ...finding, range: [1, 5, 1, 5] },
+					{ ...finding, range: [1, 5, 2, 1] },
+				],
+			},
+		],
+	};
+	for (const range of [
+		[5, 1, 2, 1],
+		[1, 5, 1, 2],
+	]) {
+		reconnectAfterMalformed(
+			["a.ts"],
+			{ ...recovered, files: [{ ...group("a.ts"), findings: [{ ...finding, range }] }] },
+			recovered,
+		);
+	}
+});
+
+test("a clean response requires a snapshot identity", () => {
+	reconnectAfterMalformed(
+		[],
+		{ ...analysis([]), snapshotVersion: "" },
+		{ ...analysis([]), snapshotVersion: "", problems: ["analysis failed"] },
+	);
+});
+
+test("analysis errors during initialization and refresh produce captures and recover", () => {
+	const root = mkdtempSync(path.join(tmpdir(), "lintai-analysis-"));
+	writeFileSync(
+		path.join(root, "serve"),
+		`
+const fs = require("node:fs");
+import(${JSON.stringify(new URL("./frames.js", import.meta.url).href)}).then(({ FrameDecoder, encodeFrame }) => {
+  const decoder = new FrameDecoder();
+  let initialized = false;
+  let failRefresh = true;
+  process.stdin.on("data", (chunk) => {
+    for (const request of decoder.push(chunk)) {
+      if (request.method === "shutdown") process.exit(0);
+      fs.appendFileSync("requests", request.method + "\\n");
+      let result;
+      let error;
+      if (request.method === "initialize") {
+        if (!fs.existsSync("attempted")) {
+          fs.writeFileSync("attempted", "");
+          error = { code: -32010, message: "invalid TOML" };
+        } else {
+          initialized = true;
+          result = { protocolVersion: 4 };
+        }
+      } else if (request.method === "diagnostics/files" && initialized) {
+        if (failRefresh) {
+          failRefresh = false;
+          error = { code: -32010, message: "refresh failed" };
+        } else {
+          result = { snapshotVersion: "recovered", problems: [], physicalRoot: "", aliases: {}, files: [] };
+        }
+      } else {
+        error = { code: -32002, message: "not initialized" };
+      }
+      process.stdout.write(encodeFrame({ jsonrpc: "2.0", id: request.id, ...(error ? { error } : { result }) }));
+    }
+  });
+});
+`,
+	);
+	const session = createLintaiSession({ binary: process.execPath, workspaceRoot: root });
+	try {
+		const first = session.capture([]);
+		assert.equal(first.snapshotVersion, "");
+		assert.deepEqual(first.files, []);
+		assert.match(first.problems[0], /Could not analyze the workspace: invalid TOML/);
+
+		const second = session.capture([]);
+		assert.equal(second.snapshotVersion, "");
+		assert.deepEqual(second.files, []);
+		assert.match(second.problems[0], /Could not analyze the workspace: refresh failed/);
+
+		const third = session.capture([]);
+		assert.equal(third.snapshotVersion, "recovered");
+		assert.deepEqual(third.problems, []);
+		assert.deepEqual(readFileSync(path.join(root, "requests"), "utf8").trim().split("\n"), [
+			"initialize",
+			"initialize",
+			"diagnostics/files",
+			"diagnostics/files",
+		]);
+		assert.match(first.problems[0], /invalid TOML/);
+	} finally {
+		session.dispose();
+		rmSync(root, { recursive: true, force: true });
+	}
 });
 
 test("consume a partial frame already buffered by Node before reading the pipe", async () => {

@@ -8,6 +8,7 @@ import {
 	type Finding,
 	LintAIClient,
 	type LintaiOptions,
+	fileNames,
 	findWorkspaceRoot,
 } from "./client.js";
 import {
@@ -49,49 +50,6 @@ type Lookup = {
 	key: (file: string) => string;
 };
 const lookups = new WeakMap<LintaiCapture, Lookup>();
-
-const portable = (name: string) => name.split(path.sep).join("/");
-function inside(root: string, file: string): string | undefined {
-	const relative = path.relative(root, file);
-	return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative)
-		? portable(relative)
-		: undefined;
-}
-
-// Normalizes a requested or host-visited name against the logical root and
-// the physical root frozen with the capture. A host can spell the workspace
-// through another directory alias (e.g. /var on macOS); such a directory is
-// accepted only if it resolves to the frozen physical root. The source file
-// itself is never opened, and the logical root is never resolved again.
-function fileNames(logicalRoot: string, physicalRoot: string) {
-	const roots = [logicalRoot, ...(physicalRoot ? [physicalRoot] : [])];
-	const checked = new Set<string>();
-	return (file: string): string => {
-		const absolute = path.resolve(logicalRoot, file);
-		for (const root of roots) {
-			const name = inside(root, absolute);
-			if (name !== undefined) return name;
-		}
-		if (physicalRoot && path.isAbsolute(file)) {
-			let dir = path.dirname(absolute);
-			while (!checked.has(dir)) {
-				checked.add(dir);
-				try {
-					if (realpathSync.native(dir) === physicalRoot) {
-						roots.push(dir);
-						return portable(path.relative(dir, absolute));
-					}
-				} catch {
-					/* continue with the parent of a missing directory */
-				}
-				const parent = path.dirname(dir);
-				if (parent === dir) break;
-				dir = parent;
-			}
-		}
-		return portable(path.normalize(file));
-	};
-}
 
 function freezeCapture(
 	logicalRoot: string,
