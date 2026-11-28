@@ -486,6 +486,9 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, mode observe.Mode, st
 	allDiagnostics := catalogDiagnostics(ruleCatalog, nil)
 	allDiagnostics = append(allDiagnostics, unknownPolicyRules(config, knownRules)...)
 	stampDiagnostics(allDiagnostics, assembled.snapshotID, producerNames)
+	for index := range evidence.findings {
+		stampDiagnostic(&evidence.findings[index].diagnostic, assembled.snapshotID, producerNames)
+	}
 	sortDiagnostics(allDiagnostics)
 	result.Diagnostics = allDiagnostics
 	assembleSeverity(config, &result, &run)
@@ -607,7 +610,7 @@ func runPreparedRule(rule *ruleRecord, assembled composedFacts, options Config, 
 		factLimit: options.FactLimit, explain: options.Explain, beforeEvaluation: hooks.beforeEvaluation,
 	})
 	if perr != nil {
-		outcome.diagnostics = []diagnostics.Diagnostic{errorDiagnostic(rule.metadata.ID, perr.phase, rule.metadata.Version, assembled.snapshotID, assembled.namespaces, perr.Error())}
+		outcome.diagnostics = []diagnostics.Diagnostic{errorDiagnostic(rule.metadata.ID, perr.phase, rule.metadata.Version, "", nil, perr.Error())}
 		return outcome
 	}
 	for index := range violations {
@@ -617,7 +620,7 @@ func runPreparedRule(rule *ruleRecord, assembled composedFacts, options Config, 
 	for index, item := range violations {
 		message, err := rule.loaded.Message(item.row, item.predicate)
 		if err != nil {
-			outcome.diagnostics = []diagnostics.Diagnostic{errorDiagnostic(rule.metadata.ID, "message", rule.metadata.Version, assembled.snapshotID, assembled.namespaces, err.Error())}
+			outcome.diagnostics = []diagnostics.Diagnostic{errorDiagnostic(rule.metadata.ID, "message", rule.metadata.Version, "", nil, err.Error())}
 			return outcome
 		}
 		location := item.location
@@ -626,11 +629,8 @@ func runPreparedRule(rule *ruleRecord, assembled composedFacts, options Config, 
 			DiagnosticKind: diagnostics.KindArchitectureViolation, Severity: rule.severity,
 			Message: message, SourceLocation: &location,
 			EntityIdentity: &diagnostics.EntityIdentity{SemanticKey: item.anchor},
-			Provenance: diagnostics.Provenance{
-				SnapshotVersion: assembled.snapshotID, RuleVersion: rule.metadata.Version,
-				ProducerNamespaces: append([]string(nil), assembled.namespaces...),
-			},
-			Explanation: append([]string(nil), item.explanation...),
+			Provenance:     diagnostics.Provenance{RuleVersion: rule.metadata.Version},
+			Explanation:    append([]string(nil), item.explanation...),
 		})
 		violations[index].diagnostic = provisional[len(provisional)-1]
 	}
@@ -676,9 +676,13 @@ func ruleIDOrPath(ruleID, rulePath string) string {
 // the completed analysis.
 func stampDiagnostics(items []diagnostics.Diagnostic, snapshotID string, namespaces []string) {
 	for index := range items {
-		items[index].Provenance.SnapshotVersion = snapshotID
-		items[index].Provenance.ProducerNamespaces = append([]string(nil), namespaces...)
+		stampDiagnostic(&items[index], snapshotID, namespaces)
 	}
+}
+
+func stampDiagnostic(item *diagnostics.Diagnostic, snapshotID string, namespaces []string) {
+	item.Provenance.SnapshotVersion = snapshotID
+	item.Provenance.ProducerNamespaces = append([]string(nil), namespaces...)
 }
 
 func severityOf(options Config, id string) diagnostics.Severity {

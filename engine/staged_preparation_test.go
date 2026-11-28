@@ -33,6 +33,14 @@ func TestMixedRuleOutcomes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if result.SnapshotVersion == "" {
+		t.Fatal("analysis has no snapshot identity")
+	}
+	for _, item := range result.Diagnostics {
+		if item.Provenance.SnapshotVersion != result.SnapshotVersion || len(item.Provenance.ProducerNamespaces) != 1 || item.Provenance.ProducerNamespaces[0] != "catalog" {
+			t.Errorf("diagnostic did not receive final analysis provenance: %+v", item)
+		}
+	}
 	data, err := json.Marshal(result.Diagnostics)
 	if err != nil {
 		t.Fatal(err)
@@ -57,5 +65,25 @@ func TestMixedRuleOutcomes(t *testing.T) {
 	}
 	if !bytes.Equal(got, want) {
 		t.Fatalf("ordered diagnostics changed:\n--- got\n%s\n--- want\n%s", got, want)
+	}
+}
+
+func TestSuppressedFindingsRetainFinalProvenance(t *testing.T) {
+	repoRoot, _ := filepath.Abs("..")
+	workspace := t.TempDir()
+	program := "Decl violation(Entity, Code). violation(Entity, Code) :- catalog.usable(Entity, Code)."
+	writeTestFile(t, workspace, "lintai-rules/rule.ts", parallelRuleSource("fixture.suppressed", program, "(row) => row.Code"))
+	session := openTestSession(t, parallelFixtureOptions(t, repoRoot, workspace), newParallelFixtureProducer())
+	result, err := session.UpdateSuppressions(context.Background(), SuppressionUpdate{All: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.SuppressionsWritten || len(result.Suppressed) != 3 {
+		t.Fatalf("expected three recorded and suppressed findings: %+v", result)
+	}
+	for _, item := range result.Suppressed {
+		if item.Provenance.SnapshotVersion != result.SnapshotVersion || item.Provenance.RuleVersion != 1 || len(item.Provenance.ProducerNamespaces) != 1 || item.Provenance.ProducerNamespaces[0] != "catalog" {
+			t.Errorf("suppressed copy lost final analysis provenance: %+v", item)
+		}
 	}
 }
