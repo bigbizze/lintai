@@ -38,7 +38,7 @@ The CLI automatically reads workspace-root `lintai-suppressions.json` in the `li
 
 Both plugin factories and `@lintai/client` accept `suppressionsLocation?: string`. Serve initialization uses the same parameter name. Hosts report unused entries at the engine severity. A stale entry has JSON diagnostic kind `unused_suppression`. Rule errors take exit priority (3); violations and unused suppressions exit 1. Invalid saved policy exits 2.
 
-Go `engine.Options` has `SuppressionsLocation`, `SuppressAll`, `SuppressRules`, and `PruneSuppressions`. `engine.Result` exposes `Suppressed`, `UnusedSuppressions`, `SuppressionsPath`, and `SuppressionsWritten`. See the bulk suppressions section above for grouping, recording and lock approval.
+Go embedders bind policy and producers to a session with `engine.Open(engine.Config{...}, producers...)`. `engine.Config` holds the workspace root, rule policy, fact limit, worker and explanation settings, lock selection, and `SuppressionsLocation`. `Session.Check` and refresh methods read suppressions without writing them. To deliberately record or prune allowances, call `Session.UpdateSuppressions(ctx, engine.SuppressionUpdate{...})`: set `All: true` to record every error-severity violation, `Rules: []string{"rule.id"}` to record selected rules, or `Prune: true` to lower stale counts. The request applies only to that operation; `All` and `Rules` are mutually exclusive, and neither can be combined with `Prune`. `engine.Result` exposes `Suppressed`, `UnusedSuppressions`, `SuppressionsPath`, and `SuppressionsWritten`. See the bulk suppressions section above for grouping, recording and lock approval.
 
 This page documents lintai's current rule-authoring and integration surface.
 
