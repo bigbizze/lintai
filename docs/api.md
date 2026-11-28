@@ -1,37 +1,5 @@
 # API and Caveats
 
-## Owner-context semantic model (0.9.1)
-
-This release implements [the owner-context specification](../specs/lintai-owner-context-implementation.md). It contains breaking changes and no migration path:
-
-- Each selected source file has one effective compiler owner. `ts.module_config` and `ts.module_owner_config` show root config membership and the effective owner. Configured source correspondence has its own `ts.source_endpoint`, `ts.source_endpoint_incomplete` and `ts.source_config_adjusted` relations.
-- `ts.call_target_conflict`, `ts.fn_signature_conflict` and `ts.declaration_fn_incomplete` are removed. `fn_signature_unresolved` is now a helper. `call_declaration_incomplete` no longer has a `/conflict` reason.
-- Each rule execution uses a fresh runtime. `--explain` output is deterministic.
-
-## Architecture replacement (0.9.0)
-
-This release replaces the analysis architecture defined in [the refactor specification](../specs/lintai-refactor-implementation-r6.md). It contains breaking changes and no migration path:
-
-- Rule programs use namespaced facts, such as `ts.fn` and `ts.import_edge`, and engine helpers, such as `lintai.glob`. `lintai schema` prints the configured producer catalog. See [base relations](#base-relations-and-caveats).
-- An optional `lintai.toml` at the workspace root sets the scope. `--config PATH` selects another file.
-- Rules are evaluated in parallel. `--rule-workers N` and the `ruleWorkers` client and plugin option set the maximum number of concurrent rule jobs.
-- Suppressions use `.suppression(...)` declarations and the `lintai.suppressions/4` file format.
-- `--pass-on-unpruned-suppressions` is removed. Unused suppression entries are always reported.
-
-## Declared call provenance (0.8.0)
-
-Rules can identify the checked signature and lexical contract member at a call site through `call_declaration` and `declaration_member`. `call_declaration_incomplete` exposes `/unresolved`, `/synthetic`, or `/unsupported` evidence. These facts preserve runtime call classifications: a known declared member can still have an unresolved runtime implementation. The included Writer policy distinguishes forbidden writes from cases it cannot decide, including properties that borrow another member's signature.
-
-## Semantic extraction and rule inspection (0.7.0)
-
-This release adds public export and declaration inventories, checked-to-source declaration associations, explicit type-opacity facts, and suspension sites for `await`, `for await`, and module-scope suspension. Shared lexical ownership keeps call, reference, and suspension facts attached to the correct function or module. Rule listings expose validated versions, reported predicates, and `expectNonEmpty` declarations.
-
-Source associations report incomplete or ambiguous evidence instead of guessing. The session validates producer inputs before reusing analysis; the server validates captured inputs on each independent file or explicit multi-file request. Library-type opacity remains explicit; accepting it also trusts any merged augmentations. See the predicate reference below and [examples.md](examples.md) for rule-author guidance.
-
-## Linear reachability predicates (0.6.4)
-
-`owner_reaches_ambient`, `owner_reaches_ambient_strict`, `owner_reaches_unresolved`, `module_reaches_ambient` and `type_reaches_incomplete` now propagate backward from their targets one edge at a time. They no longer build `calls_reach`, `calls_or_refs_reach`, `imports_reach` or `type_contains`, so their cost grows with nodes × targets instead of nodes². Their results are unchanged. The closure predicates remain for rules that need both ends of a pair. See example 16 in [examples.md](examples.md) for the same pattern with your own target relation.
-
 ## Bulk suppressions
 
 The CLI automatically reads workspace-root `lintai-suppressions.json` in the `lintai.suppressions/4` format. Use `--suppress-all` or repeatable `--suppress-rule <id>` to record current errors, `--prune-suppressions` to lower stale counts, and `--suppressions-location <path>` to override the file. Unused entries are reported when a completed rule has the owning producer's coverage of the document. Recording and pruning flags are mutually exclusive. Relative locations resolve from the workspace root. `lintai lock --suppressions-location <path>` approves the allowances at that location.
@@ -163,7 +131,7 @@ Source correspondence is a separate domain: automatic declaration maps use parse
 
 The correspondence partition consists of `declaration_source_candidate`, `declaration_source`, `declaration_source_outcome`, all `source_entry*` and `source_binding*` relations, `source_endpoint`, `source_endpoint_incomplete` and `source_config_adjusted`. All other bases, including `declaration*`, `location`, `ambient_source` and `config_adjusted`, are ordinary. Endpoint metadata is published only for IDs referenced by retained `source_binding_checked_decl` and `source_binding_source_decl` rows, either declaration position in retained `declaration_source_candidate` and `declaration_source` rows, or checked declaration IDs in retained `declaration_source_outcome` rows. The whole metadata tuple is chosen deterministically; `/unsupported` or `/conflict` remains explicit. An endpoint shared by both domains keeps its ordinary reporting support, including an explicit null tracking value. Config values are paths, not entities, and have no reporting anchors.
 
-The `declaration_fn` relation is a direct link to a retained implementation. Its absence does not establish that an implementation does not exist. Overload declarations remain distinct. Each collected function has at most one whole signature, including its parameter marks and return. `fn_signature_unresolved` is a helper derived from `fn_signature` and `signature_incomplete`; request its bases when using `facts --relation`. The former `call_target_conflict`, `fn_signature_conflict` and `declaration_fn_incomplete` bases are removed.
+The `declaration_fn` relation is a direct link to a retained implementation. Its absence does not establish that an implementation does not exist. Overload declarations remain distinct. Each collected function has at most one whole signature, including its parameter marks and return. `fn_signature_unresolved` is a helper derived from `fn_signature` and `signature_incomplete`; request its bases when using `facts --relation`.
 
 ### A.1 Source identity and lexical evidence
 
@@ -481,7 +449,7 @@ lintai rules [--workspace-root <dir>] [--json]
 lintai serve
 ```
 
-`lintai lock` creates the lock file or replaces an existing lintai rules lock, including an obsolete format. A lock is recognized by its `lintai.rules-lock/` format field. The command refuses to overwrite any other existing file, including an unbranded lock from an early release; move that file aside before locking. It also refuses a lock file that names the rule pack or the suppressions file through links, and rejects approval when either reserved location is a dangling symlink.
+`lintai lock` creates the lock file or replaces an existing lintai rules lock. A lock is recognized by its `lintai.rules-lock/` format field. The command refuses to overwrite any other existing file. It also refuses a lock file that names the rule pack or the suppressions file through links, and rejects approval when either reserved location is a dangling symlink.
 
 `lintai rules` lists the rules and the settings each one declares. It initializes each packed entry to read its declarations and discards the runtime. Configuration parsing, callbacks and analysis run during checks. Without `--json`, it prints one `<id> <path>` line per rule and sends errors to stderr. With `--json`, it prints:
 
@@ -603,7 +571,7 @@ lintai treats a broken file as a configuration error and exits with code 2. That
 
 ### Rules lock
 
-After building, review the rule and policy changes and run `lintai lock` to approve them. The command writes `lintai-rules.lock.json`. In CI, run `lintai build-rules && lintai check --rules-lock lintai-rules.lock.json`. A missing or obsolete approval, a pack mismatch or an unapproved policy fails integrity verification. The [trust model](trust.md) describes which changes require renewed approval.
+After building, review the rule and policy changes and run `lintai lock` to approve them. The command writes `lintai-rules.lock.json`. In CI, run `lintai build-rules && lintai check --rules-lock lintai-rules.lock.json`. A missing or outdated approval, a pack mismatch or an unapproved policy fails integrity verification. The [trust model](trust.md) describes which changes require renewed approval.
 
 ### Rule severity
 
@@ -629,7 +597,7 @@ Configure each semantic ID in the workspace's `lintai.toml`.
 severity = "warning"
 ```
 
-Use `off` to disable a semantic rule and lintai suppression allowances for supported rule-specific exceptions. Migrate old host overrides and disable comments targeting `lintai/<semantic-id>`. A host override or inline disable for `lintai/error` or `lintai/warning` affects **every** finding in that category, including analysis failures in the error category.
+Use `off` to disable a semantic rule and lintai suppression allowances for supported rule-specific exceptions. A host override or inline disable for `lintai/error` or `lintai/warning` affects **every** finding in that category, including analysis failures in the error category.
 
 **Rule edits take effect after a successful `lintai build-rules`.** Until then the previous pack remains active. New IDs in a replacement pack appear on the next live operation. Locked projects also need explicit approval for the new bytes. A built pack with zero entries still validates. For authoring-only or intentionally disabled integration, use `createLintaiPlugin({ enabled: false })`. This sets both analysis levels to off, retains `configs.authoring` and starts no child.
 
@@ -718,8 +686,6 @@ export async function lintSavedFiles(session, hostCwd, filenames) {
 ```
 
 Create the session with `createLintaiSession({ workspaceRoot })` and dispose it when finished. If its workspace alias now names a different project, dispose it and create a new session to select that project. Present the returned `problems` once alongside the file results, including when `filenames` is empty.
-
-Migrating from a selected capture: `session.capture(files)` and `session.capture("all")` become `session.capture()`. Pass the files to the host, not to the capture. `capture.snapshotVersion` is removed. A visit to a file the capture does not contain shows no findings instead of throwing.
 
 Rule failures and recoverable configuration or analysis errors, including malformed TOML, appear in `capture.problems`, even with no documents or host visits. A failed analysis can have no files, while a partial result retains findings from successful rules. A broken connection, incompatible protocol or malformed response throws. `@lintai/oxlint-plugin` exports the same `createLintaiSession` and `createCapturedLintaiPlugin`.
 

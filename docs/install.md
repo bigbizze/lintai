@@ -137,37 +137,21 @@ Useful source-build caveats:
   - `pnpm smoke:npm` (ESLint)
   - `pnpm smoke:oxlint` (oxlint CLI and language server, with no ESLint installed)
 
-## Build and extraction cost
+## Cost
 
-Measured on Linux x86_64 (16 cores) with Go 1.27.3. Extraction time is the median of 5 `lintai facts --relation module` runs. The public repository is `colinhacks/zod` at `b1f6ba06c5de`, which has 511 modules and 11 tsconfig programs. Timings vary by about ±10% between repeated sets on this machine.
+These numbers come from `pnpm bench:g3`. It runs lintai on the zod repository (511 files, 10,214 findings) with the benchmark rules. They were measured on Linux x64 with Node 26.13.1, Go 1.27.3, ESLint 10.15.0 and Oxlint 1.90.0.
 
-| Build | Clean `go build ./cmd/lintai` | Binary size | Fixture workspace | zod |
-|---|---|---|---|---|
-| 0.2.4 (`bigbizze/typescript-go` fork) | 61 s | 68.7 MB | 0.03 s | 4.8 s |
-| Compiler copied in, same commit | 61 s | 69.4 MB | 0.03 s | 4.8 s |
-| 0.3.0 (adds tsconfig adjustment and timing) | 66 s | 69.4 MB | 0.04 s | 4.9 to 5.2 s |
-| 0.9.0 (commit `29bbe41`, Apple M4, 10 cores, macOS 27.2, Go 1.27.3) | 35 s | 71.3 MB | 0.02 s | 3.3 s |
-
-The 0.9.0 row was measured on a different machine from the earlier rows, so compare it with them only roughly. Relation names are now qualified, so the command is `lintai facts --relation ts.module_path`, and the value is the median `total_ms` of 5 runs.
-
-Set `LINTAI_EXTRACT_TIMING=1` to print one line to stderr with the number of files and programs and the milliseconds spent in config loading, program creation, the fact walk and in total. On zod, almost all of the time is the fact walk, which runs the type checker.
-
-## Linter cost
-
-Measured with lintai 0.9.0 (commit `29bbe41`) on an Apple M4 (10 cores, macOS 27.2) with Node 22.23, on the fixture workspace (`testdata/fixtures/workspace/src`, 16 files, with the 8 rules from `testdata/fixtures/rules` in `lintai-rules/`). The packages were packed and installed into a fresh project the same way `scripts/smoke-pack.mjs` does, with ESLint 9.39 and `@typescript-eslint/parser` 8.73 as the ESLint parser, and oxlint 1.90. Each value is the median wall-clock time of 5 runs of the whole command, each in a new process, after one warm-up run. Node 24 was not measured.
-
-| Command | Node 22.23 |
+| Run | Time |
 |---|---|
-| `lintai` CLI alone | 790 ms |
-| `eslint src`, no rules | 340 ms |
-| `eslint src` with the lintai rules (`configs.all`) | 1770 ms |
-| `oxlint src`, no JS plugin | 55 ms |
-| `oxlint src` with `@lintai/oxlint-plugin` loaded, one authoring rule | 730 ms |
-| `oxlint src` with the lintai rules (`configs.all`) | 1540 ms |
+| `lintai check`, cold | 10 s |
+| ESLint CLI, 477 files, cold | 14 s |
+| Oxlint CLI, 477 files, cold | 10.5 s |
+| Capture of the whole workspace, warm | 3.4 s |
+| One file in the editor, warm | 84 ms |
 
-These are whole-command times; they were not broken down by component. They are not comparable with the 0.6.0 figures that this table replaces, which used one bridge rule on a different machine.
+Most of the cold time is the TypeScript type checker. A warm run reuses the facts when no input changed. Run `pnpm bench:g3` to measure your own machine.
 
-The oxlint rule uses `create(context)`, not `createOnce`. `create()` costs about 28 µs per file (it resolves the options and gets the cached client), which is less than 0.1% of the run on this workspace. `createOnce` would save this cost but would make the oxlint rule different in structure from the ESLint rule.
+Set `LINTAI_EXTRACT_TIMING=1` to print one line to stderr with the number of files and programs and the milliseconds spent in config loading, program creation, the fact walk and in total.
 
 ## Troubleshooting and caveats
 
