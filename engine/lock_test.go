@@ -43,6 +43,16 @@ func TestLockedChecksRejectChangesBeforeAnyVM(t *testing.T) {
 	if _, err := session.ApproveRules(ctx, filepath.Join("linked", suppressions.DefaultFile)); err == nil || !strings.Contains(err.Error(), "conflicts") {
 		t.Fatalf("lock target naming the suppressions file: %v", err)
 	}
+	// A dangling link in the suppressions location names the file it points to.
+	if err := os.Symlink("shared.json", filepath.Join(root, suppressions.DefaultFile)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := session.ApproveRules(ctx, "shared.json"); err == nil || !strings.Contains(err.Error(), "conflicts") {
+		t.Fatalf("lock target behind a dangling suppressions link: %v", err)
+	}
+	if err := os.Remove(filepath.Join(root, suppressions.DefaultFile)); err != nil {
+		t.Fatal(err)
+	}
 	saveAllowances(2, "original")
 	if _, err := session.ApproveRules(ctx, ""); err != nil {
 		t.Fatal(err)

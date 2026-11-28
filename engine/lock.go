@@ -310,8 +310,14 @@ func sameDestination(a, b string) bool {
 }
 
 // physicalPath resolves every link in path. When path does not resolve, it
-// resolves the nearest directory that does and keeps the remaining names.
+// resolves the nearest directory that does and keeps the remaining names. A
+// dangling link names the file it points to, as a link to an existing file
+// does.
 func physicalPath(path string) string {
+	return resolvePhysicalPath(path, 0)
+}
+
+func resolvePhysicalPath(path string, links int) string {
 	path = filepath.Clean(path)
 	if resolved, err := filepath.EvalSymlinks(path); err == nil {
 		return resolved
@@ -320,7 +326,14 @@ func physicalPath(path string) string {
 	if dir == path {
 		return path
 	}
-	return filepath.Join(physicalPath(dir), filepath.Base(path))
+	parent := resolvePhysicalPath(dir, links)
+	if target, err := os.Readlink(path); err == nil && links < 255 {
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(parent, target)
+		}
+		return resolvePhysicalPath(target, links+1)
+	}
+	return filepath.Join(parent, filepath.Base(path))
 }
 
 // isRulesLockDocument accepts any branded lintai rules-lock format, including

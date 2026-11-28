@@ -479,7 +479,7 @@ lintai rules [--workspace-root <dir>] [--json]
 lintai serve
 ```
 
-`lintai lock` creates the lock file or replaces an existing lintai rules lock, including an obsolete format. A lock is recognized by its `lintai.rules-lock/` format field. The command refuses to overwrite any other existing file, including an unbranded lock from an early release; move that file aside before locking.
+`lintai lock` creates the lock file or replaces an existing lintai rules lock, including an obsolete format. A lock is recognized by its `lintai.rules-lock/` format field. The command refuses to overwrite any other existing file, including an unbranded lock from an early release; move that file aside before locking. It also refuses a lock file that names the rule pack or the suppressions file, through links or a dangling link in either location.
 
 `lintai rules` lists the rules and the settings each one declares. It initializes each packed entry to read its declarations and discards the runtime. Configuration parsing, callbacks and analysis run during checks. Without `--json`, it prints one `<id> <path>` line per rule and sends errors to stderr. With `--json`, it prints:
 
