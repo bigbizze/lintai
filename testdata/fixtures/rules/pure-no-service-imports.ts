@@ -7,7 +7,7 @@ export const config = z.object({
 	serviceDir: z.string().default("src/services"),
 });
 
-export default rule("arch.pure-no-service-imports")
+export default rule<z.infer<typeof config>>("arch.pure-no-service-imports")
 	.version(1)
 	.program(({ env }) => dl`
 		Decl violation(Imp, From, To).

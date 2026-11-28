@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/bigbizze/lintai/diagnostics"
+	"github.com/bigbizze/lintai/internal/testpack"
 	"github.com/bigbizze/lintai/suppressions"
 )
 
@@ -19,9 +21,16 @@ func suppressionFixture(t *testing.T, files map[string]string) (string, string, 
 	}
 	workspace := t.TempDir()
 	writeFiles(t, workspace, files)
+	var entries []string
+	for path := range files {
+		if strings.HasPrefix(path, "lintai-rules/") || strings.HasPrefix(path, "policy/") {
+			entries = append(entries, path)
+		}
+	}
+	testpack.Build(t, repo, workspace, entries...)
 	check := func(flags ...string) (int, []diagnostics.Diagnostic) {
 		t.Helper()
-		args := []string{"--json", "--repo-root", repo, "--workspace-root", workspace}
+		args := []string{"--json", "--workspace-root", workspace}
 		return runCode(t, append(args, flags...))
 	}
 	return repo, workspace, check
@@ -43,10 +52,7 @@ func TestSuppressionTrackingAndCounts(t *testing.T) {
 export default rule('sample').version(1).program(dl`
 	rule += "`" + `Decl named(Fn). Decl calls(Site). Decl other(Site).
 named(Fn) :- ts.fn_async(Fn). calls(Site) :- ts.call_site(Site), ts.site(Site, File), lintai.glob(File, "src/**"). other(Site) :- ts.call_site(Site), ts.site(Site, File), lintai.glob(File, "src/**").` + "`" + `).report('named','calls','other').message(() => 'violation');`
-	_, workspace, runCheck := suppressionFixture(t, map[string]string{"src/a.ts": "declare function work(): void;\nexport async function first() { work(); work(); }\n", "policy/sample.ts": rule})
-	check := func(flags ...string) (int, []diagnostics.Diagnostic) {
-		return runCheck(append([]string{"--rules", "policy/**/*.ts"}, flags...)...)
-	}
+	_, workspace, check := suppressionFixture(t, map[string]string{"src/a.ts": "declare function work(): void;\nexport async function first() { work(); work(); }\n", "policy/sample.ts": rule})
 	requireCode(t, check, exitClean, "--suppress-all")
 	file, err := suppressions.Load(filepath.Join(workspace, suppressions.DefaultFile))
 	if err != nil {
@@ -114,6 +120,7 @@ func TestSuppressionReasonsReplacementAndLock(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeFiles(t, workspace, map[string]string{"lintai-rules/a.ts": makeRule("a", "Why", "clock")})
+	testpack.Build(t, repo, workspace, "lintai-rules/*.ts")
 	requireCode(t, check, exitUsage)
 	requireCode(t, check, exitUsage, "--suppress-rule", "b")
 	after, err := os.ReadFile(path)
@@ -149,9 +156,10 @@ func TestSuppressionReasonsReplacementAndLock(t *testing.T) {
 	requireCode(t, check, exitUsage)
 	requireCode(t, check, exitClean, "--suppress-rule", "a")
 	writeFiles(t, workspace, map[string]string{"lintai-rules/a.ts": makeRule("a", "Why", "network")})
+	testpack.Build(t, repo, workspace, "lintai-rules/*.ts")
 	requireCode(t, check, exitViolations)
 	requireCode(t, check, exitClean, "--suppress-rule", "a")
-	code, _ := runCode(t, []string{"lock", "--repo-root", repo, "--workspace-root", workspace})
+	code, _ := runCode(t, []string{"lock", "--workspace-root", workspace})
 	if code != exitClean {
 		t.Fatalf("lock exit %d", code)
 	}
@@ -166,7 +174,7 @@ func TestSuppressionReasonsReplacementAndLock(t *testing.T) {
 		t.Fatalf("unapproved proposal changed file: %v", err)
 	}
 	requireCode(t, check, exitClean, "--suppress-all")
-	code, _ = runCode(t, []string{"lock", "--repo-root", repo, "--workspace-root", workspace})
+	code, _ = runCode(t, []string{"lock", "--workspace-root", workspace})
 	if code != exitClean {
 		t.Fatalf("lock exit %d", code)
 	}

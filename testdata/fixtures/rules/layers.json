@@ -1,0 +1,11 @@
+{
+	"globs": [
+		["pure", "src/pure/**"],
+		["services", "src/services/**"],
+		["server", "src/server/**"]
+	],
+	"allowed": [
+		["server", "services"],
+		["server", "pure"]
+	]
+}

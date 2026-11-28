@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -15,7 +14,9 @@ import (
 	"github.com/bigbizze/lintai/backend"
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/facts"
+	"github.com/bigbizze/lintai/internal/testpack"
 	"github.com/bigbizze/lintai/observe"
+	"github.com/bigbizze/lintai/suppressions"
 )
 
 // This one fixture covers V28-V30: it runs the production rule path over
@@ -27,77 +28,38 @@ func TestParallelRuleExecutionContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	workspace := t.TempDir()
-	producer := newParallelFixtureProducer()
 	writeParallelRules(t, workspace, 5, true)
-	engine := Open(Options{}, producer)
-	defer engine.Close()
-
-	var active atomic.Int64
-	var peak atomic.Int64
-	var entered atomic.Int64
-	releaseOverlap := make(chan struct{})
-	var releaseOnce sync.Once
-	parallelOptions := parallelFixtureOptions(repoRoot, workspace)
-	parallelOptions.RuleWorkers = 2
-	parallelOptions.FactLimit = 8
-	parallelOptions.Explain = true
-	parallelOptions.onDerivedFact = func() {
-		current := active.Add(1)
-		for previous := peak.Load(); current > previous; previous = peak.Load() {
-			if peak.CompareAndSwap(previous, current) {
-				break
+	run := func(workers int) (Result, runInfo, executionEvidence) {
+		t.Helper()
+		config := parallelFixtureOptions(t, repoRoot, workspace)
+		config.RuleWorkers, config.FactLimit, config.Explain = workers, 8, true
+		session := openTestSession(t, config, newParallelFixtureProducer())
+		result, info, evidence, err := session.analyzeWithEvidence(context.Background(), observe.Full, suppressionsState{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertParallelFixtureOutcomes(t, result, info, evidence)
+		// A run without allowances does not group its findings. An allowance
+		// that matches no finding groups them, and the output is the same.
+		suppress := func(file suppressions.File) Result {
+			t.Helper()
+			suppressed := cloneResult(result)
+			if _, err := applySuppressions(config, SuppressionUpdate{}, suppressionsState{path: "lintai-suppressions.json", file: file}, info, evidence, &suppressed); err != nil {
+				t.Fatal(err)
 			}
+			return suppressed
 		}
-		if entered.Add(1) >= 2 {
-			releaseOnce.Do(func() { close(releaseOverlap) })
+		unmatched := suppressions.File{{
+			File: "elsewhere.sql", Rule: "fixture.elsewhere", Assertion: suppressions.Assertion{Name: "violation", Arity: 2},
+			Groups: []suppressions.Group{{Namespace: "catalog", Reasons: []suppressions.Reason{}, Description: "elsewhere", Count: 1}},
+		}}
+		if without, with := suppress(nil), suppress(unmatched); !reflect.DeepEqual(without, with) || len(without.Diagnostics) == 0 {
+			t.Fatalf("suppression output depends on grouping:\nwithout allowances: %+v\nwith an unmatched allowance: %+v", without, with)
 		}
-		select {
-		case <-releaseOverlap:
-		case <-time.After(10 * time.Second):
-			t.Error("timed out waiting for overlapping derived facts")
-			releaseOnce.Do(func() { close(releaseOverlap) })
-		}
-		active.Add(-1)
+		return result, info, evidence
 	}
-	parallelResult, parallelRun, parallelEvidence, err := engine.analyzeWithEvidence(context.Background(), parallelOptions, observe.Full)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := peak.Load(); got != 2 {
-		t.Fatalf("expected two overlapping production evaluators under bound 2, peak was %d", got)
-	}
-	assertParallelFixtureOutcomes(t, parallelResult, parallelRun, parallelEvidence)
-	firstObservation := engine.executionObservation()
-	if firstObservation.bundleArtifacts != 8 || firstObservation.programBuilds != 7 || firstObservation.mangleCompiles != 7 || firstObservation.peakActiveJobs != 2 {
-		t.Fatalf("unexpected first-run execution observation: %+v", firstObservation)
-	}
-	t.Logf("R5 cold observation: bundle builds=%d, program builds=%d, Mangle plan compiles=%d, created facts=%v, peak active jobs=%d",
-		firstObservation.bundleArtifacts, firstObservation.programBuilds, firstObservation.mangleCompiles,
-		parallelEvidence.createdFactCounts, firstObservation.peakActiveJobs)
-
-	var sequentialActive atomic.Int64
-	var sequentialPeak atomic.Int64
-	sequentialOptions := parallelFixtureOptions(repoRoot, workspace)
-	sequentialOptions.RuleWorkers = 1
-	sequentialOptions.FactLimit = 8
-	sequentialOptions.Explain = true
-	sequentialOptions.onDerivedFact = func() {
-		current := sequentialActive.Add(1)
-		for previous := sequentialPeak.Load(); current > previous; previous = sequentialPeak.Load() {
-			if sequentialPeak.CompareAndSwap(previous, current) {
-				break
-			}
-		}
-		sequentialActive.Add(-1)
-	}
-	sequentialResult, sequentialRun, sequentialEvidence, err := engine.analyzeWithEvidence(context.Background(), sequentialOptions, observe.Full)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := sequentialPeak.Load(); got != 1 {
-		t.Fatalf("one worker must use the same evaluator without overlap, peak was %d", got)
-	}
-	assertParallelFixtureOutcomes(t, sequentialResult, sequentialRun, sequentialEvidence)
+	parallelResult, _, parallelEvidence := run(2)
+	sequentialResult, _, sequentialEvidence := run(1)
 	if !reflect.DeepEqual(parallelResult, sequentialResult) {
 		t.Fatalf("one-worker and multi-worker results differ:\nparallel:   %+v\nsequential: %+v", parallelResult, sequentialResult)
 	}
@@ -107,21 +69,6 @@ func TestParallelRuleExecutionContract(t *testing.T) {
 	if !reflect.DeepEqual(parallelEvidence.anchors, sequentialEvidence.anchors) {
 		t.Fatalf("one-worker and multi-worker producer tracking support differs:\nparallel:   %+v\nsequential: %+v", parallelEvidence.anchors, sequentialEvidence.anchors)
 	}
-	if !reflect.DeepEqual(parallelEvidence.createdFactCounts, sequentialEvidence.createdFactCounts) {
-		t.Fatalf("one-worker and multi-worker created-fact counts differ: parallel=%+v sequential=%+v", parallelEvidence.createdFactCounts, sequentialEvidence.createdFactCounts)
-	}
-	secondObservation := engine.executionObservation()
-	if secondObservation.bundleArtifacts != firstObservation.bundleArtifacts || secondObservation.mangleCompiles != firstObservation.mangleCompiles {
-		t.Fatalf("unchanged bundle artifacts or generated plans were rebuilt: first=%+v second=%+v", firstObservation, secondObservation)
-	}
-	if secondObservation.programBuilds != firstObservation.programBuilds+7 {
-		t.Fatalf("each run must generate programs in fresh rule runtimes: first=%+v second=%+v", firstObservation, secondObservation)
-	}
-	t.Logf("R5 unchanged observation delta: bundle builds=%d, program builds=%d, Mangle plan compiles=%d, peak active jobs=%d",
-		secondObservation.bundleArtifacts-firstObservation.bundleArtifacts,
-		secondObservation.programBuilds-firstObservation.programBuilds,
-		secondObservation.mangleCompiles-firstObservation.mangleCompiles,
-		secondObservation.peakActiveJobs)
 }
 
 func TestParallelRuleExecutionCancellationJoinsBeforeClose(t *testing.T) {
@@ -132,18 +79,16 @@ func TestParallelRuleExecutionCancellationJoinsBeforeClose(t *testing.T) {
 	workspace := t.TempDir()
 	producer := newParallelFixtureProducer()
 	writeParallelRules(t, workspace, 5, false)
-	engine := Open(Options{}, producer)
-
 	started := make(chan struct{}, 8)
 	releaseWorkers := make(chan struct{})
 	dispatchFinished := make(chan struct{})
 	var active atomic.Int64
 	var peak atomic.Int64
-	options := parallelFixtureOptions(repoRoot, workspace)
+	options := parallelFixtureOptions(t, repoRoot, workspace)
 	options.RuleWorkers = 2
 	options.SuppressionsLocation = filepath.Join(t.TempDir(), "suppression-state.json")
-	options.SuppressAll = true
-	options.onDerivedFact = func() {
+	engine := openTestSession(t, options, producer)
+	engine.hooks.beforeEvaluation = func() {
 		current := active.Add(1)
 		for previous := peak.Load(); current > previous; previous = peak.Load() {
 			if peak.CompareAndSwap(previous, current) {
@@ -154,11 +99,11 @@ func TestParallelRuleExecutionCancellationJoinsBeforeClose(t *testing.T) {
 		<-releaseWorkers
 		active.Add(-1)
 	}
-	options.afterDispatch = func() { close(dispatchFinished) }
+	engine.hooks.afterDispatch = func() { close(dispatchFinished) }
 
 	analyzeDone := make(chan error, 1)
 	go func() {
-		_, err := engine.Check(context.Background(), options)
+		_, err := engine.UpdateSuppressions(context.Background(), SuppressionUpdate{All: true})
 		analyzeDone <- err
 	}()
 	for i := 0; i < 2; i++ {
@@ -248,19 +193,21 @@ func assertParallelFixtureOutcomes(t *testing.T, result Result, run runInfo, evi
 	if got := byRule["fixture.message-failure"]; len(got) != 1 || got[0].Phase != "message" || !strings.Contains(got[0].Message, "second row failed") {
 		t.Fatalf("message failure did not discard that rule's partial findings: %+v", got)
 	}
-	if got := byRule["init-failure.ts"]; len(got) != 1 || got[0].DiagnosticKind != diagnostics.KindRuleExecutionError || got[0].Phase != "setup" || !strings.Contains(got[0].Message, "initialization failed") {
+	if got := byRule["lintai-rules/init-failure.ts"]; len(got) != 1 || got[0].DiagnosticKind != diagnostics.KindRuleExecutionError || got[0].Phase != "load" || !strings.Contains(got[0].Message, "initialization failed") {
 		t.Fatalf("module initialization failure did not produce an explicit rule error: %+v", got)
 	}
-	if len(evidence.findings) != 15 {
-		t.Fatalf("failed rules contributed provisional findings: got %d detached typed rows, want 15", len(evidence.findings))
-	}
-	if len(evidence.createdFactCounts) != 7 || evidence.createdFactCounts["fixture.fact-limit"] <= evidence.createdFactCounts["fixture.success-0"] {
-		t.Fatalf("fixture did not record each rule's created-fact count: %+v", evidence.createdFactCounts)
-	}
-	for _, finding := range evidence.findings {
-		if len(finding.typedRow) != 2 || len(finding.columns) != 2 || finding.columns[0] != "Entity" || finding.columns[1] != "Code" {
-			t.Fatalf("typed report outcome was not detached with its assertion columns: %+v", finding)
+	findings := 0
+	for index, finding := range evidence.findings {
+		if finding == nil {
+			continue
 		}
+		findings++
+		if finding.ruleID != result.Diagnostics[index].RuleID || len(finding.typedRow) != 2 || len(finding.columns) != 2 || finding.columns[0] != "Entity" || finding.columns[1] != "Code" {
+			t.Fatalf("typed report outcome was not detached beside its diagnostic: %+v", finding)
+		}
+	}
+	if findings != 15 || len(evidence.findings) != len(result.Diagnostics) {
+		t.Fatalf("failed rules contributed provisional findings: got %d detached typed rows, want 15", findings)
 	}
 	for _, id := range []string{"fixture.success-0", "fixture.success-1", "fixture.success-2", "fixture.success-3", "fixture.success-4"} {
 		if _, ok := run.evaluated[id]; !ok {
@@ -274,12 +221,8 @@ func assertParallelFixtureOutcomes(t *testing.T, result Result, run runInfo, evi
 	}
 }
 
-func parallelFixtureOptions(repoRoot, workspace string) Options {
-	return Options{
-		RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages", "client"),
-		WorkspaceRoot: workspace, RuleGlobs: []string{"lintai-rules/**/*.ts"},
-		Env: map[string]any{}, Severity: diagnostics.SeverityError,
-	}
+func parallelFixtureOptions(t *testing.T, repoRoot, workspace string) Config {
+	return Config{WorkspaceRoot: testpack.Build(t, repoRoot, workspace, "lintai-rules/*.ts")}
 }
 
 func writeParallelRules(t *testing.T, workspace string, successes int, includeFailures bool) {

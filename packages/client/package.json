@@ -12,7 +12,7 @@
 	"bugs": {
 		"url": "https://github.com/bigbizze/lintai/issues"
 	},
-	"files": ["dist", "!dist/**/*.test.*", "scripts"],
+	"files": ["dist", "!dist/**/*.test.*"],
 	"exports": {
 		".": {
 			"types": "./dist/index.d.ts",
@@ -30,9 +30,7 @@
 		"dev": "tsc --watch",
 		"test": "node --test 'dist/**/*.test.js'"
 	},
-	"dependencies": {
-		"@lintai/sdk": "workspace:*",
-		"esbuild": "^0.25.2",
+	"devDependencies": {
 		"typescript": "^5.7.0"
 	},
 	"publishConfig": {

@@ -50,10 +50,10 @@ npm install -D @lintai/cli @lintai/sdk @lintai/eslint-plugin eslint@^10.15.0 @ty
 `@lintai/sdk` does not depend on Zod. If your rules export `config` schemas using Zod, add it yourself:
 
 ```sh
-pnpm add -D zod
+pnpm add -D zod@3
 ```
 
-Any schema object with `parse` or `safeParse` works.
+A named `config` export supplies a synchronous `parse(value)` method. The parser runs in the pure runtime. See the [SDK example](../packages/sdk/README.md).
 
 ### CLI + SDK + oxlint integration
 
@@ -64,22 +64,6 @@ npm install -D @lintai/cli @lintai/sdk @lintai/oxlint-plugin oxlint
 ```
 
 This does not install ESLint. The plugin needs oxlint 1.90.0 or later. See [Oxlint plugin reference](api.md#oxlint-plugin-reference-and-caveats).
-
-### pnpm caveat
-
-If your repo uses `pnpm` 10+, allow `esbuild` to run its postinstall/build step:
-
-```json
-{
-  "pnpm": {
-    "onlyBuiltDependencies": ["esbuild"]
-  }
-}
-```
-
-Without that, rule bundling will fail because the helper scripts rely on `esbuild`.
-
-With npm, rule bundling works without extra settings.
 
 ## Quick consumer setup and caveats
 
@@ -105,13 +89,18 @@ export default rule("arch.no-async")
 	.message((row) => `${row.Name} in ${row.File} must not be async`);
 ```
 
-Run it:
+Create `lintai.toml` in the workspace root.
+
+```toml
+[rules]
+entries = ["lintai-rules/no-async.ts"]
+```
 
 ```sh
-pnpm exec lintai \
-  --workspace-root . \
-  --rules 'lintai-rules/**/*.ts'
+pnpm exec lintai build-rules && pnpm exec lintai check
 ```
+
+The native builder resolves installed rule dependencies and publishes `.lintai/rules.json`. Checks keep using the last successful build until you rebuild. The native executable can check the pack with Node absent from `PATH`.
 
 With npm, use `npm exec -- lintai` in place of `pnpm exec lintai`.
 
@@ -123,66 +112,9 @@ For eligible modules, root membership is drawn from the bounded set of original 
 
 For shared scope settings, put `exclude`, `include` and exact `sources` under `[workspace]` in `lintai.toml` at the workspace root. Repeat `--source <file>` to add exact files, including files otherwise excluded. Use `--config <file>` to choose a different config, relative to the invocation directory. See [Snapshot scope](api.md#snapshot-scope) for precedence, `--files`, and how to inspect the selection.
 
-Useful caveats:
+## ESLint and Oxlint setup
 
-- relative rule globs are resolved from `workspaceRoot`
-- the CLI is one-shot and deterministic
-- the ESLint plugin may use persistent `serve` mode in long-lived editor sessions
-
-## ESLint setup and caveats
-
-Add an ESLint config:
-
-```js
-// eslint.config.mjs
-import { createLintaiPlugin } from "@lintai/eslint-plugin";
-import tsParser from "@typescript-eslint/parser";
-
-const lintai = createLintaiPlugin({ rules: ["lintai-rules/**/*.ts"] });
-
-export default [
-	{
-		files: ["src/**/*.ts", "src/**/*.tsx"],
-		languageOptions: { parser: tsParser },
-		...lintai.configs.all,
-	},
-	{
-		files: ["lintai-rules/**/*.ts"],
-		languageOptions: { parser: tsParser },
-		plugins: { lintai },
-		rules: lintai.configs.authoring.rules,
-	},
-];
-```
-
-ESLint 10 looks for a flat config starting from each linted file; use `--config` to select one explicitly. Configure your editor to use the supported Node 26 runtime.
-
-Each lintai rule is the ESLint rule `lintai/<rule-id>`. Set its level, a per-file override or a disable comment as for any other rule. See [api.md](api.md#linter-rules).
-
-Options of `createLintaiPlugin`:
-
-- `mode?: "serve" | "oneshot"`
-- `binary?: string`
-- `repoRoot?: string`
-- `workspaceRoot?: string`
-- `rules?: string[]`
-- `exclude?: string[]`
-- `files?: "tsconfig" | "walk"`
-- `env?: Record<string, unknown>`
-- `factLimit?: number`
-- `ruleWorkers?: number`
-- `rulesLock?: string`
-- `setupSandbox?: "on" | "off"`
-
-Plugin caveats:
-
-- if `mode` is omitted, plain `eslint` CLI runs default to `oneshot`
-- long-lived editor/language-server use defaults to `serve`
-- an ESLint API caller with a complete file list can opt into one validation for the operation with [`plugin.withFileBatch`](api.md#explicit-eslint-multi-file-operations). Ordinary editor callbacks validate each file request; ESLint CLI one-shot behavior is unchanged
-- each file request checks recorded inputs and configuration. Source and rule edits are picked up on the next lint pass, without a background watcher. Quick validation can miss a same-size edit with a deliberately restored modification time; forced reanalysis performs a Full check
-- lintai reads saved files, not the editor buffer. While a file has unsaved changes, `lintai/analysis` shows one message on line 1 that asks you to save the file, and the other lintai rules report nothing for that file.
-- when lintai cannot produce diagnostics, `lintai/analysis` reports the reason on line 1 of each linted file, so a broken setup does not look like a clean workspace. This covers a failed analysis, a `serve` process that failed and fell back to one `oneshot` run, a rule that could not run (a `rule_execution_error`) and a rule file that did not load. In an `eslint` CLI run, these messages appear on the first linted file only.
-- the rule list is read when ESLint loads the config. Newly discovered IDs report through `lintai/analysis` with restart guidance; restart ESLint or its language server to register a dedicated rule. Existing rule implementation edits do not require a restart
+Build the rule pack, enable the fixed error and warning adapters, and use a single invocation-scoped plugin for bulk linting. The same configuration defaults to live requests in the editor. See the [ESLint and Oxlint configurations and commands](api.md#linter-rules).
 
 ## Build from source and caveats
 
@@ -248,26 +180,10 @@ Reinstall `@lintai/cli` on a supported platform and architecture. The launcher r
 - `@lintai/lintai-linux-arm64`
 - `@lintai/lintai-linux-x64`
 
-### `could not find lintai asset root`
+### Missing rule pack
 
-The asset root is the directory that contains `scripts/bundle-rule.mjs` and `scripts/prepare-rule.mjs`. lintai looks for `node_modules/@lintai/client`, then `node_modules/.pnpm/node_modules/@lintai/client` (pnpm), then `packages/client`, then the repository root. Pass `--asset-root` explicitly if you are running the Go binary directly outside the npm package layout.
-
-### Rule bundles fail unexpectedly
-
-The artifact identity covers the coherent inputs consumed by both bundle outputs: rule and generated-entry source, tool identity, configuration, package metadata and module-resolution observations. The bundler rejects an incoherent or escaping captured view. A later file edit does not change the captured identity; the next check validates the evidence before reuse. Retry after the edit is complete if the captured view could not be built.
-
-Each rule execution uses a fresh pure JavaScript runtime. Its program and message callbacks share state during that run, and the next execution starts with fresh module state. Metadata listing uses a separate runtime and does not invoke rule callbacks. See [the rules-lock reference](api.md#rules-lock) for artifact identity and integrity checks.
-
-Check:
-
-- `esbuild` install/build permissions in pnpm
-- `zod` is installed if your rules import it
-- your rule file is included by the configured `rules` glob
+Run `pnpm exec lintai build-rules` from the workspace root. Each path in `[rules].entries` must name a rule entry. Install the SDK and any packages the rule imports. A build error names the failing entry and leaves the previous pack readable.
 
 ### ESLint does not pick up a rule change immediately
 
-In serve mode, the next file request checks rule inputs for changes. If an edit does not appear:
-
-- make sure the changed file is inside the configured `rules` glob
-- lint a target source file again, not just the rule file
-- if the editor still appears stuck, restart the ESLint service and report it as a bug
+Rebuild with `lintai build-rules` and lint the source file again. In locked mode, approve the replacement pack with `lintai lock` after review. The editor can pick up new IDs in the next live operation.

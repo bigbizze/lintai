@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"syscall"
 	"time"
 )
@@ -24,13 +23,10 @@ func unchangedStamp(info os.FileInfo, s *Stamp) bool {
 	if info == nil || !info.Mode().IsRegular() || s == nil {
 		return false
 	}
-	size, _ := strconv.ParseInt(s.Size, 10, 64)
-	modified, _ := strconv.ParseInt(s.MtimeNs, 10, 64)
-	observed, _ := strconv.ParseInt(s.ObservedAtNs, 10, 64)
-	return info.Size() == size && info.ModTime().UnixNano() == modified && modified <= observed-int64(2*time.Second)
+	return info.Size() == s.Size && info.ModTime().UnixNano() == s.MtimeNs && s.MtimeNs <= s.ObservedAtNs-int64(2*time.Second)
 }
 func makeStamp(info os.FileInfo, observed time.Time) *Stamp {
-	return &Stamp{strconv.FormatInt(info.Size(), 10), strconv.FormatInt(info.ModTime().UnixNano(), 10), strconv.FormatInt(observed.UnixNano(), 10)}
+	return &Stamp{info.Size(), info.ModTime().UnixNano(), observed.UnixNano()}
 }
 func sameInfo(a, b os.FileInfo) bool {
 	return a != nil && b != nil && a.Mode().IsRegular() && b.Mode().IsRegular() && a.Size() == b.Size() && a.ModTime().Equal(b.ModTime())
@@ -244,7 +240,7 @@ func (s Set) matches(index int, r Record, mode Mode) (bool, error) {
 		value, err := filepath.EvalSymlinks(r.Path)
 		if err != nil {
 			if missing(err) {
-				return false, nil
+				return r.Value == Missing, nil
 			}
 			return false, err
 		}

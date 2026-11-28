@@ -60,8 +60,8 @@ func TestReadRequestRoundTripsParams(t *testing.T) {
 	payload, err := json.Marshal(Request{
 		JSONRPC: "2.0",
 		ID:      "abc",
-		Method:  "diagnostics/file",
-		Params:  json.RawMessage(`{"file":"src/example.ts"}`),
+		Method:  "diagnostics/files",
+		Params:  json.RawMessage(`{"files":["src/example.ts"]}`),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -76,7 +76,7 @@ func TestReadRequestRoundTripsParams(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(request.Params) != `{"file":"src/example.ts"}` {
+	if string(request.Params) != `{"files":["src/example.ts"]}` {
 		t.Fatalf("unexpected params %s", string(request.Params))
 	}
 }

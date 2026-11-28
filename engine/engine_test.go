@@ -15,6 +15,7 @@ import (
 	"github.com/bigbizze/lintai/backend/typescript"
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/facts"
+	"github.com/bigbizze/lintai/internal/testpack"
 	"github.com/bigbizze/lintai/observe"
 	"github.com/bigbizze/lintai/runtime"
 )
@@ -95,15 +96,10 @@ func TestRuleErrorPhases(t *testing.T) {
 	}
 	rulePaths = append(rulePaths, filepath.Join(repoRoot, "testdata/fixtures/rules/pure-no-effects.ts"))
 
-	result, err := Open(Options{}, typescript.New()).Check(context.Background(), Options{
-		RepoRoot:      repoRoot,
-		AssetRoot:     filepath.Join(repoRoot, "packages", "client"),
-		WorkspaceRoot: filepath.Join(repoRoot, "testdata/fixtures/workspace"),
-		RuleGlobs:     rulePaths,
-		Env:           map[string]any{},
-		Severity:      diagnostics.SeverityError,
+	result, err := openTestSession(t, Config{
+		WorkspaceRoot: testpack.Build(t, repoRoot, filepath.Join(repoRoot, "testdata/fixtures/workspace"), rulePaths...),
 		FactLimit:     200,
-	})
+	}, typescript.New()).Check(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +135,7 @@ func TestRuleErrorPhases(t *testing.T) {
 	}
 }
 
-func TestRelativeRuleGlobsResolveFromWorkspaceRoot(t *testing.T) {
+func TestWorkspacePackReportsLocatedFinding(t *testing.T) {
 	repoRoot, err := filepath.Abs("..")
 	if err != nil {
 		t.Fatal(err)
@@ -151,14 +147,9 @@ export default rule("arch.no-async").version(1)
 	.program(dl`+"`"+`Decl v(Fn). v(Fn) :- ts.fn_async(Fn).`+"`"+`)
 	.report("v").message(() => "no async");
 `)
-	result, err := Open(Options{}, typescript.New()).Check(context.Background(), Options{
-		RepoRoot:      repoRoot,
-		AssetRoot:     filepath.Join(repoRoot, "packages", "client"),
-		WorkspaceRoot: workspaceRoot,
-		RuleGlobs:     []string{"lintai-rules/**/*.ts"},
-		Env:           map[string]any{},
-		Severity:      diagnostics.SeverityError,
-	})
+	result, err := openTestSession(t, Config{
+		WorkspaceRoot: testpack.Build(t, repoRoot, workspaceRoot, "lintai-rules/*.ts"),
+	}, typescript.New()).Check(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,11 +213,7 @@ func TestDeclaredWriterCapabilityPolicy(t *testing.T) {
 				}
 				writeTestFile(t, root, file, source)
 			}
-			result, err := Open(Options{}, typescript.New(typescript.Options{Files: typescript.FileScopeWalk})).Check(context.Background(), Options{
-				RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages", "client"),
-				WorkspaceRoot: root, RuleGlobs: []string{filepath.Join(fixture, "writer-policy.ts")},
-				Severity: diagnostics.SeverityError,
-			})
+			result, err := openTestSession(t, Config{WorkspaceRoot: testpack.Build(t, repoRoot, root, filepath.Join(fixture, "writer-policy.ts"))}, typescript.New(typescript.Options{Files: typescript.FileScopeWalk})).Check(context.Background())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -280,14 +267,9 @@ export default rule("t.round-trip").version(1)
 	.report("v")
 		.message((row) => JSON.stringify([row.S === tricky, row.N, row.K]));
 `)
-	result, err := Open(Options{}, typescript.New(typescript.Options{Files: typescript.FileScopeWalk})).Check(context.Background(), Options{
-		RepoRoot:      repoRoot,
-		AssetRoot:     filepath.Join(repoRoot, "packages", "client"),
-		WorkspaceRoot: filepath.Join(repoRoot, "testdata/fixtures/workspace"),
-		RuleGlobs:     []string{rulePath},
-		Env:           map[string]any{},
-		Severity:      diagnostics.SeverityError,
-	})
+	result, err := openTestSession(t, Config{
+		WorkspaceRoot: testpack.Build(t, repoRoot, filepath.Join(repoRoot, "testdata/fixtures/workspace"), rulePath),
+	}, typescript.New(typescript.Options{Files: typescript.FileScopeWalk})).Check(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,14 +305,9 @@ Decl v(M). v(M) :- ts.module_path(M, F), !lintai.glob(F, "src/core/**"), layer(M
 Decl w(M). w(M) :- ts.module_path(M, F), F = "src/a/b.c", layer(M, /ui.x).`+"`"+`)
 	.report("v").message(() => "outside");
 `)
-	result, err := Open(Options{}, typescript.New()).Check(context.Background(), Options{
-		RepoRoot:      repoRoot,
-		AssetRoot:     filepath.Join(repoRoot, "packages", "client"),
-		WorkspaceRoot: workspaceRoot,
-		RuleGlobs:     []string{"lintai-rules/**/*.ts"},
-		Env:           map[string]any{},
-		Severity:      diagnostics.SeverityError,
-	})
+	result, err := openTestSession(t, Config{
+		WorkspaceRoot: testpack.Build(t, repoRoot, workspaceRoot, "lintai-rules/*.ts"),
+	}, typescript.New()).Check(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -377,19 +354,15 @@ export default rule("t.broken-warning").version(1)
 `)
 	writeTestFile(t, workspaceRoot, "lintai-rules/soft.ts", `export { soft as default } from "./rules";
 `)
-	result, err := Open(Options{}, typescript.New()).Check(context.Background(), Options{
-		RepoRoot:      repoRoot,
-		AssetRoot:     filepath.Join(repoRoot, "packages", "client"),
-		WorkspaceRoot: workspaceRoot,
-		RuleGlobs:     []string{"lintai-rules/broken-*.ts", "lintai-rules/soft.ts"},
-		Env:           map[string]any{},
-		RuleSeverity: map[string]diagnostics.Severity{
-			"t.soft":           diagnostics.SeverityWarning,
-			"t.broken-off":     diagnostics.SeverityOff,
-			"t.broken-warning": diagnostics.SeverityWarning,
-			"t.missing":        diagnostics.SeverityOff,
+	result, err := openTestSession(t, Config{
+		WorkspaceRoot: testpack.Build(t, repoRoot, workspaceRoot, "lintai-rules/broken-*.ts", "lintai-rules/soft.ts"),
+		Rule: map[string]RulePolicy{
+			"t.soft":           {Severity: "warning"},
+			"t.broken-off":     {Severity: "off"},
+			"t.broken-warning": {Severity: "warning"},
+			"t.missing":        {Severity: "off"},
 		},
-	})
+	}, typescript.New()).Check(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -484,14 +457,9 @@ export default rule("t.awaited").version(1)
 	.report("v")
 	.message((row) => `+"`${row.Name}:${row.Text}`"+`);
 `)
-	result, err := Open(Options{}, typescript.New()).Check(context.Background(), Options{
-		RepoRoot:      repoRoot,
-		AssetRoot:     filepath.Join(repoRoot, "packages", "client"),
-		WorkspaceRoot: workspaceRoot,
-		RuleGlobs:     []string{"lintai-rules/**/*.ts"},
-		Env:           map[string]any{},
-		Severity:      diagnostics.SeverityError,
-	})
+	result, err := openTestSession(t, Config{
+		WorkspaceRoot: testpack.Build(t, repoRoot, workspaceRoot, "lintai-rules/*.ts"),
+	}, typescript.New()).Check(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -588,14 +556,9 @@ export async function ambiguous(value: string | undefined): Promise<ActionResult
 				writeTestFile(t, root, group+"/use.ts", `export { mixed } from "../src/actions/save";`)
 			}
 			rulePath := filepath.Join(repoRoot, "testdata/npm-smoke/lintai-rules/actions-return-action-result.ts")
-			result, err := Open(Options{}, typescript.New()).Check(context.Background(), Options{
-				RepoRoot:      repoRoot,
-				AssetRoot:     filepath.Join(repoRoot, "packages", "client"),
-				WorkspaceRoot: root,
-				RuleGlobs:     []string{rulePath},
-				Env:           map[string]any{},
-				Severity:      diagnostics.SeverityError,
-			})
+			result, err := openTestSession(t, Config{
+				WorkspaceRoot: testpack.Build(t, repoRoot, root, rulePath),
+			}, typescript.New()).Check(context.Background())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -646,10 +609,7 @@ export default rule("test.strict").version(1)
   `+"`"+`)
   .report("ambient", "indeterminate").message((row, ctx) => `+"`${row.Name}:${ctx.assertion_id}`"+`);
 `)
-	result, err := Open(Options{}, typescript.New()).Check(context.Background(), Options{
-		RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: root,
-		RuleGlobs: []string{"lintai-rules/*.ts"},
-	})
+	result, err := openTestSession(t, Config{WorkspaceRoot: testpack.Build(t, repoRoot, root, "lintai-rules/*.ts")}, typescript.New()).Check(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -708,14 +668,9 @@ export default rule("arch.public-api-infrastructure-types").version(1)
 	.message((row) => row.Name);
 `
 	writeTestFile(t, workspaceRoot, "lintai-rules/public-api.ts", rule)
-	result, err := Open(Options{}, typescript.New()).Check(context.Background(), Options{
-		RepoRoot:      repoRoot,
-		AssetRoot:     filepath.Join(repoRoot, "packages", "client"),
-		WorkspaceRoot: workspaceRoot,
-		RuleGlobs:     []string{"lintai-rules/**/*.ts"},
-		Env:           map[string]any{},
-		Severity:      diagnostics.SeverityError,
-	})
+	result, err := openTestSession(t, Config{
+		WorkspaceRoot: testpack.Build(t, repoRoot, workspaceRoot, "lintai-rules/*.ts"),
+	}, typescript.New()).Check(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -774,17 +729,14 @@ export function choose(flag: boolean) {
 	root := t.TempDir()
 	writeTestFile(t, root, "src/scorecard/total.ts", source)
 	writeTestFile(t, root, "src/scorecard/only-unsupported.ts", `class Only { value = await unknown(); }`)
-	session := Open(Options{}, typescript.New(typescript.Options{Files: typescript.FileScopeWalk}))
+	session := openTestSession(t, Config{}, typescript.New(typescript.Options{Files: typescript.FileScopeWalk}))
 	defer session.Close()
-	catalog, err := session.describeProducers()
-	if err != nil {
-		t.Fatal(err)
-	}
+	catalog := session.catalog
 	requested := map[string]map[facts.Predicate]struct{}{"ts": {}}
 	for _, relation := range catalog.entries[0].description.BaseRelations {
 		requested["ts"][relation.Predicate] = struct{}{}
 	}
-	assembled, err := catalog.collect(context.Background(), Options{RepoRoot: root, WorkspaceRoot: root}, requested, nil, observe.Full)
+	assembled, err := catalog.collect(context.Background(), root, requested, nil, observe.Full)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -981,7 +933,7 @@ bad_owner(Site) :- ts.site_attribution_unsupported(Site, _), ts.site_owner(Site,
 Decl uncertain(Fn).
 uncertain(Fn) :- ts.fn(Fn, _, "choose"), ts.owner_has_unresolved_call(Fn).
 `}
-	violations, perr := evaluateProgram(assembled.base, assembled.sources, assembled.schemaDecls, assembled.anchors, assembled.reportable, assembled.namespaces, output, []string{"call_only", "follow_refs", "module_seen", "bad_owner", "uncertain"}, nil, evalOptions{})
+	violations, perr := evaluateProgram(assembled.base, catalog.sources, catalog.schemaDecls, assembled.anchors, assembled.reportable, assembled.namespaces, output, []string{"call_only", "follow_refs", "module_seen", "bad_owner", "uncertain"}, nil, evalOptions{})
 	if perr != nil {
 		t.Fatal(perr)
 	}

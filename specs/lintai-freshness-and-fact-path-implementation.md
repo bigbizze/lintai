@@ -1,10 +1,12 @@
-# lintai freshness and fact path simplification implementation specification
+# Historical lintai freshness and fact path simplification implementation specification
 
-Date: November 23, 2026  
-Revision: 2  
-Repository: https://github.com/bigbizze/lintai  
-Verified baseline: 5a137a57c446572fe7902c95413b601bf2f8d3f4  
-Intended repository location: docs/freshness-and-fact-path-simplification.md
+This document records the earlier implementation specification and is not current API authority. See the [current API](../docs/api.md) and [Go and RPC API](../docs/go-api.md) for current behavior.
+
+Date: November 23, 2026
+Revision: 2
+Repository: https://github.com/bigbizze/lintai
+Verified baseline: 5a137a57c446572fe7902c95413b601bf2f8d3f4
+Historical specification location: `specs/lintai-freshness-and-fact-path-implementation.md`
 
 ## 1. Objective and authority
 
@@ -532,9 +534,9 @@ Fallback to one-shot is for spawn failures, EOF, malformed framing/protocol or a
 
 Keep explicit one-shot mode and one-shot fallback. Their one-shot result cache is allowed because there is no retained server in that mode. A forced reanalyze clears and reruns that cache. Preserve the fallback explanation that ordinary file requests use one run until restart or forced reanalysis.
 
-For problems(), keep latestProblems, the exact problem-list identity and whether that list has been reported. JSON.stringify of the ordered string list is sufficient. An unchanged response must not reset reportProblemsOnce. A changed list resets it; an empty list ends the prior problem episode. Do not use SnapshotVersion to decide whether problems changed.
+For problems(), keep the exact problem-list identity and whether that episode has been reported; attach the episode to the file response that produced it. JSON.stringify of the ordered string list is sufficient. An unchanged response must not reset reportProblemsOnce. A changed list resets it; an empty list ends the prior problem episode. Do not use SnapshotVersion to decide whether problems changed.
 
-Keep process lifecycle/framed transport, the plugin's unsaved-buffer check and its existing per-file synchronous-pass cache. The pass cache is cleared after the pass and prevents one request per registered rule; it is not a workspace freshness cache.
+Keep process lifecycle/framed transport and the plugin's unsaved-buffer check. Share one response among enabled rules in a host file analysis. ESLint and Oxlint invalidate the prior response while their enabled lintai rules are created, before `Program` listeners run, so every analysis that runs an enabled lintai rule requests a new response even when the host reuses its `SourceCode` object. In serve mode, an ordinary file request validates freshness. The owner-approved multi-file boundary is an explicit exception: a caller supplies the complete file list and receives all projections from one validation or analysis; a later operation validates again. See [the ESLint host API](../docs/api.md#explicit-eslint-multi-file-operations) and [the Go and RPC APIs](../docs/go-api.md#serve-protocol).
 
 Delete rule/input watchers, watch dependency injection, idle timers, analysis epochs, saved-version maps, invalidated state, background refresh methods, rule/input invalidation scheduling, serve-mode diagnosticsByFile/unlocated caches and WatchHints throughout.
 
@@ -750,4 +752,3 @@ These links locate the implementation being replaced. They are navigation aids, 
 - [Configuration composition root](https://github.com/bigbizze/lintai/blob/5a137a57c446572fe7902c95413b601bf2f8d3f4/cmd/lintai/main.go)
 - [Bundler and approval identity](https://github.com/bigbizze/lintai/blob/5a137a57c446572fe7902c95413b601bf2f8d3f4/packages/client/scripts/bundle-rule.mjs)
 - [Client and plugin integration](https://github.com/bigbizze/lintai/tree/5a137a57c446572fe7902c95413b601bf2f8d3f4/packages/client/src)
-

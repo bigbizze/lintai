@@ -2,6 +2,8 @@ package engine
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -9,11 +11,12 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"codeberg.org/TauCeti/mangle-go/ast"
 	"github.com/bigbizze/lintai/backend"
 	"github.com/bigbizze/lintai/backend/typescript"
-	"github.com/bigbizze/lintai/bundle"
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/facts"
+	"github.com/bigbizze/lintai/internal/testpack"
 	"github.com/bigbizze/lintai/observe"
 )
 
@@ -25,14 +28,14 @@ func TestSessionRetainsAndReplacesCurrentGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	workspace, rules := t.TempDir(), t.TempDir()
-	a := writeTestFile(t, workspace, "src/a.ts", "export const value = 1;\n")
+	const original = "export const value = 1;\n"
+	a := writeTestFile(t, workspace, "src/a.ts", original)
 	rule := writeTestFile(t, rules, "modules.ts", parallelRuleSource("fixture.modules", "Decl violation(Entity). violation(Entity) :- ts.module(Entity).", "(row) => row.Entity"))
 	var evaluations atomic.Int64
-	options := Options{RepoRoot: repo, AssetRoot: filepath.Join(repo, "packages/client"), WorkspaceRoot: workspace,
-		RuleGlobs: []string{rule}, RuleWorkers: 1, beforeEvaluation: func() { evaluations.Add(1) }}
+	options := Config{WorkspaceRoot: testpack.Build(t, repo, workspace, rule), RuleWorkers: 1}
 	newProducer := func() *typescript.Backend { return typescript.New(typescript.Options{Files: typescript.FileScopeWalk}) }
-	session := Open(options, newProducer())
-	defer session.Close()
+	session := openTestSession(t, options, newProducer())
+	session.hooks.beforeEvaluation = func() { evaluations.Add(1) }
 	first, err := session.Check(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -41,37 +44,22 @@ func TestSessionRetainsAndReplacesCurrentGeneration(t *testing.T) {
 		t.Fatalf("unexpected first result: %+v", first)
 	}
 	index := session.currentFacts.base
-	observation := session.executionObservation()
-	options.RuleWorkers = 2
-	warm, err := session.Check(context.Background(), options)
+	plan := session.ruleEntries["rules/modules.ts"]
+	warm, err := session.Check(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	warmObservation := session.executionObservation()
-	if !reflect.DeepEqual(first, warm) || session.currentFacts.base != index || evaluations.Load() != 2 ||
-		warmObservation.bundleArtifacts != observation.bundleArtifacts || warmObservation.mangleCompiles != observation.mangleCompiles {
-		t.Fatalf("unchanged check did not reuse facts/plans and dispatch rules: first=%+v warm=%+v", first, warm)
+	if !reflect.DeepEqual(first, warm) || session.currentFacts.base != index || evaluations.Load() != 2 {
+		t.Fatalf("unchanged check did not reuse facts and dispatch rules: first=%+v warm=%+v", first, warm)
 	}
-	options.RuleSeverity = map[string]diagnostics.Severity{"fixture.modules": diagnostics.SeverityWarning}
-	warning, err := session.Check(context.Background(), options)
-	if err != nil || len(warning.Diagnostics) != 1 || warning.Diagnostics[0].Severity != diagnostics.SeverityWarning ||
-		evaluations.Load() != 3 {
-		t.Fatalf("warning check did not evaluate rules: %+v %v", warning, err)
+	if retained := session.ruleEntries["rules/modules.ts"]; plan == nil || plan.plan == nil || retained != plan {
+		t.Fatal("unchanged check did not reuse the compiled plan")
 	}
-	freshOptions := options
-	freshOptions.beforeEvaluation = nil
-	freshSession := Open(freshOptions, newProducer())
-	freshWarning, freshErr := freshSession.Check(context.Background())
-	if closeErr := freshSession.Close(); closeErr != nil {
-		t.Fatal(closeErr)
-	}
-	if freshErr != nil || !reflect.DeepEqual(warning, freshWarning) {
-		t.Fatalf("reassembled warning differs from fresh result: %+v %+v %v", warning, freshWarning, freshErr)
-	}
-	options.RuleSeverity = nil
-	errorResult, err := session.Check(context.Background(), options)
-	if err != nil || !reflect.DeepEqual(errorResult, first) || evaluations.Load() != 4 {
-		t.Fatalf("error check did not evaluate rules: %+v %v", errorResult, err)
+	warningOptions := options
+	warningOptions.Rule = map[string]RulePolicy{"fixture.modules": {Severity: "warning"}}
+	warning, err := openTestSession(t, warningOptions, newProducer()).Check(context.Background())
+	if err != nil || len(warning.Diagnostics) != 1 || warning.Diagnostics[0].Severity != diagnostics.SeverityWarning {
+		t.Fatalf("warning policy: %+v %v", warning, err)
 	}
 	// Returned data is independent of the current result.
 	warm.Diagnostics[0].Message = "caller changed its copy"
@@ -82,14 +70,11 @@ func TestSessionRetainsAndReplacesCurrentGeneration(t *testing.T) {
 
 	assertFresh := func() Result {
 		t.Helper()
-		got, err := session.Check(context.Background(), options)
+		got, err := session.Check(context.Background())
 		if err != nil {
 			t.Fatal(err)
 		}
-		freshOptions := options
-		freshOptions.beforeEvaluation = nil
-		freshSession := Open(freshOptions, newProducer())
-		defer freshSession.Close()
+		freshSession := openTestSession(t, options, newProducer())
 		fresh, err := freshSession.Check(context.Background())
 		if err != nil {
 			t.Fatal(err)
@@ -109,14 +94,27 @@ func TestSessionRetainsAndReplacesCurrentGeneration(t *testing.T) {
 	if err := os.Chtimes(a, info.ModTime(), info.ModTime()); err != nil {
 		t.Fatal(err)
 	}
+	// Projection reads the completed capture after disk has changed.
+	projected := session.currentResult.project([]string{"src/a.ts", "src/b.ts"}, false)
+	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(original)))
+	if !slices.Equal(groupDigests(projected), []string{digest, ""}) || len(projected.Files[0].Diagnostics) != 1 {
+		t.Fatalf("projection after edit: %+v", projected)
+	}
 	changed := assertFresh()
-	if changed.SnapshotVersion == first.SnapshotVersion || evaluations.Load() != 5 {
+	if changed.FactRevision == first.FactRevision || evaluations.Load() != 3 {
 		t.Fatal("content change did not replace the generation")
 	}
 	writeTestFile(t, workspace, "src/b.ts", "export const other = 3;\n")
 	added := assertFresh()
 	if len(added.Diagnostics) != 2 {
 		t.Fatalf("new source not discovered: %+v", added.Diagnostics)
+	}
+	all, err := session.RefreshAll(context.Background())
+	if err != nil || !slices.Equal(groupFiles(all), []string{"src/a.ts", "src/b.ts"}) || !slices.Equal(groupDigests(all), []string{
+		fmt.Sprintf("%x", sha256.Sum256([]byte("export const value = 2;\n"))),
+		fmt.Sprintf("%x", sha256.Sum256([]byte("export const other = 3;\n"))),
+	}) || len(all.Files[0].Diagnostics) != 1 || len(all.Files[1].Diagnostics) != 1 || evaluations.Load() != 4 {
+		t.Fatalf("all-file projection: %+v %v", all, err)
 	}
 	if err := os.Remove(a); err != nil {
 		t.Fatal(err)
@@ -128,30 +126,17 @@ func TestSessionRetainsAndReplacesCurrentGeneration(t *testing.T) {
 	if len(first.DiagnosticsFor("src/a.ts")) != 1 {
 		t.Fatal("old completed result changed after replacement")
 	}
-	otherWorkspace := t.TempDir()
-	writeTestFile(t, otherWorkspace, "src/other.ts", "export const value = 4;\n")
-	options.WorkspaceRoot = otherWorkspace
-	switched := assertFresh()
-	if len(switched.DiagnosticsFor("src/other.ts")) != 1 || slices.Contains(switched.AnalyzedFiles, "src/b.ts") {
-		t.Fatalf("workspace replacement retained old facts: %+v", switched)
-	}
 
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := session.Check(canceled, options); err == nil {
+	if _, err := session.Check(canceled); err == nil {
 		t.Fatal("canceled check succeeded")
 	}
 	if _, err := session.Current(); err == nil {
 		t.Fatal("failed refresh left a current result")
 	}
-	if _, err := session.Check(context.Background(), options); err != nil {
+	if _, err := session.Check(context.Background()); err != nil {
 		t.Fatal(err)
-	}
-	if _, err := session.Check(context.Background(), options, options); err == nil {
-		t.Fatal("check accepted multiple requests")
-	}
-	if _, err := session.Current(); err == nil {
-		t.Fatal("invalid check left a current result")
 	}
 	if err := session.Close(); err != nil {
 		t.Fatal(err)
@@ -164,72 +149,13 @@ func TestSessionRetainsAndReplacesCurrentGeneration(t *testing.T) {
 	}
 }
 
-// V20: arbitrary setup runs on every check and can change a generated program
 // without requiring a new producer generation.
-func TestSessionRefreshesSetupWithRetainedFacts(t *testing.T) {
-	repo, err := filepath.Abs("..")
-	if err != nil {
-		t.Fatal(err)
-	}
-	workspace := t.TempDir()
-	program := `Decl violation(Entity, Code). violation(Entity, Code) :- catalog.usable(Entity, Code).`
-	filtered := `Decl violation(Entity, Code). violation(Entity, Code) :- catalog.usable(Entity, Code), Code = "a".`
-	source := `import { dl, rule } from "@lintai/sdk";
-export default rule("fixture.setup-refresh").version(1)
-  .setup(({ workspaceRoot }) => {
-    const fs = require("node:fs"); const path = require("node:path");
-    const counter = path.join(workspaceRoot, "setup-count");
-    const count = fs.existsSync(counter) ? Number(fs.readFileSync(counter, "utf8")) : 0;
-    fs.writeFileSync(counter, String(count + 1));
-    return { onlyFirst: fs.readFileSync(path.join(workspaceRoot, "setup-value"), "utf8") === "first" };
-  })
-  .program(({ setup }) => setup.onlyFirst ? dl` + "`" + filtered + "`" + ` : dl` + "`" + program + "`" + `)
-  .report("violation").message((row) => row.Code);`
-	writeTestFile(t, workspace, "lintai-rules/setup.ts", source)
-	value := writeTestFile(t, workspace, "setup-value", "first")
-	options := parallelFixtureOptions(repo, workspace)
-	options.SetupSandbox = bundle.SetupSandboxOff
-	producer := newParallelFixtureProducer()
-	producer.reusable = true
-	session := Open(options, producer)
-	defer session.Close()
-	for i := 0; i < 2; i++ {
-		result, err := session.Check(context.Background())
-		if err != nil || len(result.Diagnostics) != 1 {
-			t.Fatalf("setup result: %+v %v", result, err)
-		}
-	}
-	count, err := os.ReadFile(filepath.Join(workspace, "setup-count"))
-	if err != nil || string(count) != "2" {
-		t.Fatalf("setup counts: setup=%q err=%v", count, err)
-	}
-	index := session.currentFacts.base
-	if err := os.WriteFile(value, []byte("all"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	projected, err := session.Refresh(context.Background(), options, "catalog/items.sql")
-	if err != nil || len(projected.Diagnostics) != 1 {
-		t.Fatalf("unobserved setup input should not invalidate refresh: %+v %v", projected, err)
-	}
-	count, err = os.ReadFile(filepath.Join(workspace, "setup-count"))
-	if err != nil || string(count) != "2" {
-		t.Fatalf("unchanged refresh reran setup: setup=%q err=%v", count, err)
-	}
-	result, err := session.Check(context.Background())
-	if err != nil || len(result.Diagnostics) != 3 || session.currentFacts.base != index {
-		t.Fatalf("changed setup did not re-execute on the retained facts: %+v %v", result, err)
-	}
-}
-
 func TestComposedFactsCaptureCurrentEligibilityWithoutReemission(t *testing.T) {
 	producer := newParallelFixtureProducer()
-	session := Open(Options{}, producer)
+	session := openTestSession(t, Config{}, producer)
 	defer session.Close()
-	catalog, err := session.describeProducers()
-	if err != nil {
-		t.Fatal(err)
-	}
-	empty, err := catalog.collect(context.Background(), Options{}, nil, nil, observe.Full)
+	catalog := session.catalog
+	empty, err := catalog.collect(context.Background(), "", nil, nil, observe.Full)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,7 +164,7 @@ func TestComposedFactsCaptureCurrentEligibilityWithoutReemission(t *testing.T) {
 	}
 	predicate := facts.Predicate{Name: "catalog.item", Arity: 2}
 	demand := map[string]map[facts.Predicate]struct{}{"catalog": {predicate: {}}}
-	first, err := catalog.collect(context.Background(), Options{}, demand, &empty, observe.Full)
+	first, err := catalog.collect(context.Background(), "", demand, &empty, observe.Full)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -250,7 +176,7 @@ func TestComposedFactsCaptureCurrentEligibilityWithoutReemission(t *testing.T) {
 		t.Fatal(err)
 	}
 	producer.observations, producer.reusable = set, true
-	next, err := catalog.collect(context.Background(), Options{}, demand, &first, observe.Full)
+	next, err := catalog.collect(context.Background(), "", demand, &first, observe.Full)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -258,15 +184,15 @@ func TestComposedFactsCaptureCurrentEligibilityWithoutReemission(t *testing.T) {
 		t.Fatal("equal identity failed to reuse facts with freshly captured eligibility")
 	}
 	producer.observations = observe.Set{}
-	immutable, err := catalog.collect(context.Background(), Options{}, demand, &next, observe.Full)
+	immutable, err := catalog.collect(context.Background(), "", demand, &next, observe.Full)
 	if err != nil || !immutable.reusableFromObservations || len(immutable.observations.Records()) != 0 {
 		t.Fatalf("immutable empty observation promise: %v", err)
 	}
-	if _, err := captureGenerationMetadata(backend.GenerationMetadata{}); err == nil {
+	if _, _, err := captureGenerationMetadata(backend.GenerationMetadata{}, "", "p", nil, nil); err == nil {
 		t.Fatal("empty revision accepted")
 	}
 	scope := map[string]any{"items": []any{"original"}}
-	metadata, err := captureGenerationMetadata(backend.GenerationMetadata{InputRevision: "opaque", Scope: scope, AnalyzedFiles: []string{"src/./a.ts", "src/a.ts"}})
+	metadata, _, err := captureGenerationMetadata(backend.GenerationMetadata{InputRevision: "opaque", Scope: scope, AnalyzedFiles: []string{"src/./a.ts", "src/a.ts"}}, "", "p", nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,4 +200,67 @@ func TestComposedFactsCaptureCurrentEligibilityWithoutReemission(t *testing.T) {
 	if metadata.Scope.(map[string]any)["items"].([]any)[0] != "original" || !slices.Equal(metadata.AnalyzedFiles, []string{"src/a.ts"}) {
 		t.Fatal("metadata was not normalized and detached")
 	}
+
+	t.Run("TypeScript identity components", func(t *testing.T) {
+		root := t.TempDir()
+		writeTestFile(t, root, "src/a.ts", "import { b } from './b'; export const a = b;\n")
+		writeTestFile(t, root, "src/b.ts", "export const b = 1;\n")
+		module := facts.Predicate{Name: "ts.module", Arity: 1}
+		modulePath := facts.Predicate{Name: "ts.module_path", Arity: 2}
+		demand := map[string]map[facts.Predicate]struct{}{"ts": {module: {}}}
+		collect := func(settings typescript.Options, requested map[string]map[facts.Predicate]struct{}, previous *composedFacts) composedFacts {
+			t.Helper()
+			session := openTestSession(t, Config{}, typescript.New(settings))
+			t.Cleanup(func() { _ = session.Close() })
+			catalog := session.catalog
+			result, err := catalog.collect(context.Background(), root, requested, previous, observe.Full)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return result
+		}
+		digest := func(result composedFacts) string {
+			t.Helper()
+			value, err := result.observations.Digest(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return value
+		}
+		first := collect(typescript.Options{Files: typescript.FileScopeWalk, Excludes: []string{"unused-a/**", "unused-b/**"}}, demand, nil)
+		reordered := collect(typescript.Options{Files: typescript.FileScopeWalk, Excludes: []string{"unused-b/**", "unused-a/**"}}, demand, &first)
+		if reordered.snapshotID != first.snapshotID || reordered.base != first.base || digest(reordered) != digest(first) {
+			t.Fatal("equivalent source-selection ordering changed the composed identity")
+		}
+		descriptorChanged := collect(typescript.Options{Files: typescript.FileScopeWalk, Excludes: []string{"unused-c/**"}}, demand, &first)
+		if digest(descriptorChanged) != digest(first) || descriptorChanged.snapshotID == first.snapshotID || descriptorChanged.base == first.base {
+			t.Fatal("unchanged observations authorized reuse across different producer settings")
+		}
+		selectionChanged := collect(typescript.Options{Files: typescript.FileScopeWalk, Excludes: []string{"src/b.ts"}}, demand, &first)
+		moduleSym := ast.PredicateSym{Symbol: module.Name, Arity: module.Arity}
+		if first.factCounts[moduleSym] != 2 || selectionChanged.factCounts[moduleSym] != 1 ||
+			selectionChanged.snapshotID == first.snapshotID || selectionChanged.base == first.base {
+			t.Fatalf("changed source selection reused output: first=%d changed=%d", first.factCounts[moduleSym], selectionChanged.factCounts[moduleSym])
+		}
+		moreDemand := map[string]map[facts.Predicate]struct{}{"ts": {module: {}, modulePath: {}}}
+		requested := collect(typescript.Options{Files: typescript.FileScopeWalk, Excludes: []string{"unused-a/**", "unused-b/**"}}, moreDemand, &first)
+		pathSym := ast.PredicateSym{Symbol: modulePath.Name, Arity: modulePath.Arity}
+		if digest(requested) != digest(first) || requested.snapshotID == first.snapshotID || requested.base == first.base || requested.factCounts[pathSym] != 2 {
+			t.Fatal("unchanged observations authorized reuse across different relation demand")
+		}
+	})
+}
+
+func openTestSession(t *testing.T, options Config, producers ...backend.Producer) *Session {
+	t.Helper()
+	session, err := Open(options, producers...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := session.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	return session
 }

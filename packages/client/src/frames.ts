@@ -1,31 +1,44 @@
-// Content-Length framing for JSON messages, the same framing that lintai
-// serve uses.
+// Content-Length counts UTF-8 bytes. Accumulate the payload in chunks so a
+// multi-megabyte response is copied only once, when it is complete.
 export function encodeFrame(message: unknown): Buffer {
-	const payload = Buffer.from(JSON.stringify(message), "utf8");
-	return Buffer.concat([Buffer.from(`Content-Length: ${payload.length}\r\n\r\n`, "utf8"), payload]);
+	const payload = Buffer.from(JSON.stringify(message));
+	return Buffer.concat([Buffer.from(`Content-Length: ${payload.length}\r\n\r\n`), payload]);
 }
 
 export class FrameDecoder {
-	private buffer = Buffer.alloc(0);
+	private header = Buffer.alloc(0);
+	private remaining = 0;
+	private parts: Buffer[] = [];
 
-	push(chunk: Buffer): unknown[] {
-		this.buffer = Buffer.concat([this.buffer, chunk]);
+	push(bytes: Buffer): unknown[] {
+		let chunk = bytes;
 		const messages: unknown[] = [];
-		while (true) {
-			const headerEnd = this.buffer.indexOf("\r\n\r\n");
-			if (headerEnd < 0) {
-				return messages;
+		while (chunk.length) {
+			if (!this.remaining) {
+				if (this.header.length) chunk = Buffer.concat([this.header, chunk]);
+				const end = chunk.indexOf("\r\n\r\n");
+				if (end > 8192 || (end < 0 && chunk.length > 8192)) throw new Error("invalid frame header");
+				if (end < 0) {
+					this.header = Buffer.from(chunk);
+					break;
+				}
+				const match = /^Content-Length:[ \t]*(\d+)$/i.exec(chunk.toString("ascii", 0, end));
+				if (!match) throw new Error("invalid frame header");
+				this.remaining = Number(match[1]);
+				if (!Number.isSafeInteger(this.remaining) || !this.remaining)
+					throw new Error("invalid frame length");
+				this.header = Buffer.alloc(0);
+				chunk = chunk.subarray(end + 4);
 			}
-			const match = /^Content-Length:\s*(\d+)$/im.exec(this.buffer.subarray(0, headerEnd).toString("utf8"));
-			if (!match) {
-				throw new Error("invalid frame header");
+			const take = Math.min(this.remaining, chunk.length);
+			this.parts.push(chunk.subarray(0, take));
+			chunk = chunk.subarray(take);
+			this.remaining -= take;
+			if (!this.remaining) {
+				messages.push(JSON.parse(Buffer.concat(this.parts).toString("utf8")));
+				this.parts = [];
 			}
-			const payloadEnd = headerEnd + 4 + Number.parseInt(match[1], 10);
-			if (this.buffer.length < payloadEnd) {
-				return messages;
-			}
-			messages.push(JSON.parse(this.buffer.subarray(headerEnd + 4, payloadEnd).toString("utf8")));
-			this.buffer = this.buffer.subarray(payloadEnd);
 		}
+		return messages;
 	}
 }

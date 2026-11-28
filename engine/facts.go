@@ -13,17 +13,12 @@ import (
 // Facts explicitly collects and formats the selected base relations without
 // preparing or executing rules. An empty selection means all base relations.
 func (e *Session) Facts(ctx context.Context, names []string) (string, error) {
-	e.checkMu.Lock()
-	defer e.checkMu.Unlock()
 	ctx, finish, err := e.beginCheck(ctx)
 	if err != nil {
 		return "", err
 	}
 	defer finish()
-	catalog, err := e.describeProducers()
-	if err != nil {
-		return "", err
-	}
+	catalog := e.catalog
 	allowed := make([]string, 0)
 	known := make(map[string]struct{})
 	for _, entry := range catalog.entries {
@@ -50,7 +45,7 @@ func (e *Session) Facts(ctx context.Context, names []string) (string, error) {
 			}
 		}
 	}
-	assembled, err := catalog.collect(ctx, e.defaults, requested, nil, observe.Full)
+	assembled, err := catalog.collect(ctx, e.config.WorkspaceRoot, requested, nil, observe.Full)
 	if err != nil {
 		return "", err
 	}

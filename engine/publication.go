@@ -2,158 +2,188 @@ package engine
 
 import (
 	"fmt"
+	"maps"
+	"os"
 	"path/filepath"
 	"slices"
-	"strings"
 
-	"github.com/bigbizze/lintai/bundle"
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/internal/canonical"
+	"github.com/bigbizze/lintai/internal/workspace"
 	"github.com/bigbizze/lintai/observe"
 )
 
-// FileResult is the projection of a completed workspace result for one file.
-type FileResult struct {
-	Diagnostics       []diagnostics.Diagnostic
-	WorkspaceProblems []diagnostics.Diagnostic
-	SnapshotVersion   string
-	RulesLoaded       int
-	Warnings          []string
+// FileGroup is one document: its name under the physical workspace root, the
+// SHA-256 of the analyzed logical text in lowercase hexadecimal (empty when no
+// source identity was verified), and its findings.
+type FileGroup struct {
+	File         string
+	SourceDigest string
+	Diagnostics  []diagnostics.Diagnostic
 }
 
-// FilesResult contains ordered projections and workspace problems from one
-// completed publication. Diagnostics[i] corresponds to the ith requested file.
+// FilesResult contains document groups and workspace problems from one
+// completed publication. PhysicalRoot is the session's workspace directory.
 type FilesResult struct {
-	Diagnostics       [][]diagnostics.Diagnostic
+	Files             []FileGroup
+	PhysicalRoot      string
 	WorkspaceProblems []diagnostics.Diagnostic
-	SnapshotVersion   string
+	FactRevision      string
 	RulesLoaded       int
 	Warnings          []string
 }
 
 type publishedResult struct {
-	result       Result
-	request      Options
-	requestKey   string
-	observations observe.Set
-	reusable     bool
-	byFile       map[string][]int
-	unlocated    []int
+	result        Result
+	sourceDigests map[string]string
+	observations  observe.Set
+	reusable      bool
 }
 
-// effectiveOptions detaches the request and encodes every output-affecting
-// option before a reuse decision. Worker count and synchronization hooks are
-// execution details, not part of the result identity.
-func effectiveOptions(options Options) (Options, string, error) {
-	if options.RuleWorkers < 0 {
-		return Options{}, "", fmt.Errorf("rule workers must be zero or a positive integer")
-	}
-	var err error
-	if options.RepoRoot, err = filepath.Abs(options.RepoRoot); err != nil {
-		return Options{}, "", err
-	}
-	if options.WorkspaceRoot, err = filepath.Abs(options.WorkspaceRoot); err != nil {
-		return Options{}, "", err
-	}
-	if options.AssetRoot == "" {
-		options.AssetRoot = options.RepoRoot
-	}
-	if options.AssetRoot, err = filepath.Abs(options.AssetRoot); err != nil {
-		return Options{}, "", err
-	}
-	options.RepoRoot = filepath.Clean(options.RepoRoot)
-	options.WorkspaceRoot = filepath.Clean(options.WorkspaceRoot)
-	options.AssetRoot = filepath.Clean(options.AssetRoot)
-	if options.RulesLock != "" {
-		options.RulesLock = filepath.Clean(ResolveRulesLockPath(options.WorkspaceRoot, options.RulesLock))
-	}
-	if options.SuppressionsLocation != "" && !filepath.IsAbs(options.SuppressionsLocation) {
-		options.SuppressionsLocation = filepath.Join(options.WorkspaceRoot, options.SuppressionsLocation)
-	}
-	if options.SuppressionsLocation != "" {
-		options.SuppressionsLocation = filepath.Clean(options.SuppressionsLocation)
-	}
-	options.RuleGlobs = slices.Clone(options.RuleGlobs)
-	options.SuppressRules = slices.Clone(options.SuppressRules)
-	if options.Env == nil {
-		options.Env = map[string]any{}
-	}
-	environment, err := canonical.NormalizeStructured(options.Env)
-	if err != nil {
-		return Options{}, "", fmt.Errorf("environment: %w", err)
-	}
-	options.Env = environment.(map[string]any)
-	if options.Severity == "" {
-		options.Severity = diagnostics.SeverityError
-	}
-	if options.FactLimit <= 0 {
-		options.FactLimit = DefaultFactLimit
-	}
-	options.SetupSandbox, err = bundle.ParseSetupSandbox(string(options.SetupSandbox))
-	if err != nil {
-		return Options{}, "", err
-	}
-	severity := make(map[string]any, len(options.RuleSeverity))
-	copiedSeverity := make(map[string]diagnostics.Severity, len(options.RuleSeverity))
-	for id, value := range options.RuleSeverity {
-		severity[id] = string(value)
-		copiedSeverity[id] = value
-	}
-	options.RuleSeverity = copiedSeverity
-	identity, err := canonical.MarshalStructured([]any{
-		"lintai-request-v1", options.RepoRoot, options.AssetRoot, options.WorkspaceRoot,
-		options.RuleGlobs, options.Env, string(options.Severity), severity, options.FactLimit,
-		options.Explain, options.RulesLock, string(options.SetupSandbox), options.SuppressionsLocation,
-		options.SuppressAll, options.SuppressRules, options.PruneSuppressions,
-	})
-	if err != nil {
-		return Options{}, "", fmt.Errorf("request: %w", err)
-	}
-	return options, string(identity), nil
+// fileIndex groups the diagnostics of one completed result by document. It
+// is built once and read by every lookup of that result.
+type fileIndex struct {
+	root      string
+	byFile    map[string][]int
+	unlocated []int
 }
 
-func newPublishedResult(result Result, request Options, key string, observations observe.Set, reusable bool) *publishedResult {
-	request.beforeEvaluation, request.onDerivedFact, request.afterDispatch = nil, nil, nil
-	reusable = reusable && !request.SuppressAll && len(request.SuppressRules) == 0 && !request.PruneSuppressions
-	published := &publishedResult{result: result, request: request, requestKey: key, observations: observations, reusable: reusable, byFile: make(map[string][]int)}
+// normalizeConfig detaches the session policy and resolves its paths once.
+func normalizeConfig(config Config) (Config, error) {
+	if config.RuleWorkers < 0 {
+		return Config{}, fmt.Errorf("rule workers must be zero or a positive integer")
+	}
+	given, err := filepath.Abs(config.WorkspaceRoot)
+	if err != nil {
+		return Config{}, err
+	}
+	physical, err := workspace.PhysicalPath(given)
+	if err != nil {
+		return Config{}, fmt.Errorf("workspace root: %w", err)
+	}
+	if info, err := os.Stat(physical); err != nil {
+		return Config{}, fmt.Errorf("workspace root: %w", err)
+	} else if !info.IsDir() {
+		return Config{}, fmt.Errorf("workspace root %s is not a directory", given)
+	}
+	config.WorkspaceRoot = physical
+	if config.RulesLock != "" {
+		config.RulesLock = filepath.Clean(RebasePath(given, config.WorkspaceRoot, ResolveRulesLockPath(config.WorkspaceRoot, config.RulesLock)))
+	}
+	if config.SuppressionsLocation != "" {
+		config.SuppressionsLocation = filepath.Clean(RebasePath(given, config.WorkspaceRoot, ResolveRulesLockPath(config.WorkspaceRoot, config.SuppressionsLocation)))
+	}
+	if config.FactLimit <= 0 {
+		config.FactLimit = DefaultFactLimit
+	}
+	policies := make(map[string]RulePolicy, len(config.Rule))
+	for id, policy := range config.Rule {
+		if policy.Severity == "" {
+			policy.Severity = "error"
+		}
+		if _, err := diagnostics.ParseSeverity(policy.Severity); err != nil {
+			return Config{}, fmt.Errorf("rule %s: %w", id, err)
+		}
+		if policy.Options == nil {
+			policy.Options = map[string]any{}
+		}
+		raw, err := canonical.NormalizeStructured(policy.Options)
+		if err != nil {
+			return Config{}, fmt.Errorf("rule %s options: %w", id, err)
+		}
+		policy.Options = raw.(map[string]any)
+		policies[id] = policy
+	}
+	config.Rule = policies
+	return config, nil
+}
+
+func newPublishedResult(result Result, root string, sourceDigests map[string]string, observations observe.Set, reusable bool) *publishedResult {
+	index := &fileIndex{root: root, byFile: make(map[string][]int)}
+	for _, file := range result.AnalyzedFiles {
+		index.byFile[documentName(root, file)] = nil
+	}
 	for i, item := range result.Diagnostics {
 		if item.DiagnosticKind == diagnostics.KindRuleExecutionError {
-			published.reusable = false
+			reusable = false
 		}
 		if item.SourceLocation == nil {
-			published.unlocated = append(published.unlocated, i)
+			index.unlocated = append(index.unlocated, i)
 		} else {
-			file := publicationFileKey(request.WorkspaceRoot, item.SourceLocation.File)
-			published.byFile[file] = append(published.byFile[file], i)
+			file := documentName(root, item.SourceLocation.File)
+			index.byFile[file] = append(index.byFile[file], i)
 		}
 	}
-	return published
+	result.index = index
+	return &publishedResult{result: result, sourceDigests: sourceDigests, observations: observations, reusable: reusable}
 }
 
-func publicationFileKey(root, file string) string {
-	file = filepath.Clean(filepath.FromSlash(file))
-	if filepath.IsAbs(file) {
-		if relative, err := filepath.Rel(root, file); err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-			file = relative
+// verifiedSourceDigests keeps a document's digest only when every producer
+// that owns a reported range in it captured the same text. Otherwise the host
+// receives no digest and treats the group as unverified.
+func verifiedSourceDigests(result Result, root string, evidence *executionEvidence) map[string]string {
+	verified := maps.Clone(evidence.sourceDigests)
+	for _, item := range result.Diagnostics {
+		if item.SourceLocation == nil || item.EntityIdentity == nil {
+			continue
+		}
+		owner, anchored := evidence.anchorOwners[item.EntityIdentity.SemanticKey]
+		if !anchored {
+			continue
+		}
+		file := documentName(root, item.SourceLocation.File)
+		if _, captured := evidence.digestOwners[file][owner]; !captured {
+			delete(verified, file)
 		}
 	}
-	return strings.TrimPrefix(filepath.ToSlash(file), "/")
+	return verified
 }
 
-func (p *publishedResult) projectFiles(files []string) FilesResult {
+// documentName names a file under the physical workspace root: relative to
+// the root inside it, otherwise its clean absolute path, with forward slashes.
+// A relative name is based at the root.
+func documentName(root, file string) string {
+	name := filepath.Clean(filepath.FromSlash(file))
+	if !filepath.IsAbs(name) {
+		name = filepath.Join(root, name)
+	}
+	if relative, err := filepath.Rel(root, name); err == nil && filepath.IsLocal(relative) {
+		name = relative
+	}
+	return filepath.ToSlash(name)
+}
+
+func (p *publishedResult) group(file string) FileGroup {
+	index := p.result.index
+	group := FileGroup{File: file, Diagnostics: []diagnostics.Diagnostic{}}
+	indexes, captured := index.byFile[file]
+	if captured {
+		group.SourceDigest = p.sourceDigests[file]
+	}
+	for _, i := range indexes {
+		group.Diagnostics = append(group.Diagnostics, p.result.Diagnostics[i])
+	}
+	group.Diagnostics = cloneDiagnostics(group.Diagnostics)
+	return group
+}
+
+// project returns the named documents, or every document when all is set,
+// with the workspace problems of the publication.
+func (p *publishedResult) project(files []string, all bool) FilesResult {
+	index := p.result.index
+	if all {
+		files = slices.Sorted(maps.Keys(index.byFile))
+	}
 	result := FilesResult{
-		Diagnostics:     make([][]diagnostics.Diagnostic, len(files)),
-		SnapshotVersion: p.result.SnapshotVersion, RulesLoaded: p.result.RulesLoaded,
+		Files: make([]FileGroup, 0, len(files)), PhysicalRoot: index.root,
+		FactRevision: p.result.FactRevision, RulesLoaded: p.result.RulesLoaded,
 		Warnings: slices.Clone(p.result.Warnings),
 	}
-	for i, file := range files {
-		for _, index := range p.byFile[publicationFileKey(p.request.WorkspaceRoot, file)] {
-			result.Diagnostics[i] = append(result.Diagnostics[i], p.result.Diagnostics[index])
-		}
-		result.Diagnostics[i] = cloneDiagnostics(result.Diagnostics[i])
+	for _, file := range files {
+		result.Files = append(result.Files, p.group(file))
 	}
-	for _, index := range p.unlocated {
-		result.WorkspaceProblems = append(result.WorkspaceProblems, p.result.Diagnostics[index])
+	for _, i := range index.unlocated {
+		result.WorkspaceProblems = append(result.WorkspaceProblems, p.result.Diagnostics[i])
 	}
 	result.WorkspaceProblems = cloneDiagnostics(result.WorkspaceProblems)
 	return result

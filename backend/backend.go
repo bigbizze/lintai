@@ -15,15 +15,24 @@ type Producer interface {
 }
 
 type CollectionRequest struct {
-	RepoRoot      string
 	WorkspaceRoot string
 	Predicates    []facts.Predicate
 }
 
 type GenerationMetadata struct {
-	InputRevision            string
-	Scope                    any
-	AnalyzedFiles            []string
+	InputRevision string
+	Scope         any
+	AnalyzedFiles []string
+	// SourceDigests optionally identifies the immutable text used for file
+	// coordinates. Values are lowercase hex SHA-256 of decoded UTF-8 text
+	// after removing one leading BOM. Preserve line endings.
+	SourceDigests map[string]string
+	// Documents maps a file name this generation reports, in analyzed files,
+	// source digests or anchor locations, to the canonical absolute path of
+	// the document that supplied its text, recorded when the producer read
+	// it. A name without an entry is its own document under the workspace
+	// root. Non-file producers leave it empty.
+	Documents                map[string]string
 	Observations             observe.Set
 	ReusableFromObservations bool
 }

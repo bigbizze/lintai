@@ -6,12 +6,14 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/bigbizze/lintai/backend"
 	"github.com/bigbizze/lintai/backend/typescript"
 	"github.com/bigbizze/lintai/diagnostics"
+	"github.com/bigbizze/lintai/internal/testpack"
 	"github.com/bigbizze/lintai/observe"
 	"github.com/bigbizze/lintai/suppressions"
 )
@@ -59,17 +61,19 @@ func TestSuppressionProducerCoverage(t *testing.T) {
 	other := secondCoverageProducer()
 	writeTestFile(t, workspace, "lintai-rules/catalog.ts", parallelRuleSource("fixture.catalog", "Decl violation(Entity, Code). violation(Entity, Code) :- catalog.usable(Entity, Code).", "(row) => row.Code"))
 	writeTestFile(t, workspace, "lintai-rules/other.ts", parallelRuleSource("fixture.other", "Decl violation(Entity, Code). violation(Entity, Code) :- other.usable(Entity, Code).", "(row) => row.Code"))
-	session := Open(Options{}, catalog, other)
-	defer session.Close()
-	options := parallelFixtureOptions(repo, workspace)
-	options.SuppressAll = true
+	options := parallelFixtureOptions(t, repo, workspace)
 	options.RuleWorkers = 2
-	result, err := session.Check(context.Background(), options)
+	session := openTestSession(t, options, catalog, other)
+	result, err := session.UpdateSuppressions(context.Background(), SuppressionUpdate{All: true})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(result.Suppressed) != 6 {
 		t.Fatalf("recording: %+v", result.Diagnostics)
+	}
+	// The dependency finding of the first rule sorts before every other one.
+	if !slices.IsSortedFunc(result.Suppressed, compareDiagnostics) || result.Suppressed[0].SourceLocation.File != "../catalog/items.sql" {
+		t.Fatalf("suppressed findings are not in diagnostic order: %+v", result.Suppressed)
 	}
 	wantEntities := map[string]bool{
 		"catalog:item-a": false, "catalog:item-b": false, "catalog:item-c": false,
@@ -100,11 +104,11 @@ func TestSuppressionProducerCoverage(t *testing.T) {
 	nullSupport.Location.File = "../catalog/items.sql"
 	nullSupport.Tracking = nil
 	oneProducer.anchors["item-b"] = nullSupport
-	single := Open(Options{}, &coverageProducer{parallelFixtureProducer: oneProducer, revision: "catalog:1"}, secondCoverageProducer())
 	oneOptions := options
 	oneOptions.RuleWorkers = 1
 	oneOptions.SuppressionsLocation = "single-suppressions.json"
-	oneResult, err := single.Check(context.Background(), oneOptions)
+	single := openTestSession(t, oneOptions, &coverageProducer{parallelFixtureProducer: oneProducer, revision: "catalog:1"}, secondCoverageProducer())
+	oneResult, err := single.UpdateSuppressions(context.Background(), SuppressionUpdate{All: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +119,7 @@ func TestSuppressionProducerCoverage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(originalBytes, oneBytes) || !reflect.DeepEqual(result.Suppressed, oneResult.Suppressed) || result.SnapshotVersion != oneResult.SnapshotVersion {
+	if !bytes.Equal(originalBytes, oneBytes) || !reflect.DeepEqual(result.Suppressed, oneResult.Suppressed) || result.FactRevision != oneResult.FactRevision {
 		t.Fatal("one and multiple workers disagree on saved groups or decisions")
 	}
 	saved, err := suppressions.Load(path)
@@ -134,8 +138,7 @@ func TestSuppressionProducerCoverage(t *testing.T) {
 	if !foundNull || !foundKey {
 		t.Fatalf("missing producer support: %+v", saved)
 	}
-	options.SuppressAll = false
-	matched, err := session.Check(context.Background(), options)
+	matched, err := session.Check(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,9 +154,9 @@ func TestSuppressionProducerCoverage(t *testing.T) {
 	if !matchedDependency {
 		t.Fatalf("dependency finding was not matched by its saved allowance: %+v", matched.Suppressed)
 	}
-	options.SuppressAll = false
-	options.Severity = diagnostics.SeverityWarning
-	warningResult, err := session.Check(context.Background(), options)
+	warningOptions := options
+	warningOptions.Rule = map[string]RulePolicy{"fixture.catalog": {Severity: "warning"}, "fixture.other": {Severity: "warning"}}
+	warningResult, err := openTestSession(t, warningOptions, catalog, other).Check(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,12 +168,9 @@ func TestSuppressionProducerCoverage(t *testing.T) {
 			t.Fatalf("unexpected severity: %+v", item)
 		}
 	}
-	options.Severity = diagnostics.SeverityError
 	catalog.rows = nil
 	catalog.revision = "catalog:2"
-	options.SuppressAll = false
-	options.PruneSuppressions = true
-	result, err = session.Check(context.Background(), options)
+	result, err = session.UpdateSuppressions(context.Background(), SuppressionUpdate{Prune: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +186,7 @@ func TestSuppressionProducerCoverage(t *testing.T) {
 	}
 	catalog.files = []string{"catalog/items.sql"}
 	catalog.revision = "catalog:3"
-	_, err = session.Check(context.Background(), options)
+	_, err = session.UpdateSuppressions(context.Background(), SuppressionUpdate{Prune: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -206,6 +206,29 @@ func TestSuppressionProducerCoverage(t *testing.T) {
 	if !dependencyEntry {
 		t.Fatalf("dependency allowance did not survive primary-file pruning: %+v", after)
 	}
+	// Coverage named by absolute paths prunes allowances whose findings use
+	// the equivalent relative names.
+	catalog.rows, catalog.revision = oneProducer.rows, "catalog:4"
+	if _, err := session.UpdateSuppressions(context.Background(), SuppressionUpdate{All: true}); err != nil {
+		t.Fatal(err)
+	}
+	physical, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog.rows, catalog.revision = nil, "catalog:5"
+	catalog.files = []string{filepath.ToSlash(filepath.Join(physical, "catalog/items.sql")), filepath.ToSlash(filepath.Join(physical, "../catalog/items.sql"))}
+	if _, err := session.UpdateSuppressions(context.Background(), SuppressionUpdate{Prune: true}); err != nil {
+		t.Fatal(err)
+	}
+	catalog.rows, catalog.revision = oneProducer.rows, "catalog:6"
+	reintroduced, err := session.Check(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reintroduced.Diagnostics) != 3 {
+		t.Fatalf("absolute coverage did not prune relative allowances: %+v", reintroduced.Diagnostics)
+	}
 }
 
 // V23, V25, V30, V39: a concurrent edit or cancellation blocks the guarded
@@ -217,11 +240,10 @@ func TestSavedWriteGuards(t *testing.T) {
 	}
 	workspace := t.TempDir()
 	writeTestFile(t, workspace, "lintai-rules/r.ts", parallelRuleSource("fixture.guard", "Decl violation(Entity, Code). violation(Entity, Code) :- catalog.usable(Entity, Code).", "(row) => row.Code"))
-	session := Open(Options{}, newParallelFixtureProducer())
-	defer session.Close()
-	options := parallelFixtureOptions(repo, workspace)
-	options.SuppressAll = true
-	if _, err := session.Check(context.Background(), options); err != nil {
+	producer := newParallelFixtureProducer()
+	options := parallelFixtureOptions(t, repo, workspace)
+	session := openTestSession(t, options, producer)
+	if _, err := session.UpdateSuppressions(context.Background(), SuppressionUpdate{All: true}); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(workspace, suppressions.DefaultFile)
@@ -230,13 +252,12 @@ func TestSavedWriteGuards(t *testing.T) {
 		t.Fatal(err)
 	}
 	changed := append(append([]byte(nil), original...), '\n')
-	options.Explain = true
-	options.afterDispatch = func() {
+	session.hooks.afterDispatch = func() {
 		if err := os.WriteFile(path, changed, 0o644); err != nil {
 			t.Error(err)
 		}
 	}
-	if _, err := session.Check(context.Background(), options); err == nil || !strings.Contains(err.Error(), "suppression_changed") {
+	if _, err := session.UpdateSuppressions(context.Background(), SuppressionUpdate{All: true}); err == nil || !strings.Contains(err.Error(), "suppression_changed") {
 		t.Fatalf("expected suppression_changed: %v", err)
 	}
 	current, err := os.ReadFile(path)
@@ -244,34 +265,26 @@ func TestSavedWriteGuards(t *testing.T) {
 		t.Fatalf("concurrent edit lost: %v", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	options.afterDispatch = cancel
-	if _, err := session.Check(ctx, options); err == nil {
+	session.hooks.afterDispatch = cancel
+	if _, err := session.UpdateSuppressions(ctx, SuppressionUpdate{All: true}); err == nil {
 		t.Fatal("cancelled check succeeded")
 	}
 	current, err = os.ReadFile(path)
 	if err != nil || !bytes.Equal(current, changed) {
 		t.Fatalf("cancelled check wrote suppression: %v", err)
 	}
-	options.afterDispatch = nil
-	options.SuppressAll = false
-	lock, _, err := BuildRulesLock(context.Background(), options)
-	if err != nil {
-		t.Fatal(err)
-	}
+	session.hooks.afterDispatch = nil
 	lockPath := filepath.Join(workspace, DefaultRulesLockFile)
 	cancelledLock, cancelLock := context.WithCancel(context.Background())
-	cancelLock()
-	if err := WriteRulesLock(cancelledLock, lockPath, lock); err == nil {
+	session.hooks.beforeWrite = cancelLock
+	if _, err := session.ApproveRules(cancelledLock, ""); err == nil {
 		t.Fatal("cancelled lock write succeeded")
 	}
 	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
 		t.Fatalf("cancelled lock write left a file: %v", err)
 	}
-	if err := WriteRulesLock(context.Background(), lockPath, lock); err != nil {
-		t.Fatal(err)
-	}
-	lock, _, err = BuildRulesLock(context.Background(), options)
-	if err != nil {
+	session.hooks.beforeWrite = nil
+	if _, err := session.ApproveRules(context.Background(), ""); err != nil {
 		t.Fatal(err)
 	}
 	before, err := os.ReadFile(lockPath)
@@ -279,10 +292,12 @@ func TestSavedWriteGuards(t *testing.T) {
 		t.Fatal(err)
 	}
 	external := append(append([]byte(nil), before...), '\n')
-	if err := os.WriteFile(lockPath, external, 0o644); err != nil {
-		t.Fatal(err)
+	session.hooks.beforeWrite = func() {
+		if err := os.WriteFile(lockPath, external, 0o644); err != nil {
+			t.Error(err)
+		}
 	}
-	if err := WriteRulesLock(context.Background(), lockPath, lock); err == nil || !strings.Contains(err.Error(), "rules_lock_changed") {
+	if _, err := session.ApproveRules(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "rules_lock_changed") {
 		t.Fatalf("expected rules_lock_changed: %v", err)
 	}
 	current, err = os.ReadFile(lockPath)
@@ -290,38 +305,35 @@ func TestSavedWriteGuards(t *testing.T) {
 		t.Fatalf("lock edit lost: %v", err)
 	}
 	// A locked suppression update also verifies that approval stayed current.
-	options.SuppressAll = true
-	options.RulesLock = DefaultRulesLockFile
-	options.afterDispatch = func() {
+	lockedOptions := options
+	lockedOptions.RulesLock = DefaultRulesLockFile
+	locked := openTestSession(t, lockedOptions, producer)
+	locked.hooks.afterDispatch = func() {
 		if err := os.WriteFile(lockPath, append(external, '\n'), 0o644); err != nil {
 			t.Error(err)
 		}
 	}
-	if _, err := session.Check(context.Background(), options); err == nil || !strings.Contains(err.Error(), "rules_lock_changed") {
+	if _, err := locked.UpdateSuppressions(context.Background(), SuppressionUpdate{All: true}); err == nil || !strings.Contains(err.Error(), "rules_lock_changed") {
 		t.Fatalf("approval edit must block write: %v", err)
 	}
 	current, err = os.ReadFile(path)
 	if err != nil || !bytes.Equal(current, changed) {
 		t.Fatalf("approval edit allowed a suppression write: %v", err)
 	}
-	options.SuppressAll = false
-	options.RulesLock = ""
-	options.afterDispatch = nil
-	lock, _, err = BuildRulesLock(context.Background(), options)
-	if err != nil {
-		t.Fatal(err)
+	session.hooks.beforeWrite = func() {
+		if err := os.WriteFile(path, append(changed, '\n'), 0o644); err != nil {
+			t.Error(err)
+		}
 	}
-	if err := os.WriteFile(path, append(changed, '\n'), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := WriteRulesLock(context.Background(), lockPath, lock); err == nil || !strings.Contains(err.Error(), "suppression_changed") {
+	if _, err := session.ApproveRules(context.Background(), ""); err == nil || !strings.Contains(err.Error(), "suppression_changed") {
 		t.Fatalf("suppression edit must block lock write: %v", err)
 	}
-	if err := os.WriteFile(lockPath, []byte(`{"version":2,"rules":{}}`), 0o644); err != nil {
+	session.hooks.beforeWrite = nil
+	if err := os.WriteFile(lockPath, []byte(`{"format":"lintai.rules-lock/2","rules":{}}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := BuildRulesLock(context.Background(), options); err == nil {
-		t.Fatal("accepted unknown lock format")
+	if _, err := session.ApproveRules(context.Background(), ""); err != nil {
+		t.Fatal("explicit approval should replace obsolete format")
 	}
 }
 
@@ -348,9 +360,8 @@ func TestSuppressionPolicyValidation(t *testing.T) {
 			source := parallelRuleSource("fixture.policy", "Decl violation(Entity, Code). violation(Entity, Code) :- catalog.usable(Entity, Code).", "(row) => row.Code")
 			source = strings.Replace(source, `.report("violation").message(`, `.report("violation")`+tc.policy+`.message(`, 1)
 			writeTestFile(t, workspace, "lintai-rules/r.ts", source)
-			session := Open(Options{}, newParallelFixtureProducer())
-			defer session.Close()
-			result, err := session.Check(context.Background(), parallelFixtureOptions(repo, workspace))
+			session := openTestSession(t, parallelFixtureOptions(t, repo, workspace), newParallelFixtureProducer())
+			result, err := session.Check(context.Background())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -380,12 +391,10 @@ func TestSuppressionPolicyValidationOnPlanReuse(t *testing.T) {
 			`.report("violation").suppression("violation", `+policy+`).message(`, 1)
 		paths[kind] = writeTestFile(t, rules, kind+".ts", source)
 	}
-	options := Options{RepoRoot: repo, AssetRoot: filepath.Join(repo, "packages", "client"),
-		WorkspaceRoot: workspace, RuleGlobs: []string{filepath.Join(rules, "*.ts")}, RuleWorkers: 1}
-	session := Open(options, typescript.New(typescript.Options{Files: typescript.FileScopeWalk}))
+	options := Config{WorkspaceRoot: testpack.Build(t, repo, workspace, filepath.Join(rules, "*.ts")), RuleWorkers: 1}
+	session := openTestSession(t, options, typescript.New(typescript.Options{Files: typescript.FileScopeWalk}))
 	defer session.Close()
 	var template *rulePlan
-	var firstCompiles int64
 	for check := 0; check < 2; check++ {
 		result, err := session.Check(context.Background())
 		if err != nil {
@@ -405,18 +414,17 @@ func TestSuppressionPolicyValidationOnPlanReuse(t *testing.T) {
 		if valid := byRule["fixture.policy-valid"]; valid.AssertionID != "violation" || valid.Message != "finding" || valid.Phase != "" {
 			t.Errorf("check %d: valid finding was lost: %+v", check, valid)
 		}
-		entry := session.ruleEntries[paths["valid"]]
-		if entry.plan == nil || entry.plan.ruleFacts != nil || len(entry.plan.suppressionRules) != 0 {
-			t.Fatal("retained plan contains per-run facts or policies")
+		entry := session.ruleEntries["rules/valid.ts"]
+		if entry.plan == nil || entry.plan.ruleFacts == nil || len(entry.plan.suppressionRules) != 1 {
+			t.Fatal("retained plan is missing facts or the validated suppression policy")
 		}
-		if session.ruleEntries[paths["invalid"]].plan != nil {
+		if session.ruleEntries["rules/invalid.ts"].plan != nil {
 			t.Fatal("invalid suppression policy retained a plan")
 		}
-		compiles := session.executionObservation().mangleCompiles
 		if check == 0 {
-			template, firstCompiles = entry.plan, compiles
-		} else if entry.plan != template || compiles != firstCompiles+1 {
-			t.Errorf("valid plan was not reused or invalid plan was not retried: first=%d warm=%d", firstCompiles, compiles)
+			template = entry.plan
+		} else if entry.plan != template {
+			t.Error("valid plan was not reused")
 		}
 	}
 	validSource, err := os.ReadFile(paths["valid"])
@@ -430,8 +438,9 @@ func TestSuppressionPolicyValidationOnPlanReuse(t *testing.T) {
 	if err := os.WriteFile(paths["valid"], []byte(invalidSource), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	testpack.Build(t, repo, workspace, filepath.Join(rules, "*.ts"))
 	result, err := session.Check(context.Background())
-	if err != nil || len(result.Diagnostics) != 2 || session.executionObservation().mangleCompiles != firstCompiles+3 {
+	if err != nil || len(result.Diagnostics) != 2 {
 		t.Fatalf("changed suppression declaration did not compile and fail independently: %+v %v", result.Diagnostics, err)
 	}
 	for _, diagnostic := range result.Diagnostics {
@@ -439,7 +448,7 @@ func TestSuppressionPolicyValidationOnPlanReuse(t *testing.T) {
 			t.Fatalf("invalid declaration was accepted: %+v", diagnostic)
 		}
 	}
-	if session.ruleEntries[paths["valid"]].plan != template {
+	if session.ruleEntries["rules/valid.ts"].plan != template {
 		t.Fatal("failed compilation replaced the last valid template")
 	}
 }

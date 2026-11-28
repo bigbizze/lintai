@@ -7,9 +7,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"codeberg.org/TauCeti/mangle-go/ast"
 	"codeberg.org/TauCeti/mangle-go/factstore"
@@ -22,9 +24,9 @@ import (
 )
 
 type composedFacts struct {
+	sourceDigests            map[string]string
+	digestOwners             map[string]map[string]struct{}
 	base                     factstore.ReadOnlyFactStore
-	sources                  []parse.SourceUnit
-	schemaDecls              map[ast.PredicateSym]ast.Decl
 	anchors                  map[string]facts.AnchorSupport
 	anchorOwners             map[string]string
 	producerFiles            map[string]map[string]struct{}
@@ -51,13 +53,22 @@ type producerCatalog struct {
 	identity    string
 }
 
-// describeProducers constructs the validated catalog without collecting any
+// An interface holding a nil producer or generation pointer is non-nil.
+func nilImplementation(value any) bool {
+	v := reflect.ValueOf(value)
+	return !v.IsValid() || v.Kind() == reflect.Pointer && v.IsNil()
+}
+
+// bindProducers constructs the validated catalog without collecting any
 // source facts. Rule programs use this view to determine the exact producer
 // relations they need before extraction begins.
-func (e *Session) describeProducers() (producerCatalog, error) {
-	entries := make([]producerEntry, 0, len(e.producers))
-	owned := make(map[string]struct{}, len(e.producers))
-	for _, producer := range e.producers {
+func bindProducers(producers []backend.Producer) (producerCatalog, error) {
+	entries := make([]producerEntry, 0, len(producers))
+	owned := make(map[string]struct{}, len(producers))
+	for _, producer := range producers {
+		if nilImplementation(producer) {
+			return producerCatalog{}, fmt.Errorf("nil producer")
+		}
 		description, err := producer.Describe()
 		if err != nil {
 			return producerCatalog{}, fmt.Errorf("describe producer: %w", err)
@@ -76,10 +87,8 @@ func (e *Session) describeProducers() (producerCatalog, error) {
 
 	var sourceUnits []parse.SourceUnit
 	schemaDecls := make(map[ast.PredicateSym]ast.Decl)
-	identityRecords := make([]any, 0, len(entries)+1)
 	for _, entry := range entries {
 		description := entry.description
-		identityRecords = append(identityRecords, description)
 		declarations, err := namespacedUnit(description.Schema.Declarations, description.Namespace)
 		if err != nil {
 			return producerCatalog{}, fmt.Errorf("producer %q declarations: %w", description.Namespace, err)
@@ -119,45 +128,57 @@ func (e *Session) describeProducers() (producerCatalog, error) {
 		copy.DeclaredAtom.Predicate = key
 		schemaDecls[key] = copy
 	}
-	engineSchemaRaw, err := json.Marshal(engineSchemaSource)
+	identity, err := catalogIdentity(entries, "")
 	if err != nil {
-		return producerCatalog{}, fmt.Errorf("engine schema identity: %w", err)
+		return producerCatalog{}, err
 	}
-	identityRecords = append(identityRecords, string(engineSchemaRaw))
-	identityRaw, err := json.Marshal(identityRecords)
-	if err != nil {
-		return producerCatalog{}, fmt.Errorf("producer catalog identity: %w", err)
-	}
-	identityHash := sha256.Sum256(identityRaw)
-
 	namespaces := make([]string, 0, len(entries))
 	for _, entry := range entries {
 		namespaces = append(namespaces, entry.description.Namespace)
 	}
 	return producerCatalog{
 		entries: entries, sources: sourceUnits, schemaDecls: schemaDecls, namespaces: namespaces,
-		identity: hex.EncodeToString(identityHash[:]),
+		identity: identity,
 	}, nil
+}
+
+// The compiled plan uses the bound descriptions. Approval additionally resolves
+// project path settings relative to the workspace owning the operation.
+func catalogIdentity(entries []producerEntry, approvalRoot string) (string, error) {
+	identityRecords := make([]any, 0, len(entries)+1)
+	for _, entry := range entries {
+		description := entry.description
+		if approvalRoot != "" && description.ImplementationID == "lintai.typescript" {
+			config, err := typeScriptPolicyConfig(approvalRoot, description.EffectiveConfiguration)
+			if err != nil {
+				return "", err
+			}
+			description.EffectiveConfiguration = config
+		}
+		identityRecords = append(identityRecords, description)
+	}
+	identityRecords = append(identityRecords, engineSchemaSource)
+	identityRaw, err := json.Marshal(identityRecords)
+	if err != nil {
+		return "", fmt.Errorf("producer catalog identity: %w", err)
+	}
+	identityHash := sha256.Sum256(identityRaw)
+
+	return hex.EncodeToString(identityHash[:]), nil
 }
 
 // Schema renders the configured catalog descriptions and engine helpers
 // without collecting producer source facts.
 func (e *Session) Schema(ctx context.Context) (string, error) {
-	e.checkMu.Lock()
-	defer e.checkMu.Unlock()
 	checkCtx, finish, err := e.beginCheck(ctx)
 	if err != nil {
 		return "", err
 	}
 	defer finish()
-	catalog, err := e.describeProducers()
-	if err != nil {
-		return "", err
-	}
 	if err := checkCtx.Err(); err != nil {
 		return "", err
 	}
-	return catalog.schema(), nil
+	return e.catalog.schema(), nil
 }
 
 func (catalog producerCatalog) schema() string {
@@ -197,15 +218,18 @@ func withoutPackageDeclaration(source string) string {
 }
 
 // collect prepares selected generations, establishes identity, then emits only on a miss.
-func (catalog producerCatalog) collect(ctx context.Context, options Options, requestedByNamespace map[string]map[facts.Predicate]struct{}, current *composedFacts, mode observe.Mode) (composedFacts, error) {
+func (catalog producerCatalog) collect(ctx context.Context, root string, requestedByNamespace map[string]map[facts.Predicate]struct{}, current *composedFacts, mode observe.Mode) (composedFacts, error) {
 	type prepared struct {
 		entry      producerEntry
 		requested  []facts.Predicate
 		generation backend.Generation
 		metadata   backend.GenerationMetadata
+		documents  documents
 	}
 	preparedGenerations := make([]prepared, 0, len(catalog.entries))
 	records := make([]any, 0, len(catalog.entries))
+	sourceDigests := make(map[string]string)
+	digestOwners := make(map[string]map[string]struct{})
 	var observations []observe.Set
 	reusable := true
 	for _, entry := range catalog.entries {
@@ -229,27 +253,32 @@ func (catalog producerCatalog) collect(ctx context.Context, options Options, req
 			}
 			return requested[i].Arity < requested[j].Arity
 		})
-		generation, err := entry.producer.Prepare(ctx, backend.CollectionRequest{RepoRoot: options.RepoRoot, WorkspaceRoot: options.WorkspaceRoot, Predicates: slices.Clone(requested)}, mode)
+		generation, err := entry.producer.Prepare(ctx, backend.CollectionRequest{WorkspaceRoot: root, Predicates: slices.Clone(requested)}, mode)
 		if err != nil {
 			return composedFacts{}, fmt.Errorf("prepare producer %q: %w", description.Namespace, err)
 		}
-		if generation == nil {
+		if nilImplementation(generation) {
 			return composedFacts{}, fmt.Errorf("producer %q returned a nil generation", description.Namespace)
 		}
-		metadata, err := captureGenerationMetadata(generation.Metadata())
+		preparedGenerations = append(preparedGenerations, prepared{entry: entry, requested: requested, generation: generation, metadata: generation.Metadata()})
+	}
+	for i := range preparedGenerations {
+		item := &preparedGenerations[i]
+		namespace := item.entry.description.Namespace
+		metadata, documents, err := captureGenerationMetadata(item.metadata, root, namespace, sourceDigests, digestOwners)
 		if err != nil {
-			return composedFacts{}, fmt.Errorf("producer %q generation metadata: %w", description.Namespace, err)
+			return composedFacts{}, fmt.Errorf("producer %q generation metadata: %w", namespace, err)
 		}
+		item.metadata, item.documents = metadata, documents
 		observations = append(observations, metadata.Observations)
 		reusable = reusable && metadata.ReusableFromObservations
-		predicates := make([]any, len(requested))
-		for i, predicate := range requested {
-			predicates[i] = []any{predicate.Name, predicate.Arity}
+		predicates := make([]any, len(item.requested))
+		for j, predicate := range item.requested {
+			predicates[j] = []any{predicate.Name, predicate.Arity}
 		}
-		records = append(records, []any{description.Namespace, description.ImplementationID, description.ImplementationStamp, description.ContractVersion, description.EffectiveConfiguration, metadata.InputRevision, metadata.Scope, predicates})
-		preparedGenerations = append(preparedGenerations, prepared{entry, requested, generation, metadata})
+		records = append(records, []any{namespace, metadata.InputRevision, metadata.Scope, predicates})
 	}
-	encoded, err := canonical.MarshalStructured([]any{"lintai-facts-v3", catalog.identity, records})
+	encoded, err := canonical.MarshalStructured([]any{"lintai-facts-v4", catalog.identity, records})
 	if err != nil {
 		return composedFacts{}, fmt.Errorf("snapshot identity: %w", err)
 	}
@@ -258,6 +287,7 @@ func (catalog producerCatalog) collect(ctx context.Context, options Options, req
 	captured := observe.Union(observations...)
 	if current != nil && current.snapshotID == snapshotID {
 		reused := *current
+		reused.sourceDigests, reused.digestOwners = sourceDigests, digestOwners
 		reused.observations, reused.reusableFromObservations = captured, reusable
 		return reused, nil
 	}
@@ -294,50 +324,95 @@ func (catalog producerCatalog) collect(ctx context.Context, options Options, req
 			}
 		}
 		for id, support := range validated.Anchors() {
+			support.Location.File = item.documents.name(support.Location.File)
 			anchors[id] = support
 			anchorOwners[id] = namespace
 		}
 		producerFiles[namespace] = make(map[string]struct{})
 		for _, file := range item.metadata.AnalyzedFiles {
 			analyzedFiles[file] = struct{}{}
-			producerFiles[namespace][file] = struct{}{}
+			producerFiles[namespace][documentName(root, file)] = struct{}{}
 		}
 	}
-	return composedFacts{base: base, sources: catalog.sources, schemaDecls: catalog.schemaDecls, anchors: anchors, anchorOwners: anchorOwners, producerFiles: producerFiles, reportable: reportable, factCounts: factCounts, analyzedFiles: analyzedFiles, namespaces: namespaces, snapshotID: snapshotID, observations: captured, reusableFromObservations: reusable}, nil
+	return composedFacts{sourceDigests: sourceDigests, digestOwners: digestOwners, base: base, anchors: anchors, anchorOwners: anchorOwners, producerFiles: producerFiles, reportable: reportable, factCounts: factCounts, analyzedFiles: analyzedFiles, namespaces: namespaces, snapshotID: snapshotID, observations: captured, reusableFromObservations: reusable}, nil
 }
 
-func captureGenerationMetadata(metadata backend.GenerationMetadata) (backend.GenerationMetadata, error) {
+// documents replaces each file name a generation reports with the name of
+// the document the producer declared for it. Other names stay as reported.
+type documents struct {
+	root     string
+	declared map[string]string
+}
+
+func (d documents) name(file string) string {
+	if document, ok := d.declared[documentName(d.root, file)]; ok {
+		return document
+	}
+	return file
+}
+
+// captureGenerationMetadata records each source digest under its document
+// together with the producer that captured it, so projection can verify a
+// range only against text its own producer observed. Two producers that claim
+// different text for one document are rejected.
+func captureGenerationMetadata(metadata backend.GenerationMetadata, root, namespace string, sourceDigests map[string]string, digestOwners map[string]map[string]struct{}) (backend.GenerationMetadata, documents, error) {
+	docs := documents{root: root, declared: make(map[string]string, len(metadata.Documents))}
 	if metadata.InputRevision == "" {
-		return backend.GenerationMetadata{}, fmt.Errorf("input revision is empty")
+		return backend.GenerationMetadata{}, docs, fmt.Errorf("input revision is empty")
 	}
 	scope, err := canonical.NormalizeStructured(metadata.Scope)
 	if err != nil {
-		return backend.GenerationMetadata{}, fmt.Errorf("scope: %w", err)
+		return backend.GenerationMetadata{}, docs, fmt.Errorf("scope: %w", err)
 	}
 	metadata.Scope = scope
+	for file, document := range metadata.Documents {
+		if _, err := generationFilePath(file); err != nil {
+			return backend.GenerationMetadata{}, docs, err
+		}
+		if _, err := generationFilePath(document); err != nil || !filepath.IsAbs(filepath.FromSlash(document)) {
+			return backend.GenerationMetadata{}, docs, fmt.Errorf("document of %q is not an absolute path: %q", file, document)
+		}
+		docs.declared[documentName(root, file)] = documentName(root, document)
+	}
+	metadata.Documents = nil
+	for file, digest := range metadata.SourceDigests {
+		if _, err := generationFilePath(file); err != nil {
+			return backend.GenerationMetadata{}, docs, err
+		}
+		if _, err := hex.DecodeString(digest); err != nil || len(digest) != 2*sha256.Size || digest != strings.ToLower(digest) {
+			return backend.GenerationMetadata{}, docs, fmt.Errorf("invalid source digest for %q", file)
+		}
+		key := documentName(root, docs.name(file))
+		if previous, exists := sourceDigests[key]; exists && previous != digest {
+			return backend.GenerationMetadata{}, docs, fmt.Errorf("conflicting source identities for %q", key)
+		}
+		sourceDigests[key] = digest
+		if digestOwners[key] == nil {
+			digestOwners[key] = make(map[string]struct{})
+		}
+		digestOwners[key][namespace] = struct{}{}
+	}
+	// Digests now belong to the composition. Drop the producer-owned map.
+	metadata.SourceDigests = nil
 	files := make([]string, 0, len(metadata.AnalyzedFiles))
 	for _, file := range metadata.AnalyzedFiles {
-		if file == "" {
-			return backend.GenerationMetadata{}, fmt.Errorf("analyzed path is empty")
+		file, err := generationFilePath(file)
+		if err != nil {
+			return backend.GenerationMetadata{}, docs, err
 		}
-		file = filepath.ToSlash(filepath.Clean(filepath.FromSlash(file)))
-		if file == "." || file == "/" {
-			return backend.GenerationMetadata{}, fmt.Errorf("invalid analyzed path %q", file)
-		}
-		files = append(files, file)
+		files = append(files, docs.name(file))
 	}
 	sort.Strings(files)
 	metadata.AnalyzedFiles = slices.Compact(files)
-	return metadata, nil
+	return metadata, docs, nil
 }
 
-func emptyComposedFacts() (composedFacts, error) {
-	encoded, err := canonical.MarshalStructured([]any{"lintai-facts-v3", "", []any{}})
-	if err != nil {
-		return composedFacts{}, err
+func generationFilePath(file string) (string, error) {
+	clean := filepath.Clean(filepath.FromSlash(file))
+	if !utf8.ValidString(file) || strings.ContainsRune(file, 0) || clean == filepath.Dir(clean) {
+		return "", fmt.Errorf("invalid generation file path %q", file)
 	}
-	digest := sha256.Sum256(encoded)
-	return composedFacts{base: factstore.NewMultiIndexedArrayInMemoryStore(), schemaDecls: make(map[ast.PredicateSym]ast.Decl), anchors: make(map[string]facts.AnchorSupport), reportable: make(map[facts.Predicate]map[string]struct{}), factCounts: make(map[ast.PredicateSym]int), analyzedFiles: make(map[string]struct{}), snapshotID: "sha256:" + hex.EncodeToString(digest[:])}, nil
+	return filepath.ToSlash(clean), nil
 }
 
 const engineSchemaSource = `Package lintai!
@@ -356,10 +431,8 @@ func catalogForRule(catalog []parse.SourceUnit, rule parse.SourceUnit, roots []s
 		pkg         string
 	}
 	byHead := make(map[string][]clauseRef)
-	pkgNames := make([]string, len(catalog))
 	for unitIndex, unit := range catalog {
 		pkg := sourcePackageName(unit)
-		pkgNames[unitIndex] = pkg
 		for clauseIndex, clause := range unit.Clauses {
 			byHead[qualifyPredicate(pkg, clause.Head.Predicate.Symbol)] = append(byHead[qualifyPredicate(pkg, clause.Head.Predicate.Symbol)], clauseRef{unitIndex: unitIndex, clauseIndex: clauseIndex, clause: clause, pkg: pkg})
 		}

@@ -30,6 +30,7 @@ type capturedFile struct {
 }
 
 type capturedDirectory struct {
+	missing     bool
 	files       []string
 	directories []string
 	symlinks    []string
@@ -40,32 +41,22 @@ type capturedDirectory struct {
 // generation. Bundled lib files are covered by the implementation stamp.
 type resolutionInputFS struct {
 	vfs.FS
-	mu         sync.Mutex
-	statInfo   map[string]vfs.FileInfo
-	resolved   map[string]tspath.RootedPath
-	captureErr error
-	*compilerInputObservations
-	missingDirectories map[string]struct{}
-}
-
-// compilerInputObservations is the one captured-input model, transferred
-// from the compiler filesystem to detached validity evidence after extraction.
-type compilerInputObservations struct {
-	reads       map[string]capturedFile
-	fileProbes  map[string]bool
-	dirProbes   map[string]bool
-	stats       map[string]string
-	directories map[string]capturedDirectory
-	realpaths   map[string]string
+	mu                    sync.Mutex
+	captureErr            error
+	reads                 map[string]capturedFile
+	fileProbes, dirProbes map[string]bool
+	stats                 map[string]vfs.FileInfo
+	directories           map[string]capturedDirectory
+	// An empty path records a failed resolution. The compiler receives the
+	// original path in that case, while validation checks for its appearance.
+	realpaths map[string]string
 }
 
 func trackResolutionInputs(fs vfs.FS) *resolutionInputFS {
 	return &resolutionInputFS{
-		FS: fs, statInfo: make(map[string]vfs.FileInfo), resolved: make(map[string]tspath.RootedPath), missingDirectories: make(map[string]struct{}), compilerInputObservations: &compilerInputObservations{
-			reads: make(map[string]capturedFile), fileProbes: make(map[string]bool),
-			dirProbes: make(map[string]bool), stats: make(map[string]string),
-			directories: make(map[string]capturedDirectory), realpaths: make(map[string]string),
-		},
+		FS: fs, reads: make(map[string]capturedFile), fileProbes: make(map[string]bool),
+		dirProbes: make(map[string]bool), stats: make(map[string]vfs.FileInfo),
+		directories: make(map[string]capturedDirectory), realpaths: make(map[string]string),
 	}
 }
 
@@ -97,7 +88,12 @@ func (fsys *resolutionInputFS) ReadFile(path tspath.RootedFilePath) (string, boo
 	if captured, ok := fsys.reads[key]; ok {
 		return captured.contents, captured.exists
 	}
+	// The text is read through its resolved path, which also names the
+	// document that supplied it.
 	file := filepath.FromSlash(key)
+	if actual := fsys.resolve(key); actual != "" {
+		file = actual
+	}
 	before, statErr := os.Stat(file)
 	observed := time.Now()
 	raw, err := os.ReadFile(file)
@@ -134,14 +130,13 @@ func isMissing(err error) bool {
 // second filesystem read or changing the bytes used for observation identity.
 func decodeCompilerBytes(raw []byte) string {
 	if len(raw) >= 2 && (raw[0] == 0xff && raw[1] == 0xfe || raw[0] == 0xfe && raw[1] == 0xff) {
-		order := binary.LittleEndian
+		var order binary.ByteOrder = binary.LittleEndian
+		if raw[0] == 0xfe {
+			order = binary.BigEndian
+		}
 		values := make([]uint16, (len(raw)-2)/2)
 		for i := range values {
-			if raw[0] == 0xff {
-				values[i] = order.Uint16(raw[2+i*2:])
-			} else {
-				values[i] = binary.BigEndian.Uint16(raw[2+i*2:])
-			}
+			values[i] = order.Uint16(raw[2+i*2:])
 		}
 		return string(utf16.Decode(values))
 	}
@@ -179,13 +174,10 @@ func (fsys *resolutionInputFS) GetAccessibleEntries(path tspath.RootedDirectoryP
 	if captured, ok := fsys.directories[key]; ok {
 		return captured.entries()
 	}
-	if _, missing := fsys.missingDirectories[key]; missing {
-		return vfs.Entries{Symlinks: map[string]struct{}{}}
-	}
 	entries, err := os.ReadDir(filepath.FromSlash(key))
 	if err != nil {
 		if isMissing(err) {
-			fsys.missingDirectories[key] = struct{}{}
+			fsys.directories[key] = capturedDirectory{missing: true}
 		} else {
 			fsys.captureErr = fmt.Errorf("read compiler directory %s: %w", key, err)
 		}
@@ -225,17 +217,14 @@ func (fsys *resolutionInputFS) Stat(path tspath.RootedPath) vfs.FileInfo {
 	}
 	fsys.mu.Lock()
 	defer fsys.mu.Unlock()
-	if captured, observed := fsys.statInfo[key]; observed {
+	if captured, observed := fsys.stats[key]; observed {
 		return captured
 	}
 	info := fsys.FS.Stat(path)
 	if info == nil {
 		fsys.checkProbeError(key)
 	}
-	if _, observed := fsys.stats[key]; !observed {
-		fsys.stats[key] = fileKind(info)
-	}
-	fsys.statInfo[key] = info
+	fsys.stats[key] = info
 	return info
 }
 
@@ -246,25 +235,60 @@ func (fsys *resolutionInputFS) Realpath(path tspath.RootedPath) tspath.RootedPat
 	}
 	fsys.mu.Lock()
 	defer fsys.mu.Unlock()
-	if captured, ok := fsys.resolved[key]; ok {
-		return captured
+	actual := fsys.resolve(key)
+	if actual == "" || nativepath.IsNetworkPath(actual) {
+		return path
 	}
-	// Match the underlying OS filesystem's resolution and use that same
-	// answer for both the compiler and the observation. In particular, do
-	// not resolve twice: the target could change between those operations.
-	answer := path
-	actual, err := nativepath.Realpath(filepath.FromSlash(key))
-	if err == nil {
-		actual, err = filepath.Abs(actual)
+	return tspath.RootedPathFromAbsolute(actual)
+}
+
+// resolve is called with mu held. It resolves key once, so the compiler,
+// source reads and observation see the same link target, and returns an empty
+// path when key does not resolve.
+func (fsys *resolutionInputFS) resolve(key string) string {
+	actual, seen := fsys.realpaths[key]
+	if !seen {
+		var err error
+		actual, err = nativepath.Realpath(filepath.FromSlash(key))
+		if err == nil {
+			actual, err = filepath.Abs(actual)
+		}
+		if err != nil {
+			if !isMissing(err) {
+				fsys.captureErr = fmt.Errorf("resolve input %s: %w", key, err)
+			}
+			actual = ""
+		}
+		fsys.realpaths[key] = actual
 	}
-	if err == nil && !nativepath.IsNetworkPath(actual) {
-		answer = tspath.RootedPathFromAbsolute(actual)
-		fsys.realpaths[key] = answer.AsString()
-	} else if err != nil && !isMissing(err) {
-		fsys.captureErr = fmt.Errorf("resolve input %s: %w", key, err)
+	return actual
+}
+
+// documents maps each name of a file read for coordinates, relative to root
+// or absolute, to the resolved path of the file that supplied its text, in
+// its on-disk spelling, when that path differs from the name.
+func (fsys *resolutionInputFS) documents(root string, names []string) (map[string]string, error) {
+	fsys.mu.Lock()
+	defer fsys.mu.Unlock()
+	documents := make(map[string]string)
+	for _, name := range names {
+		path := filepath.FromSlash(name)
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(filepath.FromSlash(root), path)
+		}
+		actual := fsys.realpaths[normalizeSlash(path)]
+		if actual == "" {
+			continue
+		}
+		actual, err := onDiskSpelling(actual)
+		if err != nil {
+			return nil, err
+		}
+		if actual != path {
+			documents[name] = actual
+		}
 	}
-	fsys.resolved[key] = answer
-	return answer
+	return documents, nil
 }
 
 func (fsys *resolutionInputFS) inputPath(path string) string { return normalizeSlash(path) }
@@ -319,10 +343,14 @@ func (fsys *resolutionInputFS) observations() []CompilerObservation {
 	for path, exists := range fsys.dirProbes {
 		records = append(records, CompilerObservation{Kind: "state", Path: filepath.FromSlash(path), Op: "directory", Value: fmt.Sprint(exists)})
 	}
-	for path, kind := range fsys.stats {
-		records = append(records, CompilerObservation{Kind: "state", Path: filepath.FromSlash(path), Op: "stat", Value: kind})
+	for path, info := range fsys.stats {
+		records = append(records, CompilerObservation{Kind: "state", Path: filepath.FromSlash(path), Op: "stat", Value: fileKind(info)})
 	}
 	for path, dir := range fsys.directories {
+		if dir.missing {
+			records = append(records, CompilerObservation{Kind: "state", Path: filepath.FromSlash(path), Op: "read-directory", Value: "missing"})
+			continue
+		}
 		entries := make([][2]string, 0, len(dir.files)+len(dir.directories)+len(dir.symlinks))
 		for _, name := range dir.files {
 			entries = append(entries, [2]string{name, "file"})
@@ -335,11 +363,11 @@ func (fsys *resolutionInputFS) observations() []CompilerObservation {
 		}
 		records = append(records, CompilerObservation{Kind: "listing", Path: filepath.FromSlash(path), Op: "compiler-accessible", Entries: entries})
 	}
-	for path := range fsys.missingDirectories {
-		records = append(records, CompilerObservation{Kind: "state", Path: filepath.FromSlash(path), Op: "read-directory", Value: "missing"})
-	}
 	for path, value := range fsys.realpaths {
-		records = append(records, CompilerObservation{Kind: "resolved", Path: filepath.FromSlash(path), Value: filepath.FromSlash(value)})
+		if value == "" {
+			value = "missing"
+		}
+		records = append(records, CompilerObservation{Kind: "resolved", Path: filepath.FromSlash(path), Value: value})
 	}
 	return records
 }

@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -55,9 +54,9 @@ const (
 
 // Stamp certifies the metadata immediately before the bytes were read.
 type Stamp struct {
-	Size         string `json:"size"`
-	MtimeNs      string `json:"mtimeNs"`
-	ObservedAtNs string `json:"observedAtNs"`
+	Size         int64 `json:"size"`
+	MtimeNs      int64 `json:"mtimeNs"`
+	ObservedAtNs int64 `json:"observedAtNs"`
 }
 
 // Record describes one operation and its captured result. Entries are pairs of
@@ -91,30 +90,7 @@ func validChild(s string) bool {
 	return validText(s) && s != "" && s != "." && s != ".." && filepath.Base(s) == s && !strings.ContainsRune(s, '/')
 }
 func validStamp(s *Stamp) bool {
-	if s == nil {
-		return true
-	}
-	size, e1 := strconv.ParseInt(s.Size, 10, 64)
-	_, e2 := strconv.ParseInt(s.MtimeNs, 10, 64)
-	at, e3 := strconv.ParseInt(s.ObservedAtNs, 10, 64)
-	return e1 == nil && e2 == nil && e3 == nil && size >= 0 && at >= 0 && decimal(s.Size) && decimal(s.MtimeNs) && decimal(s.ObservedAtNs)
-}
-func decimal(s string) bool {
-	if s == "" {
-		return false
-	}
-	if s[0] == '-' {
-		s = s[1:]
-	}
-	if s == "" {
-		return false
-	}
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			return false
-		}
-	}
-	return true
+	return s == nil || s.Size >= 0 && s.ObservedAtNs >= 0
 }
 func copyRecord(r Record) Record {
 	r.Entries = slices.Clone(r.Entries)
@@ -197,7 +173,7 @@ func normalize(r Record) (Record, error) {
 			return r, fmt.Errorf("invalid link observation %s", r.Path)
 		}
 	case Resolved:
-		if r.Op != "" || !noListing || r.Present || r.Stamp != nil || !validPath(string(r.Value)) {
+		if r.Op != "" || !noListing || r.Present || r.Stamp != nil || (r.Value != Missing && !validPath(string(r.Value))) {
 			return r, fmt.Errorf("invalid resolved observation %s", r.Path)
 		}
 	case Env:
@@ -315,7 +291,7 @@ func (s Set) Digest(root string) (string, error) {
 			path = r.Path
 		}
 		var value any = string(r.Value)
-		if r.Kind == Resolved || r.Kind == Link && filepath.IsAbs(string(r.Value)) {
+		if (r.Kind == Resolved || r.Kind == Link) && filepath.IsAbs(string(r.Value)) {
 			value = pathValue(string(r.Value))
 		}
 		b, err := json.Marshal(item{r.Kind, path, r.Op, value, r.Entries, r.Ignore, r.Present})

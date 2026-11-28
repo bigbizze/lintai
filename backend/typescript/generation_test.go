@@ -22,6 +22,14 @@ func TestGenerationInvalidatesCapturedContentAndScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	rootPath, err := filepath.Abs(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest, err := first.observations.Digest(filepath.Clean(rootPath))
+	if err != nil || first.inputRevision != digest {
+		t.Fatalf("input revision must equal captured observation digest: revision=%q digest=%q err=%v", first.inputRevision, digest, err)
+	}
 	again, err := producer.buildTestGeneration(context.Background(), root, root)
 	if err != nil || again != first {
 		t.Fatalf("unchanged generation not reused: %v", err)
@@ -138,7 +146,23 @@ func TestGenerationDemandAndFrozenEmission(t *testing.T) {
 	}
 	module := facts.Predicate{Name: "ts.module", Arity: 1}
 	fn := facts.Predicate{Name: "ts.fn", Arity: 3}
-	request := backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: root, Predicates: []facts.Predicate{module}}
+	// The exported description is detached. Direct preparations still
+	// validate mode, predicate name and arity, and duplicate demand.
+	description.BaseRelations[0].Predicate = facts.Predicate{Name: "mutated", Arity: 1}
+	for _, invalid := range []struct {
+		mode   observe.Mode
+		demand []facts.Predicate
+	}{
+		{observe.Mode(255), []facts.Predicate{module}},
+		{observe.Full, []facts.Predicate{{Name: "ts.module", Arity: 2}}},
+		{observe.Full, []facts.Predicate{module, module}},
+		{observe.Full, []facts.Predicate{description.BaseRelations[0].Predicate}},
+	} {
+		if _, err := producer.Prepare(context.Background(), backend.CollectionRequest{Predicates: invalid.demand}, invalid.mode); err == nil {
+			t.Fatalf("accepted invalid request %+v", invalid)
+		}
+	}
+	request := backend.CollectionRequest{WorkspaceRoot: root, Predicates: []facts.Predicate{module}}
 	first, err := producer.Prepare(context.Background(), request, observe.Full)
 	if err != nil {
 		t.Fatal(err)

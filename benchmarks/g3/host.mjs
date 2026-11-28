@@ -1,141 +1,111 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
-import { readFileSync, writeFileSync } from "node:fs";
-import { createRequire } from "node:module";
+import { readFileSync } from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { record, reset, saveRows, summary } from "./metrics.mjs";
+import { checkHost, eslintRows, hostNames } from "./semantic.mjs";
+import { eslintConfig, hosts, installed, options, root } from "./settings.mjs";
 
-const {
-	LINTAI_BENCH_REPO: repo,
-	LINTAI_BENCH_WORKSPACE: root,
-	LINTAI_BENCH_RULES: rules,
-	LINTAI_BENCH_TOOLS: tools,
-	LINTAI_BENCH_TRACE: trace,
-	LINTAI_BENCH_BINARY: binary = path.join(repo, "lintai"),
-} = process.env;
-if (!repo || !root || !rules || !tools) throw new Error("set the four LINTAI_BENCH paths");
-const requireRepo = createRequire(path.join(repo, "package.json"));
-const requireTools = createRequire(path.join(tools, "package.json"));
-const { Linter } = requireRepo("eslint");
-const parser = requireTools("@typescript-eslint/parser");
-const client = await import(pathToFileURL(path.join(repo, "packages/client/dist/client.js")).href);
-const { createLintaiPlugin } = await import(
-	pathToFileURL(path.join(repo, "packages/eslint-plugin/dist/index.js")).href
-);
-const counts = {};
-const original = client.LintAIClient.prototype.requestSync;
-client.LintAIClient.prototype.requestSync = function (method, ...args) {
-	counts[method] = (counts[method] ?? 0) + 1;
-	return original.call(this, method, ...args);
-};
-const options = {
-	mode: "serve",
-	binary,
-	repoRoot: repo,
-	workspaceRoot: root,
-	rules: [path.join(rules, "modules.ts"), path.join(rules, "functions.ts")],
-	files: "tsconfig",
-	env: {},
-	ruleWorkers: 1,
-};
-const plugin = createLintaiPlugin(options);
-assert.deepEqual(
-	Object.keys(plugin.rules)
-		.filter((id) => id.startsWith("benchmark."))
-		.sort(),
-	["benchmark.functions", "benchmark.modules"],
-);
+const { Linter } = hosts("eslint");
+const { createCapturedLintaiPlugin, createLintaiPlugin, createLintaiSession } =
+	installed("@lintai/eslint-plugin");
+const plugin = createLintaiPlugin(options("live"));
+const session = createLintaiSession(options("live"));
 const linter = new Linter({ configType: "flat", cwd: root });
-const config = [
-	{
-		files: ["**/*.ts"],
-		languageOptions: { parser, parserOptions: { ecmaVersion: 2022, sourceType: "module" } },
-		...plugin.configs.all,
-	},
-];
-const files = JSON.parse(readFileSync(path.join(repo, "benchmarks/g3/analyzed-files.json"), "utf8"))
-	.filter((name) => name.endsWith(".ts"))
-	.map((name) => path.join(root, name));
-const source = files.map((file) => readFileSync(file, "utf8"));
-assert.equal(files.length, 477);
-let reference;
-for (const pass of ["batch-cold", "batch-warm", "ordinary-warm"]) {
-	const prior = { ...counts };
-	if (trace) writeFileSync(trace, "");
-	let findings = 0;
-	let parseErrors = 0;
-	const start = process.hrtime.bigint();
-	const run = async () => {
-		const result = [];
-		for (let i = 0; i < files.length; i++) {
-			const messages = linter.verify(source[i], config, { filename: files[i] });
-			findings += messages.filter((message) =>
-				message.ruleId?.startsWith("lintai/benchmark."),
-			).length;
-			for (const message of messages) {
-				if (message.fatal) {
-					parseErrors++;
-					if (parseErrors < 5) console.error("parse failure", files[i], message.message);
-				}
-			}
-			result.push(messages);
-			await Promise.resolve(); // Same host loop as F6.
-		}
-		return result;
-	};
-	let result;
-	if (pass.startsWith("batch")) {
-		result = await plugin.withFileBatch(files, ({ problems }) => {
-			assert.deepEqual(problems, []);
-			return run();
-		});
-	} else result = await run();
-	const elapsed = Number(process.hrtime.bigint() - start) / 1e6;
-	assert.equal(parseErrors, 0);
-	assert.equal(findings, 10074);
-	const normalized = result.map((messages) =>
-		messages.map(({ ruleId, severity, message, line, column, endLine, endColumn }) => [
-			ruleId,
-			severity,
-			message,
-			line,
-			column,
-			endLine,
-			endColumn,
-		]),
-	);
-	if (reference) assert.deepEqual(normalized, reference);
-	else reference = normalized;
-	const delta = Object.fromEntries(
-		Object.entries(counts).map(([key, value]) => [key, value - (prior[key] ?? 0)]),
-	);
-	assert.equal(delta["diagnostics/files"] ?? 0, pass.startsWith("batch") ? 1 : 0);
-	assert.equal(delta["diagnostics/file"] ?? 0, pass === "ordinary-warm" ? 477 : 0);
-	const validations = trace ? readFileSync(trace, "utf8").trim().split("\n").filter(Boolean) : [];
-	if (trace && pass !== "batch-cold") {
-		const expected = pass === "batch-warm" ? 1 : 477;
-		assert.equal(validations.filter((x) => x === "workspace").length, expected);
-		assert.equal(validations.filter((x) => x === "config").length, expected);
+const config = eslintConfig(plugin);
+const files = hostNames.map((name) => path.join(root, name));
+const sources = files.map((file) => readFileSync(file, "utf8"));
+const verify = (i, configuration = config) =>
+	linter.verify(sources[i], configuration, { filename: files[i] });
+const visits = async (configuration) => {
+	const result = [];
+	for (let i = 0; i < files.length; i++) {
+		result.push(verify(i, configuration));
+		await Promise.resolve();
 	}
-	console.log(
-		JSON.stringify({
-			event: pass,
-			elapsed_ms: elapsed,
-			files: files.length,
-			findings,
-			ordered_result_sha256: createHash("sha256").update(JSON.stringify(normalized)).digest("hex"),
-			rpc: delta,
-			...(trace
-				? {
-						validations: Object.fromEntries(
-							["workspace", "config"].map((k) => [k, validations.filter((x) => x === k).length]),
-						),
-					}
-				: {}),
-			eslint: requireRepo("eslint/package.json").version,
-			parser: requireTools("@typescript-eslint/parser/package.json").version,
-			typescript: requireTools("typescript/package.json").version,
-		}),
-	);
+	return result;
+};
+
+try {
+	let reference;
+	for (const event of ["capture-cold", "capture-warm", "ordinary-warm"]) {
+		const captured = event.startsWith("capture");
+		// The live plugin owns a separate server from the session; analyze once
+		// before measuring its warm callbacks.
+		if (!captured) verify(0);
+		reset();
+		const start = performance.now();
+		let result;
+		if (captured) {
+			const capture = session.capture();
+			assert.deepEqual(capture.problems, []);
+			result = await visits(eslintConfig(createCapturedLintaiPlugin(capture)));
+		} else result = await visits();
+		const elapsed = performance.now() - start;
+		const rows = result.flatMap((messages, i) => eslintRows(hostNames[i], messages));
+		checkHost(rows);
+		if (reference) assert.deepEqual(rows, reference);
+		else {
+			reference = rows;
+			saveRows("eslint", rows);
+		}
+		record(
+			event,
+			{ elapsed_ms: elapsed, files: 477, findings: rows.length },
+			{
+				requests: captured ? 1 : 477,
+				all: captured ? 1 : 0,
+				adapter_source_reads: 0,
+			},
+		);
+	}
+
+	// Measure the real client's frame write, wait, read and decode in isolation
+	// from ESLint parsing and reporting, on the same 20 unchanged live visits.
+	const { LintAIClient } = installed("@lintai/client");
+	const original = LintAIClient.prototype.request;
+	assert.equal(typeof original, "function");
+	const trips = [];
+	LintAIClient.prototype.request = function (name, ...args) {
+		const start = performance.now();
+		const response = original.call(this, name, ...args);
+		if (name === "diagnostics/document") trips.push(performance.now() - start);
+		return response;
+	};
+	try {
+		reset();
+		const visits = [];
+		for (let i = 0; i < 20; i++) {
+			const start = performance.now();
+			const messages = verify(0);
+			visits.push(performance.now() - start);
+			assert.deepEqual(
+				eslintRows(hostNames[0], messages),
+				reference.filter((row) => row[0] === hostNames[0]),
+			);
+			await Promise.resolve();
+		}
+		assert.equal(trips.length, 20);
+		record(
+			"singleton-warm",
+			{
+				files: 1,
+				visits: 20,
+				findings_per_visit: 2,
+				callback: summary(visits),
+				round_trip: summary(trips),
+			},
+			{
+				requests: 20,
+				adapter_source_reads: 0,
+			},
+		);
+	} finally {
+		LintAIClient.prototype.request = original;
+	}
+	reset();
+	assert.deepEqual(session.capture().problems, []);
+	record("empty-capture-warm", { files: 0 }, { requests: 1, all: 1, adapter_source_reads: 0 });
+} finally {
+	plugin.dispose?.();
+	session.dispose();
 }
-// The shared client closes through its registered process-exit handler.

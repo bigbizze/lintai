@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"math"
 	"path/filepath"
@@ -22,12 +21,12 @@ type assertionSchema struct {
 }
 type runInfo struct {
 	lock                        *RulesLock
-	files                       map[string]struct{}
 	evaluated, completed, known map[string]struct{}
+	root                        string
 	coverage                    map[string]map[string]struct{}
 	assertions                  map[string]map[string]assertionSchema
 	complete                    bool
-	snapshotVersion             string
+	factRevision                string
 	producerNames               []string
 }
 type suppressionsState struct {
@@ -44,20 +43,20 @@ type suppressionWrite struct {
 	approvalSnapshot atomicfile.Snapshot
 }
 
-func validateSuppressionsOptions(options Options) error {
+func validateSuppressionUpdate(update SuppressionUpdate) error {
 	switch {
-	case options.SuppressAll && len(options.SuppressRules) > 0:
+	case update.All && len(update.Rules) > 0:
 		return fmt.Errorf("--suppress-all and --suppress-rule cannot be used together")
-	case (options.SuppressAll || len(options.SuppressRules) > 0) && options.PruneSuppressions:
+	case (update.All || len(update.Rules) > 0) && update.Prune:
 		return fmt.Errorf("recording and --prune-suppressions cannot be used together")
 	}
 	return nil
 }
-func loadSuppressions(options Options) (suppressionsState, error) {
-	if err := validateSuppressionsOptions(options); err != nil {
+func loadSuppressions(config Config, update SuppressionUpdate) (suppressionsState, error) {
+	if err := validateSuppressionUpdate(update); err != nil {
 		return suppressionsState{}, err
 	}
-	path := suppressions.ResolvePath(options.WorkspaceRoot, options.SuppressionsLocation)
+	path := suppressions.ResolvePath(config.WorkspaceRoot, config.SuppressionsLocation)
 	snapshot, err := atomicfile.Read(path)
 	if err != nil {
 		return suppressionsState{}, err
@@ -67,7 +66,7 @@ func loadSuppressions(options Options) (suppressionsState, error) {
 		return suppressionsState{}, err
 	}
 	if !snapshot.Exists {
-		if options.SuppressionsLocation != "" && !options.SuppressAll && len(options.SuppressRules) == 0 {
+		if config.SuppressionsLocation != "" && !update.All && len(update.Rules) == 0 {
 			return suppressionsState{}, fmt.Errorf("the suppressions file %s does not exist", path)
 		}
 		return suppressionsState{path: path, file: suppressions.File{}, snapshot: snapshot, observations: observations}, nil
@@ -165,34 +164,17 @@ type groupFindings struct {
 	indexes []int
 }
 
-func diagnosticKey(item diagnostics.Diagnostic) string {
-	data, _ := json.Marshal(item)
-	return string(data)
-}
 func collectGroups(file suppressions.File, result Result, evidence executionEvidence, useSaved bool) (map[string]*groupFindings, error) {
 	saved := map[string]suppressions.Entry{}
 	for _, entry := range file {
 		saved[suppressions.EntryID(entry)] = entry
 	}
-	indexes := map[string][]int{}
-	for i, item := range result.Diagnostics {
-		if item.DiagnosticKind == diagnostics.KindArchitectureViolation && item.Severity == diagnostics.SeverityError && item.SourceLocation != nil {
-			key := diagnosticKey(item)
-			indexes[key] = append(indexes[key], i)
-		}
-	}
 	groups := map[string]*groupFindings{}
-	for _, item := range evidence.findings {
-		diag := item.diagnostic
-		// Severity is presentation policy and may have changed during reuse.
-		diag.Severity = diagnostics.SeverityError
-		key := diagnosticKey(diag)
-		available := indexes[key]
-		if len(available) == 0 {
+	for index, diagnostic := range result.Diagnostics {
+		if index >= len(evidence.findings) || evidence.findings[index] == nil || diagnostic.DiagnosticKind != diagnostics.KindArchitectureViolation || diagnostic.Severity != diagnostics.SeverityError || diagnostic.SourceLocation == nil {
 			continue
 		}
-		index := available[0]
-		indexes[key] = available[1:]
+		item := *evidence.findings[index]
 		entry := suppressions.Entry{File: suppressions.NormalizePath(item.location.File), Rule: item.ruleID, Assertion: suppressions.Assertion{Name: item.predicate, Arity: len(item.typedRow)}}
 		by := item.by
 		if existing, ok := saved[suppressions.EntryID(entry)]; ok && useSaved {
@@ -227,11 +209,11 @@ func collectGroups(file suppressions.File, result Result, evidence executionEvid
 	}
 	return groups, nil
 }
-func selectedRule(options Options, rule string) bool {
-	if options.SuppressAll {
+func selectedRule(update SuppressionUpdate, rule string) bool {
+	if update.All {
 		return true
 	}
-	for _, id := range options.SuppressRules {
+	for _, id := range update.Rules {
 		if id == rule {
 			return true
 		}
@@ -242,23 +224,31 @@ func covered(run runInfo, entry suppressions.Entry) bool {
 	if _, ok := run.evaluated[entry.Rule]; !ok {
 		return false
 	}
-	if _, ok := run.coverage[entry.Rule][entry.File]; !ok {
+	if _, ok := run.coverage[entry.Rule][documentName(run.root, entry.File)]; !ok {
 		return false
 	}
 	schema, ok := run.assertions[entry.Rule][entry.Assertion.Name]
 	return ok && schema.arity == entry.Assertion.Arity
 }
-func applySuppressions(options Options, state suppressionsState, run runInfo, evidence executionEvidence, result *Result) (*suppressionWrite, error) {
+func allowanceDiagnostics(path string, failures []suppressions.LimitFailure, snapshot string, producers []string) []diagnostics.Diagnostic {
+	var items []diagnostics.Diagnostic
+	for _, failure := range failures {
+		items = append(items, errorDiagnostic(failure.RuleID, "integrity", 0, snapshot, producers, fmt.Sprintf("%s %s; review and run lintai lock", filepath.Base(path), failure.Message)))
+	}
+	return items
+}
+
+func applySuppressions(config Config, update SuppressionUpdate, state suppressionsState, run runInfo, evidence executionEvidence, result *Result) (*suppressionWrite, error) {
 	result.SuppressionsPath = state.path
-	unknown := unknownSuppressRules(options, run)
+	unknown := unknownSuppressRules(update, run)
 	result.Diagnostics = append(result.Diagnostics, unknown...)
-	writing := options.SuppressAll || len(options.SuppressRules) > 0 || options.PruneSuppressions
-	blocked := len(unknown) > 0 || blockingRuleErrors(options, result.Diagnostics, run.known) > 0
+	writing := update.writing()
+	blocked := len(unknown) > 0 || blockingRuleErrors(update, result.Diagnostics, run.known) > 0
 	file := state.file
 	if writing && blocked {
 		result.Warnings = append(result.Warnings, fmt.Sprintf("lintai did not update %s because selected rules failed", state.path))
 	}
-	if writing && !blocked && !options.PruneSuppressions {
+	if writing && !blocked && !update.Prune {
 		raw, err := collectGroups(nil, *result, evidence, false)
 		if err != nil {
 			return nil, err
@@ -266,7 +256,7 @@ func applySuppressions(options Options, state suppressionsState, run runInfo, ev
 		replacements := map[string]bool{}
 		entries := map[string]*suppressions.Entry{}
 		for _, group := range raw {
-			if !selectedRule(options, group.entry.Rule) {
+			if !selectedRule(update, group.entry.Rule) {
 				continue
 			}
 			id := suppressions.EntryID(group.entry)
@@ -291,11 +281,16 @@ func applySuppressions(options Options, state suppressionsState, run runInfo, ev
 	if err := validatePolicies(file, run); err != nil {
 		return nil, err
 	}
-	groups, err := collectGroups(file, *result, evidence, true)
-	if err != nil {
-		return nil, err
+	// Groups are only read through allowances. Without a write there are none
+	// to add, so a run without allowances skips grouping its findings.
+	var groups map[string]*groupFindings
+	if writing || len(file) > 0 {
+		var err error
+		if groups, err = collectGroups(file, *result, evidence, true); err != nil {
+			return nil, err
+		}
 	}
-	if writing && !blocked && options.PruneSuppressions {
+	if writing && !blocked && update.Prune {
 		pruned := suppressions.File{}
 		for _, entry := range file {
 			copyEntry := entry
@@ -322,18 +317,16 @@ func applySuppressions(options Options, state suppressionsState, run runInfo, ev
 	if err := suppressions.Validate(file); err != nil {
 		return nil, err
 	}
-	if run.lock != nil {
+	if writing && !blocked && run.lock != nil {
 		limited, failures := suppressions.Limit(file, run.lock.Suppressions)
-		for _, failure := range failures {
-			result.Diagnostics = append(result.Diagnostics, errorDiagnostic(failure.RuleID, "integrity", 0, run.snapshotVersion, run.producerNames, fmt.Sprintf("%s %s; review and run lintai lock", filepath.Base(state.path), failure.Message)))
-		}
+		result.Diagnostics = append(result.Diagnostics, allowanceDiagnostics(state.path, failures, run.factRevision, run.producerNames)...)
 		if len(failures) > 0 {
 			blocked = true
 		}
 		file = limited
 	}
 	var write *suppressionWrite
-	if writing && !blocked && (state.snapshot.Exists || !options.PruneSuppressions) {
+	if writing && !blocked && (state.snapshot.Exists || !update.Prune) {
 		data, err := suppressions.Encode(file)
 		if err != nil {
 			return nil, err
@@ -363,7 +356,7 @@ func applySuppressions(options Options, state suppressionsState, run runInfo, ev
 					result.UnusedSuppressions = append(result.UnusedSuppressions, suppressions.Unused{File: entry.File, RuleID: entry.Rule, Assertion: entry.Assertion, Description: group.Description, Allowed: group.Count, Found: found})
 				}
 			}
-			if found > group.Count && options.Explain && current != nil {
+			if found > group.Count && config.Explain && current != nil {
 				for _, index := range current.indexes {
 					result.Diagnostics[index].Explanation = append(result.Diagnostics[index].Explanation, fmt.Sprintf("suppressions: %s allows %d, found %d; all findings are reported", filepath.Base(state.path), group.Count, found))
 				}
@@ -384,14 +377,15 @@ func applySuppressions(options Options, state suppressionsState, run runInfo, ev
 		return fmt.Sprint(a.File, a.RuleID, a.Assertion.Name, a.Description) < fmt.Sprint(b.File, b.RuleID, b.Assertion.Name, b.Description)
 	})
 	for _, unused := range result.UnusedSuppressions {
-		result.Diagnostics = append(result.Diagnostics, unusedSuppressionDiagnostic(filepath.Base(state.path), unused, run.snapshotVersion, run.producerNames))
+		result.Diagnostics = append(result.Diagnostics, unusedSuppressionDiagnostic(filepath.Base(state.path), unused, run.factRevision, run.producerNames))
 	}
 	sortDiagnostics(result.Diagnostics)
+	sortDiagnostics(result.Suppressed)
 	return write, nil
 }
-func blockingRuleErrors(options Options, items []diagnostics.Diagnostic, known map[string]struct{}) int {
+func blockingRuleErrors(update SuppressionUpdate, items []diagnostics.Diagnostic, known map[string]struct{}) int {
 	selected := map[string]bool{}
-	for _, id := range options.SuppressRules {
+	for _, id := range update.Rules {
 		selected[id] = true
 	}
 	count := 0
@@ -406,23 +400,23 @@ func blockingRuleErrors(options Options, items []diagnostics.Diagnostic, known m
 	}
 	return count
 }
-func unknownSuppressRules(options Options, run runInfo) []diagnostics.Diagnostic {
+func unknownSuppressRules(update SuppressionUpdate, run runInfo) []diagnostics.Diagnostic {
 	if !run.complete {
 		return nil
 	}
 	seen := map[string]bool{}
 	var out []diagnostics.Diagnostic
-	for _, id := range options.SuppressRules {
+	for _, id := range update.Rules {
 		if _, ok := run.known[id]; ok || seen[id] {
 			continue
 		}
 		seen[id] = true
-		out = append(out, errorDiagnostic(id, "config", 0, run.snapshotVersion, run.producerNames, fmt.Sprintf("--suppress-rule names unknown rule %q", id)))
+		out = append(out, errorDiagnostic(id, "config", 0, run.factRevision, run.producerNames, fmt.Sprintf("--suppress-rule names unknown rule %q", id)))
 	}
 	return out
 }
-func unusedSuppressionDiagnostic(fileName string, unused suppressions.Unused, snapshotVersion string, producers []string) diagnostics.Diagnostic {
-	return diagnostics.Diagnostic{RuleID: unused.RuleID, AssertionID: "suppression", DiagnosticKind: diagnostics.KindUnusedSuppression, Severity: diagnostics.SeverityError, Message: fmt.Sprintf("%s allows %d for %s/%s in %s (%s), but found %d", fileName, unused.Allowed, unused.RuleID, unused.Assertion.Name, unused.File, unused.Description, unused.Found), SourceLocation: &diagnostics.SourceLocation{File: unused.File, StartLine: 1, StartColumn: 1, EndLine: 1, EndColumn: 1}, Provenance: diagnostics.Provenance{SnapshotVersion: snapshotVersion, ProducerNamespaces: append([]string(nil), producers...)}}
+func unusedSuppressionDiagnostic(fileName string, unused suppressions.Unused, factRevision string, producers []string) diagnostics.Diagnostic {
+	return diagnostics.Diagnostic{RuleID: unused.RuleID, AssertionID: "suppression", DiagnosticKind: diagnostics.KindUnusedSuppression, Severity: diagnostics.SeverityError, Message: fmt.Sprintf("%s allows %d for %s/%s in %s (%s), but found %d", fileName, unused.Allowed, unused.RuleID, unused.Assertion.Name, unused.File, unused.Description, unused.Found), SourceLocation: &diagnostics.SourceLocation{File: unused.File, StartLine: 1, StartColumn: 1, EndLine: 1, EndColumn: 1}, Provenance: diagnostics.Provenance{FactRevision: factRevision, ProducerNamespaces: append([]string(nil), producers...)}}
 }
 
 // commitSuppression makes the guarded rename the cancellation commit boundary.

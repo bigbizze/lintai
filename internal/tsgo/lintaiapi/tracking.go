@@ -234,15 +234,29 @@ func (e *extractor) trackingCacheKey(category, id string, node *ast.Node) string
 	if file == nil {
 		return ""
 	}
-	if e.trackingSourceDigests == nil {
-		e.trackingSourceDigests = make(map[*ast.SourceFile]string)
+	return category + "\x00" + id + "\x00" + e.sourceDigest(file)
+}
+
+// ReadFile already removed the encoding BOM. A second BOM is source text.
+func (e *extractor) sourceDigest(file *ast.SourceFile) string {
+	if e.sourceFileDigests == nil {
+		e.sourceFileDigests = make(map[*ast.SourceFile]string)
 	}
-	digest, ok := e.trackingSourceDigests[file]
+	digest, ok := e.sourceFileDigests[file]
 	if !ok {
 		digest = fmt.Sprintf("%x", sha256.Sum256([]byte(file.Text())))
-		e.trackingSourceDigests[file] = digest
+		e.sourceFileDigests[file] = digest
+		if byPath := e.operations.sourceDigests; byPath != nil {
+			path := e.relativePath(file.FileName().AsString())
+			if previous, seen := byPath[path]; seen && previous != digest {
+				// BuildSnapshot rejects a path with conflicting coordinate text.
+				byPath[path] = ""
+			} else {
+				byPath[path] = digest
+			}
+		}
 	}
-	return category + "\x00" + id + "\x00" + digest
+	return digest
 }
 
 func (e *extractor) restoreTracking(cacheKey, id string) bool {

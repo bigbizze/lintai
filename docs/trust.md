@@ -1,69 +1,34 @@
-# Trust Model
+# Approving rules and lint policy
 
-lintai is a deterministic gate against cooperative but careless authors. It is not a security boundary against an adversary with write access to the repository and its CI.
+**An unbuilt rule edit leaves the previous pack active.** Run `lintai build-rules` after editing a rule, its static imports or its SDK dependencies. The compiler reads the entries in workspace-root `lintai.toml` and publishes a complete `.lintai/rules.json`. A failed build leaves the previous pack available for local analysis.
 
-This page explains what the rules lock and the setup sandbox protect, and what they do not protect.
+For an intentional approval, review the rule sources, dependencies, project configuration and suppression allowances, then run these commands from the workspace root.
 
-## The problem
+```sh
+lintai build-rules && lintai lock
+lintai check --rules-lock lintai-rules.lock.json
+```
 
-A rule is TypeScript code in your repository. A person or an agent that can edit the code that a rule checks can often also edit the rule. For example, an agent that is told to make CI pass can change a rule so that it reports nothing. The rules lock makes that change visible: CI fails until a person updates the lock.
+Commit the reviewed lock. On a clean CI checkout with rule dependencies installed, chain the build and the locked check so a build failure stops enforcement.
 
-## Rules lock
+```sh
+lintai build-rules && lintai check --rules-lock lintai-rules.lock.json
+```
 
-`lintai lock` writes `lintai-rules.lock.json`. It has one hash for each rule. A run with `--rules-lock` compares each rule with the lock before `setup()` runs. A changed rule, a new rule or a removed rule is a `rule_execution_error` with phase `integrity`, and the run exits with code 3. A changed rule does not run, so its `setup()` cannot do anything.
+## What an approval covers
 
-What the lock covers:
+- **Executable rules.** The lock approves the runtime ABI and a SHA-256 digest of the exact pack bytes. The digest includes every logical entry name and its bundled code, including configuration parsers and imported static data. Editing a comment can preserve approval if the compiler emits identical bytes.
+- **Lint policy.** A separate digest covers effective rule severity and options, the derived-fact limit, the bound producers and their configuration (including source selection and TypeScript source-link settings), and the suppression file location. Per-rule tables in `lintai.toml` supply these settings for both native and host checks. A missing rule table uses error severity and an empty options object. Go embedders bind the same policy through `engine.Open(engine.Config{...}, producers...)`; rule policy is set with `engine.Config.Rule`. TypeScript exact sources and source-link paths inside the workspace use workspace-relative names in the approval, including when supplied as absolute paths. The digest excludes worker count and output formatting.
+- **Suppression allowances.** The lock records the approved groups, typed reasons and counts. A rule's suppression declaration defines how findings can be grouped. Recording actual allowances is a separate project decision. Checking with fewer groups or lower counts stays within approval. A new group, changed reason or increased count requires review and a new lock. Recording an increase under an enforced lock fails and leaves the saved allowances intact. Go embedders write allowances explicitly with `Session.UpdateSuppressions(ctx, engine.SuppressionUpdate{...})`; ordinary checks and refreshes are read-only, and each update applies to one operation. After pruning, run `lintai lock` to retire the previous ceiling.
 
-- the rule file
-- every file that the rule imports, directly or through other files, in the workspace and in `node_modules`
-- the `@lintai/sdk` files that the rule imports, including its suppression policy. Review and regenerate the lock when those inputs change.
-- the client bundling scripts, captured resolver/configuration inputs, and the bundler tools, including the platform-specific esbuild binary. Locks therefore need to be generated for the platform where they are enforced. Changes to the observation format also change the approved bundling helper; review and regenerate existing locks after upgrading, even if the rule source is unchanged. The lock format and platform policy are unchanged.
+The engine verifies the published bytes, lint policy and saved allowances before initializing any rule in a locked check. A missing, invalid or mismatched approval produces an integrity diagnostic and exit code 3. To replace an obsolete lock, explicitly run `lintai lock` after review. It prints the new digests and replaces the file atomically.
 
-The hash identifies captured bytes used by the prepare and pure bundles. The bundler checks its captured view for internal consistency and containment, but does not claim complete coverage of every esbuild file read on every platform. Inputs can change after capture; publication does not perform a second live-content comparison, and later checks validate the recorded evidence before reuse. Suppression and lock writes retain their separate concurrent-edit preconditions.
+## Rule execution and changing source
 
-What the lock does not cover:
+A check runs packed JavaScript in Go and works without Node on PATH. Each executed rule gets a fresh VM. Its configuration parser, facts, program and message callbacks share that VM for the operation. Rules receive frozen JSON configuration and producer facts. The runtime denies access to the filesystem, network, process, random numbers and wall-clock time.
 
-- data files that `setup()` reads through `fs`, for example a JSON deny list. Put these files under the same review as the rules, or import them statically so that the bundler reads them and they are in the hash. Ambient reads in setup and config transforms are also not automatic refresh dependencies; force reanalysis after changing them.
-- the lintai binary and the client script that runs setup. Pin their versions in your package lockfile.
+Application source and live producer inputs change as developers work. Their observations determine which facts to collect or reuse. Rechecking edited application code can change findings under the same approved pack and policy. For a policy list that travels with a rule, import its JSON statically and rebuild the pack when the list changes.
 
-With `--rules-lock`, `require()` in `setup()` loads only Node built-ins other than `module` and `vm`, and `import()` in `setup()` fails. This stops a rule that loads workspace code at run time by accident, for example with `require(path.join(root, name))`. It does not stop a rule author who wants to load code: `setup()` can read a file and evaluate it in other ways. The lock and the review of rule changes are the control for that case.
+## Protect the approval
 
-## Suppressions
-
-Suppression allowances can weaken enforcement just as rule edits can. The `lintai.rules-lock/4` lock records the current suppression groups. New groups and increased counts produce integrity errors with exit 3. Lower counts and removed groups are allowed without re-locking. The lock keeps the earlier allowance until `lintai lock` runs again, so a violation that was fixed and pruned can be recorded again within that approval. Run `lintai lock` after pruning to remove the allowance. An unapproved proposed write under an enforced lock leaves the suppression file unchanged. To approve a new allowance, record without enforcing the prior lock, review it, and run `lintai lock`.
-
-Put `lintai-suppressions.json` under CODEOWNERS and require owner review. Protect custom suppression locations in the same way. The ESLint and oxlint plugins also report overlapping `lintai/*` entries in their hosts' default suppression files; they only read those files.
-
-## The lock must be outside the writable scope
-
-The lock helps only if the author that you do not trust cannot also change the lock or the CI command. Use your repository host for this:
-
-- protect the default branch, so that every change needs a pull request and a passing CI run
-- add a CODEOWNERS entry for `lintai-rules/` and for `lintai-rules.lock.json`, and require a review from those owners
-- add a CODEOWNERS entry for the CI workflow that runs lintai, and pin the `--rules-lock` flag in that workflow
-
-## Workflow: an agent writes code, a person reviews rules
-
-1. A person writes or changes a rule, runs `lintai lock`, and commits the rule and the lock together. The rule owners review that pull request.
-2. The agent works on application code. CI runs lintai with `--rules-lock`.
-3. If the agent changes a rule or a file that a rule imports, CI fails with phase `integrity`. The agent cannot fix this without a change to the lock, and that change needs a review from the rule owners.
-4. If the agent edits only application code, the rules run as the owners approved them.
-
-Generate the lock on the operating system and architecture where it will be enforced, using the pinned lintai and dependency versions, and review the resulting lock with the rule change. If CI enforces rules on multiple platforms, generate and review a separate lock on each platform, for example with `lintai lock --lock-file locks/rules-linux-arm64.json` and `lintai lock --lock-file locks/rules-macos-arm64.json`. `lintai lock` creates the parent directory of the lock file if it does not exist. Select the corresponding reviewed file with `--rules-lock` on each platform, and protect those files like the default lock. Generate locks as an approval step; never automatically regenerate a lock immediately before enforcing it, because that would approve the current inputs without review.
-
-## Setup sandbox
-
-`setup()` is the only part of a rule that runs with Node capabilities. With `--setup-sandbox on` (the default), lintai runs `setup()` under the Node permission model:
-
-- `setup()` can read the workspace, the lintai package and the rule bundles
-- it cannot write files, start child processes or workers, or access the network
-- `require()` loads only Node built-ins other than `module` and `vm`, and `import()` fails
-
-A denied operation is a `rule_execution_error` with phase `setup`. The message names the permission or the module specifier. If a rule must do more, use `--setup-sandbox off`.
-
-Rule execution requires stable Node `>=26.13.1 <27`, including with the sandbox off. lintai does not grant network access to sandboxed setup. See the [Node 26 permission model](https://github.com/nodejs/node/blob/v26.13.1/doc/api/permissions.md).
-
-Only `setup()` is in the sandbox:
-
-- bundling reads the rule files but runs no rule code. esbuild needs to start processes and write files, so a sandbox there gives no protection against a rule author.
-- `.facts()`, `.program()` and `.message()` run in the pure runtime (Goja), which has no file, process or network access.
+Require owner review for the lock, suppression file, rule sources and CI workflow. Protect the branch and the invocation that selects locked mode, and pin the lintai binary and its dependencies. Anyone able to replace the reviewer-approved lock or bypass the enforcement command can change what CI accepts.

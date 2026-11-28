@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/bigbizze/lintai/diagnostics"
+	"github.com/bigbizze/lintai/internal/testpack"
 )
 
 // Run the exact quickstart and optional helper against a real workspace.
@@ -63,7 +64,7 @@ func TestFirstRunDocumentation(t *testing.T) {
 		"export default rule(\"docs.optional-helper\").version(1).program(dl`\n"+helper+"\n"+
 		"Decl violation(Fn).\nviolation(Fn) :- ts.fn_signature(Fn, Sig), ts.signature_param(Sig, 0, T), reaches_disallowed_incomplete(T).\n"+
 		"`).report(\"violation\").message(() => \"incomplete type\");\n")
-	output := runJSON(t, []string{"--json", "--repo-root", repo, "--workspace-root", workspace, "--rules", filepath.Join(workspace, "rules/*.ts")})
+	output := runJSON(t, []string{"--json", "--workspace-root", testpack.Build(t, repo, workspace, "rules/*.ts")})
 	var items []diagnostics.Diagnostic
 	if err := json.Unmarshal(output, &items); err != nil {
 		t.Fatal(err)

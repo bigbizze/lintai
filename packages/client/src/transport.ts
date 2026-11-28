@@ -2,14 +2,12 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { readSync, writeSync } from "node:fs";
 import type { Readable, Writable } from "node:stream";
 
-import type { SpawnedProcess, Spawner } from "./spawner.js";
-
 const syncSleep = new Int32Array(new SharedArrayBuffer(4));
 
 export interface ServeTransport {
 	write(bytes: Buffer, deadline: number): void;
 	read(deadline: number): Buffer;
-	close(): void;
+	close(failed?: boolean): void;
 	failure(): Error | undefined;
 }
 
@@ -81,6 +79,13 @@ export class NativeServeTransport implements ServeTransport {
 	}
 
 	read(deadline: number): Buffer {
+		// When the host yields between requests, Node can already have read
+		// from the pipe (in particular, the relay's child-exit notification).
+		// Consume those bytes before reading the underlying fd synchronously.
+		if (this.stdout.readableLength > 0) {
+			const pending = this.stdout.read(this.stdout.readableLength);
+			if (pending !== null) return pending;
+		}
 		const fd = getReadableFD(this.stdout);
 		if (fd == null) {
 			throw new Error("lintai serve stdout fd is unavailable for synchronous initialization");
@@ -110,9 +115,10 @@ export class NativeServeTransport implements ServeTransport {
 		}
 	}
 
-	close(): void {
+	close(failed = false): void {
 		if (this.closed) return;
 		this.closed = true;
+		if (failed) this.child.kill();
 		if (!this.stdin.destroyed) this.stdin.end();
 	}
 
@@ -126,38 +132,6 @@ export class NativeServeTransport implements ServeTransport {
 
 	private fail(error: Error): void {
 		this.failureValue ??= error;
-	}
-}
-
-export class SpawnerServeTransport implements ServeTransport {
-	constructor(
-		private readonly spawner: Spawner,
-		private readonly child: SpawnedProcess,
-	) {}
-
-	write(bytes: Buffer, deadline: number): void {
-		this.throwIfFailed();
-		this.child.writeBytes(bytes, deadline);
-	}
-
-	read(deadline: number): Buffer {
-		return this.child.readBytes(Math.max(0, deadline - Date.now()));
-	}
-
-	close(): void {
-		this.child.close();
-	}
-
-	failure(): Error | undefined {
-		return (
-			this.child.failure() ??
-			(this.spawner.failed ? new Error("the lintai spawner failed") : undefined)
-		);
-	}
-
-	private throwIfFailed(): void {
-		const failure = this.failure();
-		if (failure) throw failure;
 	}
 }
 

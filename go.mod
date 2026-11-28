@@ -8,6 +8,7 @@ require (
 	github.com/Microsoft/go-winio v0.6.2
 	github.com/bmatcuk/doublestar/v4 v4.10.0
 	github.com/dop251/goja v0.0.0-20260311135729-065cd970411c
+	github.com/evanw/esbuild v0.25.12
 	github.com/zeebo/xxh3 v1.1.0
 	golang.org/x/sync v0.23.0
 	golang.org/x/sys v0.48.0

@@ -13,6 +13,7 @@ import (
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/engine"
 	"github.com/bigbizze/lintai/facts"
+	"github.com/bigbizze/lintai/internal/testpack"
 	"github.com/bigbizze/lintai/observe"
 )
 
@@ -142,13 +143,10 @@ func TestCatalogFakeAloneReportsProducerOwnedAnchorAndOpaqueRevision(t *testing.
 	producer := fakeProducer("catalog", "item")
 	setFakeRow(producer, "item", "users")
 	writeCatalogRule(t, workspace, `Decl violation(Entity). violation(Entity) :- catalog.present(Entity).`, "violation")
-	session := engine.Open(engine.Options{}, producer)
+	options := engine.Config{WorkspaceRoot: testpack.Build(t, repoRoot, workspace, "lintai-rules/*.ts")}
+	session := openTestSession(t, options, producer)
 	defer session.Close()
-	options := engine.Options{
-		RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: workspace,
-		RuleGlobs: []string{"lintai-rules/**/*.ts"}, Env: map[string]any{}, Severity: diagnostics.SeverityError,
-	}
-	result, err := session.Check(context.Background(), options)
+	result, err := session.Check(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,15 +160,15 @@ func TestCatalogFakeAloneReportsProducerOwnedAnchorAndOpaqueRevision(t *testing.
 	if item.EntityIdentity == nil || item.EntityIdentity.SemanticKey != "catalog:users" {
 		t.Fatalf("unexpected anchor identity: %+v", item.EntityIdentity)
 	}
-	if len(item.Provenance.ProducerNamespaces) != 1 || item.Provenance.ProducerNamespaces[0] != "catalog" || !strings.HasPrefix(item.Provenance.SnapshotVersion, "sha256:") {
+	if len(item.Provenance.ProducerNamespaces) != 1 || item.Provenance.ProducerNamespaces[0] != "catalog" || !strings.HasPrefix(item.Provenance.FactRevision, "sha256:") {
 		t.Fatalf("unexpected composed provenance: %+v", item.Provenance)
 	}
 	if producer.prepares != 1 || producer.emits != 1 || producer.metadataCalls != 1 {
 		t.Fatalf("first generation counts: %+v", producer)
 	}
 	// An opaque revision is the producer's own validity claim.
-	unchanged, err := session.Check(context.Background(), options)
-	if err != nil || unchanged.SnapshotVersion != result.SnapshotVersion {
+	unchanged, err := session.Check(context.Background())
+	if err != nil || unchanged.FactRevision != result.FactRevision {
 		t.Fatalf("opaque revision not reused: %+v %v", unchanged, err)
 	}
 	if producer.prepares != 2 || producer.emits != 1 || producer.metadataCalls != 2 {
@@ -178,14 +176,14 @@ func TestCatalogFakeAloneReportsProducerOwnedAnchorAndOpaqueRevision(t *testing.
 	}
 	producer.revision = "opaque-revision-v2"
 	producer.rows[facts.Predicate{Name: "catalog.item", Arity: 1}] = nil
-	retracted, err := session.Check(context.Background(), options)
-	if err != nil || len(retracted.Diagnostics) != 0 || retracted.SnapshotVersion == result.SnapshotVersion {
+	retracted, err := session.Check(context.Background())
+	if err != nil || len(retracted.Diagnostics) != 0 || retracted.FactRevision == result.FactRevision {
 		t.Fatalf("opaque producer change did not retract its result: %+v %v", retracted, err)
 	}
 	producer.revision = "opaque-revision-v3"
 	setFakeRow(producer, "item", "partial")
 	producer.failEmit = true
-	if _, err := session.Check(context.Background(), options); err == nil || !strings.Contains(err.Error(), "fixture emit failed") {
+	if _, err := session.Check(context.Background()); err == nil || !strings.Contains(err.Error(), "fixture emit failed") {
 		t.Fatalf("expected emission error: %v", err)
 	}
 	if _, err := session.Current(); err == nil {
@@ -193,10 +191,7 @@ func TestCatalogFakeAloneReportsProducerOwnedAnchorAndOpaqueRevision(t *testing.
 	}
 
 	empty := fakeProducer("empty", "item")
-	emptyResult, err := engine.Open(engine.Options{}, empty).Check(context.Background(), engine.Options{
-		RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: t.TempDir(),
-		RuleGlobs: []string{}, Env: map[string]any{},
-	})
+	emptyResult, err := openTestSession(t, engine.Config{WorkspaceRoot: testpack.Build(t, repoRoot, t.TempDir())}, empty).Check(context.Background())
 	if err != nil {
 		t.Fatalf("present-empty relation should be successful: %v", err)
 	}
@@ -208,11 +203,81 @@ func TestCatalogFakeAloneReportsProducerOwnedAnchorAndOpaqueRevision(t *testing.
 	}
 	different := fakeProducer("empty", "item")
 	different.description.ImplementationStamp = "fixture-v2"
-	changedCatalog, err := engine.Open(engine.Options{}, different).Check(context.Background(), engine.Options{
-		RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: t.TempDir(), RuleGlobs: []string{}, Env: map[string]any{},
-	})
-	if err != nil || changedCatalog.SnapshotVersion == emptyResult.SnapshotVersion {
+	changedCatalog, err := openTestSession(t, engine.Config{WorkspaceRoot: testpack.Build(t, repoRoot, t.TempDir())}, different).Check(context.Background())
+	if err != nil || changedCatalog.FactRevision == emptyResult.FactRevision {
 		t.Fatalf("catalog identity omitted on empty demand: %v", err)
+	}
+}
+
+func TestNonFileProducerJoinsCodeAndRecoversWithoutUndemandedInterference(t *testing.T) {
+	// Spec 3: a code producer and a database producer join on a table name.
+	// Only the database revision changes; the finding on unchanged code follows it.
+	repoRoot, _ := filepath.Abs("..")
+	workspace := t.TempDir()
+	tableArgument := facts.ArgumentDescription{
+		Name: "Table", Representations: []facts.ValueKind{facts.StringKind}, Role: facts.ValueRole,
+		ReportSupport: facts.ReportNone,
+	}
+	code := fakeProducer("code", "uses")
+	code.scope = "code scope"
+	uses := facts.Predicate{Name: "code.uses", Arity: 2}
+	code.description.BaseRelations[0].Predicate = uses
+	code.description.BaseRelations[0].Arguments = append(code.description.BaseRelations[0].Arguments, tableArgument)
+	code.description.Schema = facts.Schema{Declarations: "Decl uses(Entity, Table) descr [extensional(), arg(Entity, \"entity id\"), arg(Table, \"table name\")].\n"}
+	code.description.Helpers = nil
+	code.rows = map[facts.Predicate][][]facts.Value{uses: {{facts.String("orders-query"), facts.String("orders")}}}
+	code.anchors["orders-query"] = facts.AnchorSupport{
+		Location:    diagnostics.SourceLocation{File: "app/orders.ts", StartLine: 3, StartColumn: 1, EndLine: 3, EndColumn: 12},
+		Description: "query of orders",
+	}
+	database := fakeProducer("db", "deprecated")
+	database.scope = map[string]any{"schema": "dbo"}
+	database.description.BaseRelations[0].Arguments[0] = tableArgument
+	database.description.Schema = facts.Schema{Declarations: "Decl deprecated(Table) descr [extensional(), arg(Table, \"table name\")].\n"}
+	database.description.Helpers = nil
+	deprecated := facts.Predicate{Name: "db.deprecated", Arity: 1}
+	broken := fakeProducer("unused", "item")
+	broken.failEmit = true
+	writeCatalogRule(t, workspace, `Decl violation(Entity). violation(Entity) :- code.uses(Entity, Table), db.deprecated(Table).`, "violation")
+	session := openTestSession(t, engine.Config{WorkspaceRoot: testpack.Build(t, repoRoot, workspace, "lintai-rules/*.ts")}, code, database, broken)
+	check := func() []diagnostics.Diagnostic {
+		t.Helper()
+		result, err := session.Check(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result.Diagnostics
+	}
+
+	if got := check(); len(got) != 0 {
+		t.Fatalf("no deprecated table should mean no finding: %+v", got)
+	}
+	database.revision = "db-v2"
+	database.rows[deprecated] = [][]facts.Value{{facts.String("orders")}}
+	got := check()
+	if len(got) != 1 || got[0].SourceLocation == nil || got[0].SourceLocation.File != "app/orders.ts" {
+		t.Fatalf("database revision alone did not add the code-anchored finding: %+v", got)
+	}
+	if strings.Join(got[0].Provenance.ProducerNamespaces, ",") != "code,db" {
+		t.Fatalf("provenance = %v", got[0].Provenance.ProducerNamespaces)
+	}
+
+	database.revision = "db-v3"
+	database.failEmit = true
+	if _, err := session.Check(context.Background()); err == nil || !strings.Contains(err.Error(), "fixture emit failed") {
+		t.Fatalf("demanded producer failure was not reported: %v", err)
+	}
+	if _, err := session.Current(); err == nil {
+		t.Fatal("failed composition left a published result")
+	}
+	database.failEmit = false
+	database.revision = "db-v4"
+	database.rows[deprecated] = nil
+	if got := check(); len(got) != 0 {
+		t.Fatalf("recovered database revision did not retract the finding: %+v", got)
+	}
+	if broken.prepares != 0 || broken.emits != 0 {
+		t.Fatalf("undemanded producer was invoked: prepares=%d emits=%d", broken.prepares, broken.emits)
 	}
 }
 
@@ -222,26 +287,23 @@ func TestOpaqueProducerScopeContributesToResultIdentity(t *testing.T) {
 	repoRoot, _ := filepath.Abs("..")
 	workspace := t.TempDir()
 	writeCatalogRule(t, workspace, `Decl violation(Entity). violation(Entity) :- catalog.item(Entity).`, "violation")
-	options := engine.Options{
-		RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: workspace,
-		RuleGlobs: []string{"lintai-rules/**/*.ts"}, Env: map[string]any{},
-	}
+	options := engine.Config{WorkspaceRoot: testpack.Build(t, repoRoot, workspace, "lintai-rules/*.ts")}
 	left := fakeProducer("catalog", "item")
 	left.scope = map[string]any{"partition": "a"}
 	left.analyzed = []string{"catalog/objects.sql"}
-	leftResult, err := engine.Open(engine.Options{}, left).Check(context.Background(), options)
+	leftResult, err := openTestSession(t, options, left).Check(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	right := fakeProducer("catalog", "item")
 	right.scope = []any{[]any{"partition", "a"}}
 	right.analyzed = []string{"catalog/objects.sql"}
-	rightResult, err := engine.Open(engine.Options{}, right).Check(context.Background(), options)
+	rightResult, err := openTestSession(t, options, right).Check(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if leftResult.SnapshotVersion == rightResult.SnapshotVersion {
-		t.Fatalf("producer scope did not affect identity: %s", leftResult.SnapshotVersion)
+	if leftResult.FactRevision == rightResult.FactRevision {
+		t.Fatalf("producer scope did not affect identity: %s", leftResult.FactRevision)
 	}
 	cases := []struct {
 		name          string
@@ -260,58 +322,94 @@ func TestOpaqueProducerScopeContributesToResultIdentity(t *testing.T) {
 			producer.scope = map[string]any{"selection": tc.before}
 			setFakeRow(producer, "item", "users")
 
-			session := engine.Open(engine.Options{}, producer)
+			session := openTestSession(t, engine.Config{
+				WorkspaceRoot: testpack.Build(t, repoRoot, workspace, "lintai-rules/*.ts"),
+			}, producer)
 			defer session.Close()
-			options := engine.Options{
-				RepoRoot:      repoRoot,
-				AssetRoot:     filepath.Join(repoRoot, "packages/client"),
-				WorkspaceRoot: workspace,
-				RuleGlobs:     []string{"lintai-rules/**/*.ts"},
-			}
-			first, err := session.Check(context.Background(), options)
+			first, err := session.Check(context.Background())
 			if err != nil || len(first.Diagnostics) != 1 {
 				t.Fatalf("first: diagnostics=%d err=%v", len(first.Diagnostics), err)
 			}
 
 			producer.scope = map[string]any{"selection": tc.after}
 			producer.rows[facts.Predicate{Name: "catalog.item", Arity: 1}] = nil
-			second, err := session.Check(context.Background(), options)
+			second, err := session.Check(context.Background())
 			if err != nil {
 				t.Fatal(err)
 			}
-			if first.SnapshotVersion == second.SnapshotVersion ||
+			if first.FactRevision == second.FactRevision ||
 				len(second.Diagnostics) != 0 || producer.prepares != 2 || producer.emits != 2 {
 				t.Fatalf("scope change reused old facts: sameIdentity=%v diagnostics=%d prepares=%d emits=%d",
-					first.SnapshotVersion == second.SnapshotVersion,
+					first.FactRevision == second.FactRevision,
 					len(second.Diagnostics), producer.prepares, producer.emits)
 			}
 		})
 	}
 }
 
-func TestTypeScriptAndFakeComposeThroughCatalog(t *testing.T) {
-	// V01/V24: TypeScript and an independent fake compose with two namespaces,
-	// producer-owned location support, and no file-ID inference.
+func TestExternalTypeScriptAndFakeComposeThroughCatalog(t *testing.T) {
+	// The checked-in rule joins the TypeScript import specifier to an external
+	// inventory value and reports the TypeScript-owned import site.
 	repoRoot, _ := filepath.Abs("..")
 	workspace := filepath.Join(repoRoot, "testdata/fixtures/external-backend/mixed-facts")
 	fake := fakeProducer("catalog", "external_boundary")
-	setFakeRow(fake, "external_boundary", "catalog-api")
-	result, err := engine.Open(engine.Options{}, typescript.New(), fake).Check(context.Background(), engine.Options{
-		RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: workspace,
-		RuleGlobs: []string{"lintai-rules/**/*.ts"}, Env: map[string]any{}, Severity: diagnostics.SeverityError,
-	})
-	if err != nil {
-		t.Fatal(err)
+	fake.scope = map[string]any{"environment": "production"}
+	fake.description.BaseRelations[0].Arguments[0] = facts.ArgumentDescription{
+		Name: "Specifier", Representations: []facts.ValueKind{facts.StringKind}, Role: facts.ValueRole, ReportSupport: facts.ReportNone,
 	}
-	if len(result.Diagnostics) != 1 {
-		t.Fatalf("expected one joined TypeScript/fake diagnostic, got %+v", result.Diagnostics)
+	fake.description.Schema = facts.Schema{Declarations: `Decl external_boundary(Specifier) descr [extensional(), arg(Specifier, "module specifier")].`}
+	fake.description.Helpers = nil
+	predicate := facts.Predicate{Name: "catalog.external_boundary", Arity: 1}
+	fake.rows[predicate] = [][]facts.Value{{facts.String("other-api")}}
+	unused := fakeProducer("unused", "item")
+	unused.failEmit = true
+	session := openTestSession(t, engine.Config{WorkspaceRoot: testpack.Build(t, repoRoot, workspace, "lintai-rules/*.ts")},
+		typescript.New(typescript.Options{Sources: []string{"src/handler.ts"}}), fake, unused)
+	check := func() engine.Result {
+		t.Helper()
+		result, err := session.Check(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
 	}
-	item := result.Diagnostics[0]
-	if item.RuleID != "fixture.external-boundary" || item.SourceLocation == nil || item.SourceLocation.File != "catalog/object.sql" {
+	first := check()
+	if len(first.Diagnostics) != 0 {
+		t.Fatalf("unmatched external value should not join: %+v", first.Diagnostics)
+	}
+	fake.revision = "inventory-v2"
+	fake.rows[predicate] = [][]facts.Value{{facts.String("catalog-api")}}
+	matched := check()
+	if matched.FactRevision == first.FactRevision || len(matched.Diagnostics) != 1 {
+		t.Fatalf("external revision did not add a joined diagnostic: %+v", matched)
+	}
+	item := matched.Diagnostics[0]
+	if item.RuleID != "fixture.external-boundary" || item.Message != "Import catalog-api is marked as an external boundary" ||
+		item.SourceLocation == nil || *item.SourceLocation != (diagnostics.SourceLocation{
+		File: "src/handler.ts", StartLine: 1, StartColumn: 1, EndLine: 1, EndColumn: 38,
+	}) ||
+		item.EntityIdentity == nil || !strings.HasPrefix(item.EntityIdentity.SemanticKey, "ts:") {
 		t.Fatalf("unexpected diagnostic from composed facts: %+v", item)
 	}
 	if got := strings.Join(item.Provenance.ProducerNamespaces, ","); got != "catalog,ts" {
 		t.Fatalf("producer provenance = %q", got)
+	}
+	fake.revision = "inventory-v3"
+	fake.failEmit = true
+	if _, err := session.Check(context.Background()); err == nil || !strings.Contains(err.Error(), "fixture emit failed") {
+		t.Fatalf("expected demanded producer failure: %v", err)
+	}
+	if _, err := session.Current(); err == nil {
+		t.Fatal("failed composition left a published result")
+	}
+	fake.revision = "inventory-v4"
+	fake.failEmit = false
+	fake.rows[predicate] = [][]facts.Value{{facts.String("other-api")}}
+	if recovered := check(); len(recovered.Diagnostics) != 0 || recovered.FactRevision == matched.FactRevision {
+		t.Fatalf("recovered inventory did not retract the finding: %+v", recovered)
+	}
+	if unused.prepares != 0 || unused.emits != 0 {
+		t.Fatalf("undemanded failing producer was invoked: prepares=%d emits=%d", unused.prepares, unused.emits)
 	}
 }
 
@@ -324,10 +422,7 @@ func TestProducerNamespacesDisambiguateCollidingLocalPredicates(t *testing.T) {
 	setFakeRow(left, "item", "same")
 	setFakeRow(right, "item", "same")
 	writeCatalogRule(t, workspace, `Decl violation(Entity). violation(Entity) :- left.item(Entity), right.item(_).`, "violation")
-	result, err := engine.Open(engine.Options{}, right, left).Check(context.Background(), engine.Options{
-		RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: workspace,
-		RuleGlobs: []string{"lintai-rules/**/*.ts"}, Env: map[string]any{}, Severity: diagnostics.SeverityError,
-	})
+	result, err := openTestSession(t, engine.Config{WorkspaceRoot: testpack.Build(t, repoRoot, workspace, "lintai-rules/*.ts")}, right, left).Check(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,34 +438,31 @@ func TestCatalogRejectsMissingCoverageAndInvalidEntities(t *testing.T) {
 	repoRoot, _ := filepath.Abs("..")
 	workspace := t.TempDir()
 	writeCatalogRule(t, workspace, `Decl violation(Entity). violation(Entity) :- catalog.item(Entity).`, "violation")
-	options := engine.Options{
-		RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: workspace,
-		RuleGlobs: []string{"lintai-rules/**/*.ts"}, Env: map[string]any{},
-	}
+	options := engine.Config{WorkspaceRoot: testpack.Build(t, repoRoot, workspace, "lintai-rules/*.ts")}
 	duplicate := fakeProducer("catalog", "item")
-	if _, err := engine.Open(engine.Options{}, duplicate, duplicate).Check(context.Background(), options); err == nil || !strings.Contains(err.Error(), "registered more than once") {
+	if _, err := engine.Open(engine.Config{}, duplicate, duplicate); err == nil || !strings.Contains(err.Error(), "registered more than once") {
 		t.Fatalf("expected duplicate-namespace failure, got %v", err)
 	}
 	missing := fakeProducer("catalog", "item")
 	missing.omit = facts.Predicate{Name: "catalog.item", Arity: 1}
-	if _, err := engine.Open(engine.Options{}, missing).Check(context.Background(), options); err == nil || !strings.Contains(err.Error(), "omitted requested predicate") {
+	if _, err := openTestSession(t, options, missing).Check(context.Background()); err == nil || !strings.Contains(err.Error(), "omitted requested predicate") {
 		t.Fatalf("expected missing-coverage failure, got %v", err)
 	}
 	unlisted := fakeProducer("catalog", "item")
 	unlisted.description.Schema.Declarations += `Decl unlisted(Entity) descr [extensional(), arg(Entity, "entity id")].`
-	if _, err := engine.Open(engine.Options{}, unlisted).Check(context.Background(), options); err == nil || !strings.Contains(err.Error(), "absent from BaseRelations") {
+	if _, err := engine.Open(engine.Config{}, unlisted); err == nil || !strings.Contains(err.Error(), "absent from BaseRelations") {
 		t.Fatalf("expected catalog extensional predicate mismatch, got %v", err)
 	}
 	undeclared := fakeProducer("catalog", "item")
 	undeclaredRelation := undeclared.description.BaseRelations[0]
 	undeclaredRelation.Predicate = facts.Predicate{Name: "catalog.undeclared", Arity: 1}
 	undeclared.description.BaseRelations = append(undeclared.description.BaseRelations, undeclaredRelation)
-	if _, err := engine.Open(engine.Options{}, undeclared).Check(context.Background(), options); err == nil || !strings.Contains(err.Error(), "no extensional catalog declaration") {
+	if _, err := engine.Open(engine.Config{}, undeclared); err == nil || !strings.Contains(err.Error(), "no extensional catalog declaration") {
 		t.Fatalf("expected catalog base relation mismatch, got %v", err)
 	}
 	invalid := fakeProducer("catalog", "item")
 	invalid.rows[facts.Predicate{Name: "catalog.item", Arity: 1}] = [][]facts.Value{{facts.String("")}}
-	if _, err := engine.Open(engine.Options{}, invalid).Check(context.Background(), options); err == nil || !strings.Contains(err.Error(), "invalid entity") {
+	if _, err := openTestSession(t, options, invalid).Check(context.Background()); err == nil || !strings.Contains(err.Error(), "invalid entity") {
 		t.Fatalf("expected empty entity failure, got %v", err)
 	}
 
@@ -392,10 +484,7 @@ func TestRuleViewDoesNotBorrowAnotherRulesAnchorSupport(t *testing.T) {
 
 	badProgram := `Decl violation(Entity). violation(Entity) :- catalog.unlocated(Entity).`
 	writeCatalogRuleFile(t, workspace, "query-only.ts", "fixture.query-only", badProgram, "violation")
-	withoutOwner, err := engine.Open(engine.Options{}, producer).Check(context.Background(), engine.Options{
-		RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: workspace,
-		RuleGlobs: []string{"lintai-rules/**/*.ts"}, Env: map[string]any{}, Severity: diagnostics.SeverityError,
-	})
+	withoutOwner, err := openTestSession(t, engine.Config{WorkspaceRoot: testpack.Build(t, repoRoot, workspace, "lintai-rules/*.ts")}, producer).Check(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -405,10 +494,7 @@ func TestRuleViewDoesNotBorrowAnotherRulesAnchorSupport(t *testing.T) {
 
 	writeCatalogRuleFile(t, workspace, "owner.ts", "fixture.anchor-owner",
 		`Decl violation(Entity). violation(Entity) :- catalog.item(Entity).`, "violation")
-	withOwner, err := engine.Open(engine.Options{}, producer).Check(context.Background(), engine.Options{
-		RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: workspace,
-		RuleGlobs: []string{"lintai-rules/**/*.ts"}, Env: map[string]any{}, Severity: diagnostics.SeverityError,
-	})
+	withOwner, err := openTestSession(t, engine.Config{WorkspaceRoot: testpack.Build(t, repoRoot, workspace, "lintai-rules/*.ts")}, producer).Check(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -439,10 +525,7 @@ func TestLintaiGlobDoesNotNeedTypeScript(t *testing.T) {
 	producer := fakeProducer("catalog", "item")
 	setFakeRow(producer, "item", "users")
 	writeCatalogRule(t, workspace, `Decl candidate(Entity). candidate(Entity) :- catalog.item(Entity), lintai.glob("src/users/**", "src/**"). Decl violation(Entity). violation(Entity) :- candidate(Entity).`, "violation")
-	result, err := engine.Open(engine.Options{}, producer).Check(context.Background(), engine.Options{
-		RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: workspace,
-		RuleGlobs: []string{"lintai-rules/**/*.ts"}, Env: map[string]any{}, Severity: diagnostics.SeverityError,
-	})
+	result, err := openTestSession(t, engine.Config{WorkspaceRoot: testpack.Build(t, repoRoot, workspace, "lintai-rules/*.ts")}, producer).Check(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -471,10 +554,7 @@ func TestNamespaceBindingRejectsAliasesAndRuleOwnedPackages(t *testing.T) {
 		t.Run(item.name, func(t *testing.T) {
 			workspace := t.TempDir()
 			writeCatalogRule(t, workspace, item.program, "violation")
-			result, err := engine.Open(engine.Options{}, fakeProducer("catalog", "item")).Check(context.Background(), engine.Options{
-				RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: workspace,
-				RuleGlobs: []string{"lintai-rules/**/*.ts"}, Env: map[string]any{}, Severity: diagnostics.SeverityError,
-			})
+			result, err := openTestSession(t, engine.Config{WorkspaceRoot: testpack.Build(t, repoRoot, workspace, "lintai-rules/*.ts")}, fakeProducer("catalog", "item")).Check(context.Background())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -487,10 +567,7 @@ func TestNamespaceBindingRejectsAliasesAndRuleOwnedPackages(t *testing.T) {
 	producer := fakeProducer("catalog", "item")
 	setFakeRow(producer, "item", "users")
 	writeCatalogRule(t, workspace, `Decl item(Entity). item(Entity) :- catalog.item(Entity). Decl violation(Entity). violation(Entity) :- item(Entity).`, "violation")
-	result, err := engine.Open(engine.Options{}, producer).Check(context.Background(), engine.Options{
-		RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: workspace,
-		RuleGlobs: []string{"lintai-rules/**/*.ts"}, Env: map[string]any{}, Severity: diagnostics.SeverityError,
-	})
+	result, err := openTestSession(t, engine.Config{WorkspaceRoot: testpack.Build(t, repoRoot, workspace, "lintai-rules/*.ts")}, producer).Check(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -517,4 +594,18 @@ export default rule("` + ruleID + `").version(1)
 	if err := os.WriteFile(rulePath, []byte(source), 0o644); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func openTestSession(t *testing.T, config engine.Config, producers ...backend.Producer) *engine.Session {
+	t.Helper()
+	session, err := engine.Open(config, producers...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := session.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+	return session
 }

@@ -1,456 +1,85 @@
-import { type ChildProcess, spawn } from "node:child_process";
-import { readSync, writeSync } from "node:fs";
+// Oxlint's Linux address-space reservations can prevent a later fork.
+// Create the relay when configuring the active plugin. It can start a fresh
+// Go server without asking the host to fork again.
 import path from "node:path";
-import { PassThrough, type Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
-
 import { FrameDecoder, encodeFrame } from "./frames.js";
-
-// Why a spawner process exists:
-//
-// With JS plugins, oxlint 1.90.0 reserves 6 GiB of address space for each
-// lint thread, after it loads the plugins. The reservations are adjacent, so
-// Linux merges them into one mapping. fork() copies the commit charge of
-// each mapping, and with the default overcommit setting it fails with ENOMEM
-// when one mapping is larger than RAM plus swap. Node starts child processes
-// with fork() on Linux, so after the reservations the oxlint process cannot
-// start lintai: 4 threads need 24 GiB, which is more than a 16 GiB machine
-// with 4 GiB of swap has. See https://github.com/oxc-project/oxc/issues/20331.
-//
-// The oxlint plugin calls startSpawner() when oxlint loads it, before the
-// reservations. startSpawner() starts this small Node process, and the client
-// then starts lintai through it.
+import { type ServeTransport, spawnNativeServe } from "./transport.js";
 
 export type HostMessage =
-	| { type: "run"; id: number; command: string; args: string[]; cwd: string }
 	| { type: "start"; id: number; command: string; args: string[]; cwd: string }
 	| { type: "stdin"; id: number; data: string }
-	| { type: "end"; id: number }
-	| { type: "kill"; id: number; signal?: NodeJS.Signals | number };
+	| { type: "end" | "kill"; id: number };
 
-type SpawnerMessage =
-	| {
-			type: "result";
-			id: number;
-			stdout: string;
-			stderr: string;
-			status: number | null;
-			error?: string;
-	  }
+type RelayMessage =
 	| { type: "stdout"; id: number; data: string }
-	| {
-			type: "exit";
-			id: number;
-			code: number | null;
-			signal: NodeJS.Signals | null;
-			error?: string;
-	  };
+	| { type: "exit"; id: number; error?: string };
 
-export type RunResult = {
-	stdout: string;
-	stderr: string;
-	status: number | null;
-	error?: Error;
-};
-
-export type SpawnedProcess = {
-	stdin: {
-		write(chunk: Buffer, callback?: (error?: Error | null) => void): unknown;
-		end(): void;
-		readonly destroyed: boolean;
-	};
-	stdout: Readable;
-	writeBytes(bytes: Buffer, deadline: number): void;
-	readBytes(timeoutMs: number): Buffer;
-	close(): void;
-	failure(): Error | undefined;
-	on(
-		event: "exit",
-		listener: (code: number | null, signal: NodeJS.Signals | null) => void,
-	): SpawnedProcess;
-	on(event: "error", listener: (error: Error) => void): SpawnedProcess;
-	kill(signal?: NodeJS.Signals | number): boolean;
-	unref(): void;
-};
-
-type Channel = {
-	process: SpawnedProcess;
-	pending: Buffer[];
-	exit?: { code: number | null; signal: NodeJS.Signals | null; error?: string };
-	failure?: Error;
-	exitListeners: Array<(code: number | null, signal: NodeJS.Signals | null) => void>;
-	errorListeners: Array<(error: Error) => void>;
-	exitEmitted: boolean;
-	errorEmitted: boolean;
-	flushScheduled: boolean;
-};
-
-const syncSleep = new Int32Array(new SharedArrayBuffer(4));
+function startRelay() {
+	const script = path.join(path.dirname(fileURLToPath(import.meta.url)), "spawner-child.js");
+	return spawnNativeServe(process.execPath, [script], process.cwd());
+}
 
 export class Spawner {
-	private readonly child: ChildProcess | undefined;
-	private readonly decoder = new FrameDecoder();
-	private readonly results = new Map<number, SpawnerMessage & { type: "result" }>();
-	private readonly channels = new Map<number, Channel>();
-	private readonly byProcess = new WeakMap<SpawnedProcess, Channel>();
+	private relay?: ServeTransport;
+	private startError?: Error;
 	private nextID = 1;
-	private failure: Error | undefined;
-	private started = false;
+	// A retiring child may still have part of an exit frame in the pipe when
+	// the next connection starts. Keep the decoder for the life of the relay.
+	private decoder = new FrameDecoder();
 
-	get failed(): boolean {
-		return this.failure !== undefined;
-	}
-
-	// restartable is true when the spawner process started and failed
-	// later. A spawner that could not start is not replaced, because each new
-	// start is one more fork() of the host process.
-	get restartable(): boolean {
-		return this.failed && this.started;
-	}
-
-	constructor(
-		script: string = path.join(path.dirname(fileURLToPath(import.meta.url)), "spawner-child.js"),
-	) {
-		let child: ChildProcess;
+	constructor() {
 		try {
-			child = spawn(process.execPath, [script], { stdio: ["pipe", "pipe", "inherit"] });
+			this.relay = startRelay();
 		} catch (error) {
-			this.child = undefined;
-			this.failure = new Error(
-				`could not start the lintai spawner process: ${error instanceof Error ? error.message : String(error)}`,
-			);
-			return;
+			this.startError = error instanceof Error ? error : new Error(String(error));
 		}
-		this.child = child;
-		child.on("spawn", () => {
-			this.started = true;
-		});
-		child.on("error", (error) => this.fail(error));
-		child.on("exit", () => this.fail(new Error("the lintai spawner process exited")));
-		child.stdin?.on("error", (error) => this.fail(error));
-		child.stdout?.on("data", (chunk: Buffer) => this.receive(chunk));
-		child.unref();
-		unrefStream(child.stdin);
-		unrefStream(child.stdout);
 	}
 
-	spawnSync(command: string, args: string[], cwd: string): RunResult {
+	spawn = (command: string, args: string[], cwd: string): ServeTransport => {
+		if (this.startError) {
+			const error = this.startError;
+			this.startError = undefined;
+			throw error;
+		}
+		if (!this.relay || this.relay.failure()) {
+			this.relay?.close(true);
+			this.relay = startRelay();
+			this.decoder = new FrameDecoder();
+		}
+		const relay = this.relay;
 		const id = this.nextID++;
-		try {
-			this.send({ type: "run", id, command, args, cwd });
-			while (!this.results.has(id)) {
-				this.readOnce(undefined);
-			}
-		} catch (error) {
-			return {
-				stdout: "",
-				stderr: "",
-				status: null,
-				error: error instanceof Error ? error : new Error(String(error)),
-			};
-		}
-		const result = this.results.get(id) as SpawnerMessage & { type: "result" };
-		this.results.delete(id);
+		const send = (message: HostMessage, deadline: number) =>
+			relay.write(encodeFrame(message), deadline);
+		send({ type: "start", id, command, args, cwd }, Date.now() + 60_000);
 		return {
-			stdout: result.stdout,
-			stderr: result.stderr,
-			status: result.status,
-			...(result.error === undefined ? {} : { error: new Error(result.error) }),
-		};
-	}
-
-	spawn(command: string, args: string[], cwd: string): SpawnedProcess {
-		const id = this.nextID++;
-		const spawner = this;
-		let ended = false;
-		const channel: Channel = {
-			pending: [],
-			exitListeners: [],
-			errorListeners: [],
-			exitEmitted: false,
-			errorEmitted: false,
-			flushScheduled: false,
-			process: {
-				stdin: {
-					write(chunk, callback) {
-						try {
-							spawner.send({ type: "stdin", id, data: chunk.toString("base64") });
-							callback?.(null);
-						} catch (error) {
-							callback?.(error instanceof Error ? error : new Error(String(error)));
-						}
-						return true;
-					},
-					end() {
-						if (ended) {
-							return;
-						}
-						ended = true;
-						try {
-							spawner.send({ type: "end", id });
-						} catch {
-							// The spawner is gone, so the process is gone too.
-						}
-					},
-					get destroyed() {
-						return ended;
-					},
-				},
-				stdout: new PassThrough(),
-				writeBytes(bytes, deadline) {
-					spawner.send({ type: "stdin", id, data: bytes.toString("base64") }, deadline);
-				},
-				readBytes(timeoutMs) {
-					return spawner.readSync(channel.process, timeoutMs);
-				},
-				close() {
-					channel.process.stdin.end();
-				},
-				failure() {
-					if (channel.failure) return channel.failure;
-					if (channel.exit) {
-						return new Error(
-							`lintai serve exited unexpectedly (code=${channel.exit.code ?? "null"}, signal=${channel.exit.signal ?? "null"})`,
-						);
-					}
-					if (spawner.failure) return spawner.failure;
-					return undefined;
-				},
-				on(event, listener) {
-					if (event === "exit") {
-						channel.exitListeners.push(
-							listener as (code: number | null, signal: NodeJS.Signals | null) => void,
-						);
-					} else if (event === "error") {
-						channel.errorListeners.push(listener as (error: Error) => void);
-					}
-					return channel.process;
-				},
-				kill(signal) {
-					try {
-						spawner.send({ type: "kill", id, ...(signal === undefined ? {} : { signal }) });
-						return true;
-					} catch {
-						return false;
-					}
-				},
-				unref() {},
+			write(bytes, deadline) {
+				send({ type: "stdin", id, data: bytes.toString("base64") }, deadline);
 			},
+			read: (deadline) => {
+				while (true) {
+					const messages = this.decoder.push(relay.read(deadline)) as RelayMessage[];
+					const chunks: Buffer[] = [];
+					for (const message of messages) {
+						if (message.id !== id) continue;
+						if (message.type === "exit") throw new Error(message.error ?? "lintai serve exited");
+						chunks.push(Buffer.from(message.data, "base64"));
+					}
+					if (chunks.length) return Buffer.concat(chunks);
+				}
+			},
+			close(failed) {
+				try {
+					send({ type: failed ? "kill" : "end", id }, Date.now() + 1000);
+				} catch {
+					/* relay exited */
+				}
+			},
+			failure: () => relay.failure(),
 		};
-		this.channels.set(id, channel);
-		this.byProcess.set(channel.process, channel);
-		try {
-			this.send({ type: "start", id, command, args, cwd });
-		} catch (error) {
-			channel.failure = error instanceof Error ? error : new Error(String(error));
-			channel.exit = { code: null, signal: null, error: channel.failure.message };
-			this.scheduleFlush(channel);
-		}
-		return channel.process;
+	};
+
+	dispose() {
+		this.relay?.close();
 	}
-
-	// readSync returns output of a process started with spawn() that its
-	// stdout listeners have not received yet. It waits for output when there
-	// is none.
-	readSync(child: SpawnedProcess, timeoutMs: number): Buffer {
-		const channel = this.byProcess.get(child);
-		if (!channel) {
-			throw new Error("the process was not started by this spawner");
-		}
-		const deadline = Date.now() + timeoutMs;
-		while (channel.pending.length === 0) {
-			if (channel.exit) {
-				throw new Error(
-					`lintai serve closed stdout${channel.exit.error ? `: ${channel.exit.error}` : ""}`,
-				);
-			}
-			this.readOnce(deadline);
-		}
-		const output = Buffer.concat(channel.pending.splice(0));
-		if (channel.exit) {
-			this.scheduleFlush(channel);
-		}
-		return output;
-	}
-
-	// send writes the whole frame before it returns. The callers then block
-	// the event loop while they wait for the answer, so a write that the
-	// event loop would finish later could never complete.
-	private send(message: HostMessage, deadline?: number): void {
-		if (this.failure) {
-			throw this.failure;
-		}
-		const frame = encodeFrame(message);
-		const fd = (this.child?.stdin as unknown as { _handle?: { fd?: number } } | null)?._handle?.fd;
-		if (typeof fd !== "number") {
-			this.fail(new Error("the lintai spawner stdin fd is unavailable"));
-			throw this.failure;
-		}
-		let offset = 0;
-		while (offset < frame.length) {
-			if (deadline !== undefined && deadline - Date.now() <= 0) {
-				const failure = new Error("lintai spawner write timed out");
-				this.fail(failure);
-				throw failure;
-			}
-			try {
-				const bytesWritten = writeSync(fd, frame, offset);
-				if (bytesWritten > 0) {
-					offset += bytesWritten;
-				} else {
-					this.waitForWrite(deadline);
-				}
-			} catch (error) {
-				const code = (error as NodeJS.ErrnoException)?.code;
-				if (code !== "EAGAIN" && code !== "EWOULDBLOCK") {
-					this.fail(error instanceof Error ? error : new Error(String(error)));
-					throw this.failure;
-				}
-				this.waitForWrite(deadline);
-			}
-		}
-	}
-
-	private waitForWrite(deadline: number | undefined): void {
-		const remaining = deadline === undefined ? 1 : deadline - Date.now();
-		if (remaining <= 0) {
-			const failure = new Error("lintai spawner write timed out");
-			this.fail(failure);
-			throw failure;
-		}
-		Atomics.wait(syncSleep, 0, 0, Math.min(1, remaining));
-	}
-
-	private readOnce(deadline: number | undefined): void {
-		if (this.failure) {
-			throw this.failure;
-		}
-		const fd = (this.child?.stdout as unknown as { _handle?: { fd?: number } } | null)?._handle?.fd;
-		if (typeof fd !== "number") {
-			throw new Error("the lintai spawner stdout fd is unavailable");
-		}
-		const buffer = Buffer.allocUnsafe(64 * 1024);
-		while (true) {
-			const remaining = deadline === undefined ? 10 : deadline - Date.now();
-			if (remaining <= 0) {
-				throw new Error("timed out waiting for lintai");
-			}
-			try {
-				const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
-				if (bytesRead === 0) {
-					this.fail(new Error("the lintai spawner process closed its output"));
-					throw this.failure;
-				}
-				this.receive(buffer.subarray(0, bytesRead));
-				return;
-			} catch (error) {
-				const code = (error as NodeJS.ErrnoException)?.code;
-				if (code !== "EAGAIN" && code !== "EWOULDBLOCK") {
-					throw error;
-				}
-				Atomics.wait(syncSleep, 0, 0, Math.min(10, remaining));
-			}
-		}
-	}
-
-	private receive(chunk: Buffer): void {
-		let messages: SpawnerMessage[];
-		try {
-			messages = this.decoder.push(chunk) as SpawnerMessage[];
-		} catch (error) {
-			this.fail(error instanceof Error ? error : new Error(String(error)));
-			return;
-		}
-		for (const message of messages) {
-			if (message.type === "result") {
-				this.results.set(message.id, message);
-				continue;
-			}
-			const channel = this.channels.get(message.id);
-			if (!channel) {
-				continue;
-			}
-			if (message.type === "stdout") {
-				channel.pending.push(Buffer.from(message.data, "base64"));
-			} else {
-				channel.exit = { code: message.code, signal: message.signal, error: message.error };
-				if (message.error) channel.failure = new Error(message.error);
-				this.channels.delete(message.id);
-			}
-			this.scheduleFlush(channel);
-		}
-	}
-
-	// flush gives pending output to the stdout listeners of a process, and
-	// then its exit to the exit listeners. Output stays pending while the
-	// process has no stdout listener, so that readSync can return it.
-	private scheduleFlush(channel: Channel): void {
-		if (channel.flushScheduled) {
-			return;
-		}
-		channel.flushScheduled = true;
-		setImmediate(() => {
-			channel.flushScheduled = false;
-			if (channel.pending.length > 0 && channel.process.stdout.listenerCount("data") > 0) {
-				(channel.process.stdout as PassThrough).write(Buffer.concat(channel.pending.splice(0)));
-			}
-			if (channel.failure && !channel.errorEmitted) {
-				channel.errorEmitted = true;
-				for (const listener of channel.errorListeners) listener(channel.failure);
-			}
-			if (channel.exit && channel.pending.length === 0 && !channel.exitEmitted) {
-				channel.exitEmitted = true;
-				for (const listener of channel.exitListeners) {
-					listener(channel.exit.code, channel.exit.signal);
-				}
-			}
-		});
-	}
-
-	private fail(error: Error): void {
-		if (this.failure) {
-			return;
-		}
-		this.failure = error;
-		for (const [id, channel] of this.channels) {
-			channel.failure = error;
-			channel.exit = { code: null, signal: null, error: error.message };
-			this.channels.delete(id);
-			this.scheduleFlush(channel);
-		}
-	}
-}
-
-function unrefStream(stream: unknown): void {
-	(stream as { unref?: () => void } | null)?.unref?.();
-}
-
-let active: Spawner | undefined;
-
-let enabled = false;
-
-// startSpawner starts the spawner process on Linux, where fork() can fail in
-// a large host process. Call it when the host linter loads the plugin. Later
-// lintai processes of this process start through the spawner.
-export function startSpawner(): void {
-	if (process.platform !== "linux") {
-		return;
-	}
-	enabled = true;
-	activeSpawner();
-}
-
-// activeSpawner returns the spawner when startSpawner was called. When the
-// spawner process failed after it started, it starts a new one. If that
-// start fails too (with ENOMEM after the host reserved its memory), it keeps
-// the failed spawner, which reports the error to the client. The client
-// reports it as a workspace problem.
-export function activeSpawner(): Spawner | undefined {
-	if (!enabled) {
-		return undefined;
-	}
-	if (!active || active.restartable) {
-		active = new Spawner();
-	}
-	return active;
 }

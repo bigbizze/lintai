@@ -2,16 +2,12 @@ package typescript
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"path/filepath"
 	"slices"
 	"strings"
 
-	"github.com/bigbizze/lintai/facts"
 	"github.com/bigbizze/lintai/internal/ambient"
-	"github.com/bigbizze/lintai/internal/canonical"
 	"github.com/bigbizze/lintai/internal/tsgo/lintaiapi"
 	"github.com/bigbizze/lintai/internal/workspace"
 	"github.com/bigbizze/lintai/observe"
@@ -23,11 +19,7 @@ func (b *Backend) validateGeneration(ctx context.Context, generation *producerGe
 	return changed == nil && err == nil, err
 }
 
-func (b *Backend) extractSnapshot(ctx context.Context, workspaceRoot string, relations []string, description facts.ProducerDescription, previous *lintaiapi.Snapshot) (*producerGeneration, []ambient.Source, error) {
-	scope, err := ParseFileScope(string(b.settings.Files))
-	if err != nil {
-		return nil, nil, err
-	}
+func (b *Backend) extractSnapshot(ctx context.Context, workspaceRoot string, relations []string, previous *lintaiapi.Snapshot) (*producerGeneration, []ambient.Source, error) {
 	sources := ambient.Builtin()
 	options := workspace.ScopeOptions{Exclude: b.settings.WorkspaceExcludes, Include: b.settings.Includes, Sources: b.settings.Sources, InvocationExclude: b.settings.Excludes}
 	plan, err := workspace.PlanSources(workspaceRoot, options)
@@ -48,13 +40,13 @@ func (b *Backend) extractSnapshot(ctx context.Context, workspaceRoot string, rel
 	snapshot, err := lintaiapi.BuildSnapshotReusingTracking(ctx, lintaiapi.BuildSnapshotRequest{
 		WorkspaceRoot: plan.Root, Files: plan.Files, ExactFiles: plan.ExactFiles,
 		SourceLinks: sourceLinks, AmbientMatchers: convertAmbientMatchers(sources),
-		RequestedRelations: relations, TsconfigFiles: scope == FileScopeTsconfig,
+		RequestedRelations: relations, TsconfigFiles: b.settings.Files == FileScopeTsconfig,
 	}, previous)
 	if err != nil {
 		return nil, nil, err
 	}
 	generation := &producerGeneration{snapshot: snapshot, adjustments: convertAdjustments(plan.Root, snapshot.ConfigAdjustments)}
-	if err := b.finishGeneration(generation, plan, description, workspaceRoot, scope == FileScopeTsconfig); err != nil {
+	if err := b.finishGeneration(generation, plan, workspaceRoot, b.settings.Files == FileScopeTsconfig); err != nil {
 		return nil, nil, err
 	}
 	return generation, sources, nil
@@ -65,14 +57,14 @@ func compilerObservations(inputs []lintaiapi.CompilerObservation) (observe.Set, 
 	for _, input := range inputs {
 		record := observe.Record{Kind: observe.Kind(input.Kind), Path: filepath.Clean(input.Path), Op: observe.Operation(input.Op), Value: observe.Value(input.Value), Entries: input.Entries}
 		if input.Stamp != nil {
-			record.Stamp = &observe.Stamp{Size: fmt.Sprint(input.Stamp.Size), MtimeNs: fmt.Sprint(input.Stamp.MtimeNs), ObservedAtNs: fmt.Sprint(input.Stamp.ObservedAtNs)}
+			record.Stamp = &observe.Stamp{Size: input.Stamp.Size, MtimeNs: input.Stamp.MtimeNs, ObservedAtNs: input.Stamp.ObservedAtNs}
 		}
 		records = append(records, record)
 	}
 	return observe.New(records)
 }
 
-func (b *Backend) finishGeneration(generation *producerGeneration, plan *workspace.ScopePlan, description facts.ProducerDescription, workspaceRoot string, tsconfigFiles bool) error {
+func (b *Backend) finishGeneration(generation *producerGeneration, plan *workspace.ScopePlan, workspaceRoot string, tsconfigFiles bool) error {
 	snapshot := generation.snapshot
 	compilerSet, err := compilerObservations(snapshot.CompilerInputs)
 	if err != nil {
@@ -83,23 +75,12 @@ func (b *Backend) finishGeneration(generation *producerGeneration, plan *workspa
 	if err != nil {
 		return err
 	}
-	revision, err := generation.observations.Digest(filepath.Clean(requestedRoot))
+	generation.inputRevision, err = generation.observations.Digest(filepath.Clean(requestedRoot))
 	if err != nil {
 		return fmt.Errorf("input revision: %w", err)
 	}
-	revision = combineInputRevisions(revision, plan.Revision, description.EffectiveConfiguration)
 	generation.scope = scopeIdentity(plan, snapshot, tsconfigFiles)
-	generation.inputRevision = revision
 	return nil
-}
-
-func combineInputRevisions(values ...any) string {
-	encoded, err := canonical.MarshalStructured(append([]any{"typescript-input-revision-v3"}, values...))
-	if err != nil {
-		return ""
-	}
-	digest := sha256.Sum256(encoded)
-	return "sha256:" + hex.EncodeToString(digest[:])
 }
 
 func scopeIdentity(plan *workspace.ScopePlan, snapshot *lintaiapi.Snapshot, tsconfigFiles bool) map[string]any {

@@ -2,16 +2,11 @@
 
 import { spawnSync } from "node:child_process";
 
-import { resolveAssetRoot, resolveNativeBinary } from "./index.js";
-
-function hasAssetRootFlag(args: string[]): boolean {
-	return args.some((arg, index) => arg === "--asset-root" || arg.startsWith("--asset-root=") || args[index - 1] === "--asset-root");
-}
+import { resolveNativeBinary } from "./index.js";
 
 const binary = resolveNativeBinary();
 const args = process.argv.slice(2);
-const finalArgs = hasAssetRootFlag(args) ? args : [...args, "--asset-root", resolveAssetRoot()];
-const result = spawnSync(binary, finalArgs, {
+const result = spawnSync(binary, args, {
 	stdio: "inherit",
 });
 

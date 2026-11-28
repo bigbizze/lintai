@@ -45,7 +45,7 @@ type EntityIdentity struct {
 }
 
 type Provenance struct {
-	SnapshotVersion    string   `json:"snapshot_version"`
+	FactRevision       string   `json:"fact_revision"`
 	RuleVersion        int      `json:"rule_version"`
 	ProducerNamespaces []string `json:"producer_namespaces,omitempty"`
 }

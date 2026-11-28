@@ -1,238 +1,290 @@
-import { AsyncLocalStorage } from "node:async_hooks";
 import { realpathSync } from "node:fs";
 import path from "node:path";
 
-import { suppressionOverlaps } from "./suppressions.js";
-
 import {
+	AnalysisError,
+	type DocumentAnalysis,
 	type FileAnalysis,
-	type HostDefaults,
+	type Finding,
+	LintAIClient,
 	type LintaiOptions,
-	type ResolvedBridgeOptions,
-	getClient,
-	resolveBridgeOptions,
+	type WorkspaceAnalysis,
+	findWorkspaceRoot,
 } from "./client.js";
 import {
 	type Report,
-	hasUnsavedChanges,
+	mismatchMessage,
 	programLocation,
-	toReports,
-	unsavedChangesMessage,
+	sourceDigest,
+	toReport,
+	workspaceChangedMessage,
 } from "./reports.js";
+import { Spawner } from "./spawner.js";
 
-// analysisRuleName is the plugin rule that reports everything that is not a
-// violation of a configured lintai rule: rule errors, analysis problems,
-// the unsaved-file message and violations of rules that the plugin has no
-// linter rule for.
-export const analysisRuleName = "analysis";
-
-export const authoringRuleNames = [
-	"no-ambient-in-pure-phase",
-	"no-top-level-node-imports",
-	"require-rule-shape",
-] as const;
-
-// A lintai rule cannot have one of these ids, because the plugin uses the
-// names for its own rules.
-export const reservedRuleNames: readonly string[] = [analysisRuleName, ...authoringRuleNames];
-
-// LintedFile is the part of a linter rule context that the lintai rules
-// use: the path and text, an identity shared for one host file analysis,
-// and report().
-export type LintedFile = {
+export type FileContext = {
 	physicalFilename: string;
-	// Host SourceCode shared by enabled rules in this analysis.
-	analysis: object;
-	text: string;
+	cwd?: string;
+	sourceCode: { text: string; hasBOM: boolean };
 	report(report: Report): void;
 };
 
-// The completed batch's workspace problems, including a request failure. The
-// same problems are also available to lintai/analysis during the callback.
-export type BatchOperation = { problems: readonly string[] };
-
-export type LintaiRules = {
-	// rules are the lintai rules that get a linter rule lintai/<id>, sorted
-	// by id. A rule whose id is known but that cannot run, for example
-	// because two rule files have its id, is in the list too, so a config
-	// that names it still loads. Its problem is reported by lintai/analysis.
-	rules: ReadonlyArray<{ id: string; path: string }>;
-	lintRule(id: string, file: LintedFile): void;
-	lintAnalysis(file: LintedFile): void;
-	withFileBatch<T>(
-		files: readonly string[],
-		run: (operation: BatchOperation) => T | Promise<T>,
-	): Promise<T>;
-	// Invalidate a previous response when the host begins a new file analysis.
-	invalidateAnalysis(file: LintedFile): void;
+export type CapturedFile = {
+	readonly file: string;
+	readonly sourceDigest: string;
+	readonly findings: readonly Readonly<Finding>[];
 };
 
-// createLintaiRules reads the rule ids with lintai rules and returns the
-// logic of the generated rules and of lintai/analysis. All of them share one
-// client, so one lintai process serves every rule. With no rule globs it
-// starts no lintai process.
-export function createLintaiRules(
-	options: LintaiOptions,
-	host: HostDefaults,
-	cwd: string = process.cwd(),
-): LintaiRules {
-	if (options.rules !== undefined && options.rules.length === 0) {
-		return {
-			rules: [],
-			lintRule() {},
-			lintAnalysis() {},
-			invalidateAnalysis() {},
-			async withFileBatch(_files, run) {
-				return run({ problems: [] });
-			},
-		};
-	}
-	const resolved = resolveBridgeOptions(options, cwd, host);
-	const list = getClient(resolved).listRuleIds();
-	const known = new Map(list.rules.map((item) => [item.id, item]));
-	for (const item of list.errors) {
-		if (item.id && !known.has(item.id)) {
-			known.set(item.id, { id: item.id, path: item.path });
-		}
-	}
-	const rules = [...known.values()].sort((left, right) =>
-		left.id < right.id ? -1 : left.id > right.id ? 1 : 0,
-	);
-	const reserved = rules.filter((item) => reservedRuleNames.includes(item.id));
-	if (reserved.length > 0) {
-		throw new Error(
-			`lintai: ${reserved.map((item) => `rule ${item.path} has the id "${item.id}"`).join("; ")}. The lintai plugin uses the names ${reservedRuleNames.map((name) => `lintai/${name}`).join(", ")}, so rename the rule.`,
-		);
-	}
-	const ids = new Set(known.keys());
-	const loadErrorMessages = list.errors.map((item) =>
-		item.path
-			? `[lintai] rule file ${item.path} could not be loaded: ${item.message}`
-			: `[lintai] ${item.message}`,
-	);
-	// A config that names the rule of a file that did not load fails before
-	// lintai/analysis can run, so the cause also goes to stderr now.
-	for (const message of loadErrorMessages) {
-		console.error(message);
-	}
-	// Both hosts invalidate each enabled rule's identity in create(), before
-	// Program traversal, so the first response is shared only for this analysis.
-	const analyses = new WeakMap<object, { response: FileAnalysis | undefined }>();
-	type Batch = { active: boolean; files: Map<string, FileAnalysis>; analyses: typeof analyses };
-	const batches = new AsyncLocalStorage<Batch>();
-	const currentBatch = () => {
-		const batch = batches.getStore();
-		return batch?.active ? batch : undefined;
-	};
-	let reportedOverlaps = "";
-	const responseFor = (file: LintedFile) => {
-		const batch = currentBatch();
-		const cache = batch?.analyses ?? analyses;
-		const cached = cache.get(file.analysis);
-		if (cached) return cached.response;
-		const name = workspacePath(resolved, file.physicalFilename);
-		if (batch && !batch.files.has(name)) {
-			throw new Error(`lintai: file ${name} was not supplied to withFileBatch`);
-		}
-		const response =
-			resolved.mode === "serve" && hasUnsavedChanges(file.physicalFilename, file.text)
-				? undefined
-				: batch
-					? batch.files.get(name)
-					: getClient(resolved).getFileAnalysis(name);
-		cache.set(file.analysis, { response });
-		return response;
-	};
+/** A detached, read-only result of one workspace analysis. */
+export type LintaiCapture = {
+	readonly problems: readonly string[];
+	readonly files: readonly CapturedFile[];
+};
 
+export type LintaiSession = {
+	capture(): LintaiCapture;
+	dispose(): void;
+};
+
+type Document = { readonly sourceDigest: string; readonly findings: readonly Readonly<Finding>[] };
+
+// Each capture's documents by canonical physical path. The problems of a
+// failed capture bound to a physical root belong to the files under it.
+type Registered = { byPath: Map<string, CapturedFile>; problemRoot?: string };
+const documents = new WeakMap<LintaiCapture, Registered>();
+
+function register(capture: LintaiCapture, registered: Registered) {
+	documents.set(capture, registered);
+	return capture;
+}
+
+function freezeCapture(response: WorkspaceAnalysis): LintaiCapture {
+	const byPath = new Map<string, CapturedFile>();
+	const files = response.files.map((group: FileAnalysis) => {
+		const file: CapturedFile = Object.freeze({
+			file: group.file,
+			sourceDigest: group.sourceDigest,
+			findings: Object.freeze(
+				group.findings.map((item) =>
+					Object.freeze({
+						...item,
+						...(item.range ? { range: Object.freeze([...item.range]) } : {}),
+					}),
+				),
+			),
+		}) as CapturedFile;
+		byPath.set(path.resolve(response.physicalRoot, group.file), file);
+		return file;
+	});
+	const capture = Object.freeze({
+		problems: Object.freeze([...response.problems]),
+		files: Object.freeze(files),
+	});
+	return register(capture, { byPath });
+}
+
+function failedCapture(message: string, problemRoot?: string): LintaiCapture {
+	return register(Object.freeze({ problems: Object.freeze([message]), files: Object.freeze([]) }), {
+		byPath: new Map(),
+		problemRoot,
+	});
+}
+
+// The canonical physical path of a directory, or undefined when it does not
+// resolve.
+function physicalRootOf(root: string): string | undefined {
+	try {
+		return realpathSync.native(root);
+	} catch {
+		return undefined;
+	}
+}
+
+function isUnder(root: string, file: string) {
+	const relative = path.relative(root, file);
+	return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
+// The document the host file names when the callback runs: its canonical
+// physical path, or undefined when no file exists there. A relative name is
+// based at the host's working directory.
+function documentOf(context: FileContext): string | undefined {
+	try {
+		return realpathSync.native(path.resolve(context.cwd ?? "", context.physicalFilename));
+	} catch {
+		return undefined;
+	}
+}
+
+const analysisProblem = (error: unknown) =>
+	`[lintai] Could not analyze the workspace: ${error instanceof Error ? error.message : error}`;
+const disposedError = (error: unknown) =>
+	error instanceof Error && error.message === "lintai session is disposed";
+
+function openSession(options: LintaiOptions, linuxSpawner: boolean) {
+	const settings = Object.freeze({
+		...options,
+		workspaceRoot: path.resolve(options.workspaceRoot ?? findWorkspaceRoot(process.cwd())),
+	});
+	// The Linux Oxlint helper must start before the host enters rule callbacks,
+	// where starting a child can fail.
+	const relay =
+		linuxSpawner && settings.enabled !== false && process.platform === "linux"
+			? new Spawner()
+			: undefined;
+	let client: LintAIClient | undefined;
+	let disposed = false;
+	const connect = () => {
+		if (disposed) throw new Error("lintai session is disposed");
+		client ??= new LintAIClient(settings, relay?.spawn);
+		return client;
+	};
 	return {
-		rules,
-		lintRule(id, file) {
-			const response = responseFor(file);
-			if (!response) {
-				return;
-			}
-			const own = response.diagnostics.filter(
-				(diagnostic) =>
-					diagnostic.rule_id === id &&
-					diagnostic.diagnostic_kind !== "rule_execution_error" &&
-					diagnostic.diagnostic_kind !== "unused_suppression",
-			);
-			for (const report of toReports(own)) {
-				file.report(report);
+		settings,
+		capture(): LintaiCapture {
+			const connected = connect();
+			const root = physicalRootOf(settings.workspaceRoot);
+			try {
+				return freezeCapture(connected.getWorkspace());
+			} catch (error) {
+				if (error instanceof AnalysisError) return failedCapture(analysisProblem(error), root);
+				throw error;
 			}
 		},
-		lintAnalysis(file) {
-			const response = responseFor(file);
-			if (!response) {
-				file.report({ loc: programLocation, message: unsavedChangesMessage });
-				return;
-			}
-			const problems = response.problems();
-			const overlaps = suppressionOverlaps(resolved.workspaceRoot);
-			const overlapIdentity = JSON.stringify(overlaps);
-			if (!resolved.reportProblemsOnce || overlapIdentity !== reportedOverlaps) {
-				problems.push(...overlaps);
-			}
-			reportedOverlaps = overlapIdentity;
-			for (const message of problems) {
-				file.report({ loc: programLocation, message });
-			}
-			const ruleErrors = response.diagnostics.filter(
-				(diagnostic) =>
-					diagnostic.diagnostic_kind === "rule_execution_error" ||
-					diagnostic.diagnostic_kind === "unused_suppression",
-			);
-			for (const report of toReports(ruleErrors)) {
-				file.report(report);
-			}
-			const orphans = response.diagnostics.filter(
-				(diagnostic) =>
-					diagnostic.diagnostic_kind !== "rule_execution_error" &&
-					diagnostic.diagnostic_kind !== "unused_suppression" &&
-					!ids.has(diagnostic.rule_id),
-			);
-			for (const diagnostic of orphans) {
-				for (const report of toReports(
-					[diagnostic],
-					`[lintai] rule ${diagnostic.rule_id} has no linter rule lintai/${diagnostic.rule_id}, because the linter read the rule list when it loaded the plugin. Restart the linter or the editor's language server. `,
-				)) {
-					file.report(report);
-				}
-			}
+		document(file: string): DocumentAnalysis {
+			return connect().getDocument(file);
 		},
-		async withFileBatch(files, run) {
-			const names = files.map((file) => {
-				if (!file.trim()) throw new Error("withFileBatch requires non-empty file paths");
-				return workspacePath(resolved, path.resolve(resolved.workspaceRoot, file));
-			});
-			const result = getClient(resolved).getFilesAnalysis(names);
-			const batch: Batch = { active: true, files: new Map(), analyses: new WeakMap() };
-			for (let i = 0; i < names.length; i++) batch.files.set(names[i], result.files[i]);
-			return batches.run(batch, async () => {
-				try {
-					return await run({ problems: result.problems });
-				} finally {
-					batch.active = false;
-					batch.files.clear();
-				}
-			});
-		},
-		invalidateAnalysis(file) {
-			(currentBatch()?.analyses ?? analyses).delete(file.analysis);
+		dispose() {
+			if (disposed) return;
+			disposed = true;
+			client?.dispose();
+			relay?.dispose();
 		},
 	};
 }
 
-// workspacePath returns the path of a linted file relative to the workspace
-// root. process.cwd() is a real path, but a language server can give the
-// file under a symbolic link (on macOS, the temp directory /var is a link to
-// /private/var). If the file is not under the root, compare real paths.
-function workspacePath(options: ResolvedBridgeOptions, physicalFilename: string): string {
-	let relative = path.relative(options.workspaceRoot, physicalFilename);
-	if (relative.startsWith("..") || path.isAbsolute(relative)) {
-		try {
-			relative = path.relative(realpathSync(options.workspaceRoot), realpathSync(physicalFilename));
-		} catch {}
+/** Creates a reusable session whose captures are independent detached results. */
+export function createLintaiSession(options: LintaiOptions = {}): LintaiSession {
+	const session = openSession(options, false);
+	return { capture: session.capture, dispose: session.dispose };
+}
+
+type Visit = { document?: Document; problems: readonly string[]; mismatch: boolean };
+
+// Ranged findings are shown only when the host text has the captured digest.
+// A document without a digest cannot verify its ranges.
+function visitDocument(
+	problems: readonly string[],
+	document: Document | undefined,
+	context: FileContext,
+): Visit {
+	const mismatch = document?.sourceDigest
+		? sourceDigest(context.sourceCode) !== document.sourceDigest
+		: !!document?.findings.some((item) => item.range);
+	return { document, problems, mismatch };
+}
+
+function visitCapture(capture: LintaiCapture, context: FileContext): Visit {
+	const registered = documents.get(capture);
+	if (!registered) throw new Error("lintai: not a capture created by createLintaiSession");
+	const { byPath, problemRoot } = registered;
+	const file = documentOf(context);
+	const problems =
+		problemRoot === undefined || (file !== undefined && isUnder(problemRoot, file))
+			? capture.problems
+			: [];
+	if (file === undefined) return { problems, mismatch: true };
+	return visitDocument(problems, byPath.get(file), context);
+}
+
+function createRules(enabled: boolean, resolve: (context: FileContext) => Visit) {
+	const visits = new WeakMap<object, Visit>();
+	function rule(severity: "error" | "warning") {
+		return {
+			meta: {
+				type: "problem" as const,
+				docs: { description: `Report lintai ${severity} diagnostics` },
+				schema: [],
+			},
+			create(context: FileContext) {
+				// Both hosts create all enabled listeners before entering Program,
+				// including when they reuse the same SourceCode object on a later visit.
+				visits.delete(context.sourceCode);
+				return {
+					Program() {
+						let visit = visits.get(context.sourceCode);
+						if (!visit) {
+							visit = resolve(context);
+							visits.set(context.sourceCode, visit);
+						}
+						const { problems, document, mismatch } = visit;
+						if (severity === "error") {
+							// Repeat operation-wide problems on every file: a file-local
+							// host suppression must not hide a failure of the whole analysis.
+							for (const message of problems) context.report({ loc: programLocation, message });
+							if (mismatch) context.report({ loc: programLocation, message: mismatchMessage });
+						}
+						for (const item of document?.findings ?? []) {
+							if (item.severity === severity && !(mismatch && item.range))
+								context.report(toReport(item));
+						}
+					},
+				};
+			},
+		};
 	}
-	return relative.replace(/\\/g, "/");
+	return {
+		rules: { error: rule("error"), warning: rule("warning") },
+		levels: {
+			"lintai/error": enabled ? ("error" as const) : ("off" as const),
+			"lintai/warning": enabled ? ("warn" as const) : ("off" as const),
+		},
+	};
+}
+
+/** Rules that analyze live (one validated request per visit) or once per invocation. */
+export function createLintaiRules(options: LintaiOptions, linuxSpawner = false) {
+	const session = openSession(options, linuxSpawner);
+	const { operation } = session.settings;
+	const enabled = session.settings.enabled !== false;
+	let invocation: LintaiCapture | undefined;
+	const rules = createRules(enabled, (context) => {
+		if (!enabled) return { problems: [], mismatch: false };
+		if (operation === "invocation") {
+			try {
+				invocation ??= session.capture();
+			} catch (error) {
+				if (disposedError(error)) throw error;
+				invocation = failedCapture(analysisProblem(error));
+			}
+			return visitCapture(invocation, context);
+		}
+		// The root is observed before the file, so a link that moves after
+		// either observation makes the reply's root differ from it.
+		const root = physicalRootOf(session.settings.workspaceRoot);
+		const file = documentOf(context);
+		if (file === undefined) return { problems: [], mismatch: true };
+		try {
+			const response = session.document(file);
+			if (response.physicalRoot !== root)
+				return { problems: [workspaceChangedMessage], mismatch: false };
+			return visitDocument(response.problems, response, context);
+		} catch (error) {
+			if (disposedError(error)) throw error;
+			return { problems: [analysisProblem(error)], mismatch: false };
+		}
+	});
+	return {
+		...rules,
+		dispose() {
+			invocation = undefined;
+			session.dispose();
+		},
+	};
+}
+
+/** Rules bound to one capture. They never start a lintai process. */
+export function createCapturedRules(capture: LintaiCapture) {
+	if (!documents.has(capture))
+		throw new Error("lintai: not a capture created by createLintaiSession");
+	return createRules(true, (context) => visitCapture(capture, context));
 }

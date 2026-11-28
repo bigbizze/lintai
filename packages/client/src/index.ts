@@ -1,34 +1,17 @@
-export { startSpawner } from "./spawner.js";
-
 export {
+	AnalysisError,
 	LintAIClient,
-	getClient,
-	loadRuleIds,
-	resolveBridgeOptions,
-	type Diagnostic,
+	type DocumentAnalysis,
 	type FileAnalysis,
-	type FilesAnalysis,
-	type HostDefaults,
+	type Finding,
 	type LintaiOptions,
-	type ResolvedBridgeOptions,
-	type RuleIdList,
-	type SetupSandbox,
+	type WorkspaceAnalysis,
 } from "./client.js";
-
 export {
-	hasUnsavedChanges,
-	programLocation,
-	toReports,
-	unsavedChangesMessage,
-	type Report,
-} from "./reports.js";
-
-export {
-	analysisRuleName,
-	authoringRuleNames,
+	createCapturedRules,
 	createLintaiRules,
-	reservedRuleNames,
-	type BatchOperation,
-	type LintaiRules,
-	type LintedFile,
+	createLintaiSession,
+	type CapturedFile,
+	type LintaiCapture,
+	type LintaiSession,
 } from "./plugin.js";

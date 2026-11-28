@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/BurntSushi/toml"
+	"github.com/bigbizze/lintai/internal/canonical"
 	"github.com/bigbizze/lintai/observe"
 )
 
@@ -17,11 +18,18 @@ import (
 // settings remain keyed by namespace so the command composition root can
 // select the appropriate implementation.
 type WorkspaceConfig struct {
+	Rule         map[string]RulePolicy
+	Entries      []string
 	Exclude      []string
 	Include      []string
 	Sources      []string
 	Producers    map[string]ProducerConfig
 	Observations observe.Set
+}
+
+type RulePolicy struct {
+	Severity string         `toml:"severity"`
+	Options  map[string]any `toml:"options"`
 }
 
 type ProducerConfig struct {
@@ -111,6 +119,10 @@ func ResolveConfigPath(workspaceRoot, invocationDir, explicit string) (string, b
 
 func decodeWorkspaceTOML(input string, result *WorkspaceConfig) error {
 	var document struct {
+		Rule  map[string]RulePolicy `toml:"rule"`
+		Rules struct {
+			Entries []string `toml:"entries"`
+		} `toml:"rules"`
 		Workspace struct {
 			Exclude []string `toml:"exclude"`
 			Include []string `toml:"include"`
@@ -126,6 +138,12 @@ func decodeWorkspaceTOML(input string, result *WorkspaceConfig) error {
 	// accepts case-insensitive struct field matches and ignores unknown keys.
 	for _, key := range metadata.Keys() {
 		switch {
+		case len(key) == 1 && key[0] == "rule" && metadata.Type(key...) == "Hash":
+		case len(key) == 2 && key[0] == "rule" && metadata.Type(key...) == "Hash":
+		case len(key) == 3 && key[0] == "rule" && key[2] == "severity":
+		case len(key) >= 3 && key[0] == "rule" && key[2] == "options":
+		case len(key) == 1 && key[0] == "rules" && metadata.Type(key...) == "Hash":
+		case len(key) == 2 && key[0] == "rules" && key[1] == "entries":
 		case len(key) == 1 && (key[0] == "workspace" || key[0] == "producers"):
 		case len(key) == 2 && key[0] == "workspace" && metadata.Type(key...) != "Hash":
 			switch key[1] {
@@ -160,6 +178,28 @@ func decodeWorkspaceTOML(input string, result *WorkspaceConfig) error {
 			return fmt.Errorf("producer %q must state implementation", namespace)
 		}
 	}
+	for id, policy := range document.Rule {
+		if id == "" {
+			return fmt.Errorf("rule ID must not be empty")
+		}
+		if !metadata.IsDefined("rule", id, "severity") {
+			policy.Severity = "error"
+		}
+		switch policy.Severity {
+		case "off", "warning", "error":
+		default:
+			return fmt.Errorf("rule %q: expected severity error, warning or off", id)
+		}
+		if policy.Options == nil {
+			policy.Options = map[string]any{}
+		}
+		if _, err := canonical.MarshalStructured(policy.Options); err != nil {
+			return fmt.Errorf("rule %q options: %w", id, err)
+		}
+		document.Rule[id] = policy
+	}
+	result.Rule = document.Rule
+	result.Entries = document.Rules.Entries
 	result.Exclude = document.Workspace.Exclude
 	result.Include = document.Workspace.Include
 	result.Sources = document.Workspace.Sources

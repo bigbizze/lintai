@@ -37,14 +37,23 @@ export type MessageContext = {
 	assertion_id: string;
 };
 
-export type RuleContext<Env, Setup> = {
-	env: Env;
-	setup: Setup;
+export type JsonValue =
+	| null
+	| boolean
+	| number
+	| string
+	| readonly JsonValue[]
+	| { readonly [key: string]: JsonValue };
+
+/** Optional named config export. The engine supplies the rule's options object. */
+export type RuleConfig<Env extends JsonValue = JsonValue> = {
+	parse(value: Readonly<Record<string, JsonValue>>): Env;
 };
 
-export type SetupContext<Env> = {
-	env: Env;
-	workspaceRoot: string;
+type DeepReadonly<T> = T extends object ? { readonly [K in keyof T]: DeepReadonly<T[K]> } : T;
+
+export type RuleContext<Env> = {
+	readonly env: DeepReadonly<Env>;
 };
 
 const namePattern = /^[a-z][a-z0-9_]*(\/[a-z0-9_]+)*$/;
@@ -153,35 +162,32 @@ export const dl: Dl = Object.defineProperty(
 	{ value: name, enumerable: true },
 ) as Dl;
 
-export type ProgramInput<Env, Setup> = Fragment | ((ctx: RuleContext<Env, Setup>) => Fragment);
+export type ProgramInput<Env> = Fragment | ((ctx: RuleContext<Env>) => Fragment);
 
-type RuleSpec<Env, Setup> = {
+type RuleSpec<Env> = {
 	id: string;
 	versionValue?: number;
-	setupFn?: (ctx: SetupContext<Env>) => Setup | Promise<Setup>;
-	factsFn?: (ctx: RuleContext<Env, Setup>) => Facts;
-	programValue?: ProgramInput<Env, Setup>;
+	factsFn?: (ctx: RuleContext<Env>) => DeepReadonly<Facts>;
+	programValue?: ProgramInput<Env>;
 	reportPredicates?: readonly string[];
 	expectNonEmptyPredicates?: readonly string[];
 	suppressionDeclarations?: readonly SuppressionDeclaration[];
 	messageFn?: (row: Row, ctx: MessageContext) => string;
 };
 
-export class RuleDefinition<Env, Setup> {
+export class RuleDefinition<Env> {
 	readonly id: string;
 	readonly versionValue?: number;
-	readonly setupFn?: RuleSpec<Env, Setup>["setupFn"];
-	readonly factsFn?: RuleSpec<Env, Setup>["factsFn"];
-	readonly programValue?: RuleSpec<Env, Setup>["programValue"];
+	readonly factsFn?: RuleSpec<Env>["factsFn"];
+	readonly programValue?: RuleSpec<Env>["programValue"];
 	readonly reportPredicates?: readonly string[];
 	readonly expectNonEmptyPredicates?: readonly string[];
 	readonly suppressionDeclarations?: readonly SuppressionDeclaration[];
-	readonly messageFn?: RuleSpec<Env, Setup>["messageFn"];
+	readonly messageFn?: RuleSpec<Env>["messageFn"];
 
-	constructor(private readonly spec: RuleSpec<Env, Setup>) {
+	constructor(private readonly spec: RuleSpec<Env>) {
 		this.id = spec.id;
 		this.versionValue = spec.versionValue;
-		this.setupFn = spec.setupFn;
 		this.factsFn = spec.factsFn;
 		this.programValue = spec.programValue;
 		this.reportPredicates = spec.reportPredicates;
@@ -190,36 +196,27 @@ export class RuleDefinition<Env, Setup> {
 		this.messageFn = spec.messageFn;
 	}
 
-	version(versionValue: number): RuleDefinition<Env, Setup> {
+	version(versionValue: number): RuleDefinition<Env> {
 		return new RuleDefinition({ ...this.spec, versionValue });
 	}
 
-	setup<NextSetup>(
-		setupFn: (ctx: SetupContext<Env>) => NextSetup | Promise<NextSetup>,
-	): RuleDefinition<Env, Awaited<NextSetup>> {
-		return new RuleDefinition<Env, Awaited<NextSetup>>({
-			...(this.spec as unknown as RuleSpec<Env, Awaited<NextSetup>>),
-			setupFn: setupFn as RuleSpec<Env, Awaited<NextSetup>>["setupFn"],
-		});
-	}
-
-	facts(factsFn: (ctx: RuleContext<Env, Setup>) => Facts): RuleDefinition<Env, Setup> {
+	facts(factsFn: (ctx: RuleContext<Env>) => DeepReadonly<Facts>): RuleDefinition<Env> {
 		return new RuleDefinition({ ...this.spec, factsFn });
 	}
 
-	program(programValue: ProgramInput<Env, Setup>): RuleDefinition<Env, Setup> {
+	program(programValue: ProgramInput<Env>): RuleDefinition<Env> {
 		return new RuleDefinition({ ...this.spec, programValue });
 	}
 
-	report(...predicates: string[]): RuleDefinition<Env, Setup> {
+	report(...predicates: string[]): RuleDefinition<Env> {
 		return new RuleDefinition({ ...this.spec, reportPredicates: predicates });
 	}
 
-	expectNonEmpty(...predicates: string[]): RuleDefinition<Env, Setup> {
+	expectNonEmpty(...predicates: string[]): RuleDefinition<Env> {
 		return new RuleDefinition({ ...this.spec, expectNonEmptyPredicates: predicates });
 	}
 
-	suppression(assertion: string, options: SuppressionPolicy = {}): RuleDefinition<Env, Setup> {
+	suppression(assertion: string, options: SuppressionPolicy = {}): RuleDefinition<Env> {
 		// Preserve invalid fields and values for the engine's program analysis.
 		const policy =
 			options !== null && typeof options === "object" && !Array.isArray(options)
@@ -250,22 +247,18 @@ export class RuleDefinition<Env, Setup> {
 		});
 	}
 
-	message(messageFn: (row: Row, ctx: MessageContext) => string): RuleDefinition<Env, Setup> {
+	message(messageFn: (row: Row, ctx: MessageContext) => string): RuleDefinition<Env> {
 		return new RuleDefinition({ ...this.spec, messageFn });
 	}
 }
 
-// A rule id is also a linter rule name, lintai/<id>, so it uses only the
-// characters that a linter config and a disable comment accept unquoted.
 export const ruleIdPattern = /^[a-z0-9][a-z0-9._/-]*$/;
 
-export function rule<Env = Record<string, any>, Setup = Record<string, never>>(
-	id: string,
-): RuleDefinition<Env, Setup> {
+export function rule<Env = Record<string, JsonValue>>(id: string): RuleDefinition<Env> {
 	if (typeof id !== "string" || !ruleIdPattern.test(id)) {
 		throw new TypeError(
 			`rule id ${JSON.stringify(id)} is not valid: it must match ${ruleIdPattern}`,
 		);
 	}
-	return new RuleDefinition<Env, Setup>({ id });
+	return new RuleDefinition<Env>({ id });
 }

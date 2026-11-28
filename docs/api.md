@@ -6,7 +6,6 @@ This release implements [the owner-context specification](../specs/lintai-owner-
 
 - Each selected source file has one effective compiler owner. `ts.module_config` and `ts.module_owner_config` show root config membership and the effective owner. Configured source correspondence has its own `ts.source_endpoint`, `ts.source_endpoint_incomplete` and `ts.source_config_adjusted` relations.
 - `ts.call_target_conflict`, `ts.fn_signature_conflict` and `ts.declaration_fn_incomplete` are removed. `fn_signature_unresolved` is now a helper. `call_declaration_incomplete` no longer has a `/conflict` reason.
-- Rule bundles record their inputs, and lintai checks them before it uses an artifact. Rules locks keep the `lintai.rules-lock/4` format, but their hashes change. Run `lintai lock` again.
 - Each rule execution uses a fresh runtime. `--explain` output is deterministic.
 
 ## Architecture replacement (0.9.0)
@@ -16,7 +15,7 @@ This release replaces the analysis architecture defined in [the refactor specifi
 - Rule programs use namespaced facts, such as `ts.fn` and `ts.import_edge`, and engine helpers, such as `lintai.glob`. `lintai schema` prints the configured producer catalog. See [base relations](#base-relations-and-caveats).
 - An optional `lintai.toml` at the workspace root sets the scope. `--config PATH` selects another file.
 - Rules are evaluated in parallel. `--rule-workers N` and the `ruleWorkers` client and plugin option set the maximum number of concurrent rule jobs.
-- Suppressions use `.suppression(...)` declarations and the `lintai.suppressions/4` file format. Rules locks use `lintai.rules-lock/4`. lintai does not read earlier suppression files or locks. Record the suppressions again with `--suppress-all` and run `lintai lock` again.
+- Suppressions use `.suppression(...)` declarations and the `lintai.suppressions/4` file format.
 - `--pass-on-unpruned-suppressions` is removed. Unused suppression entries are always reported.
 
 ## Declared call provenance (0.8.0)
@@ -35,24 +34,30 @@ Source associations report incomplete or ambiguous evidence instead of guessing.
 
 ## Bulk suppressions
 
-The CLI automatically reads workspace-root `lintai-suppressions.json` in the `lintai.suppressions/4` format. Use `--suppress-all` or repeatable `--suppress-rule <id>` to record current errors, `--prune-suppressions` to lower stale counts, and `--suppressions-location <path>` to override the file. Unused entries are always reported. Recording and pruning flags are mutually exclusive. Relative locations resolve from the workspace root. `lintai lock --suppressions-location <path>` approves that file in a `lintai.rules-lock/4` lock.
+The CLI automatically reads workspace-root `lintai-suppressions.json` in the `lintai.suppressions/4` format. Use `--suppress-all` or repeatable `--suppress-rule <id>` to record current errors, `--prune-suppressions` to lower stale counts, and `--suppressions-location <path>` to override the file. Unused entries are always reported. Recording and pruning flags are mutually exclusive. Relative locations resolve from the workspace root. `lintai lock --suppressions-location <path>` approves the allowances at that location.
 
-Both plugin factories and `@lintai/client` accept `suppressionsLocation?: string`. Serve initialization uses the same parameter name. Unused entries appear under `lintai/analysis`; JSON stdout remains a diagnostic array with kind `unused_suppression` for stale entries. Rule errors take exit priority (3); violations and unused suppressions exit 1. Invalid saved policy exits 2.
+Both plugin factories and `@lintai/client` accept `suppressionsLocation?: string`. Serve initialization uses the same parameter name. Hosts report unused entries at the engine severity. A stale entry has JSON diagnostic kind `unused_suppression`. Rule errors take exit priority (3); violations and unused suppressions exit 1. Invalid saved policy exits 2.
 
-Go `engine.Options` has `SuppressionsLocation`, `SuppressAll`, `SuppressRules`, and `PruneSuppressions`. `engine.Result` exposes `Suppressed`, `UnusedSuppressions`, `SuppressionsPath`, and `SuppressionsWritten`. See the bulk suppressions section above for grouping, recording and lock approval.
+Go embedders bind policy and producers to a session with `engine.Open(engine.Config{...}, producers...)`. `engine.Config` holds the workspace root, rule policy, fact limit, worker and explanation settings, lock selection, and `SuppressionsLocation`. `Session.Check` and refresh methods read suppressions without writing them. To deliberately record or prune allowances, call `Session.UpdateSuppressions(ctx, engine.SuppressionUpdate{...})`: set `All: true` to record every error-severity violation, `Rules: []string{"rule.id"}` to record selected rules, or `Prune: true` to lower stale counts. The request applies only to that operation; `All` and `Rules` are mutually exclusive, and neither can be combined with `Prune`. `engine.Result` exposes `Suppressed`, `UnusedSuppressions`, `SuppressionsPath`, and `SuppressionsWritten`. See the bulk suppressions section above for grouping, recording and lock approval.
 
 This page documents lintai's current rule-authoring and integration surface.
 
 ## Rule module shape and caveats
 
-A rule file exports:
+A rule entry has a default rule export and an optional named `config` export. Declare entry paths in the workspace-root `lintai.toml`. Use relative, POSIX-style paths to actual files. Import helpers and static policy data from those entries.
 
-- a default rule definition
-- optionally, a named `config` export
+```toml
+[rules]
+entries = ["lintai-rules/pure-no-effects.ts"]
 
-A file in the rule glob with no default export is a helper module. LintAI skips it, so shared `dl` fragments can live next to the rules. A default export that is not a rule is an error.
+[rule."arch.pure-no-effects"]
+severity = "warning"
+options = { pureDir = "src/domain" }
+```
 
-The rule id, the argument of `rule(id)`, must match `^[a-z0-9][a-z0-9._/-]*$`: lower case letters, digits, `.`, `_`, `/` and `-`, starting with a letter or a digit. The linter plugins use it in the rule name `lintai/<id>`. `rule()` throws for an invalid id, and lintai reports a `rule_execution_error` with phase `setup` for it. Each rule file must have its own id: two rule files with one id are a `rule_execution_error` with phase `config` for each file, and neither rule runs. The ids `analysis`, `no-ambient-in-pure-phase`, `no-top-level-node-imports` and `require-rule-shape` are reserved for the plugins' own rules: the CLI runs such a rule, but `createLintaiPlugin` throws.
+Run `lintai build-rules` to publish `.lintai/rules.json`. **Edits to rule sources, static JSON or package dependencies take effect only after a successful build.** Checks and editors read the published pack. An explicit `entries = []` builds an empty pack. A missing configuration, missing entry or missing pack is an error.
+
+The rule ID must match `^[a-z0-9][a-z0-9._/-]*$`. Give every entry a unique ID. Duplicate IDs produce a configuration diagnostic for each conflicting entry. The per-rule configuration table uses the semantic ID, which also appears in diagnostic messages from the host adapters.
 
 A rule is a Datalog program in the [Mangle](https://codeberg.org/TauCeti/mangle-go) dialect. The program runs over facts that LintAI extracts from the workspace. The rule names one or more predicates whose rows are violations.
 
@@ -62,7 +67,7 @@ import { z } from "zod";
 
 export const config = z.object({ pureDir: z.string().default("src/pure") });
 
-export default rule("arch.pure-no-effects")
+export default rule<z.infer<typeof config>>("arch.pure-no-effects")
 	.version(1)
 	.program(({ env }) => dl`
 		Decl reaches_suspension(Fn).
@@ -82,14 +87,13 @@ export default rule("arch.pure-no-effects")
 
 | Method | Phase | Required | Contract |
 |---|---|---|---|
-| `.version(n)` | — | yes | Rule version, a positive integer. It appears in diagnostic provenance. A rule without it fails with phase `setup`. |
-| `.setup(fn)` | Node | no | Receives `{ env, workspaceRoot }`. Returns JSON-serializable plain data. |
-| `.facts(fn)` | pure | no | Receives `{ env, setup }`. Returns `Record<string, Array<Array<string \| number \| Name>>>`: extra extensional relations for this rule. Declare each relation in the program with `descr [extensional()]`. Each tuple must match the declared arity. Booleans are not allowed; use the presence of a fact. |
-| `.program(p)` | pure | yes | A `dl` fragment, or a function `({ env, setup }) => Fragment`. |
+| `.version(n)` | — | yes | Rule version, a positive integer. It appears in diagnostic provenance. An invalid or missing version produces a load error. |
+| `.facts(fn)` | pure | no | Receives `{ env }`. Returns `Record<string, Array<Array<string \| number \| Name>>>`: extra extensional relations for this rule. Declare each relation in the program with `descr [extensional()]`. Each tuple must match the declared arity. Booleans are not allowed; use the presence of a fact. The callback must be synchronous; returning a Promise is a rule error. |
+| `.program(p)` | pure | yes | A `dl` fragment, or a function `({ env }) => Fragment`. |
 | `.report(...predicates)` | — | yes | One or more predicates defined in the program. Each one needs a `Decl` that names its arguments. Each row is one violation. The first argument is the anchor. |
 | `.suppression(assertion, { by: [...] })` | — | no | Select stable non-anchor column names whose typed values distinguish suppression groups for this reported predicate. No declaration or `{}` selects none. |
 | `.expectNonEmpty(...predicates)` | — | no | After evaluation, each listed predicate (base, prelude or rule-defined) must have at least one fact. If one is empty, the rule reports a `rule_execution_error` with phase `premise` and no violations. Use this to catch a glob or layer table that stopped matching. |
-| `.message(fn)` | pure | yes | Receives `(row, ctx)`. `row` is keyed by the argument names in the reported predicate's `Decl`. Reading a key that is not an argument name throws, and the error lists the argument names. `ctx.assertion_id` is the reported predicate's name. |
+| `.message(fn)` | pure | yes | Receives `(row, ctx)`. `row` is keyed by the argument names in the reported predicate's `Decl`. Reading a key that is not an argument name throws, and the error lists the argument names. `ctx.assertion_id` is the reported predicate's name. Must synchronously return a string; a Promise or other value is a rule error. |
 
 ### The anchor
 
@@ -122,20 +126,13 @@ export const config = z.object({
 });
 ```
 
-`config` is optional. If present, it must be a Zod-like schema with `parse` or `safeParse`. The parsed value is `env`.
+The engine passes the rule's configured options object to `config.parse(value)`. A synchronous Zod schema can validate fields, supply defaults and transform them. The result must be finite, acyclic JSON data. A thrown error, Promise or unrepresentable result yields a configuration diagnostic. Omitting the parser passes the raw options through. The engine deeply freezes a detached copy as `env`.
 
-Current caveats:
-
-- top-level rule-module imports must stay pure-phase-safe; load setup-only Node built-ins inside `setup()` with `require(...)`
-- `program()`, `facts()` and `message()` run in a restricted runtime without `process`, `require`, `fetch`, timers, `Date.now` or `Math.random`
-- `env` and `setup` are deeply frozen in the pure phase
+Initialization, parsing, facts, program generation and message callbacks all run in the pure JavaScript runtime. Rules can import pure packages, relative modules and static JSON at build time. Live data about the application comes from a fact producer with explicit inputs and scope.
 
 ## Execution model and caveats
 
-For each rule:
-
-1. `setup()` runs in Node, under the setup sandbox when it is active (see [trust.md](trust.md)). Errors use phase `setup`. When a rules lock is given, each rule is checked against it before its `setup()` runs. A mismatch uses phase `integrity`, and the rule does not run.
-
+1. In locked mode, the engine verifies the published pack, ABI, effective policy and suppression allowances before initializing any entry. Each entry initializes in its own runtime. The engine checks IDs and metadata, then parses the options of each enabled rule.
 2. `facts()` and `program()` run in Goja. Errors use phase `program`.
 3. Go parses the prelude and the program. Parse errors use phase `program_parse`.
 4. Go analyzes and stratifies the program, with the base relations and the `facts()` relations as extensional predicates. Errors use phase `program_analysis`. This includes: a redefined base or prelude predicate, a `.report()` or `.expectNonEmpty()` name that does not exist, a reported predicate without `Decl`, a `facts()` relation without an `extensional()` declaration, a wrong tuple arity, and unsafe negation.
@@ -144,11 +141,9 @@ For each rule:
 7. Each row of each reported predicate becomes a diagnostic. Anchor errors use phase `report`.
 8. `message()` runs for each row. Errors use phase `message`.
 
-File requests in serve mode and Go callers using `Session.Refresh` may reuse a successful result without rerunning setup. Ambient reads made by config transforms or setup are not automatically observed; use `reanalyze` or `Session.Check` to force preparation after those inputs change.
-
 A failing rule contributes only its error diagnostic. Other rules still run. Diagnostics are sorted by file, start line, start column, rule id, assertion id and anchor, so the output is identical across runs.
 
-Each rule execution uses a fresh pure runtime. Its `facts()` and `program()` callbacks and its `message()` callbacks share that runtime, so state initialized by the program is available to messages in that run. A later execution starts with fresh module state. Listing reads metadata in a separate runtime and does not call those callbacks.
+Initialization, parsing and callbacks for a rule share state during its execution. The next actual analysis starts with fresh module state. Metadata listing drops each runtime after reading its declarations. When the producer catalog, generated program, typed facts and relevant declarations match, the engine can reuse the compiled Datalog plan.
 
 ## Base relations and caveats
 
@@ -475,15 +470,18 @@ Caveats:
 ```sh
 lintai [flags]
 lintai check [flags]
-lintai schema [--workspace-root <dir>] [--config <file>] [--asset-root <dir>]
-lintai facts [--workspace-root <dir>] [--config <file>] [--asset-root <dir>] [--exclude <glob>]... [--source <file>]... [--files tsconfig|walk] [--source-links <file>] [--relation <name>]...
-lintai scope --explain [--json] [--workspace-root <dir>] [--config <file>] [--asset-root <dir>] [--exclude <glob>]... [--source <file>]... [--files tsconfig|walk] [--source-links <file>]
-lintai lock [--workspace-root <dir>] [--repo-root <dir>] [--asset-root <dir>] [--rules <globs>] [--lock-file <path>] [--suppressions-location <path>]
-lintai rules [--workspace-root <dir>] [--repo-root <dir>] [--asset-root <dir>] [--rules <globs>] [--json]
+lintai build-rules [--workspace-root <dir>]
+lintai schema [--workspace-root <dir>] [--config <file>]
+lintai facts [--workspace-root <dir>] [--config <file>] [--exclude <glob>]... [--source <file>]... [--files tsconfig|walk] [--source-links <file>] [--relation <name>]...
+lintai scope --explain [--json] [--workspace-root <dir>] [--config <file>] [--exclude <glob>]... [--source <file>]... [--files tsconfig|walk] [--source-links <file>]
+lintai lock [--workspace-root <dir>] [--lock-file <path>] [--suppressions-location <path>]
+lintai rules [--workspace-root <dir>] [--json]
 lintai serve
 ```
 
-`lintai rules` lists the rules and the settings each one declares. It loads each rule file, so code at the top level of that file still runs. It does not call `setup()`, `facts()`, `program()` or `message()`, analyze the workspace, or check for violations. Without `--json`, it prints one `<id> <path>` line per rule and sends errors to stderr. With `--json`, it prints:
+`lintai lock` creates the lock file or replaces an existing lintai rules lock, including an obsolete format. A lock is recognized by its `lintai.rules-lock/` format field. The command refuses to overwrite any other existing file, including an unbranded lock from an early release; move that file aside before locking. It also refuses a lock file that names the rule pack or the suppressions file through links, and rejects approval when either reserved location is a dangling symlink.
+
+`lintai rules` lists the rules and the settings each one declares. It initializes each packed entry to read its declarations and discards the runtime. Configuration parsing, callbacks and analysis run during checks. Without `--json`, it prints one `<id> <path>` line per rule and sends errors to stderr. With `--json`, it prints:
 
 ```json
 {
@@ -503,50 +501,44 @@ lintai serve
 
 `version`, `report` and `expectNonEmpty` come from the loaded rule. The arrays are always present, including an empty `expectNonEmpty`, and preserve the declaration order from the rule. `rules` is sorted by id, then by path. Paths are relative to the workspace root.
 
-A rule file that does not bundle or load, has an invalid id, is not a complete rule (no `program()`, `report()` or `message()`), or has the same id as another rule file is in `errors` and not in `rules`. An error has `id` when the id is valid and known, as for a duplicate id or an incomplete rule. These errors do not change the exit code: it is 0, so that a linter plugin can still create the other rules. Exit code 2 has its usual meaning, for example a glob that matches no file. Listing a rule does not test it. The output tells you what the rule declares, but not whether it checks the intended files or can find a violation.
+An entry that fails to initialize, has an invalid shape, or shares an ID with another entry appears in `errors`. An error includes the ID when available. A planted violation in a test workspace can verify that the rule detects the intended behavior.
 
 `lintai` and `lintai check` use the same analysis flags:
 
 - `--workspace-root`
-- `--repo-root`
-- `--asset-root`
 - `--config <file>`: choose a `lintai.toml` file, relative to the invocation directory. See [Snapshot scope](#snapshot-scope).
-- `--rules`: a comma-separated list of globs (default `lintai-rules/**/*.ts`)
 - `--exclude`: a glob, relative to the workspace root, of files to leave out of the snapshot unless explicitly selected. Repeat the flag for more globs.
 - `--source <file>`: add an exact source file, relative to the workspace root or an absolute path inside it. Repeat the flag for more files.
 - `--files`: `tsconfig` or `walk`; absent configuration defaults to `tsconfig`. See [Snapshot scope](#snapshot-scope).
 - `--source-links <file>`: an optional JSON file of source entries; a relative path is based at the workspace root. See "Source links".
-- `--env-json`: a JSON object passed to every rule as `env`
 - `--json`
 - `--explain`: with `--json`, attach `explanation` to each violation
 - `--fact-limit`: the maximum number of facts that one rule may derive (default 5,000,000)
 - `--rule-workers N`: maximum concurrent rule jobs; `0` (the default) uses `GOMAXPROCS`, and `1` runs jobs sequentially
-- `--severity <rule-id>=<level>`: the severity of the violations of one rule. `<level>` is `error` (the default for every rule), `warning` or `off`. Repeat the flag for more rules. See "Rule severity".
 - `--rules-lock <path>`: a rules lock file, relative to the workspace root, that `lintai lock` wrote. See "Rules lock".
 - `--suppress-all`, `--suppress-rule <id>`: record all or selected rules' current error findings. Repeat `--suppress-rule` for more rules.
 - `--prune-suppressions`: reduce unused allowances within completed rules' primary coverage.
 - `--suppressions-location <path>`: choose a suppressions file relative to the workspace root.
-- `--setup-sandbox on|off`: run `setup()` under the Node permission model. See "Setup sandbox".
 
 Example:
 
 ```sh
-pnpm exec lintai \
-  --workspace-root . \
-  --rules 'lintai-rules/**/*.ts' \
-  --env-json '{"apiDir":"src/api"}' \
-  --json --explain
+pnpm exec lintai build-rules && pnpm exec lintai check --json --explain
 ```
 
-`lintai schema` prints each configured producer's declarations and prelude under its namespace, followed by the engine helper declarations. It accepts `--workspace-root` and `--config`; it accepts and ignores `--asset-root`.
+`lintai schema` prints each configured producer's declarations and prelude under its namespace, followed by the engine helper declarations. It accepts `--workspace-root` and `--config`.
 
-`lintai facts` builds the snapshot and prints its base facts in Mangle syntax, sorted. It accepts the scope flags shown above, and accepts and ignores `--asset-root`. Use `--relation` one or more times with qualified names to print only those relations:
+`lintai facts` builds the snapshot and prints its base facts in Mangle syntax, sorted. It accepts the scope flags shown above. Use `--relation` one or more times with qualified names to print only those relations:
 
 ```sh
 pnpm exec lintai facts --workspace-root . --relation ts.ambient_use --relation ts.ambient_key
 ```
 
-`lintai scope --explain` prints the selected paths, compiler eligibility, configurations and pruned boundaries for each producer; `--json` emits the explanation as JSON. Its sorted `compilerFiles` records include the selected config before availability checking, the effective configured or synthetic owner, eligibility and the bounded original-root membership list, including for excluded files. `configurations` contains the real selected and owner configs, not a synthetic sentinel or inventory-only configs. It accepts and ignores `--asset-root` for launcher compatibility. It accepts `--source-links` but does not read that file when explaining scope. `lintai serve` uses JSON-RPC initialization rather than analysis CLI flags.
+`lintai scope --explain` prints the selected paths, compiler eligibility, configurations and pruned boundaries for each producer; `--json` emits the explanation as JSON. Its sorted `compilerFiles` records include the selected config before availability checking, the effective configured or synthetic owner, eligibility and the bounded original-root membership list, including for excluded files. `configurations` contains the real selected and owner configs, not a synthetic sentinel or inventory-only configs. It accepts `--source-links` but does not read that file when explaining scope. `lintai serve` uses JSON-RPC initialization rather than analysis CLI flags.
+
+Every analysis command and `lintai serve` resolve the workspace path to its physical directory before they read `lintai.toml`, and open a session on that directory. The rule pack, rules lock, suppressions file and producers use it. Absolute paths under the given workspace path, in `--source`, `--source-links`, `--rules-lock`, `--suppressions-location`, `--lock-file` and the server options, are rebased onto it. A command that started on a directory finishes on it, even when a symlinked root moves while it runs. `lintai serve` resolves the path again for each request and opens a new session when the physical directory or the effective configuration changed. Results it returned earlier still describe the earlier directory.
+
+Findings are grouped by document. For a file on disk, the document is the file's canonical physical path. A canonical physical path has every link resolved and, on macOS, names each directory entry in its on-disk letter case. On a case-insensitive volume, a workspace path or file name typed in another letter case therefore names the same directory and the same documents. On a case-sensitive volume, each spelling names its own file. lintai never lowercases a path. When it cannot establish the on-disk spelling of the workspace root, the session does not open and the command reports the error. A result names a document relative to the physical root inside it and by its absolute path outside it. Diagnostic output, suppressions and rule facts use the names producers report. A producer that reached a file through a symlink declares the file's physical path, so two producers that report one file share its group. The TypeScript producer reads each source through its physical path and declares that path in its on-disk spelling, also when an import names the file in another letter case. It reports an error when it cannot establish that spelling.
 
 ### Snapshot scope
 
@@ -563,7 +555,7 @@ files = "tsconfig" # or "walk"
 source_links = "source-links.json" # optional; the file must exist
 ```
 
-The workspace `include` patterns restore eligible source files excluded by built-in defaults or workspace `exclude`; they are not a whitelist and do not add `.d.ts` files. Invocation `--exclude` takes priority over those patterns. Exact `sources` and `--source` take priority over all of these exclusions and are added to the compiler roots even in `tsconfig` mode. Exact sources must be existing regular `.ts`, `.tsx`, `.js`, `.jsx` or `.d.ts` files inside the workspace; `.git` is never eligible. The walk does not follow symlinks, while exact paths may resolve through symlinks that stay inside the workspace and outside `.git`.
+The workspace `include` patterns restore eligible source files excluded by built-in defaults or workspace `exclude`; they are not a whitelist and do not add `.d.ts` files. Invocation `--exclude` takes priority over those patterns. Exact `sources` and `--source` take priority over all of these exclusions and are added to the compiler roots even in `tsconfig` mode. Exact sources must be existing regular `.ts`, `.tsx`, `.js`, `.jsx` or `.d.ts` files inside the workspace; `.git` is never eligible. The walk does not follow symlinks, while exact paths may resolve through symlinks that stay inside the workspace and outside `.git`. Findings for such a file belong to the resolved file.
 
 `--files` and `--source-links` override their configured producer values. With multiple TypeScript producers those scalar CLI overrides are ambiguous and rejected; configure each producer instead. Workspace settings and repeatable `--exclude` and `--source` apply to each producer.
 
@@ -603,45 +595,13 @@ All paths in the file are relative to the workspace root, not to the current dir
 
 lintai treats a broken file as a configuration error and exits with code 2. That covers a file it cannot read or parse, an unsupported version, a missing or wrong-typed field, a bad path, a `sourceTsconfig` that does not exist, and two different entries for one checked file. The server returns the same problem as an invalid-params error. Problems found while lintai analyzes a valid entry do not stop the run. If no program uses the checked file, the entry gets `source_entry_unapplied`. If the source file, its tsconfig or a matching export is missing, lintai keeps the checked facts and adds incomplete facts. The facts are described in [Source associations](#source-associations). The rules lock does not cover this file or other compiler inputs.
 
-Rules lock:
+### Rules lock
 
-`lintai lock` bundles the rules and writes `lintai-rules.lock.json` at the workspace root (`--lock-file` changes the path). It takes the same `--workspace-root`, `--rules`, `--repo-root` and `--asset-root` flags as a run, and prints one line per rule. Exit code 0 means the lock was written. Exit code 2 means a rule did not bundle.
+After building, review the rule and policy changes and run `lintai lock` to approve them. The command writes `lintai-rules.lock.json`. In CI, run `lintai build-rules && lintai check --rules-lock lintai-rules.lock.json`. A missing or obsolete approval, a pack mismatch or an unapproved policy fails integrity verification. The [trust model](trust.md) describes which changes require renewed approval.
 
-```json
-{
-  "format": "lintai.rules-lock/4",
-  "rules": [
-    { "path": "lintai-rules/no-service-imports.ts", "id": "arch.no-service-imports", "version": 1, "artifact_hash": "sha256:..." }
-  ],
-  "approved_suppressions": []
-}
-```
+### Rule severity
 
-The artifact hash covers captured rule source, configuration and resolution inputs, including imported `@lintai/sdk` code, the suppression policy, and the bundler and generated-entry identity. The prepare and pure bundles use the same captured view, and the bundler rejects an incoherent or escaping view. A result retains the captured evidence even if a file changes after capture; a later check validates that evidence before reuse. The lock also approves the current suppression groups and counts. New groups or increased counts require approval; reduced counts and removed groups do not. A recording under an enforced lock that would exceed approval fails without writing. To approve changes, record without the prior lock, review the suppression file, and explicitly regenerate the lock.
-
-With `--rules-lock`, lintai checks each rule against the lock after bundling and before `setup()`. These are `rule_execution_error` diagnostics with phase `integrity`, and exit code 3:
-
-- the hash of a rule differs from the lock
-- a rule is not in the lock
-- a rule in the lock no longer exists
-
-A rule with an integrity error does not run. With `--rules-lock`, `require()` in `setup()` loads only Node built-ins other than `module` and `vm`, and `import()` in `setup()` fails, so workspace code that a rule uses must be imported statically, and is then in the bundle and in the hash. See [trust.md](trust.md).
-
-Setup sandbox:
-
-- `on` (default): `setup()` runs under the Node permission model.
-- `off`: `setup()` runs with full Node capabilities. A rules lock still restricts runtime module loading.
-
-Rule execution requires stable Node `>=26.13.1 <27`, including when the sandbox is off. In the sandbox, `setup()` can read files in the workspace. It cannot write files, start child processes or workers, or access the network. `require()` loads only Node built-ins other than `module` and `vm`. A denied operation is a `rule_execution_error` with phase `setup` that names the permission or the specifier. See [trust.md](trust.md).
-
-Rule severity:
-
-- `--severity` sets rule levels for the CLI. Under ESLint or oxlint, set the level of each rule `lintai/<id>` in the linter config, as for any other rule. The plugins run lintai without `--severity`.
-- every rule has severity `error` unless `--severity` names it
-- `warning`: the violations of the rule have `"severity": "warning"`. Warnings do not change the exit code.
-- `off`: lintai does not evaluate the rule and reports nothing for it, also when its `setup` or program fails. A rule file that fails to bundle, or whose `setup` fails before it gives its id, still gives a `rule_execution_error`, because lintai does not know its id yet.
-- a `rule_execution_error` always has severity `error`, also for a rule with severity `warning`, so a broken rule cannot pass without notice
-- a `--severity` rule id that no loaded rule has is a `rule_execution_error` with phase `config`, so a typo does not leave a rule at `error`
+Configure `severity` and `options` under `[rule."<semantic-id>"]` in `lintai.toml`. The defaults are `error` and `{}`. An unknown ID is a configuration error. The `warning` level reports violations without failing a clean check. The `off` level skips configuration parsing and execution callbacks after metadata and ID validation. Rule failures have severity `error`.
 
 Exit codes:
 
@@ -650,227 +610,128 @@ Exit codes:
 | 0 | No error diagnostics. |
 | 1 | At least one error-severity violation or unused suppression remains, and no execution failure took priority. |
 | 2 | Invalid arguments, configuration, saved format or suppression policy, including `suppression_policy_mismatch`. |
-| 3 | Integrity, setup, rule, producer, cancellation or incoherent bundle input failure. Violations from other rules may still be in the output. |
-
-CLI caveats:
-
-- relative rule globs are resolved from `workspaceRoot`
-- each rule glob must match at least one file; otherwise the run fails with an error. If no files match and a rules lock contains rules, a check reports those missing rules as integrity errors instead
-- `lintai serve` is for editor integration; it keeps the base facts of the current snapshot and rebuilds them when the snapshot changes
+| 3 | Integrity or rule execution failure, producer failure or cancellation. Violations from other rules may still be in the output. |
 
 ## Linter rules
 
-The ESLint plugin and the oxlint plugin give each lintai rule its own linter rule, `lintai/<rule-id>`. You set its level, `"off"`, `"warn"` or `"error"` (or `0`, `1`, `2`), in the linter config, as for any other rule. Per-file overrides, disable comments (`// eslint-disable-next-line lintai/arch.legacy-imports`, `// oxlint-disable-next-line lintai/arch.legacy-imports`) and the linter CLI all work per lintai rule.
+ESLint and Oxlint expose two analysis rules. The `configs.all` preset enables `lintai/error` at error and `lintai/warning` at warning. LintAI decides each finding's severity in Go and prefixes each violation with `[rule-id/assertion-id]`. Infrastructure, integrity, rule execution and source-mismatch errors appear through `lintai/error`. Unused suppressions retain their engine severity.
 
-Each plugin package exports `createLintaiPlugin(options)`. Each construction runs `lintai rules` to discover the current rule IDs and returns a plugin with these rules:
+Configure each semantic ID in the workspace's `lintai.toml`.
 
-- `lintai/<rule-id>` for each rule that `lintai rules` lists. It reports the violations of that rule. It has no options.
-- `lintai/analysis`: everything that is not a violation of a configured rule. This is every `rule_execution_error` (any phase), a failed analysis, a `serve` process that fell back to one `oneshot` run, current rule-loading problems, the "save this file" message in `serve` mode, and a violation of a rule that has no linter rule in the plugin (see the caveats). Keep `lintai/analysis` at `"error"`.
-- the authoring rules `lintai/no-ambient-in-pure-phase` (forbids ambient APIs in callbacks passed to `.program(`, `.facts(` and `.message(`), `lintai/no-top-level-node-imports` and `lintai/require-rule-shape` (requires `.version(`, `.program(`, `.report(` and `.message(`).
-
-The plugin object also has two configs:
-
-- `configs.all`: every `lintai/<rule-id>` and `lintai/analysis` at `"error"`. In the ESLint plugin it is a flat config object with `plugins` and `rules`. In the oxlint plugin it has `rules` only, to spread in `oxlint.config.ts`.
-- `configs.authoring`: the three authoring rules at `"error"`, in the same form.
-
-All generated rules and `lintai/analysis` share one client. Rules in the same host file analysis share its diagnostics and problems; a later file analysis makes a new request in serve mode. `createLintaiPlugin({ rules: [] })` creates only `lintai/analysis` and the authoring rules and never starts lintai, for a repository that only lints rule files.
-
-Options:
-
-```ts
-type LintaiOptions = {
-	mode?: "serve" | "oneshot";
-	binary?: string;
-	repoRoot?: string;
-	workspaceRoot?: string;
-	rules?: string[];
-	exclude?: string[];
-	files?: "tsconfig" | "walk";
-	sourceLinks?: string;
-	env?: Record<string, unknown>;
-	factLimit?: number;
-	ruleWorkers?: number;
-	rulesLock?: string;
-	suppressionsLocation?: string;
-	setupSandbox?: "on" | "off";
-};
+```toml
+[rule."arch.legacy-imports"]
+severity = "warning"
 ```
 
-- `rules` is the same as the CLI `--rules` flag, as an array of globs (default `["lintai-rules/**/*.ts"]`)
-- `exclude` is the same as the CLI `--exclude` flag
-- `files` is the same as the CLI `--files` flag
-- `sourceLinks` is the same as the CLI `--source-links` flag. A relative path is resolved from the workspace root
-- `ruleWorkers` is the same as the CLI `--rule-workers` flag
-- `rulesLock` is the same as the CLI `--rules-lock` flag. A relative path is resolved from the workspace root
-- `suppressionsLocation` corresponds to the CLI suppression option
-- `setupSandbox` is the same as the CLI `--setup-sandbox` flag
-- relative roots resolve from the directory that the linter runs in
+Use `off` to disable a semantic rule and lintai suppression allowances for supported rule-specific exceptions. Migrate old host overrides and disable comments targeting `lintai/<semantic-id>`. A host override or inline disable for `lintai/error` or `lintai/warning` affects **every** finding in that category, including analysis failures in the error category.
 
-Linter rule caveats:
+**Rule edits take effect after a successful `lintai build-rules`.** Until then the previous pack remains active. New IDs in a replacement pack appear on the next live operation. Locked projects also need explicit approval for the new bytes. A built pack with zero entries still validates. For authoring-only or intentionally disabled integration, use `createLintaiPlugin({ enabled: false })`. This sets both analysis levels to off, retains `configs.authoring` and starts no child.
 
-- the rule list is fixed for each plugin instance. Construct and register a new plugin, or restart the linter or language server, after adding a rule file or changing an ID. Until then, violations of the new ID appear under `lintai/analysis`, with restart guidance.
-- a lintai rule that is not in the linter config does not run, and neither linter has a wildcard such as `"lintai/*"`. Spread `configs.all` to enable every rule, then override single rules.
-- a misspelled rule name in the config, such as `"lintai/arch.no-servce-imports"`, fails the lint run, as for any unknown rule
-- a rule file that does not load has no linter rule, so a config that names its rule fails as an unknown rule. The plugin writes the load error to stderr during construction. `lintai/analysis` reports current execution problems from the analysis response, so the old error disappears after recovery. A rule whose id is known (a duplicate id or an incomplete rule) keeps its linter rule, so the config loads, and `lintai/analysis` reports the problem as a rule error.
-- when `lintai rules` itself fails, for example because the binary is missing, the plugin has no lintai rules and writes the cause to stderr. A new plugin construction tries again.
-- a rule set to `"off"` in the linter is still evaluated by lintai; only its output is dropped. To skip the evaluation, remove the rule file from the `rules` globs.
-- rule errors always appear under `lintai/analysis` at the level of `lintai/analysis`, whatever level the rule has, so a broken rule cannot pass as a warning or be hidden by `"off"`
-- `lintai rules` takes about 0.1 to 0.3 s for 1 to 20 rules. It runs once for each plugin construction.
+### ESLint plugin reference and caveats
 
-### Explicit ESLint multi-file operations
-
-ESLint's rule callbacks do not expose the `lintFiles()` boundary or its complete file list. A caller that has the exact concrete files can wrap the operation on the same plugin instance:
-
-```js
-import { ESLint } from "eslint";
-import { createLintaiPlugin } from "@lintai/eslint-plugin";
-
-const plugin = createLintaiPlugin({ mode: "serve" });
-const files = ["src/a.js", "src/b.js"]; // Complete list of concrete paths, not globs.
-const eslint = new ESLint({
-  overrideConfigFile: true,
-  overrideConfig: [plugin.configs.all],
-  concurrency: "off",
-  cache: false,
-});
-const results = await plugin.withFileBatch(files, async ({ problems }) => {
-  // Available even if analysis failed or files is empty. lintai/analysis also reports them.
-  if (problems.length) console.error(problems.join("\n"));
-  return eslint.lintFiles(files);
-});
-```
-
-Add the application's normal language/parser configuration to `overrideConfig` as needed. Relative paths resolve from the lintai workspace root. Supply every physical file whose enabled lintai rule can run; a file omitted from the list throws instead of silently appearing clean. In serve mode the wrapper makes one `diagnostics/files` request, resolving configuration and validating or reanalyzing once, then uses its ordered file projections and current workspace problems for the callback. A request failure is present in `problems` and is reported by `lintai/analysis`; the callback still runs so the caller can handle it. Throw from the callback if the caller prefers to stop. Existing one-shot mode keeps its one-shot behavior.
-
-The response belongs only to that invocation and is discarded when the callback's returned promise settles, including on a throw. Each later invocation requests a fresh result. Nested or overlapping calls have separate async contexts and retain their own results, even if ESLint reuses a `SourceCode`. The wrapper covers callbacks running in its async context in the same process and using that plugin instance; ESLint worker processes do not inherit it. Work left running after the callback settles and ordinary editor callbacks outside the wrapper use independent file requests, each with workspace validation. Unsaved-buffer handling is unchanged. The batch is a completed publication, not a filesystem transaction: edits during the operation can be reflected by the next operation.
-
-Keep ESLint's result cache disabled for lintai runs (`cache: false` in the API or do not pass CLI `--cache`). ESLint can return a cached result without invoking the lintai rule callback, so the batch wrapper cannot refresh that result when lintai's workspace, rules, configuration, or suppressions change. Enable ESLint caching only if its cache identity accounts for those lintai inputs.
-
-## ESLint plugin reference and caveats
-
-Install:
-
-```sh
-pnpm add -D @lintai/cli @lintai/sdk @lintai/eslint-plugin eslint@^10.15.0 @typescript-eslint/parser@^8.73.0
-```
-
-Example `eslint.config.js`:
+Install the adapter, CLI, SDK and your parser, and set the editor's Node runtime to 26.13.1 or later in the supported 26.x line. Use one plugin instance for the workspace in `eslint.config.mjs`.
 
 ```js
 import { createLintaiPlugin } from "@lintai/eslint-plugin";
 import tsParser from "@typescript-eslint/parser";
 
-const lintai = createLintaiPlugin({ rules: ["lintai-rules/**/*.ts"] });
+const lintai = createLintaiPlugin({
+  workspaceRoot: import.meta.dirname,
+  operation: process.env.LINTAI_HOST_OPERATION === "invocation" ? "invocation" : "live",
+});
 
-export default [
-	{
-		files: ["src/**/*.ts", "src/**/*.tsx"],
-		languageOptions: { parser: tsParser },
-		...lintai.configs.all,
-		rules: {
-			...lintai.configs.all.rules,
-			"lintai/arch.legacy-imports": "warn",
-		},
-	},
-	{
-		files: ["src/legacy/**"],
-		rules: { "lintai/arch.legacy-imports": "off" },
-	},
-	{
-		files: ["lintai-rules/**/*.ts"],
-		languageOptions: { parser: tsParser },
-		plugins: { lintai },
-		rules: lintai.configs.authoring.rules,
-	},
-];
+export default [{
+  files: ["src/**/*.ts", "src/**/*.tsx"],
+  languageOptions: { parser: tsParser },
+  ...lintai.configs.all,
+}];
 ```
 
-Plugin caveats:
-
-- ESLint 10 finds flat config from each linted file; pass `--config` to select one explicitly, and use Node 26 for the editor integration
-- `serve` is the default in editor-like long-lived processes
-- `oneshot` is the default under plain ESLint CLI detection
-- lintai reads saved files, not the editor buffer. In `serve` mode, an unsaved buffer shows a save message through `lintai/analysis` and hides other lintai findings for that file.
-- each file request validates the recorded inputs and reloads changed configuration; source and rule changes are picked up on the next lint pass. There is no background refresh. Quick validation can miss a same-size edit whose modification time was deliberately restored; forced `reanalyze` performs a Full check.
-- a newly discovered rule's findings appear through `lintai/analysis` with restart guidance until the linter reloads its plugin and registers the ID. Changes to an existing rule implementation need no restart.
-- when lintai cannot produce diagnostics, `lintai/analysis` reports the reason on line 1 of each linted file, so a broken setup does not look like a clean workspace. In an `eslint` CLI run, these messages appear on the first linted file only.
-- Outside an explicit `withFileBatch` callback, each ESLint verification that runs an enabled lintai rule starts a fresh file request, including when `Linter.verify` receives a previously used `SourceCode` object. Enabled lintai rules in that verification share the response, even when `lintai/analysis` is disabled.
-- the ESLint path never computes `explanation`
-
-## Oxlint plugin reference and caveats
-
-`@lintai/oxlint-plugin` is an oxlint JS plugin. It runs the same lintai analysis as the ESLint plugin, in the oxlint CLI and in the oxlint language server (`oxlint --lsp`), with no ESLint installed.
-
-Install:
+Run the whole-project host command in one worker and disable the file-result cache. An imported file or a policy change can affect otherwise unchanged targets.
 
 ```sh
-pnpm add -D @lintai/cli @lintai/sdk @lintai/oxlint-plugin oxlint
+pnpm exec lintai build-rules &&
+  LINTAI_HOST_OPERATION=invocation pnpm exec eslint --no-cache --concurrency off src
 ```
 
-oxlint loads a JS plugin from a module path, not from a plugin object, so call `createLintaiPlugin` in a small local module, for example `lintai.oxlint.mjs`:
+### Oxlint plugin reference and caveats
+
+Install `@lintai/oxlint-plugin`, `@lintai/cli`, `@lintai/sdk` and `oxlint`. Export one plugin instance from `lintai.oxlint.mjs`.
 
 ```js
 import { createLintaiPlugin } from "@lintai/oxlint-plugin";
 
 export default createLintaiPlugin({
-	workspaceRoot: import.meta.dirname,
-	rules: ["lintai-rules/**/*.ts"],
+  workspaceRoot: import.meta.dirname,
+  operation: process.env.LINTAI_HOST_OPERATION === "invocation" ? "invocation" : "live",
 });
 ```
 
-Name that module in `jsPlugins`. In `oxlint.config.ts` you can import it and spread `configs.all`. Node evaluates the module once, so `lintai rules` runs once:
+Load the module in `oxlint.config.ts`.
 
 ```ts
 import { defineConfig } from "oxlint";
-import lintai from "./lintai.oxlint.mjs";
 
 export default defineConfig({
-	jsPlugins: ["./lintai.oxlint.mjs"],
-	rules: { ...lintai.configs.all.rules, "lintai/arch.legacy-imports": "warn" },
+  jsPlugins: ["./lintai.oxlint.mjs"],
+  rules: { "lintai/error": "error", "lintai/warning": "warn" },
 });
 ```
 
-In `.oxlintrc.json`, list the rules by hand:
+Oxlint 1.90.0 shares its JS plugin across native lint workers and runs this command with no file-result cache. On Linux the active plugin starts a small helper before Oxlint reserves its worker address space. It can start a new Go child after a transport failure.
 
-```json
-{
-	"jsPlugins": ["./lintai.oxlint.mjs"],
-	"rules": {
-		"lintai/analysis": "error",
-		"lintai/arch.no-service-imports": "error",
-		"lintai/arch.legacy-imports": "warn"
-	},
-	"overrides": [
-		{
-			"files": ["lintai-rules/**/*.ts"],
-			"rules": {
-				"lintai/require-rule-shape": "error",
-				"lintai/no-ambient-in-pure-phase": "error",
-				"lintai/no-top-level-node-imports": "error"
-			}
-		}
-	]
+```sh
+pnpm exec lintai build-rules &&
+  LINTAI_HOST_OPERATION=invocation pnpm exec oxlint -c oxlint.config.ts src
+```
+
+### Programmatic captures
+
+Both adapters default to `operation: "live"`. A live visit resolves the host file to its canonical physical path, validates the saved workspace once and receives the findings of that document with the workspace problems. Both severity rules use that response. For a raw CLI command, `operation: "invocation"` captures the whole workspace on its first visit and looks up each later visit in that capture. An embedder reusing a host process across commands should create a fresh invocation instance per command and call `dispose()` when done.
+
+An in-process embedder creates a session, captures the workspace once, binds a plugin to the capture and lints the files it chooses. A capture is a detached, read-only result: it holds the workspace problems and every analyzed or diagnostic-bearing document, and owns no process or connection. `dispose()` stops new captures; completed captures remain usable. Two captures taken before and after an edit can be displayed in any order through two bound plugins. A bound plugin never starts a Go process.
+
+```js
+import { ESLint } from "eslint";
+import tsParser from "@typescript-eslint/parser";
+import { createCapturedLintaiPlugin, createLintaiSession } from "@lintai/eslint-plugin";
+
+export async function lintSelected(workspaceRoot, files) {
+  const session = createLintaiSession({ workspaceRoot });
+  try {
+    const capture = session.capture();
+    const plugin = createCapturedLintaiPlugin(capture);
+    const eslint = new ESLint({
+      cwd: workspaceRoot,
+      overrideConfigFile: true,
+      cache: false,
+      concurrency: "off",
+      overrideConfig: [{
+        files: ["**/*.ts"],
+        languageOptions: { parser: tsParser },
+        ...plugin.configs.all,
+      }],
+    });
+    const results = files.length ? await eslint.lintFiles(files) : [];
+    // capture.problems holds workspace failures, including when files is empty.
+    return { results, problems: capture.problems };
+  } finally {
+    session.dispose();
+  }
 }
 ```
 
-Options: the same `LintaiOptions` as the ESLint plugin.
+Migrating from a selected capture: `session.capture(files)` and `session.capture("all")` become `session.capture()`. Pass the files to the host, not to the capture. `capture.snapshotVersion` is removed. A visit to a file the capture does not contain shows no findings instead of throwing.
 
-Modes:
+Rule failures and recoverable configuration or analysis errors, including malformed TOML, appear in `capture.problems`. A capture that fails with such an error has no files. Its error stays in `capture.problems`, also when the host visits no files. The adapter binds the error to the physical workspace root it resolved when the capture started. A visit shows the error only when the visited file resolves under that root, so a visit to a file in another physical workspace does not show it. When the adapter cannot resolve the root, every visit shows the error. A broken connection, incompatible protocol or malformed response throws. `@lintai/oxlint-plugin` exports the same `createLintaiSession` and `createCapturedLintaiPlugin`.
 
-- `oxlint` CLI: `oneshot`. The plugin runs lintai once, and reports workspace problems on the first linted file only.
-- `oxlint --lsp`: `serve`. The plugin keeps one `lintai serve` process and reports workspace problems on each lint. When the editor text of a file is different from the saved file, `lintai/analysis` shows one message on line 1 that asks you to save the file. Each file request validates captured inputs and refreshes the analysis when needed.
-- In serve mode, each oxlint file analysis that runs an enabled lintai rule makes a fresh file request; its enabled lintai rules share the response, including when `lintai/analysis` is disabled.
-- The plugin detects the language server from the `--lsp` argument of the oxlint process. An explicit `mode` option always wins.
-- The plugin resolves relative paths in its options from the directory that the oxlint process runs in. An editor can start `oxlint --lsp` in a different directory, so set `workspaceRoot: import.meta.dirname` in `lintai.oxlint.mjs`, as in the example.
+A visit shows findings that agree with the workspace and the document observed when the callback runs, and with the text the host supplies. The adapter resolves the host filename, relative to the host's working directory, to its canonical physical path with the platform real-path function (`fs.realpathSync.native`) and looks up that document. A host may open the workspace or a source directory through a symlink; the visit finds the file it resolves to. A capture keeps the physical root of its analysis. If a symlinked root later points elsewhere, the capture still describes the original directory, and a host file that now resolves into the new directory has no findings in it, even when its bytes are identical. A file that does not exist on disk cannot be identified and gets the save/rerun notice instead of findings. A live visit resolves the workspace root before the host filename, and the server returns the physical root of the workspace it analyzed. When the two roots differ, for example because a symlinked root moved between the two resolutions, the visit shows one retry notice through `lintai/error` instead of findings. Files added after a capture join the next operation. A session or rule factory copies its options when it opens. Later changes to the options object do not affect it.
 
-Plugin caveats:
+The adapter then compares the host text with the captured SHA-256 digest of the analyzed logical text, encoded as UTF-8 with exactly one leading BOM removed and line endings preserved. The digest comes from the producer that owns the reported ranges. A matching earlier buffer can display findings after the saved file changes. A mismatch, or ranges without a digest, produces a save/rerun notice through `lintai/error` instead of ranged findings. ESLint 10 can strip two leading BOMs from the buffer it exposes to plugins. A saved file that starts with two BOMs therefore gets the source-mismatch notice in that host. Workspace failures appear on every file the operation visits with the error adapter enabled, except the error of a failed capture on a file outside its workspace, so a file-local suppression cannot hide a failure of the whole analysis. A transport failure surfaces on the failing operation and the next live operation can reconnect.
 
-- oxlint documents JS plugins as alpha and outside semver. A later oxlint can break the plugin until lintai is updated. The plugin is tested with oxlint 1.90.0, and its peer dependency is `oxlint@^1.90.0`.
-- the plugin needs stable Node 26.13.1 or later in the 26.x LTS line
-- line and column values are the same as under ESLint. A lintai diagnostic at line 3, column 5 is shown by the oxlint CLI at line 3, column 5
-- the plugin reports only. It gives no fixes and no suggestions
-- oxlint 1.90.0 runs JS plugins on one thread of one Node.js process, in the CLI and in the language server, so one shared client serves all files
-- on Linux, the plugin starts a small Node.js process (the spawner) when oxlint loads it, and starts lintai (also `lintai rules`) through that process. After it loads JS plugins, oxlint 1.90.0 reserves 6 GiB of address space for each lint thread. Then Node cannot start a child process from the oxlint process when the system does not allow that much memory to be committed, and the start fails with `ENOMEM` (see [oxc#20331](https://github.com/oxc-project/oxc/issues/20331)). This occurs, for example, with 4 threads on a machine with 16 GiB of RAM and 4 GiB of swap, such as a GitHub Actions `ubuntu-latest` runner
+A raw host that visits zero files has nowhere to display workspace failures. For enforcement, CI can run `lintai build-rules && lintai check --rules-lock lintai-rules.lock.json`. The native check reports workspace failures even with zero host callbacks.
+
+The factories accept `binary`, `workspaceRoot`, `ruleWorkers`, `factLimit`, `rulesLock` and `suppressionsLocation` alongside `operation` and `enabled`. Paths in the saved workspace policy resolve in Go. The independent `configs.authoring` preset checks rule modules.
 
 ## Diagnostic shape and caveats
 
@@ -895,7 +756,7 @@ CLI `--json` output emits diagnostics like:
       "semantic_key": "ts:site:..."
     },
     "provenance": {
-      "snapshot_version": "abc123",
+      "fact_revision": "sha256:abc123",
       "rule_version": 1,
       "producer_namespaces": ["ts"]
     },
@@ -919,8 +780,8 @@ Fields:
 - `message`
 - `source_location`
 - `entity_identity.semantic_key`: the producer's analysis anchor ID, not the cross-edit suppression tracking key
-- `provenance`
-- `phase`: for execution errors, one of `config`, `bundle`, `integrity`, `setup`, `program`, `program_parse`, `program_analysis`, `evaluation`, `premise`, `report`, `message`
+- `provenance`: `fact_revision` identifies the composed producer facts, with the rule version and producer namespaces
+- `phase`: for execution errors, one of `load`, `config`, `integrity`, `program`, `program_parse`, `program_analysis`, `evaluation`, `premise`, `report`, `message`
 - `explanation`: with `--explain`, the proof of the violation as ground atoms in depth-first order; `!atom` marks a negated premise that holds because the atom is absent
 
 Diagnostic caveat:

@@ -5,6 +5,14 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
+import {
+	assertStopped,
+	build,
+	encodedSources,
+	installed,
+	largeResult,
+	trackServer,
+} from "./smoke-host.mjs";
 import { packConsumer } from "./smoke-pack.mjs";
 
 const repoDir = await packConsumer("oxlint-smoke", [
@@ -14,172 +22,169 @@ const repoDir = await packConsumer("oxlint-smoke", [
 	{ name: "@lintai/oxlint-plugin", dir: "packages/oxlint-plugin" },
 	{ name: "@lintai/authoring-rules", dir: "packages/authoring-rules" },
 ]);
-execFileSync("pnpm", ["add", "-D", "@lintai/cli", "@lintai/sdk", "@lintai/oxlint-plugin", "oxlint@1.90.0"], {
-	cwd: repoDir,
-	stdio: "inherit",
-});
+execFileSync(
+	"pnpm",
+	["add", "-D", "@lintai/cli", "@lintai/sdk", "@lintai/oxlint-plugin", "oxlint@1.90.0"],
+	{
+		cwd: repoDir,
+		stdio: "inherit",
+	},
+);
 
 const eslintInstalled = spawnSync("pnpm", ["why", "eslint"], { cwd: repoDir, encoding: "utf8" });
-assert.ok(!eslintInstalled.stdout.includes("eslint "), `expected no eslint in the install\n${eslintInstalled.stdout}`);
-assert.ok(!existsSync(path.join(repoDir, "node_modules", "eslint")), "expected no node_modules/eslint");
-
-// One lintai process serves every rule: lintai.oxlint.mjs names a wrapper
-// binary that logs the first argument of each lintai run. "rules" is lintai
-// rules, "--json" is a oneshot run and "serve" is lintai serve.
-const countFile = path.join(repoDir, "lintai-runs.log");
-const wrapper = path.join(repoDir, "lintai-counting");
-await fs.writeFile(
-	wrapper,
-	`#!/bin/sh\necho "$1" >> ${JSON.stringify(countFile)}\nexec ${JSON.stringify(path.join(repoDir, "node_modules", ".bin", "lintai"))} "$@"\n`,
-	{ mode: 0o755 },
+assert.ok(
+	!eslintInstalled.stdout.includes("eslint "),
+	`expected no eslint in the install\n${eslintInstalled.stdout}`,
 );
-const pluginFile = path.join(repoDir, "lintai.oxlint.mjs");
-const pluginSource = await fs.readFile(pluginFile, "utf8");
-await fs.writeFile(pluginFile, pluginSource.replace(`rules: ["lintai-rules/**/*.ts"]`, `rules: ["lintai-rules/**/*.ts"], binary: ${JSON.stringify(wrapper)}`));
-async function lintaiRuns() {
-	const text = existsSync(countFile) ? await fs.readFile(countFile, "utf8") : "";
-	await fs.writeFile(countFile, "");
-	return text.trim().split("\n").filter(Boolean);
-}
-
-function oxlint(args) {
-	const result = spawnSync("pnpm", ["exec", "oxlint", "--format", "json", ...args, "src/"], { cwd: repoDir, encoding: "utf8" });
-	let diagnostics = [];
-	try {
-		diagnostics = JSON.parse(result.stdout).diagnostics;
-	} catch {
-		// The caller checks the status and the output.
-	}
-	return { ...result, diagnostics };
-}
-function summary(diagnostics) {
-	return diagnostics.map((diagnostic) => `${diagnostic.code} ${diagnostic.severity} ${diagnostic.filename}`).sort();
-}
-
-// CLI: oneshot mode. .oxlintrc.json lists the rules by hand, sets the type
-// rule to warn and turns arch.no-async off for src/legacy.ts.
-// src/disabled.ts has a disable comment for arch.no-async.
-const cli = oxlint([]);
-assert.notEqual(cli.status, 0, `expected oxlint to fail on the planted violation\n${cli.stdout}\n${cli.stderr}`);
-const cliDiagnostics = cli.diagnostics;
-assert.deepEqual(
-	summary(cliDiagnostics),
-	["lintai(arch.actions-return-action-result) warning src/actions/save.ts", "lintai(arch.no-async) error src/example.ts"],
-	cli.stdout,
+assert.ok(
+	!existsSync(path.join(repoDir, "node_modules", "eslint")),
+	"expected no node_modules/eslint",
 );
-assert.deepEqual(await lintaiRuns(), ["rules", "--json"]);
-const planted = cliDiagnostics.find((diagnostic) => diagnostic.code === "lintai(arch.no-async)");
-assert.match(planted.message, /\[arch\.no-async\/violation\] example in src\/example\.ts must not be async/);
-assert.equal(planted.filename, "src/example.ts");
-// Spec §4.4: the anchor spans the declared function, from its modifiers through
-// the closing brace. Oxlint reports a 1-based start and a byte length.
+
+build(repoDir);
+const readRequests = await trackServer(repoDir, "lintai.oxlint.mjs");
+function lint(file) {
+	const result = installed(
+		repoDir,
+		"oxlint",
+		["-c", "oxlint.config.ts", "--format", "json", file],
+		{
+			env: { ...process.env, LINTAI_HOST_OPERATION: "invocation" },
+		},
+	);
+	assert.equal(result.status, 1, result.stderr);
+	return JSON.parse(result.stdout).diagnostics;
+}
+const cli = lint("src");
+assert.deepEqual(cli.map((item) => [item.code, item.severity, item.filename]).sort(), [
+	["lintai(error)", "error", "src/example.ts"],
+	["lintai(warning)", "warning", "src/actions/save.ts"],
+]);
+const planted = cli.find((item) => item.code === "lintai(error)");
+assert.match(planted.message, /\[arch\.no-async\/violation\] example/);
 assert.deepEqual(planted.labels[0].span, { offset: 0, length: 46, line: 1, column: 1 });
-// The structural type rule reports the action that does not return
-// Promise<ActionResult<T>> and accepts the one that does.
-const typeRule = cliDiagnostics.filter((diagnostic) => diagnostic.message.includes("[arch.actions-return-action-result/violation]"));
-assert.equal(typeRule.length, 1, `expected one type rule diagnostic\n${cli.stdout}`);
-assert.match(typeRule[0].message, /legacySave must return Promise<ActionResult<T>>, but returns Promise<number>/);
-assert.equal(typeRule[0].filename, "src/actions/save.ts");
-assert.deepEqual(typeRule[0].labels[0].span, { offset: 150, length: 66, line: 7, column: 1 });
-
-// A misspelled lintai rule name fails the lint run.
-await fs.writeFile(
-	path.join(repoDir, "typo.oxlintrc.json"),
-	JSON.stringify({ jsPlugins: ["./lintai.oxlint.mjs"], rules: { "lintai/arch.no-asnyc": "error" } }),
-);
-const typo = oxlint(["-c", "typo.oxlintrc.json"]);
-assert.notEqual(typo.status, 0, `expected a misspelled rule to fail oxlint\n${typo.stdout}\n${typo.stderr}`);
-assert.match(typo.stdout + typo.stderr, /Rule 'arch\.no-asnyc' not found in plugin 'lintai'/);
-await lintaiRuns();
-
-// oxlint.config.ts imports the plugin module to spread configs.all. Node
-// evaluates the module once, so lintai rules runs once.
-await fs.writeFile(
-	path.join(repoDir, "oxlint.config.ts"),
-	`import { defineConfig } from "oxlint";
-import lintai from "./lintai.oxlint.mjs";
-
-export default defineConfig({
-	jsPlugins: ["./lintai.oxlint.mjs"],
-	rules: { ...lintai.configs.all.rules, "lintai/arch.actions-return-action-result": "warn" },
-	overrides: [{ files: ["src/legacy.ts"], rules: { "lintai/arch.no-async": "off" } }],
-});
-`,
-);
-const spread = oxlint(["-c", "oxlint.config.ts"]);
-assert.notEqual(spread.status, 0, `expected oxlint.config.ts to report the violation\n${spread.stdout}\n${spread.stderr}`);
+const warning = cli.find((item) => item.code === "lintai(warning)");
+assert.match(warning.message, /\[arch\.actions-return-action-result\/violation\] legacySave/);
+assert.deepEqual(warning.labels[0].span, { offset: 150, length: 66, line: 7, column: 1 });
+const requests = await readRequests();
 assert.deepEqual(
-	summary(spread.diagnostics),
-	["lintai(arch.actions-return-action-result) warning src/actions/save.ts", "lintai(arch.no-async) error src/example.ts"],
-	spread.stdout,
+	requests.filter((row) => row.method.startsWith("diagnostics/")).map((row) => row.method),
+	["diagnostics/workspace"],
 );
-assert.deepEqual(await lintaiRuns(), ["rules", "--json"]);
-await fs.rename(path.join(repoDir, "oxlint.config.ts"), path.join(repoDir, "oxlint.config.ts.off"));
+await assertStopped(requests[0].pid);
+await encodedSources(
+	repoDir,
+	(file) =>
+		lint(file)
+			.filter((item) => item.code.startsWith("lintai("))
+			.map((item) => item.message),
+	"oxlint",
+);
+await largeResult(repoDir, (file) => lint(file).map((item) => item.message));
 
-// Authoring rules run on the rule files.
-const authoring = spawnSync("pnpm", ["exec", "oxlint", "--format", "json", "lintai-rules/"], {
-	cwd: repoDir,
-	encoding: "utf8",
-});
-assert.equal(authoring.status, 0, `expected the rule file to pass the authoring rules\n${authoring.stdout}\n${authoring.stderr}`);
-
-// Language server: serve mode with the TypeScript config importing the plugin.
-// Give it a workspace without the JSON config, using the same packed install.
 const lspRepoDir = path.join(path.dirname(repoDir), "lsp-repo");
 await fs.mkdir(lspRepoDir);
-await fs.cp(path.join(repoDir, "src"), path.join(lspRepoDir, "src"), { recursive: true });
-await fs.cp(path.join(repoDir, "lintai-rules"), path.join(lspRepoDir, "lintai-rules"), { recursive: true });
-await fs.copyFile(path.join(repoDir, "package.json"), path.join(lspRepoDir, "package.json"));
-await fs.copyFile(path.join(repoDir, "lintai.oxlint.mjs"), path.join(lspRepoDir, "lintai.oxlint.mjs"));
-await fs.copyFile(path.join(repoDir, "oxlint.config.ts.off"), path.join(lspRepoDir, "oxlint.config.ts"));
+for (const name of [
+	"src",
+	"lintai-rules",
+	"lintai.toml",
+	"oxlint.config.ts",
+	"lintai.oxlint.mjs",
+	"package.json",
+]) {
+	await fs.cp(path.join(repoDir, name), path.join(lspRepoDir, name), { recursive: true });
+}
 await fs.symlink(path.join(repoDir, "node_modules"), path.join(lspRepoDir, "node_modules"), "dir");
-await lintaiRuns();
-const examplePath = path.join(lspRepoDir, "src", "example.ts");
+build(lspRepoDir);
+// Language servers may use a different spelling of the workspace from
+// import.meta.dirname in the plugin configuration (e.g. /var on macOS).
+const editorRoot = path.join(path.dirname(repoDir), "editor-workspace");
+await fs.symlink(await fs.realpath(lspRepoDir), editorRoot, "dir");
+const examplePath = path.join(editorRoot, "src", "example.ts");
 const exampleURI = pathToFileURL(examplePath).href;
 const exampleText = await fs.readFile(examplePath, "utf8");
 const server = startLanguageServer(lspRepoDir);
 try {
 	await server.request("initialize", {
 		processId: process.pid,
-		rootUri: pathToFileURL(lspRepoDir).href,
+		rootUri: pathToFileURL(editorRoot).href,
 		capabilities: {},
-		workspaceFolders: [{ uri: pathToFileURL(lspRepoDir).href, name: "smoke" }],
-		initializationOptions: [{ workspaceUri: pathToFileURL(lspRepoDir).href, options: { run: "onSave" } }],
+		workspaceFolders: [{ uri: pathToFileURL(editorRoot).href, name: "smoke" }],
+		initializationOptions: [
+			{ workspaceUri: pathToFileURL(editorRoot).href, options: { run: "onSave" } },
+		],
 	});
 	server.notify("initialized", {});
 	server.notify("textDocument/didOpen", {
 		textDocument: { uri: exampleURI, languageId: "typescript", version: 1, text: exampleText },
 	});
-	const opened = await server.diagnostics(exampleURI);
+	const opened = await server.diagnostics(exampleURI, "initial open");
 	assert.ok(
 		opened.some((diagnostic) => diagnostic.message.includes("[arch.no-async/violation]")),
 		`expected the lintai diagnostic after didOpen\n${JSON.stringify(opened)}`,
 	);
-	const located = opened.find((diagnostic) => diagnostic.message.includes("[arch.no-async/violation]"));
+	assert.equal((await readRequests()).at(-1).file, await fs.realpath(examplePath));
+	const located = opened.find((diagnostic) =>
+		diagnostic.message.includes("[arch.no-async/violation]"),
+	);
 	// The language server uses 0-based lines and characters.
 	assert.deepEqual(located.range.start, { line: 0, character: 0 });
 
-	const actionPath = path.join(lspRepoDir, "src", "actions", "save.ts");
+	const actionPath = path.join(editorRoot, "src", "actions", "save.ts");
 	const actionURI = pathToFileURL(actionPath).href;
 	server.notify("textDocument/didOpen", {
-		textDocument: { uri: actionURI, languageId: "typescript", version: 1, text: await fs.readFile(actionPath, "utf8") },
+		textDocument: {
+			uri: actionURI,
+			languageId: "typescript",
+			version: 1,
+			text: await fs.readFile(actionPath, "utf8"),
+		},
 	});
-	const action = await server.diagnostics(actionURI);
+	const action = await server.diagnostics(actionURI, "second open");
 	assert.ok(
-		action.some((diagnostic) => diagnostic.message.includes("[arch.actions-return-action-result/violation] legacySave")),
+		action.some((diagnostic) =>
+			diagnostic.message.includes("[arch.actions-return-action-result/violation] legacySave"),
+		),
 		`expected the type rule diagnostic after didOpen\n${JSON.stringify(action)}`,
 	);
 
-	// Re-lint the same saved file and text after changing a rule implementation.
-	const rulePath = path.join(lspRepoDir, "lintai-rules", "no-async.ts");
-	const ruleText = await fs.readFile(rulePath, "utf8");
-	assert.ok(ruleText.includes("must not be async"));
-	await fs.writeFile(rulePath, ruleText.replace("must not be async", "must never be async"));
+	// Kill the real server after plugin loading. One operation exposes the
+	// broken pipe, and the following independent visit connects again.
+	const last = (await readRequests()).at(-1);
+	process.kill(last.pid, "SIGKILL");
+	await assertStopped(last.pid);
 	server.notify("textDocument/didSave", { textDocument: { uri: exampleURI } });
-	const refreshed = await server.diagnostics(exampleURI);
 	assert.ok(
-		refreshed.some((diagnostic) => diagnostic.message.includes("example in src/example.ts must never be async")),
-		`expected the edited rule's diagnostic for unchanged file text\n${JSON.stringify(refreshed)}`,
+		(await server.diagnostics(exampleURI, "first save after killing the child")).some((item) =>
+			item.message.includes("Could not analyze the workspace"),
+		),
+	);
+	server.notify("textDocument/didSave", { textDocument: { uri: exampleURI } });
+	assert.ok(
+		(await server.diagnostics(exampleURI, "reconnection")).some((item) =>
+			item.message.includes("[arch.no-async/violation]"),
+		),
+	);
+	assert.notEqual((await readRequests()).at(-1).pid, last.pid);
+
+	// A rebuilt pack can add an ID to the running language server.
+	const ruleSource = await fs.readFile(path.join(lspRepoDir, "lintai-rules/no-async.ts"), "utf8");
+	await fs.writeFile(
+		path.join(lspRepoDir, "lintai-rules/added.ts"),
+		ruleSource.replace("arch.no-async", "arch.added"),
+	);
+	const configPath = path.join(lspRepoDir, "lintai.toml");
+	const policy = await fs.readFile(configPath, "utf8");
+	await fs.writeFile(
+		configPath,
+		`${policy.replace("entries = [", 'entries = ["lintai-rules/added.ts", ')}\n[rule."arch.added"]\noptions = { directory = "src" }\n`,
+	);
+	build(lspRepoDir);
+	server.notify("textDocument/didSave", { textDocument: { uri: exampleURI } });
+	assert.ok(
+		(await server.diagnostics(exampleURI, "pack replacement")).some((item) =>
+			item.message.includes("[arch.added/violation]"),
+		),
 	);
 
 	const fixedText = exampleText.replace("export async function", "export function");
@@ -189,17 +194,20 @@ try {
 		contentChanges: [{ text: fixedText }],
 	});
 	server.notify("textDocument/didSave", { textDocument: { uri: exampleURI } });
-	const saved = await server.diagnostics(exampleURI);
+	const saved = await server.diagnostics(exampleURI, "saved fix");
 	assert.ok(
-		!saved.some((diagnostic) => String(diagnostic.code).startsWith("lintai(arch.")),
+		!saved.some((diagnostic) => diagnostic.message.includes("[arch.")),
 		`expected no lintai diagnostics after didSave\n${JSON.stringify(saved)}`,
 	);
+} catch (error) {
+	console.error("Recent native requests", (await readRequests()).slice(-12));
+	throw error;
 } finally {
 	server.close();
 }
-// The language server read the rule list once and used one lintai serve
-// process for all rules.
-assert.deepEqual(await lintaiRuns(), ["rules", "serve"]);
+const live = (await readRequests()).filter((row) => row.method === "diagnostics/document");
+assert.equal(new Set(live.map((row) => row.pid)).size, 2);
+await assertStopped(live.at(-1).pid);
 
 function startLanguageServer(cwd) {
 	// Start oxlint directly, not through pnpm exec, so that close() stops the
@@ -222,14 +230,21 @@ function startLanguageServer(cwd) {
 			if (headerEnd < 0) {
 				return;
 			}
-			const length = Number(/Content-Length: (\d+)/i.exec(buffer.subarray(0, headerEnd).toString())[1]);
+			const length = Number(
+				/Content-Length: (\d+)/i.exec(buffer.subarray(0, headerEnd).toString())[1],
+			);
 			if (buffer.length < headerEnd + 4 + length) {
 				return;
 			}
-			const message = JSON.parse(buffer.subarray(headerEnd + 4, headerEnd + 4 + length).toString("utf8"));
+			const message = JSON.parse(
+				buffer.subarray(headerEnd + 4, headerEnd + 4 + length).toString("utf8"),
+			);
 			buffer = buffer.subarray(headerEnd + 4 + length);
 			if (message.method && message.id !== undefined) {
-				const result = message.method === "workspace/configuration" ? message.params.items.map(() => null) : null;
+				const result =
+					message.method === "workspace/configuration"
+						? message.params.items.map(() => null)
+						: null;
 				send({ id: message.id, result });
 			}
 			const index = waiters.findIndex((waiter) => waiter.match(message));
@@ -258,10 +273,10 @@ function startLanguageServer(cwd) {
 		notify(method, params) {
 			send({ method, params });
 		},
-		async diagnostics(uri) {
+		async diagnostics(uri, stage) {
 			const message = await wait(
 				(item) => item.method === "textDocument/publishDiagnostics" && item.params.uri === uri,
-				`diagnostics for ${uri}`,
+				`${stage} diagnostics for ${uri}`,
 			);
 			return message.params.diagnostics;
 		},

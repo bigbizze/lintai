@@ -30,13 +30,3 @@ export function resolveNativeBinary(platform = process.platform, arch = process.
 		);
 	}
 }
-
-export function resolveAssetRoot(): string {
-	try {
-		const entryPath = require.resolve("@lintai/client");
-		return path.resolve(path.dirname(entryPath), "..");
-	} catch (error) {
-		const value = error instanceof Error ? error.message : String(error);
-		throw new Error(`lintai could not locate @lintai/client runtime assets. ${value}`);
-	}
-}

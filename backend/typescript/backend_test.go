@@ -3,6 +3,7 @@ package typescript
 import (
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -14,6 +15,7 @@ import (
 	"github.com/bigbizze/lintai/engine"
 	"github.com/bigbizze/lintai/facts"
 	"github.com/bigbizze/lintai/internal/ambient"
+	"github.com/bigbizze/lintai/internal/testpack"
 	"github.com/bigbizze/lintai/internal/tsgo/lintaiapi"
 	"github.com/bigbizze/lintai/internal/workspace"
 	"github.com/bigbizze/lintai/observe"
@@ -57,7 +59,7 @@ func (b *Backend) buildTestGeneration(ctx context.Context, repoRoot, workspaceRo
 	for _, relation := range description.BaseRelations {
 		predicates = append(predicates, relation.Predicate)
 	}
-	_, err = inspectEmission(ctx, b, backend.CollectionRequest{RepoRoot: repoRoot, WorkspaceRoot: workspaceRoot, Predicates: predicates})
+	_, err = inspectEmission(ctx, b, backend.CollectionRequest{WorkspaceRoot: workspaceRoot, Predicates: predicates})
 	if err != nil {
 		return nil, err
 	}
@@ -65,11 +67,7 @@ func (b *Backend) buildTestGeneration(ctx context.Context, repoRoot, workspaceRo
 }
 
 func (b *Backend) buildLintaiSnapshot(ctx context.Context, repoRoot, workspaceRoot string) (*lintaiapi.Snapshot, []ambient.Source, string, error) {
-	description, err := b.Describe()
-	if err != nil {
-		return nil, nil, "", err
-	}
-	generation, sources, err := b.extractSnapshot(ctx, workspaceRoot, nil, description, nil)
+	generation, sources, err := b.extractSnapshot(ctx, workspaceRoot, nil, nil)
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -108,7 +106,7 @@ calculate({ value: helper("ok") });
 	}
 	collect := func(predicates []facts.Predicate) emissionView {
 		t.Helper()
-		batch, err := inspectEmission(context.Background(), producer, backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: root, Predicates: predicates})
+		batch, err := inspectEmission(context.Background(), producer, backend.CollectionRequest{WorkspaceRoot: root, Predicates: predicates})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -262,7 +260,7 @@ func TestTwoTypeScriptProducersKeepConstructionSettingsIndependent(t *testing.T)
 			requested[index] = relation.Predicate
 		}
 		batch, err := inspectEmission(context.Background(), producer, backend.CollectionRequest{
-			RepoRoot: root, WorkspaceRoot: root, Predicates: requested,
+			WorkspaceRoot: root, Predicates: requested,
 		})
 		if err != nil {
 			t.Fatal(err)
@@ -385,7 +383,7 @@ export function run(): boolean { return effect("ok"); }
 	}
 	collect := func(producer *Backend, predicates []facts.Predicate) emissionView {
 		t.Helper()
-		batch, err := inspectEmission(context.Background(), producer, backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: root, Predicates: predicates})
+		batch, err := inspectEmission(context.Background(), producer, backend.CollectionRequest{WorkspaceRoot: root, Predicates: predicates})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -612,12 +610,12 @@ export default rule("test.filtered-callback").version(1)
     indeterminate(Fn, Name) :- ts.fn(Fn, _, Name), Name = "escape", ts.site_owner(Site, Fn), ts.fn_value_escape_unknown(Site).`+"`"+`)
   .report("indeterminate").message((row) => row.Name);
 `)
-	session := engine.Open(engine.Options{}, New())
+	session, err := engine.Open(engine.Config{WorkspaceRoot: testpack.Build(t, repoRoot, root, "lintai-rules/*.ts")}, New())
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer session.Close()
-	result, err := session.Check(context.Background(), engine.Options{
-		RepoRoot: repoRoot, AssetRoot: filepath.Join(repoRoot, "packages/client"), WorkspaceRoot: root,
-		RuleGlobs: []string{"lintai-rules/*.ts"},
-	})
+	result, err := session.Check(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -765,9 +763,22 @@ func TestSymlinkedWorkspaceRootKeepsScopeAndIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	options.SourceLinks = filepath.Join(alias, "source-links.json")
-	aliasSnapshot, err := New(options).buildTestGeneration(context.Background(), alias, alias)
+	absoluteSource := filepath.Join(alias, "src/a.ts")
+	options.Sources = []string{absoluteSource}
+	aliasProducer := New(options)
+	aliasSnapshot, err := aliasProducer.buildTestGeneration(context.Background(), alias, alias)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if options.Sources[0] != absoluteSource || aliasProducer.settings.Sources[0] != absoluteSource {
+		t.Fatal("source normalization mutated caller or producer settings")
+	}
+	repeated, err := New(options).buildTestGeneration(context.Background(), alias, alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repeated.inputRevision != aliasSnapshot.inputRevision || !reflect.DeepEqual(repeated.scope, aliasSnapshot.scope) {
+		t.Fatalf("unchanged symlinked-root identity: revision=%q repeated=%q", aliasSnapshot.inputRevision, repeated.inputRevision)
 	}
 	if !reflect.DeepEqual(realSnapshot.scope, aliasSnapshot.scope) {
 		t.Fatalf("symlinked root changed scope: %v != %v", realSnapshot.scope, aliasSnapshot.scope)
@@ -798,9 +809,13 @@ func TestSymlinkedWorkspaceRootKeepsScopeAndIdentity(t *testing.T) {
 	if !hasGenerationObservation(aliasSnapshot, alias) || !hasGenerationObservation(aliasSnapshot, filepath.Join(root, "src/a.ts")) {
 		t.Fatal("symlinked root and captured source are missing from observations")
 	}
-	plan, err := workspace.PlanSources(alias, workspace.ScopeOptions{Sources: []string{filepath.Join(alias, "src/a.ts")}})
+	scopeOptions := workspace.ScopeOptions{Sources: []string{absoluteSource}}
+	plan, err := workspace.PlanSources(alias, scopeOptions)
 	if err != nil {
 		t.Fatalf("absolute exact source through symlinked root: %v", err)
+	}
+	if scopeOptions.Sources[0] != absoluteSource {
+		t.Fatal("source selection mutated caller options")
 	}
 	if changed, err := plan.Observations.Changed(context.Background(), observe.Full); err != nil || changed != nil {
 		t.Fatalf("validate scope with absolute exact source: changed=%v err=%v", changed, err)
@@ -1431,18 +1446,24 @@ export const mapped = [1].map((n) => n);`,
 }
 
 func TestGenerationValidatesUnchangedSymlinkMembership(t *testing.T) {
-	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	writeWorkspaceFile(t, root, "tsconfig.json", `{"include":["src/**/*.ts"]}`)
-	writeWorkspaceFile(t, root, "src/a.ts", `export const value = 1;`)
+	writeWorkspaceFile(t, root, "src/a.ts", `export const value = 1; export { other } from "../linked/b"; export { third } from "../lib/cEE";`)
+	writeWorkspaceFile(t, root, "lib/b.ts", `export const other = 2;`)
+	writeWorkspaceFile(t, root, "lib/Cee.ts", `export const third = 3;`)
 	if err := os.Mkdir(filepath.Join(root, "empty"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	for _, link := range []struct{ target, name string }{
-		{"a.ts", "link.ts"},
-		{"../empty", "linked-dir"},
-		{"missing.ts", "dangling.ts"},
+		{"a.ts", "src/link.ts"},
+		{"../empty", "src/linked-dir"},
+		{"missing.ts", "src/dangling.ts"},
+		{"lib", "linked"},
 	} {
-		if err := os.Symlink(link.target, filepath.Join(root, "src", link.name)); err != nil {
+		if err := os.Symlink(link.target, filepath.Join(root, link.name)); err != nil {
 			t.Skipf("symlinks unavailable: %v", err)
 		}
 	}
@@ -1455,9 +1476,24 @@ func TestGenerationValidatesUnchangedSymlinkMembership(t *testing.T) {
 	if err != nil || again != generation {
 		t.Fatalf("unchanged symlink membership was not reused: err=%v", err)
 	}
-	snapshot := generation.snapshot
-	if len(snapshot.Modules) != 1 || snapshot.Modules[0].Path != "src/a.ts" {
-		t.Fatalf("unexpected selected modules: %+v", snapshot.Modules)
+	// A file imported through a linked directory, or by another letter case on
+	// a case-insensitive volume, keeps its compiler name and declares the file
+	// its text was read from in its on-disk spelling.
+	modules := []string{"src/a.ts"}
+	want := map[string]string{"linked/b.ts": filepath.Join(root, "lib", "b.ts")}
+	if _, err := os.Stat(filepath.Join(root, "lib", "cEE.ts")); err == nil {
+		modules = []string{"lib/Cee.ts", "src/a.ts"}
+		want["lib/cEE.ts"] = filepath.Join(root, "lib", "Cee.ts")
+	}
+	var paths []string
+	for _, module := range generation.snapshot.Modules {
+		paths = append(paths, module.Path)
+	}
+	if !slices.Equal(paths, modules) {
+		t.Fatalf("unexpected selected modules: %+v", generation.snapshot.Modules)
+	}
+	if documents := generation.Metadata().Documents; !maps.Equal(documents, want) {
+		t.Fatalf("unexpected documents: %v", documents)
 	}
 }
 
@@ -1479,7 +1515,7 @@ func TestSourceLinksValidationAndDemand(t *testing.T) {
 	for _, relation := range description.BaseRelations {
 		predicates[relation.Predicate.Name] = relation.Predicate
 	}
-	request := backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: root}
+	request := backend.CollectionRequest{WorkspaceRoot: root}
 	request.Predicates = []facts.Predicate{predicates["ts.module"], predicates["ts.declaration"], predicates["ts.location"], predicates["ts.config_adjusted"]}
 	if _, err := inspectEmission(context.Background(), producer, request); err == nil || !strings.Contains(err.Error(), "invalid --source-links") || producer.current != nil {
 		t.Fatalf("ordinary demand did not reject invalid source links: %v", err)
@@ -1545,7 +1581,7 @@ func TestCorrespondenceIsolationAndProjection(t *testing.T) {
 			}
 			collect := func(producer *Backend, predicates []facts.Predicate) emissionView {
 				t.Helper()
-				batch, err := inspectEmission(context.Background(), producer, backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: root, Predicates: predicates})
+				batch, err := inspectEmission(context.Background(), producer, backend.CollectionRequest{WorkspaceRoot: root, Predicates: predicates})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -1681,7 +1717,7 @@ func TestCorrespondenceIsolationAndProjection(t *testing.T) {
 		byName[relation.Predicate.Name] = relation.Predicate
 	}
 	predicates := []facts.Predicate{byName["project.module_config"], byName["project.module_owner_config"], byName["project.source_endpoint"]}
-	batch, err := inspectEmission(context.Background(), custom, backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: root, Predicates: predicates})
+	batch, err := inspectEmission(context.Background(), custom, backend.CollectionRequest{WorkspaceRoot: root, Predicates: predicates})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1709,7 +1745,7 @@ func TestOutsideOwnerConfigPathJoinsAdjustments(t *testing.T) {
 		byName[relation.Predicate.Name] = relation.Predicate
 	}
 	predicates := []facts.Predicate{byName["ts.module_config"], byName["ts.module_owner_config"], byName["ts.config_adjusted"]}
-	batch, err := inspectEmission(context.Background(), producer, backend.CollectionRequest{RepoRoot: root, WorkspaceRoot: workspace, Predicates: predicates})
+	batch, err := inspectEmission(context.Background(), producer, backend.CollectionRequest{WorkspaceRoot: workspace, Predicates: predicates})
 	if err != nil {
 		t.Fatal(err)
 	}

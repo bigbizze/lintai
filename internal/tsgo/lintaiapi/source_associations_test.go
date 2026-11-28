@@ -205,7 +205,7 @@ export const result = parse("value");`,
 		}
 	}
 	for _, path := range []string{checkedPath, filepath.Join(root, "packages/contracts/src/options.ts")} {
-		if !slices.ContainsFunc(snapshot.CompilerInputs, func(input CompilerObservation) bool { return input.Path == path && observationExists(input) }) {
+		if !slices.ContainsFunc(snapshot.CompilerInputs, func(input CompilerObservation) bool { return input.Path == path && input.Kind == "content" }) {
 			t.Fatalf("checked entry or auxiliary program file %s is missing from snapshot inputs: %+v", path, snapshot.CompilerInputs)
 		}
 	}

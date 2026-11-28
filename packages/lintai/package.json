@@ -34,9 +34,6 @@
 		"build": "tsc",
 		"dev": "tsc --watch"
 	},
-	"dependencies": {
-		"@lintai/client": "workspace:*"
-	},
 	"optionalDependencies": {
 		"@lintai/lintai-darwin-arm64": "workspace:*",
 		"@lintai/lintai-darwin-x64": "workspace:*",
