@@ -130,7 +130,7 @@ func bindProducers(producers []backend.Producer) (producerCatalog, error) {
 		copy.DeclaredAtom.Predicate = key
 		schemaDecls[key] = copy
 	}
-	identity, err := catalogIdentity(entries, "")
+	identity, err := catalogIdentity(entries, nil)
 	if err != nil {
 		return producerCatalog{}, err
 	}
@@ -146,12 +146,12 @@ func bindProducers(producers []backend.Producer) (producerCatalog, error) {
 
 // The compiled plan uses the bound descriptions. Approval additionally resolves
 // project path settings relative to the workspace owning the operation.
-func catalogIdentity(entries []producerEntry, approvalRoot string) (string, error) {
+func catalogIdentity(entries []producerEntry, approvalRoot *fileKeys) (string, error) {
 	identityRecords := make([]any, 0, len(entries)+1)
 	for _, entry := range entries {
 		description := entry.description
-		if approvalRoot != "" && description.ImplementationID == "lintai.typescript" {
-			config, err := typeScriptPolicyConfig(approvalRoot, description.EffectiveConfiguration)
+		if approvalRoot != nil && description.ImplementationID == "lintai.typescript" {
+			config, err := typeScriptPolicyConfig(*approvalRoot, description.EffectiveConfiguration)
 			if err != nil {
 				return "", err
 			}
@@ -220,14 +220,13 @@ func withoutPackageDeclaration(source string) string {
 }
 
 // collect prepares selected generations, establishes identity, then emits only on a miss.
-func (catalog producerCatalog) collect(ctx context.Context, workspaceRoot string, requestedByNamespace map[string]map[facts.Predicate]struct{}, current *composedFacts, mode observe.Mode) (composedFacts, error) {
+func (catalog producerCatalog) collect(ctx context.Context, root fileKeys, requestedByNamespace map[string]map[facts.Predicate]struct{}, current *composedFacts, mode observe.Mode) (composedFacts, error) {
 	type prepared struct {
 		entry      producerEntry
 		requested  []facts.Predicate
 		generation backend.Generation
 		metadata   backend.GenerationMetadata
 	}
-	initialKeys := newFileKeys(workspaceRoot, nil)
 	preparedGenerations := make([]prepared, 0, len(catalog.entries))
 	records := make([]any, 0, len(catalog.entries))
 	sourceDigests := make(map[string]string)
@@ -255,7 +254,7 @@ func (catalog producerCatalog) collect(ctx context.Context, workspaceRoot string
 			}
 			return requested[i].Arity < requested[j].Arity
 		})
-		generation, err := entry.producer.Prepare(ctx, backend.CollectionRequest{WorkspaceRoot: workspaceRoot, Predicates: slices.Clone(requested)}, mode)
+		generation, err := entry.producer.Prepare(ctx, backend.CollectionRequest{WorkspaceRoot: root.root, Predicates: slices.Clone(requested)}, mode)
 		if err != nil {
 			return composedFacts{}, fmt.Errorf("prepare producer %q: %w", description.Namespace, err)
 		}
@@ -264,9 +263,11 @@ func (catalog producerCatalog) collect(ctx context.Context, workspaceRoot string
 		}
 		preparedGenerations = append(preparedGenerations, prepared{entry, requested, generation, generation.Metadata()})
 	}
-	keys, err := operationFileKeys(initialKeys, preparedGenerations, func(item prepared) observe.Set { return item.metadata.Observations })
-	if err != nil {
-		return composedFacts{}, err
+	keys := fileKeys{root: root.root, physical: root.physical}
+	for _, item := range preparedGenerations {
+		if err := checkRootResolution(root, item.metadata.Observations); err != nil {
+			return composedFacts{}, fmt.Errorf("producer %q: %w", item.entry.description.Namespace, err)
+		}
 	}
 	declarations := make([]aliasDeclaration, 0)
 	published := make(map[string]struct{})
@@ -278,12 +279,15 @@ func (catalog producerCatalog) collect(ctx context.Context, workspaceRoot string
 			declarations = append(declarations, aliasDeclaration{item.entry.description.Namespace, alias, file})
 		}
 	}
-	if keys.aliases, err = resolveFileAliases(keys, declarations, published); err != nil {
+	aliases, err := resolveFileAliases(keys, declarations, published, false)
+	if err != nil {
 		return composedFacts{}, err
 	}
+	keys.aliases = aliases
 	// Anchors arrive during emission, after alias declarations have been read.
 	// Check their canonical filenames with the same unaliased mapping used for
-	// analyzed files, including when a matching snapshot reuses old facts.
+	// analyzed files, including when a matching snapshot reuses old facts, and
+	// then require every alias destination to be an analyzed or anchored file.
 	validateAnchorAliases := func(anchors map[string]facts.AnchorSupport) error {
 		if len(keys.aliases) == 0 {
 			return nil
@@ -291,7 +295,7 @@ func (catalog producerCatalog) collect(ctx context.Context, workspaceRoot string
 		for _, support := range anchors {
 			published[support.Location.File] = struct{}{}
 		}
-		_, err := resolveFileAliases(keys, declarations, published)
+		_, err := resolveFileAliases(keys, declarations, published, true)
 		return err
 	}
 	for i := range preparedGenerations {
@@ -419,32 +423,17 @@ func captureGenerationMetadata(metadata backend.GenerationMetadata, keys fileKey
 	return metadata, nil
 }
 
-// operationFileKeys uses the workspace-root resolution the producers recorded,
-// so publication keys name the physical files the producers actually read.
-// Without a recorded resolution it keeps the root resolved before producers
-// ran. Producers that resolved the root differently cannot share one result.
-func operationFileKeys[T any](initial fileKeys, items []T, observations func(T) observe.Set) (fileKeys, error) {
-	requested := filepath.Clean(initial.root)
-	if absolute, err := filepath.Abs(initial.root); err == nil {
-		requested = filepath.Clean(absolute)
-	}
-	physical := ""
-	for _, item := range items {
-		for _, record := range observations(item).Records() {
-			if record.Kind != observe.Resolved || record.Path != requested {
-				continue
-			}
-			value := filepath.Clean(string(record.Value))
-			if physical != "" && physical != value {
-				return fileKeys{}, fmt.Errorf("producers resolved workspace root %q to both %q and %q", requested, physical, value)
-			}
-			physical = value
+// checkRootResolution rejects a producer that resolved the workspace root to
+// another directory than the operation did, as when the root symlink changes
+// during the operation. The attempt fails instead of publishing a result that
+// mixes two workspaces; the next operation resolves the root again.
+func checkRootResolution(root fileKeys, observations observe.Set) error {
+	for _, record := range observations.Records() {
+		if record.Kind == observe.Resolved && record.Path == root.root && string(record.Value) != root.physical {
+			return fmt.Errorf("read workspace root %s at %s, but this operation resolved it to %s; retry", root.root, record.Value, root.physical)
 		}
 	}
-	if physical == "" {
-		physical = initial.physical
-	}
-	return fileKeys{root: initial.root, physical: physical, aliases: make(map[string]string)}, nil
+	return nil
 }
 
 type aliasDeclaration struct{ namespace, alias, file string }
@@ -452,12 +441,13 @@ type aliasDeclaration struct{ namespace, alias, file string }
 // resolveFileAliases validates every declared alias against the captured root
 // before any mapping is applied, so the result does not depend on producer or
 // map order. Equal declarations coalesce and identity aliases are dropped.
-// Different destinations for one alias, alias chains and cycles, and aliases
-// that shadow a declared canonical file are errors.
-func resolveFileAliases(keys fileKeys, declarations []aliasDeclaration, analyzed map[string]struct{}) (map[string]string, error) {
+// Invalid names, different destinations for one alias, alias chains and
+// cycles, and aliases that shadow a declared canonical file are errors. When
+// files holds every analyzed and anchored file, each destination must be one.
+func resolveFileAliases(keys fileKeys, declarations []aliasDeclaration, files map[string]struct{}, complete bool) (map[string]string, error) {
 	base := fileKeys{root: keys.root, physical: keys.physical}
-	canonicalFiles := make(map[string]struct{}, len(analyzed))
-	for file := range analyzed {
+	canonicalFiles := make(map[string]struct{}, len(files))
+	for file := range files {
 		canonicalFiles[base.key(file)] = struct{}{}
 	}
 	aliases := make(map[string]string)
@@ -466,6 +456,11 @@ func resolveFileAliases(keys fileKeys, declarations []aliasDeclaration, analyzed
 		return strings.Compare(a.namespace+"\x00"+a.alias+"\x00"+a.file, b.namespace+"\x00"+b.alias+"\x00"+b.file)
 	})
 	for _, declaration := range declarations {
+		for _, name := range []string{declaration.alias, declaration.file} {
+			if _, err := generationFilePath(name); err != nil {
+				return nil, fmt.Errorf("producer %q file alias: %w", declaration.namespace, err)
+			}
+		}
 		alias, file := base.key(declaration.alias), base.key(declaration.file)
 		if alias == file {
 			continue
@@ -483,6 +478,9 @@ func resolveFileAliases(keys fileKeys, declarations []aliasDeclaration, analyzed
 		}
 		if _, shadows := canonicalFiles[alias]; shadows {
 			return nil, fmt.Errorf("producer %q names %q as an alias of %q, but %q is an analyzed file", owners[alias], alias, file, alias)
+		}
+		if _, known := canonicalFiles[file]; complete && !known {
+			return nil, fmt.Errorf("producer %q names %q as an alias of %q, which is not an analyzed or reported file", owners[alias], alias, file)
 		}
 	}
 	return aliases, nil

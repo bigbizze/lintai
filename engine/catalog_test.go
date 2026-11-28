@@ -205,7 +205,7 @@ func TestBoundProducerOwnershipAndConfigurationIdentity(t *testing.T) {
 			t.Fatal(err)
 		}
 		delete(valid.description.EffectiveConfiguration.(map[string]any), "shape")
-		facts, err := session.catalog.collect(context.Background(), "", nil, nil, observe.Full)
+		facts, err := session.catalog.collect(context.Background(), fileKeys{}, nil, nil, observe.Full)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -302,6 +302,34 @@ func TestFileKeysAcceptEverySourceSpelling(t *testing.T) {
 	if got := keys.key(filepath.Join(resolved, "src", "a.js")); got != "src/a.js" {
 		t.Fatalf("physical spelling -> %s", got)
 	}
+
+	// The configured root is a symlink inside its target, and a finding is in
+	// a file outside the workspace. A request keeps its spellings, order and
+	// duplicates, and every spelling of one file finds the same findings.
+	nested := filepath.Join(physical, "current")
+	if err := os.Symlink(physical, nested); err != nil {
+		t.Fatal(err)
+	}
+	located := func(file string) diagnostics.Diagnostic {
+		return diagnostics.Diagnostic{SourceLocation: &diagnostics.SourceLocation{File: file}}
+	}
+	result := Result{files: newFileKeys(nested, nil), Diagnostics: []diagnostics.Diagnostic{located("src/a.js"), located("../deps/shared.ts")}}
+	shared := filepath.Join(filepath.Dir(resolved), "deps", "shared.ts")
+	requested := []string{"src/a.js", filepath.Join(nested, "src", "a.js"), filepath.Join(resolved, "src", "a.js"), "../deps/shared.ts", shared, "src/a.js"}
+	published := newPublishedResult(result, nil, observe.Set{}, true)
+	projected := published.projectFiles(requested, false)
+	if !slices.Equal(groupFiles(projected), requested) {
+		t.Fatalf("requested spellings not kept: %v", groupFiles(projected))
+	}
+	for i, group := range projected.Files {
+		if len(group.Diagnostics) != 1 || len(result.DiagnosticsFor(requested[i])) != 1 {
+			t.Fatalf("%s: %d findings", group.File, len(group.Diagnostics))
+		}
+	}
+	all := published.projectFiles(nil, true)
+	if want := slices.Sorted(slices.Values([]string{"src/a.js", filepath.ToSlash(shared)})); !slices.Equal(groupFiles(all), want) || len(all.Files[0].Diagnostics) != 1 || len(all.Files[1].Diagnostics) != 1 {
+		t.Fatalf("all files: %+v", all.Files)
+	}
 }
 
 func TestSourceDigestUsesOneFileKeyForEverySpelling(t *testing.T) {
@@ -323,10 +351,39 @@ func TestSourceDigestUsesOneFileKeyForEverySpelling(t *testing.T) {
 	}
 }
 
-func TestOperationFileKeysUseTheProducersRootResolution(t *testing.T) {
+// rootReadingProducer resolves the workspace root when it prepares, as a file
+// producer does, and records that resolution.
+type rootReadingProducer struct {
+	*parallelFixtureProducer
+}
+
+func (producer *rootReadingProducer) Prepare(ctx context.Context, request backend.CollectionRequest, mode observe.Mode) (backend.Generation, error) {
+	generation, err := producer.parallelFixtureProducer.Prepare(ctx, request, mode)
+	if err != nil {
+		return nil, err
+	}
+	physical, err := filepath.EvalSymlinks(request.WorkspaceRoot)
+	if err != nil {
+		return nil, err
+	}
+	prepared := generation.(*parallelGeneration)
+	prepared.metadata.Observations, err = observe.New([]observe.Record{{Kind: observe.Resolved, Path: request.WorkspaceRoot, Value: observe.Value(physical)}})
+	return prepared, err
+}
+
+func TestOperationReadsOneWorkspaceRoot(t *testing.T) {
+	repo, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
 	parent := t.TempDir()
+	program := "Decl violation(Entity, Code). violation(Entity, Code) :- catalog.usable(Entity, Code)."
+	physical := map[string]string{}
 	for _, name := range []string{"a", "b"} {
-		if err := os.Mkdir(filepath.Join(parent, name), 0o755); err != nil {
+		workspace := filepath.Join(parent, name)
+		writeTestFile(t, workspace, "lintai-rules/root.ts", parallelRuleSource("fixture.root", program, `(row) => "`+name+`:" + row.Code`))
+		parallelFixtureOptions(t, repo, workspace)
+		if physical[name], err = filepath.EvalSymlinks(workspace); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -334,42 +391,43 @@ func TestOperationFileKeysUseTheProducersRootResolution(t *testing.T) {
 	if err := os.Symlink(filepath.Join(parent, "a"), link); err != nil {
 		t.Skip(err)
 	}
-	read, err := filepath.EvalSymlinks(filepath.Join(parent, "a"))
-	if err != nil {
-		t.Fatal(err)
+	retarget := func(name string) {
+		t.Helper()
+		if err := os.Remove(link); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(filepath.Join(parent, name), link); err != nil {
+			t.Fatal(err)
+		}
 	}
-	observed, err := observe.New([]observe.Record{{Kind: observe.Resolved, Path: link, Value: observe.Value(read)}})
-	if err != nil {
-		t.Fatal(err)
+	producer := &rootReadingProducer{newParallelFixtureProducer()}
+	producer.reusable = true
+	session := openTestSession(t, Config{WorkspaceRoot: link}, producer)
+	assertWorkspace := func(name string) {
+		t.Helper()
+		result, err := session.RefreshFiles(context.Background(), []string{"catalog/items.sql"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var messages []string
+		for _, item := range result.Files[0].Diagnostics {
+			messages = append(messages, item.Message)
+		}
+		if result.PhysicalRoot != physical[name] || !slices.Equal(messages, []string{name + ":a", name + ":b", name + ":c"}) {
+			t.Fatalf("expected workspace %s only, got root %s and messages %v", name, result.PhysicalRoot, messages)
+		}
 	}
-	initial := newFileKeys(link, nil)
-	if err := os.Remove(link); err != nil {
-		t.Fatal(err)
+
+	// The rule pack is read from a; the producer then reads b.
+	session.hooks.beforeCollect = func() { retarget("b") }
+	result, err := session.RefreshFiles(context.Background(), []string{"catalog/items.sql"})
+	if err == nil || !strings.Contains(err.Error(), `producer "catalog"`) || !strings.Contains(err.Error(), physical["b"]) || len(result.Files) != 0 {
+		t.Fatalf("expected the mixed attempt to fail, got %+v, %v", result, err)
 	}
-	if err := os.Symlink(filepath.Join(parent, "b"), link); err != nil {
-		t.Fatal(err)
-	}
-	keys, err := operationFileKeys(initial, []observe.Set{observed}, func(set observe.Set) observe.Set { return set })
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := keys.key(filepath.Join(read, "x.ts")); got != "x.ts" {
-		t.Fatalf("file the producer read -> %s", got)
-	}
-	moved, err := filepath.EvalSymlinks(filepath.Join(parent, "b"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := keys.key(filepath.Join(moved, "x.ts")); got == "x.ts" {
-		t.Fatal("file in the newly linked workspace matched the published result")
-	}
-	other, err := observe.New([]observe.Record{{Kind: observe.Resolved, Path: link, Value: observe.Value(moved)}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := operationFileKeys(initial, []observe.Set{observed, other}, func(set observe.Set) observe.Set { return set }); err == nil {
-		t.Fatal("producers that read different workspaces were composed")
-	}
+	session.hooks.beforeCollect = nil
+	assertWorkspace("b")
+	retarget("a")
+	assertWorkspace("a")
 }
 
 func TestProjectAllOmitsIdentityAliases(t *testing.T) {
@@ -407,7 +465,7 @@ func TestResolveFileAliasesIsOrderIndependentAndRejectsAmbiguity(t *testing.T) {
 	}
 	coalesced := []aliasDeclaration{declare("p", "link.ts", "a/shared.ts"), declare("q", "link.ts", "a/shared.ts"), declare("q", "a/shared.ts", "a/shared.ts")}
 	for _, declarations := range [][]aliasDeclaration{coalesced, {coalesced[2], coalesced[1], coalesced[0]}} {
-		got, err := resolveFileAliases(keys, slices.Clone(declarations), analyzed)
+		got, err := resolveFileAliases(keys, slices.Clone(declarations), analyzed, false)
 		if err != nil || len(got) != 1 || got["link.ts"] != "a/shared.ts" {
 			t.Fatalf("aliases = %v, %v", got, err)
 		}
@@ -419,7 +477,7 @@ func TestResolveFileAliasesIsOrderIndependentAndRejectsAmbiguity(t *testing.T) {
 		"shadow":   {declare("p", "b/shared.ts", "a/shared.ts")},
 	} {
 		for _, order := range [][]aliasDeclaration{declarations, {declarations[len(declarations)-1], declarations[0]}} {
-			if _, err := resolveFileAliases(keys, slices.Clone(order), analyzed); err == nil {
+			if _, err := resolveFileAliases(keys, slices.Clone(order), analyzed, false); err == nil {
 				t.Errorf("%s: expected an error", name)
 			}
 		}
@@ -468,6 +526,20 @@ func TestResolveFileAliasesIsOrderIndependentAndRejectsAmbiguity(t *testing.T) {
 		assertShadow()
 		if catalog.emitCalls.Load() != catalogEmits || other.emitCalls.Load() != otherEmits {
 			t.Fatal("unchanged generation should reuse cached anchors when validating aliases")
+		}
+		for name, aliases := range map[string]map[string]string{
+			"empty alias":                      {"": "other.sql"},
+			"empty destination":                {"link.sql": ""},
+			"destination is not an input file": {"link.sql": "missing.sql"},
+		} {
+			other.aliases = aliases
+			if result, err := session.RefreshAll(context.Background()); err == nil || !strings.Contains(err.Error(), `producer "other"`) || len(result.Files) != 0 {
+				t.Fatalf("%s: expected a producer error, got %+v, %v", name, result, err)
+			}
+		}
+		other.aliases = map[string]string{"link.sql": "other.sql"}
+		if result, err := session.RefreshAll(context.Background()); err != nil || result.Aliases["link.sql"] != "other.sql" {
+			t.Fatalf("expected the alias of an analyzed file, got %+v, %v", result, err)
 		}
 	})
 }

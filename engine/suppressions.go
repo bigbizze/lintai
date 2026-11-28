@@ -31,10 +31,12 @@ type runInfo struct {
 	producerNames               []string
 }
 type suppressionsState struct {
-	path         string
-	file         suppressions.File
-	snapshot     atomicfile.Snapshot
-	observations observe.Set
+	// path is the configured spelling; location is the same file under the
+	// operation's physical root, which is read and written.
+	path, location string
+	file           suppressions.File
+	snapshot       atomicfile.Snapshot
+	observations   observe.Set
 }
 type suppressionWrite struct {
 	path             string
@@ -53,16 +55,17 @@ func validateSuppressionUpdate(update SuppressionUpdate) error {
 	}
 	return nil
 }
-func loadSuppressions(config Config, update SuppressionUpdate) (suppressionsState, error) {
+func loadSuppressions(config Config, root fileKeys, update SuppressionUpdate) (suppressionsState, error) {
 	if err := validateSuppressionUpdate(update); err != nil {
 		return suppressionsState{}, err
 	}
 	path := suppressions.ResolvePath(config.WorkspaceRoot, config.SuppressionsLocation)
-	snapshot, err := atomicfile.Read(path)
+	location := root.read(path)
+	snapshot, err := atomicfile.Read(location)
 	if err != nil {
 		return suppressionsState{}, err
 	}
-	observations, err := policyObservations(path, snapshot)
+	observations, err := policyObservations(location, snapshot)
 	if err != nil {
 		return suppressionsState{}, err
 	}
@@ -70,13 +73,13 @@ func loadSuppressions(config Config, update SuppressionUpdate) (suppressionsStat
 		if config.SuppressionsLocation != "" && !update.All && len(update.Rules) == 0 {
 			return suppressionsState{}, fmt.Errorf("the suppressions file %s does not exist", path)
 		}
-		return suppressionsState{path: path, file: suppressions.File{}, snapshot: snapshot, observations: observations}, nil
+		return suppressionsState{path: path, location: location, file: suppressions.File{}, snapshot: snapshot, observations: observations}, nil
 	}
 	file, err := suppressions.Parse(path, snapshot.Data)
 	if err != nil {
 		return suppressionsState{}, err
 	}
-	return suppressionsState{path: path, file: file, snapshot: snapshot, observations: observations}, nil
+	return suppressionsState{path: path, location: location, file: file, snapshot: snapshot, observations: observations}, nil
 }
 func typedReason(v facts.Value) ([2]string, error) {
 	switch v.Kind {
@@ -299,9 +302,14 @@ func applySuppressions(config Config, update SuppressionUpdate, state suppressio
 	if err := validatePolicies(file, run); err != nil {
 		return nil, err
 	}
-	groups, err := collectGroups(file, *result, evidence, true)
-	if err != nil {
-		return nil, err
+	// Groups are only read through allowances. Without a write there are none
+	// to add, so a run without allowances skips grouping its findings.
+	var groups map[string]*groupFindings
+	if writing || len(file) > 0 {
+		var err error
+		if groups, err = collectGroups(file, *result, evidence, true); err != nil {
+			return nil, err
+		}
 	}
 	if writing && !blocked && update.Prune {
 		pruned := suppressions.File{}
@@ -344,7 +352,7 @@ func applySuppressions(config Config, update SuppressionUpdate, state suppressio
 		if err != nil {
 			return nil, err
 		}
-		write = &suppressionWrite{path: state.path, snapshot: state.snapshot, data: data}
+		write = &suppressionWrite{path: state.location, snapshot: state.snapshot, data: data}
 		if run.lock != nil {
 			write.approvalPath = run.lock.target
 			write.approvalSnapshot = run.lock.targetSnapshot

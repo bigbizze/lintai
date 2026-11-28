@@ -22,9 +22,9 @@ type FileGroup struct {
 }
 
 // FilesResult contains ordered file groups and workspace problems from one
-// completed publication. PhysicalRoot is the workspace root the producers
-// resolved for that analysis. Aliases maps each accepted alternative name of a
-// returned all-files group to its canonical name.
+// completed publication. PhysicalRoot is the workspace root the analysis
+// resolved once and read all workspace files through. Aliases maps each
+// accepted alternative name of a returned all-files group to its canonical name.
 type FilesResult struct {
 	Files             []FileGroup
 	PhysicalRoot      string
@@ -127,10 +127,13 @@ func verifiedSourceDigests(result Result, evidence *executionEvidence) map[strin
 	return verified
 }
 
-// fileKeys maps every accepted spelling of a published file to one key:
-// workspace-relative through the requested root or the physical root captured
-// once for the operation, then through an exact-source alias. A path outside
-// the workspace stays absolute.
+// fileKeys maps every accepted spelling of a published file to one key. The
+// physical root is resolved once for the operation. An absolute name inside the
+// configured root, or else inside the physical root, becomes workspace-relative.
+// A relative name that leaves the workspace is resolved from the physical root,
+// as producers and the operating system resolve it, and a name outside the
+// workspace keys as that absolute path. An exact-source alias then maps to its
+// canonical file.
 type fileKeys struct {
 	root, physical string
 	aliases        map[string]string
@@ -145,27 +148,36 @@ func newFileKeys(root string, aliases map[string]string) fileKeys {
 }
 
 func (k fileKeys) key(file string) string {
-	clean := filepath.Clean(filepath.FromSlash(file))
-	if filepath.IsAbs(clean) && k.physical != k.root {
-		if relative, err := filepath.Rel(k.physical, clean); err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-			clean = relative
+	name := filepath.Clean(filepath.FromSlash(file))
+	if !filepath.IsAbs(name) && !insideRoot(name) {
+		name = filepath.Join(k.physical, name)
+	}
+	if filepath.IsAbs(name) {
+		for _, root := range []string{k.root, k.physical} {
+			if relative, err := filepath.Rel(root, name); err == nil && insideRoot(relative) {
+				name = relative
+				break
+			}
 		}
 	}
-	key := publicationFileKey(k.root, clean)
+	key := filepath.ToSlash(name)
 	if canonical, ok := k.aliases[key]; ok {
 		return canonical
 	}
 	return key
 }
 
-func publicationFileKey(root, file string) string {
-	file = filepath.Clean(filepath.FromSlash(file))
-	if filepath.IsAbs(file) {
-		if relative, err := filepath.Rel(root, file); err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-			file = relative
-		}
+// read is the path to open for a file named by a configured-root spelling, so
+// every read of one operation goes through the same physical root.
+func (k fileKeys) read(path string) string {
+	if relative, err := filepath.Rel(k.root, path); err == nil && insideRoot(relative) {
+		return filepath.Join(k.physical, relative)
 	}
-	return filepath.ToSlash(file)
+	return path
+}
+
+func insideRoot(relative string) bool {
+	return relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 func (p *publishedResult) projectFiles(files []string, all bool) FilesResult {

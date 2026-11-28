@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	goruntime "runtime"
 	"slices"
 	"sort"
@@ -93,6 +94,7 @@ type Session struct {
 
 // testHooks are in-package synchronization points for tests.
 type testHooks struct {
+	beforeCollect    func()
 	beforeEvaluation func()
 	afterDispatch    func()
 }
@@ -274,10 +276,29 @@ func (e *Session) clearCurrent() {
 	e.currentFacts = nil
 }
 
+// operationRoot resolves the workspace root once for an operation. Every
+// workspace read of the operation goes through the physical root, and the
+// recorded resolution makes the result stale when the root symlink changes.
+// A root that does not resolve is used as configured and records nothing, so
+// producers that read no files do not need it to exist.
+func operationRoot(root string) (fileKeys, observe.Set, error) {
+	physical, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return fileKeys{root: root, physical: filepath.Clean(root)}, observe.Set{}, nil
+	}
+	physical = filepath.Clean(physical)
+	observations, err := observe.New([]observe.Record{{Kind: observe.Resolved, Path: root, Value: observe.Value(physical)}})
+	return fileKeys{root: root, physical: physical}, observations, err
+}
+
 // runAndPublish is called by the active operation.
 func (e *Session) runAndPublish(checkCtx context.Context, update SuppressionUpdate, mode observe.Mode) (*publishedResult, error) {
 	config := e.config
-	state, err := loadSuppressions(config, update)
+	root, rootObservations, err := operationRoot(config.WorkspaceRoot)
+	if err != nil {
+		return nil, err
+	}
+	state, err := loadSuppressions(config, root, update)
 	var result Result
 	var run runInfo
 	var evidence executionEvidence
@@ -291,7 +312,7 @@ func (e *Session) runAndPublish(checkCtx context.Context, update SuppressionUpda
 		result.Diagnostics = []diagnostics.Diagnostic{errorDiagnostic("rules-lock", "integrity", 0, "", nil, err.Error())}
 		err = nil
 	} else {
-		result, run, evidence, err = e.analyzeWithEvidence(checkCtx, mode, state)
+		result, run, evidence, err = e.analyzeWithEvidence(checkCtx, mode, state, root)
 		if err != nil {
 			return nil, err
 		}
@@ -309,9 +330,9 @@ func (e *Session) runAndPublish(checkCtx context.Context, update SuppressionUpda
 	reusable := evidence.reusable && !update.writing()
 	result.files = evidence.files
 	if result.files.root == "" {
-		result.files = fileKeys{root: config.WorkspaceRoot}
+		result.files = root
 	}
-	published := newPublishedResult(result, verifiedSourceDigests(result, &evidence), observe.Union(evidence.observations, state.observations), reusable)
+	published := newPublishedResult(result, verifiedSourceDigests(result, &evidence), observe.Union(rootObservations, evidence.observations, state.observations), reusable)
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
@@ -387,7 +408,7 @@ func cloneResult(result Result) Result {
 	return result
 }
 
-func (e *Session) analyzeWithEvidence(ctx context.Context, mode observe.Mode, state suppressionsState) (Result, runInfo, executionEvidence, error) {
+func (e *Session) analyzeWithEvidence(ctx context.Context, mode observe.Mode, state suppressionsState, root fileKeys) (Result, runInfo, executionEvidence, error) {
 	config := e.config
 	run := runInfo{
 		evaluated:  make(map[string]struct{}),
@@ -405,7 +426,7 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, mode observe.Mode, st
 		return Result{Diagnostics: []diagnostics.Diagnostic{errorDiagnostic("rules-lock", "integrity", 0, "", nil, err.Error())}}, run, evidence, nil
 	}
 	producerCatalog := e.catalog
-	ruleCatalog, err := openRuleCatalog(ctx, config.WorkspaceRoot, e)
+	ruleCatalog, err := openRuleCatalog(ctx, root.physical, e)
 	if err != nil {
 		if config.RulesLock != "" {
 			return integrity(err)
@@ -415,11 +436,11 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, mode observe.Mode, st
 	defer ruleCatalog.close()
 	evidence.observations = ruleCatalog.observations
 	if config.RulesLock != "" {
-		lock, err := ReadRulesLock(config.RulesLock)
+		lock, err := ReadRulesLock(root.read(config.RulesLock))
 		if err != nil {
 			return integrity(err)
 		}
-		if err := lock.verify(config, ruleCatalog.digest, producerCatalog); err != nil {
+		if err := lock.verify(config, root, ruleCatalog.digest, producerCatalog); err != nil {
 			return integrity(err)
 		}
 		if _, failures := suppressions.Limit(state.file, lock.Suppressions); len(failures) > 0 {
@@ -444,7 +465,10 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, mode observe.Mode, st
 	}
 	prepareRulePlans(ruleCatalog, producerCatalog)
 	jobs, requested := ruleRelationDemand(ruleCatalog)
-	assembled, err := producerCatalog.collect(ctx, config.WorkspaceRoot, requested, e.currentFacts, mode)
+	if e.hooks.beforeCollect != nil {
+		e.hooks.beforeCollect()
+	}
+	assembled, err := producerCatalog.collect(ctx, root, requested, e.currentFacts, mode)
 	if err != nil {
 		return Result{}, run, evidence, err
 	}
@@ -515,11 +539,12 @@ func assembleSeverity(options Config, result *Result, run *runInfo) {
 // analyze is a package-private convenience for tests that exercise
 // diagnostics and run eligibility without inspecting typed outcomes.
 func (e *Session) analyze(ctx context.Context) (Result, runInfo, error) {
-	state, err := loadSuppressions(e.config, SuppressionUpdate{})
+	root := newFileKeys(e.config.WorkspaceRoot, nil)
+	state, err := loadSuppressions(e.config, root, SuppressionUpdate{})
 	if err != nil {
 		return Result{}, runInfo{}, err
 	}
-	result, run, _, err := e.analyzeWithEvidence(ctx, observe.Full, state)
+	result, run, _, err := e.analyzeWithEvidence(ctx, observe.Full, state, root)
 	return result, run, err
 }
 

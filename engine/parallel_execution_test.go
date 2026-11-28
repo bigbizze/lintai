@@ -16,6 +16,7 @@ import (
 	"github.com/bigbizze/lintai/facts"
 	"github.com/bigbizze/lintai/internal/testpack"
 	"github.com/bigbizze/lintai/observe"
+	"github.com/bigbizze/lintai/suppressions"
 )
 
 // This one fixture covers V28-V30: it runs the production rule path over
@@ -33,11 +34,28 @@ func TestParallelRuleExecutionContract(t *testing.T) {
 		config := parallelFixtureOptions(t, repoRoot, workspace)
 		config.RuleWorkers, config.FactLimit, config.Explain = workers, 8, true
 		session := openTestSession(t, config, newParallelFixtureProducer())
-		result, info, evidence, err := session.analyzeWithEvidence(context.Background(), observe.Full, suppressionsState{})
+		result, info, evidence, err := session.analyzeWithEvidence(context.Background(), observe.Full, suppressionsState{}, newFileKeys(session.config.WorkspaceRoot, nil))
 		if err != nil {
 			t.Fatal(err)
 		}
 		assertParallelFixtureOutcomes(t, result, info, evidence)
+		// A run without allowances does not group its findings. An allowance
+		// that matches no finding groups them, and the output is the same.
+		suppress := func(file suppressions.File) Result {
+			t.Helper()
+			suppressed := cloneResult(result)
+			if _, err := applySuppressions(config, SuppressionUpdate{}, suppressionsState{path: "lintai-suppressions.json", file: file}, info, evidence, &suppressed); err != nil {
+				t.Fatal(err)
+			}
+			return suppressed
+		}
+		unmatched := suppressions.File{{
+			File: "elsewhere.sql", Rule: "fixture.elsewhere", Assertion: suppressions.Assertion{Name: "violation", Arity: 2},
+			Groups: []suppressions.Group{{Namespace: "catalog", Reasons: []suppressions.Reason{}, Description: "elsewhere", Count: 1}},
+		}}
+		if without, with := suppress(nil), suppress(unmatched); !reflect.DeepEqual(without, with) || len(without.Diagnostics) == 0 {
+			t.Fatalf("suppression output depends on grouping:\nwithout allowances: %+v\nwith an unmatched allowance: %+v", without, with)
+		}
 		return result, info, evidence
 	}
 	parallelResult, _, parallelEvidence := run(2)

@@ -144,7 +144,7 @@ func ReadRulesLock(path string) (RulesLock, error) {
 
 // Path settings are interpreted using the same workspace as producer preparation.
 // Preserve application strings in all other producer and rule options.
-func typeScriptPolicyConfig(root string, value any) (any, error) {
+func typeScriptPolicyConfig(root fileKeys, value any) (any, error) {
 	raw, ok := value.(map[string]any)
 	if !ok {
 		return nil, fmt.Errorf("invalid TypeScript producer configuration")
@@ -157,15 +157,13 @@ func typeScriptPolicyConfig(root string, value any) (any, error) {
 		if !filepath.IsAbs(path) {
 			return filepath.ToSlash(filepath.Clean(path)), nil
 		}
-		relative, err := filepath.Rel(root, path)
+		relative, err := filepath.Rel(root.root, path)
 		if err == nil && filepath.IsLocal(relative) {
 			return filepath.ToSlash(relative), nil
 		}
 		// Exact source selection also accepts the resolved spelling of a symlinked root.
-		if resolved, e := filepath.EvalSymlinks(root); e == nil {
-			if r, e := filepath.Rel(resolved, path); e == nil && filepath.IsLocal(r) {
-				return filepath.ToSlash(r), nil
-			}
+		if r, e := filepath.Rel(root.physical, path); e == nil && filepath.IsLocal(r) {
+			return filepath.ToSlash(r), nil
 		}
 		if err != nil {
 			return "", err
@@ -195,7 +193,7 @@ func typeScriptPolicyConfig(root string, value any) (any, error) {
 }
 
 // policyDigest hashes effective Go policy before calling any executable entry.
-func policyDigest(options Config, catalog producerCatalog) (string, error) {
+func policyDigest(options Config, root fileKeys, catalog producerCatalog) (string, error) {
 	policies := map[string]any{}
 	for id, policy := range options.Rule {
 		if policy.Severity != "error" || len(policy.Options) != 0 {
@@ -207,7 +205,7 @@ func policyDigest(options Config, catalog producerCatalog) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("suppression policy location: %w", err)
 	}
-	identity, err := catalogIdentity(catalog.entries, options.WorkspaceRoot)
+	identity, err := catalogIdentity(catalog.entries, &root)
 	if err != nil {
 		return "", err
 	}
@@ -218,11 +216,11 @@ func policyDigest(options Config, catalog producerCatalog) (string, error) {
 	return fmt.Sprintf("sha256:%x", sha256.Sum256(raw)), nil
 }
 
-func (lock RulesLock) verify(options Config, pack string, catalog producerCatalog) error {
+func (lock RulesLock) verify(options Config, root fileKeys, pack string, catalog producerCatalog) error {
 	if pack != lock.PackDigest {
 		return fmt.Errorf("rule pack digest changed (approved %s, found %s); review and run lintai lock", lock.PackDigest, pack)
 	}
-	policy, err := policyDigest(options, catalog)
+	policy, err := policyDigest(options, root, catalog)
 	if err != nil {
 		return err
 	}
@@ -252,7 +250,8 @@ func (e *Session) BuildRulesLock(ctx context.Context, target string) (RulesLock,
 	if targetState.Exists && !isRulesLockDocument(targetState.Data) {
 		return RulesLock{}, fmt.Errorf("%s exists and is not a lintai rules lock; refusing to overwrite it", target)
 	}
-	state, err := loadSuppressions(options, SuppressionUpdate{})
+	root := newFileKeys(options.WorkspaceRoot, nil)
+	state, err := loadSuppressions(options, root, SuppressionUpdate{})
 	if err != nil {
 		return RulesLock{}, err
 	}
@@ -260,11 +259,11 @@ func (e *Session) BuildRulesLock(ctx context.Context, target string) (RulesLock,
 		return RulesLock{}, fmt.Errorf("lock path conflicts with rule pack or suppressions")
 	}
 	producers := e.catalog
-	digest, err := policyDigest(options, producers)
+	digest, err := policyDigest(options, root, producers)
 	if err != nil {
 		return RulesLock{}, err
 	}
-	catalog, err := openRuleCatalog(ctx, options.WorkspaceRoot, nil)
+	catalog, err := openRuleCatalog(ctx, root.physical, nil)
 	if err != nil {
 		return RulesLock{}, err
 	}
@@ -284,7 +283,7 @@ func (e *Session) BuildRulesLock(ctx context.Context, target string) (RulesLock,
 	if unknown := unknownPolicyRules(options, ids); len(unknown) > 0 {
 		return RulesLock{}, fmt.Errorf("%s", unknown[0].Message)
 	}
-	return RulesLock{PackDigest: catalog.digest, PolicyDigest: digest, Suppressions: state.file, target: target, targetSnapshot: targetState, source: state.path, sourceSnapshot: state.snapshot}, ctx.Err()
+	return RulesLock{PackDigest: catalog.digest, PolicyDigest: digest, Suppressions: state.file, target: target, targetSnapshot: targetState, source: state.location, sourceSnapshot: state.snapshot}, ctx.Err()
 }
 
 // isRulesLockDocument accepts any branded lintai rules-lock format, including

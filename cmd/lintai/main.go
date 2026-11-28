@@ -214,12 +214,29 @@ func runServe(ctx context.Context) error {
 }
 
 // serveSession owns the configuration receipt and the producers made from it.
+// physical is the workspace root the configuration was read through.
 type serveSession struct {
 	params   server.InitializeParams
 	config   workspace.WorkspaceConfig
+	physical string
 	receipt  bool
 	settings []typescript.Options
 	session  *engine.Session
+	// beforeAnalysis runs between configuration and analysis in tests.
+	beforeAnalysis func()
+}
+
+// physicalRoot resolves the workspace root as the engine resolves it once for
+// each operation.
+func physicalRoot(root string) string {
+	absolute, err := filepath.Abs(root)
+	if err != nil {
+		return root
+	}
+	if physical, err := filepath.EvalSymlinks(absolute); err == nil {
+		return physical
+	}
+	return absolute
 }
 
 func (s *serveSession) configure(ctx context.Context) (err error) {
@@ -231,7 +248,8 @@ func (s *serveSession) configure(ctx context.Context) (err error) {
 	if err = ctx.Err(); err != nil {
 		return err
 	}
-	if s.receipt && s.session != nil && len(s.config.Observations.Records()) != 0 {
+	physical := physicalRoot(s.params.WorkspaceRoot)
+	if s.receipt && s.session != nil && physical == s.physical && len(s.config.Observations.Records()) != 0 {
 		var changed *observe.Record
 		changed, err = s.config.Observations.Changed(ctx, observe.Quick)
 		if err != nil {
@@ -243,7 +261,7 @@ func (s *serveSession) configure(ctx context.Context) (err error) {
 	}
 	var config workspace.WorkspaceConfig
 	var settings []typescript.Options
-	settings, config, err = captureTypeScriptSettings(s.params.WorkspaceRoot, "", "", false, "", false, nil, nil)
+	settings, config, err = captureTypeScriptSettings(physical, "", "", false, "", false, nil, nil)
 	if err != nil {
 		return fmt.Errorf("load workspace configuration: %w", err)
 	}
@@ -271,8 +289,22 @@ func (s *serveSession) configure(ctx context.Context) (err error) {
 		}
 		s.settings = settings
 	}
-	s.config, s.receipt = config, true
+	s.config, s.physical, s.receipt = config, physical, true
 	return nil
+}
+
+// analyze rejects a result whose analysis read another physical root than the
+// configuration did, as when the root symlink changes between the two. The
+// next request reads the configuration again.
+func (s *serveSession) analyze(refresh func() (engine.FilesResult, error)) (engine.FilesResult, error) {
+	if s.beforeAnalysis != nil {
+		s.beforeAnalysis()
+	}
+	result, err := refresh()
+	if err == nil && result.PhysicalRoot != s.physical {
+		return engine.FilesResult{}, fmt.Errorf("workspace root %s changed from %s to %s during analysis; retry", s.params.WorkspaceRoot, s.physical, result.PhysicalRoot)
+	}
+	return result, err
 }
 
 func (s *serveSession) RefreshFiles(ctx context.Context, files []string) (engine.FilesResult, error) {
@@ -283,19 +315,19 @@ func (s *serveSession) RefreshFiles(ctx context.Context, files []string) (engine
 		_ = s.Close()
 		return engine.FilesResult{}, err
 	}
-	return s.session.RefreshFiles(ctx, files)
+	return s.analyze(func() (engine.FilesResult, error) { return s.session.RefreshFiles(ctx, files) })
 }
 
 func (s *serveSession) RefreshAll(ctx context.Context) (engine.FilesResult, error) {
 	if err := s.configure(ctx); err != nil {
 		return engine.FilesResult{}, err
 	}
-	return s.session.RefreshAll(ctx)
+	return s.analyze(func() (engine.FilesResult, error) { return s.session.RefreshAll(ctx) })
 }
 
 func (s *serveSession) Close() error {
 	s.receipt = false
-	s.config = workspace.WorkspaceConfig{}
+	s.config, s.physical = workspace.WorkspaceConfig{}, ""
 	s.settings = nil
 	if s.session != nil {
 		session := s.session

@@ -155,7 +155,7 @@ func TestComposedFactsCaptureCurrentEligibilityWithoutReemission(t *testing.T) {
 	session := openTestSession(t, Config{}, producer)
 	defer session.Close()
 	catalog := session.catalog
-	empty, err := catalog.collect(context.Background(), "", nil, nil, observe.Full)
+	empty, err := catalog.collect(context.Background(), fileKeys{}, nil, nil, observe.Full)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +164,7 @@ func TestComposedFactsCaptureCurrentEligibilityWithoutReemission(t *testing.T) {
 	}
 	predicate := facts.Predicate{Name: "catalog.item", Arity: 2}
 	demand := map[string]map[facts.Predicate]struct{}{"catalog": {predicate: {}}}
-	first, err := catalog.collect(context.Background(), "", demand, &empty, observe.Full)
+	first, err := catalog.collect(context.Background(), fileKeys{}, demand, &empty, observe.Full)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +176,7 @@ func TestComposedFactsCaptureCurrentEligibilityWithoutReemission(t *testing.T) {
 		t.Fatal(err)
 	}
 	producer.observations, producer.reusable = set, true
-	next, err := catalog.collect(context.Background(), "", demand, &first, observe.Full)
+	next, err := catalog.collect(context.Background(), fileKeys{}, demand, &first, observe.Full)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +184,7 @@ func TestComposedFactsCaptureCurrentEligibilityWithoutReemission(t *testing.T) {
 		t.Fatal("equal identity failed to reuse facts with freshly captured eligibility")
 	}
 	producer.observations = observe.Set{}
-	immutable, err := catalog.collect(context.Background(), "", demand, &next, observe.Full)
+	immutable, err := catalog.collect(context.Background(), fileKeys{}, demand, &next, observe.Full)
 	if err != nil || !immutable.reusableFromObservations || len(immutable.observations.Records()) != 0 {
 		t.Fatalf("immutable empty observation promise: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestComposedFactsCaptureCurrentEligibilityWithoutReemission(t *testing.T) {
 			session := openTestSession(t, Config{}, typescript.New(settings))
 			t.Cleanup(func() { _ = session.Close() })
 			catalog := session.catalog
-			result, err := catalog.collect(context.Background(), root, requested, previous, observe.Full)
+			result, err := catalog.collect(context.Background(), newFileKeys(root, nil), requested, previous, observe.Full)
 			if err != nil {
 				t.Fatal(err)
 			}

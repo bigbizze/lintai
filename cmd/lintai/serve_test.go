@@ -175,4 +175,39 @@ func TestServeConfigurationAndRPCRecovery(t *testing.T) {
 	if composition.session == previous || len(composition.settings) != 1 || composition.settings[0].Namespace != "other" {
 		t.Fatalf("namespace not replaced: %+v", composition.settings)
 	}
+
+	// The configured root is a symlink retargeted after the configuration is
+	// read: the request fails instead of applying one workspace's
+	// configuration to the other, and the next request follows the new target.
+	write(configPath, config("a.ts"))
+	other := t.TempDir()
+	write(filepath.Join(other, "a.ts"), "export const a = 1;\n")
+	write(filepath.Join(other, "b.ts"), "export const b = 2;\n")
+	write(filepath.Join(other, "lintai.toml"), config("b.ts"))
+	otherRule := filepath.Join(other, "rules", "example.ts")
+	write(otherRule, rule)
+	testpack.Build(t, repo, other, otherRule)
+	link := filepath.Join(t.TempDir(), "current")
+	if err := os.Symlink(root, link); err != nil {
+		t.Skip(err)
+	}
+	retargeted := &serveSession{params: server.InitializeParams{WorkspaceRoot: link, RuleWorkers: 1}}
+	defer retargeted.Close()
+	retargeted.beforeAnalysis = func() {
+		retargeted.beforeAnalysis = nil
+		if err := os.Remove(link); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(other, link); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got, err := retargeted.RefreshFiles(context.Background(), []string{"a.ts", "b.ts"}); err == nil || !strings.Contains(err.Error(), "retry") {
+		t.Fatalf("mixed workspaces were published: %+v", got)
+	}
+	got, err := retargeted.RefreshFiles(context.Background(), []string{"a.ts", "b.ts"})
+	otherPhysical, _ := filepath.EvalSymlinks(other)
+	if err != nil || got.PhysicalRoot != otherPhysical || len(got.Files[0].Diagnostics) != 1 || len(got.Files[1].Diagnostics) != 0 {
+		t.Fatalf("retargeted workspace: %+v, %v", got, err)
+	}
 }
