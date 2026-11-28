@@ -3,38 +3,44 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { record, reset, saveRows, summary } from "./metrics.mjs";
 import { checkHost, eslintRows, hostNames } from "./semantic.mjs";
-import { eslintConfig, hosts, installed, options, parent, root } from "./settings.mjs";
+import { eslintConfig, hosts, installed, options, root } from "./settings.mjs";
 
 const { Linter } = hosts("eslint");
-const { createLintaiPlugin } = installed("@lintai/eslint-plugin");
+const { createCapturedLintaiPlugin, createLintaiPlugin, createLintaiSession } =
+	installed("@lintai/eslint-plugin");
 const plugin = createLintaiPlugin(options("live"));
+const session = createLintaiSession(options("live"));
 const linter = new Linter({ configType: "flat", cwd: root });
 const config = eslintConfig(plugin);
 const files = hostNames.map((name) => path.join(root, name));
 const sources = files.map((file) => readFileSync(file, "utf8"));
-const verify = (i) => linter.verify(sources[i], config, { filename: files[i] });
-const visits = async () => {
+const verify = (i, configuration = config) =>
+	linter.verify(sources[i], configuration, { filename: files[i] });
+const visits = async (configuration) => {
 	const result = [];
 	for (let i = 0; i < files.length; i++) {
-		result.push(verify(i));
-		await Promise.resolve(); // Keep the historical callback boundary.
+		result.push(verify(i, configuration));
+		await Promise.resolve();
 	}
 	return result;
 };
 
 try {
 	let reference;
-	for (const event of ["batch-cold", "batch-warm", "ordinary-warm"]) {
-		const batch = event.startsWith("batch");
+	for (const event of ["capture-cold", "capture-warm", "ordinary-warm"]) {
+		const captured = event.startsWith("capture");
 		const cold = event.endsWith("cold");
+		// The live plugin owns a separate server from the session; analyze once
+		// before measuring its warm callbacks.
+		if (!captured) verify(0);
 		reset();
 		const start = performance.now();
-		const result = batch
-			? await plugin.withFileBatch(files, ({ problems }) => {
-					assert.deepEqual(problems, []);
-					return visits();
-				})
-			: await visits();
+		let result;
+		if (captured) {
+			const capture = session.capture(files);
+			assert.deepEqual(capture.problems, []);
+			result = await visits(eslintConfig(createCapturedLintaiPlugin(capture)));
+		} else result = await visits();
 		const elapsed = performance.now() - start;
 		const rows = result.flatMap((messages, i) => eslintRows(hostNames[i], messages));
 		checkHost(rows);
@@ -43,7 +49,7 @@ try {
 			reference = rows;
 			saveRows("eslint", rows);
 		}
-		const requests = batch ? 1 : 477;
+		const requests = captured ? 1 : 477;
 		record(
 			event,
 			{ elapsed_ms: elapsed, files: 477, findings: rows.length },
@@ -53,7 +59,7 @@ try {
 				config: cold ? 0 : requests,
 				workspace: cold ? 0 : requests,
 				all: 0,
-				adapter_source_reads: parent ? 477 : 0,
+				adapter_source_reads: 0,
 			},
 		);
 	}
@@ -61,11 +67,10 @@ try {
 	// Measure the real client's frame write, wait, read and decode in isolation
 	// from ESLint parsing and reporting, on the same 20 unchanged live visits.
 	const { LintAIClient } = installed("@lintai/client");
-	const method = parent ? "requestSync" : "request";
-	const original = LintAIClient.prototype[method];
+	const original = LintAIClient.prototype.request;
 	assert.equal(typeof original, "function");
 	const trips = [];
-	LintAIClient.prototype[method] = function (name, ...args) {
+	LintAIClient.prototype.request = function (name, ...args) {
 		const start = performance.now();
 		const response = original.call(this, name, ...args);
 		if (name === "diagnostics/files") trips.push(performance.now() - start);
@@ -99,15 +104,16 @@ try {
 				config: 20,
 				workspace: 20,
 				analyses: 0,
-				adapter_source_reads: parent ? 20 : 0,
+				adapter_source_reads: 0,
 			},
 		);
 	} finally {
-		LintAIClient.prototype[method] = original;
+		LintAIClient.prototype.request = original;
 	}
 	reset();
-	await plugin.withFileBatch([], ({ problems }) => assert.deepEqual(problems, []));
-	record("empty-batch-warm", { files: 0 }, { requests: 1, config: 1, workspace: 1, analyses: 0 });
+	assert.deepEqual(session.capture([]).problems, []);
+	record("empty-capture-warm", { files: 0 }, { requests: 1, config: 1, workspace: 1, analyses: 0 });
 } finally {
 	plugin.dispose?.();
+	session.dispose();
 }

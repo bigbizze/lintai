@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { record, reset, saveRows } from "./metrics.mjs";
 import { checkHost, eslintRows, hostNames, oxlintRows } from "./semantic.mjs";
-import { hosts, out, parent, root } from "./settings.mjs";
+import { hosts, out, root } from "./settings.mjs";
 
 const here = fileURLToPath(new URL(".", import.meta.url));
 const oxConfig = path.join(out, "oxlint.json");
@@ -15,13 +15,7 @@ writeFileSync(
 		plugins: [],
 		categories: { correctness: "off" },
 		jsPlugins: [path.join(here, "oxlint-plugin.mjs")],
-		rules: parent
-			? {
-					"lintai/analysis": "error",
-					"lintai/benchmark.functions": "error",
-					"lintai/benchmark.modules": "error",
-				}
-			: { "lintai/error": "error", "lintai/warning": "warn" },
+		rules: { "lintai/error": "error", "lintai/warning": "warn" },
 	}),
 );
 
@@ -66,23 +60,7 @@ for (const host of ["eslint", "oxlint"]) {
 	const data = JSON.parse(output);
 	const messages = host === "eslint" ? data.flatMap((group) => group.messages) : data.diagnostics;
 	assert.equal(host === "eslint" ? data.length : data.number_of_files, hostNames.length);
-	const overflow = messages.find((m) => /ENOBUFS/.test(m.message));
 	const event = `${host}-cli-cold`;
-	if (parent && overflow) {
-		assert.ok(!messages.some((m) => m.message.startsWith("[benchmark.")));
-		record(
-			event,
-			{
-				elapsed_ms: ms,
-				files_requested: hostNames.length,
-				findings: 0,
-				parent_error: overflow.message,
-				stdout_bytes: output.length,
-			},
-			{ requests: 0, all: 0, config: 0, workspace: 0, analyses: 1 },
-		);
-		continue;
-	}
 	let rows;
 	if (host === "eslint") {
 		const groups = new Map(
@@ -104,8 +82,8 @@ for (const host of ["eslint", "oxlint"]) {
 		event,
 		{ elapsed_ms: ms, files: 477, findings: rows.length, stdout_bytes: output.length },
 		{
-			requests: parent ? 0 : 1,
-			all: parent ? 0 : 1,
+			requests: 1,
+			all: 1,
 			analyses: 1,
 			workspace: 0,
 			config: 0,

@@ -69,9 +69,9 @@ export function record(event, metrics, expected) {
 		if (requests && !counts.all) {
 			const sizes = {
 				"all-projections-warm": 511,
-				"batch-cold": 477,
-				"batch-warm": 477,
-				"empty-batch-warm": 0,
+				"capture-cold": 477,
+				"capture-warm": 477,
+				"empty-capture-warm": 0,
 			};
 			const n = sizes[event] ?? 1;
 			assert.deepEqual(row.selector_lengths, [n], `${event} selector`);
@@ -81,12 +81,6 @@ export function record(event, metrics, expected) {
 		}
 		if (event.endsWith("-cli-cold") && counts.all)
 			assert.deepEqual(row.binary_commands, { serve: 1 });
-		if (metrics.findings === 10074 && requests === 1) {
-			assert.ok(
-				row.largest_frame_bytes > 2 * 1024 ** 2,
-				"expected a multi-megabyte framed response",
-			);
-		}
 	}
 	const json = JSON.stringify(row);
 	appendFileSync(path.join(out, trace ? "counted.jsonl" : "timing.jsonl"), `${json}\n`);

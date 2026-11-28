@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { out, parent, root } from "./settings.mjs";
+import { out, root } from "./settings.mjs";
 
 export const names = JSON.parse(readFileSync(new URL("./analyzed-files.json", import.meta.url)));
 export const hostNames = names.filter((name) => name.endsWith(".ts"));
@@ -28,7 +28,7 @@ function finding(name, rule, severity, message, range) {
 	const prefix = /^\[([^/\]]+)\/([^\]]+)\] ([\s\S]*)$/.exec(message);
 	assert.ok(prefix, `${name} unexpected adapter message: ${message}`);
 	const [, id, assertion, text] = prefix;
-	assert.equal(rule, parent ? id : severity);
+	assert.equal(rule, severity);
 	return [name, id, assertion, severity, text, ...range];
 }
 

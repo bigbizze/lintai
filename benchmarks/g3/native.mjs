@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { record, reset, saveRows } from "./metrics.mjs";
 import { engineRow, names } from "./semantic.mjs";
-import { installed, parent, root, rules, versions } from "./settings.mjs";
+import { root, versions } from "./settings.mjs";
 
 function run(args, status) {
 	reset();
@@ -24,7 +24,7 @@ function run(args, status) {
 
 reset();
 record("tools", versions());
-if (!parent) {
+{
 	const { ms } = run(["build-rules"], 0);
 	const pack = readFileSync(path.join(root, ".lintai/rules.json"));
 	record(
@@ -38,17 +38,6 @@ if (!parent) {
 	);
 }
 const args = ["check", "--json", "--rule-workers", "1"];
-if (parent)
-	args.push(
-		"--repo-root",
-		process.env.G3_REPO,
-		"--asset-root",
-		path.dirname(installed.resolve("@lintai/client/package.json")),
-		"--rules",
-		rules.join(","),
-		"--files",
-		"tsconfig",
-	);
 const { stdout, ms } = run(args, 1);
 const rows = JSON.parse(stdout).map(engineRow);
 assert.equal(rows.length, 10214);

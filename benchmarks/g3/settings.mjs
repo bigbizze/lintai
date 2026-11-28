@@ -4,29 +4,12 @@ import path from "node:path";
 const env = process.env;
 export const fixture = env.G3_FIXTURE;
 export const root = path.join(fixture, "zod");
-export const parent = env.G3_VARIANT === "parent";
 export const out = env.G3_OUT;
 export const installed = createRequire(path.join(env.G3_INSTALL, "package.json"));
-export const hosts = createRequire(
-	path.join(env.G3_HOST_INSTALL ?? env.G3_INSTALL, "package.json"),
-);
+export const hosts = installed;
 const tools = createRequire(path.join(fixture, "host-tools", "package.json"));
-export const rules = ["modules", "functions"].map((id) => path.join(fixture, "rules", `${id}.ts`));
 export function options(operation) {
-	return {
-		binary: env.G3_BINARY,
-		workspaceRoot: root,
-		ruleWorkers: 1,
-		...(parent
-			? {
-					repoRoot: env.G3_REPO,
-					rules,
-					files: "tsconfig",
-					env: {},
-					...(operation === "live" ? { mode: "serve" } : {}),
-				}
-			: { operation }),
-	};
+	return { binary: env.G3_BINARY, workspaceRoot: root, ruleWorkers: 1, operation };
 }
 
 export function eslintConfig(plugin) {

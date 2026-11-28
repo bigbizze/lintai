@@ -1,6 +1,6 @@
 # Go API
 
-The `engine` package provides a retained analysis session. Construct producer instances with their own settings, open a session with the default request, and close it when finished:
+The `engine` package provides a retained analysis session. Construct producer instances with their own settings, open a session with its configuration, and close it when finished. The configuration is bound once; every operation uses it:
 
 ```go
 import (
@@ -10,10 +10,9 @@ import (
     "github.com/bigbizze/lintai/engine"
 )
 
-func check(ctx context.Context, repoRoot, workspaceRoot string) error {
+func check(ctx context.Context, workspaceRoot string) error {
     producer := typescript.New(typescript.Options{Files: typescript.FileScopeTsconfig})
-    session, err := engine.Open(engine.Options{
-        RepoRoot:      repoRoot,
+    session, err := engine.Open(engine.Config{
         WorkspaceRoot: workspaceRoot,
         RuleWorkers:   2,
     }, producer)
@@ -34,11 +33,13 @@ func check(ctx context.Context, repoRoot, workspaceRoot string) error {
 
 Opening validates and binds each producer description once. The caller owns all supplied producers until construction succeeds. A successful session closes each bound producer once.
 
-`RefreshAll(ctx, options)` validates once and returns every analyzed file and every file with a located diagnostic, in normalized filename order. Both batch methods return parallel `Files`, `Diagnostics`, and `SourceDigests` slices. Explicit requests preserve filename spelling and duplicates. An empty digest means source identity is unavailable. A producer can supply `GenerationMetadata.SourceDigests` keyed by filename, using lowercase hexadecimal SHA-256 of the UTF-8 encoding of the analyzed logical text with one leading BOM removed. File projections use that captured identity even after a disk edit.
+Migrating from the previous API: `engine.Options` with per-call options becomes one `engine.Config` passed to `Open`. `RepoRoot` is gone. `Check(ctx, options)` becomes `Check(ctx)`. A suppression write becomes `UpdateSuppressions(ctx, engine.SuppressionUpdate{All: true})`. `Refresh(ctx, options, file)` becomes `RefreshFiles(ctx, []string{file})`, and `RefreshAll(ctx, options)` becomes `RefreshAll(ctx)`.
 
-`Check` reads the published pack and validates producer inputs in Full mode. Each actual analysis initializes a fresh VM per inspected rule. Eligible rules parse configuration, generate their program and facts, and render messages in that VM. The session can retain a complete immutable compiled plan for a matching key, the current fact index and one completed publication. `Check(ctx, options)` replaces the default request for that call.
+`RefreshFiles(ctx, files)` and `RefreshAll(ctx)` return a `FilesResult` holding ordered `FileGroup` values, each with `File`, `SourceDigest` and `Diagnostics`, plus workspace problems, the snapshot version, the physical root resolved for that analysis and an alias map. Explicit requests preserve filename spelling, order and duplicates. `RefreshAll` returns each canonical file once, in normalized order, with accepted alternative names in `Aliases`. An empty digest means source identity is unavailable. A producer can supply `GenerationMetadata.SourceDigests` keyed by filename, using lowercase hexadecimal SHA-256 of the UTF-8 encoding of the analyzed logical text with one leading BOM removed. File projections use that captured identity even after a disk edit.
 
-`Refresh(ctx, options, file)` and `RefreshFiles(ctx, options, files)` require a complete explicit request and are read-only: they reject suppression recording and pruning. `RefreshFiles` validates once and returns `Diagnostics` in request order (including duplicates), plus one set of workspace problems and publication metadata; all projections come from the same completed result. Returned results and projections are detached from the retained publication. An empty list still validates and can return workspace problems. A later call validates again. Both validate the published result's observations in Quick mode and, when the request and all eligible inputs remain unchanged, return the requested file diagnostics and unlocated workspace problems without starting rule or producer work. Otherwise they perform analysis with Quick reuse checks. Results with rule execution errors are displayed but retried on the next refresh. A failed or canceled request makes `Current` unavailable; `Current` and `Result.DiagnosticsFor` read completed data without refreshing it. `Close` is idempotent, cancels and joins active work, and prevents further requests.
+`Check` reads the published pack and validates producer inputs in Full mode. Each actual analysis initializes a fresh VM per inspected rule. Eligible rules parse configuration, generate their program and facts, and render messages in that VM. The session can retain a complete immutable compiled plan for a matching key, the current fact index and one completed publication.
+
+The refresh methods are read-only. Each call validates once, and all its projections come from the same completed result. Returned results are detached from the retained publication. An empty list still validates and can return workspace problems. A later call validates again. Both validate the published result's observations in Quick mode and, when all eligible inputs remain unchanged, return the requested groups and unlocated workspace problems without starting rule or producer work. Otherwise they perform analysis with Quick reuse checks. Results with rule execution errors are displayed but retried on the next refresh. A failed or canceled request makes `Current` unavailable; `Current` and `Result.DiagnosticsFor` read completed data without refreshing it. `Close` is idempotent, cancels and joins active work, and prevents further requests.
 
 A publication records the inputs used during analysis. Concurrent edits can yield different versions of different inputs within a single publication. The next validating request checks the captured observations. Edit application sources directly. After editing executable rules or their static data, run `lintai build-rules` to publish the change.
 
@@ -56,14 +57,28 @@ The public `observe` package represents captured content, filesystem operation r
 
 ## Suppressions and rule integrity
 
-`Check` applies the workspace suppressions file to complete raw outcomes. `Options.SuppressionsLocation`, `SuppressAll`, `SuppressRules`, and `PruneSuppressions` control the current policy. `Result.Diagnostics` contains presented findings and `Suppressed` contains suppressed findings. `UnusedSuppressions`, `SuppressionsPath`, and `SuppressionsWritten` describe the policy result. Reading a result never replays writes.
+`Check` applies the workspace suppressions file to complete raw outcomes. `Config.SuppressionsLocation` selects the file. `UpdateSuppressions` records (`All`, `Rules`) or prunes (`Prune`) allowances once. `Result.Diagnostics` contains presented findings and `Suppressed` contains suppressed findings. `UnusedSuppressions`, `SuppressionsPath`, and `SuppressionsWritten` describe the policy result. Reading a result never replays writes.
 
-Set `Options.RulesLock` to enforce the approved pack bytes, effective policy and suppression ceiling before any rule is initialized. Go callers approve deliberately with `session.BuildRulesLock(ctx, options)` and `engine.WriteRulesLock(ctx, path, lock)`. The native build, approval, inspection and analysis paths run without Node. See the [trust model](trust.md).
+Set `Config.RulesLock` to enforce the approved pack bytes, effective policy and suppression ceiling before any rule is initialized. Go callers approve deliberately with `session.BuildRulesLock(ctx, target)` and `engine.WriteRulesLock(ctx, path, lock)`. The native build, approval, inspection and analysis paths run without Node. See the [trust model](trust.md).
 
 ## Serve protocol
 
-`lintai serve` processes Content-Length framed JSON-RPC requests sequentially. Initialize with `{"protocolVersion":3,"workspaceRoot":"/project"}`. Both peers require version 3. Initialization configures the session, and each subsequent projection validates the workspace configuration and publication once.
+`lintai serve` processes Content-Length framed JSON-RPC requests sequentially. Initialize with `{"protocolVersion":4,"workspaceRoot":"/project"}`. Both peers require version 4. Initialization supplies the session settings once, and each subsequent projection validates the workspace configuration and publication once.
 
-Call `diagnostics/files` with `{"files":["src/example.ts"]}` or `{"files":"all"}`. Arrays preserve the requested spelling, order, duplicates and empty groups. An empty array returns workspace problems. The all-files selector returns the publication's stable projectable names. Results contain `snapshotVersion`, `rulesLoaded`, ordered workspace problem strings in `problems` and groups shaped as `{file, sourceDigest, diagnostics}`. An empty digest means source identity is unavailable. The digest is lowercase hex SHA-256 over the analyzed logical text encoded in UTF-8 after removing one leading BOM.
+Call `diagnostics/files` with `{"files":["src/example.ts"]}` or `{"files":"all"}`. Arrays preserve the requested spelling, order, duplicates and empty groups. An empty array returns workspace problems without groups. The all-files selector returns each canonical file once, with accepted alternative names in `aliases`. A result has this shape:
 
-A custom `server.Analyzer` implements `RefreshFiles`, `RefreshAll` and `Close`. Returned file names, source digests and diagnostic slices must align. A recoverable analysis failure returns JSON-RPC error `-32010`. `shutdown` responds with `{}` and closes the session.
+```ts
+type Finding = {
+  ruleId: string; assertionId: string; severity: "error" | "warning";
+  message: string; range?: [number, number, number, number];
+};
+type HostResult = {
+  snapshotVersion: string; problems: string[];
+  physicalRoot: string; aliases: Record<string, string>;
+  files: Array<{ file: string; sourceDigest: string; findings: Finding[] }>;
+};
+```
+
+A range is start line, start column, end line, end column, one-based in UTF-16 units. `physicalRoot` is the workspace root the producers resolved for that analysis; an empty value authorizes no physical alias lookup. An empty digest means source identity is unavailable. The digest is lowercase hex SHA-256 over the analyzed logical text encoded in UTF-8 after removing one leading BOM. Native and Go diagnostics keep snapshot hashes, producers, anchors and explanations; the host payload omits them.
+
+A custom `server.Analyzer` implements `RefreshFiles`, `RefreshAll` and `Close`, returning an `engine.FilesResult`. A recoverable analysis failure returns JSON-RPC error `-32010`. `shutdown` responds with `{}` and closes the session.

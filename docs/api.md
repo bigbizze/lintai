@@ -474,7 +474,7 @@ lintai build-rules [--workspace-root <dir>]
 lintai schema [--workspace-root <dir>] [--config <file>]
 lintai facts [--workspace-root <dir>] [--config <file>] [--exclude <glob>]... [--source <file>]... [--files tsconfig|walk] [--source-links <file>] [--relation <name>]...
 lintai scope --explain [--json] [--workspace-root <dir>] [--config <file>] [--exclude <glob>]... [--source <file>]... [--files tsconfig|walk] [--source-links <file>]
-lintai lock [--workspace-root <dir>] [--repo-root <dir>] [--lock-file <path>] [--suppressions-location <path>]
+lintai lock [--workspace-root <dir>] [--lock-file <path>] [--suppressions-location <path>]
 lintai rules [--workspace-root <dir>] [--json]
 lintai serve
 ```
@@ -506,7 +506,6 @@ An entry that fails to initialize, has an invalid shape, or shares an ID with an
 `lintai` and `lintai check` use the same analysis flags:
 
 - `--workspace-root`
-- `--repo-root`
 - `--config <file>`: choose a `lintai.toml` file, relative to the invocation directory. See [Snapshot scope](#snapshot-scope).
 - `--exclude`: a glob, relative to the workspace root, of files to leave out of the snapshot unless explicitly selected. Repeat the flag for more globs.
 - `--source <file>`: add an exact source file, relative to the workspace root or an absolute path inside it. Repeat the flag for more files.
@@ -682,22 +681,62 @@ pnpm exec lintai build-rules &&
   LINTAI_HOST_OPERATION=invocation pnpm exec oxlint -c oxlint.config.ts src
 ```
 
-### Explicit ESLint multi-file operations
+### Programmatic captures
 
 Both adapters default to `operation: "live"`. An independent visit validates saved-workspace inputs once. Both severity rules use that response. For a raw CLI command, `operation: "invocation"` captures all projectable files on its first visit and serves subsequent visits locally. An embedder reusing a host process across commands should create a fresh invocation instance per command and call `dispose()` when done.
 
-An in-process embedder can use the same plugin instance in the host config and the batch callback. The callback's `problems` remain available even when the declared list is empty. The operation lasts until the callback settles. Overlapping and nested callbacks each retain their own capture. An undeclared path is an error.
+An in-process embedder creates a session, takes a synchronous capture of the files it will lint, and binds a plugin to that capture. A capture is a detached, read-only result: it holds workspace problems, the snapshot identity and file results, and owns no process or connection. `dispose()` stops new captures; completed captures remain usable. Two captures taken before and after an edit can be displayed in any order through two bound plugins. A bound plugin never starts a Go process.
 
 ```js
-const results = await lintai.withFileBatch(files, async ({ problems }) => {
-  const results = await eslint.lintFiles(files);
-  return { results, problems };
-});
+import { ESLint } from "eslint";
+import tsParser from "@typescript-eslint/parser";
+import { createCapturedLintaiPlugin, createLintaiSession } from "@lintai/eslint-plugin";
+
+export async function lintSelected(workspaceRoot, files) {
+  const session = createLintaiSession({ workspaceRoot });
+  try {
+    const capture = session.capture(files);
+    const plugin = createCapturedLintaiPlugin(capture);
+    const eslint = new ESLint({
+      cwd: workspaceRoot,
+      overrideConfigFile: true,
+      cache: false,
+      concurrency: "off",
+      overrideConfig: [{
+        files: ["**/*.ts"],
+        languageOptions: { parser: tsParser },
+        ...plugin.configs.all,
+      }],
+    });
+    const results = files.length ? await eslint.lintFiles(files) : [];
+    // Handle capture.problems, including when files is empty.
+    return { results, problems: capture.problems };
+  } finally {
+    session.dispose();
+  }
+}
 ```
+
+Migrating from `withFileBatch`: replace the callback with a capture and a bound plugin.
+
+```js
+// Before
+const { results, problems } = await lintai.withFileBatch(files, async ({ problems }) => ({
+  results: await eslint.lintFiles(files),
+  problems,
+}));
+// After
+const capture = session.capture(files);
+const eslint = makeESLint(createCapturedLintaiPlugin(capture));
+const results = await eslint.lintFiles(files);
+const problems = capture.problems;
+```
+
+`capture("all")` captures every projectable file. Rule failures and recoverable configuration or analysis errors, including malformed TOML on the first capture, appear in `capture.problems`. A broken connection, incompatible protocol or malformed response throws. `@lintai/oxlint-plugin` exports the same `createLintaiSession` and `createCapturedLintaiPlugin`.
 
 A host may open the workspace through a directory symlink while its plugin config uses the physical workspace root. The adapter recognizes an absolute file under either spelling by resolving parent directories to the same workspace root. Each operation retains the aliases it verifies. An unrelated absolute path stays distinct from a workspace-relative name.
 
-Each invocation or batch freezes its file set. A batch matches visits by the exact spelling passed to `withFileBatch`. If the batch names `alias/example.ts`, the host must visit that spelling; a visit to `src/example.ts` throws even when both reach the same file. Pass the same paths to the batch and the host. Looking up an uncaptured file in an invocation yields no findings. Files added after capture join the next operation. The adapter compares the host text with the captured SHA-256 digest of the analyzed logical text, encoded as UTF-8 with exactly one leading BOM removed and line endings preserved. A matching earlier buffer can display findings after the saved file changes. A mismatch or unverifiable range produces a save/rerun notice through `lintai/error`. ESLint 10 can strip two leading BOMs from the buffer it exposes to plugins. A saved file that starts with two BOMs therefore gets the source-mismatch notice in that host. Workspace failures appear on every file the operation visits with the error adapter enabled, so a file-local suppression cannot hide a failure of the whole analysis. A transport failure surfaces on the failing operation and the next live operation can reconnect.
+Each invocation or capture freezes its file set and its physical workspace root. If a symlinked root later points elsewhere, the capture still describes the original target. A selected capture matches visits by the spellings passed to `capture`. If it names `alias/example.ts`, the host must visit that spelling; a visit to `src/example.ts` throws even when both reach the same file. Pass the same paths to the capture and the host. An all-files capture resolves canonical and alias names. Looking up an uncaptured file in an invocation yields no findings. Files added after capture join the next operation. The adapter compares the host text with the captured SHA-256 digest of the analyzed logical text, encoded as UTF-8 with exactly one leading BOM removed and line endings preserved. A matching earlier buffer can display findings after the saved file changes. A mismatch or unverifiable range produces a save/rerun notice through `lintai/error`. ESLint 10 can strip two leading BOMs from the buffer it exposes to plugins. A saved file that starts with two BOMs therefore gets the source-mismatch notice in that host. Workspace failures appear on every file the operation visits with the error adapter enabled, so a file-local suppression cannot hide a failure of the whole analysis. A transport failure surfaces on the failing operation and the next live operation can reconnect.
 
 A host that visits zero files has nowhere to display workspace failures. For enforcement, CI can run `lintai build-rules && lintai check --rules-lock lintai-rules.lock.json`. The native check reports workspace failures even with zero host callbacks.
 
