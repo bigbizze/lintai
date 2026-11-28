@@ -365,7 +365,7 @@ source_links = "links.json"
 	if err := os.WriteFile(filepath.Join(root, "lintai.toml"), []byte(config), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	settings, err := loadTypeScriptSettings(root, "", "", false, "", false, []string{"cli/**"}, []string{"cli.d.ts"})
+	settings, _, _, err := captureTypeScriptSettings(root, "", "", false, "", false, []string{"cli/**"}, []string{"cli.d.ts"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -374,7 +374,7 @@ source_links = "links.json"
 		!slices.Equal(settings[0].Excludes, []string{"cli/**"}) || !slices.Equal(settings[0].Sources, []string{"configured.d.ts", "cli.d.ts"}) {
 		t.Fatalf("configuration defaults or list appends were not applied: %+v", settings)
 	}
-	settings, err = loadTypeScriptSettings(root, "", "tsconfig", true, "", true, nil, nil)
+	settings, _, _, err = captureTypeScriptSettings(root, "", "tsconfig", true, "", true, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -387,10 +387,10 @@ implementation = "lintai.typescript"
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := loadTypeScriptSettings(root, "", "walk", true, "", false, nil, nil); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+	if _, _, _, err := captureTypeScriptSettings(root, "", "walk", true, "", false, nil, nil); err == nil || !strings.Contains(err.Error(), "ambiguous") {
 		t.Fatalf("scalar TypeScript flags were accepted with multiple configured instances: %v", err)
 	}
-	if _, err := loadTypeScriptSettings(root, "", "", false, "", true, nil, nil); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+	if _, _, _, err := captureTypeScriptSettings(root, "", "", false, "", true, nil, nil); err == nil || !strings.Contains(err.Error(), "ambiguous") {
 		t.Fatalf("source-links flag was accepted with multiple configured instances: %v", err)
 	}
 	if err := os.Mkdir(filepath.Join(root, "cli"), 0o755); err != nil {

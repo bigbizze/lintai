@@ -352,27 +352,23 @@ func TestSourceDigestUsesOneFileKeyForEverySpelling(t *testing.T) {
 	}
 }
 
-// rootReadingProducer resolves the workspace root when it prepares, as a file
-// producer does, and records that resolution.
-type rootReadingProducer struct {
+// movingProducer retargets the workspace link while it prepares, as a
+// concurrent change might, and records the root it was given.
+type movingProducer struct {
 	*parallelFixtureProducer
+	move  func()
+	roots []string
 }
 
-func (producer *rootReadingProducer) Prepare(ctx context.Context, request backend.CollectionRequest, mode observe.Mode) (backend.Generation, error) {
-	generation, err := producer.parallelFixtureProducer.Prepare(ctx, request, mode)
-	if err != nil {
-		return nil, err
+func (producer *movingProducer) Prepare(ctx context.Context, request backend.CollectionRequest, mode observe.Mode) (backend.Generation, error) {
+	producer.roots = append(producer.roots, request.WorkspaceRoot)
+	if producer.move != nil {
+		producer.move()
 	}
-	physical, err := filepath.EvalSymlinks(request.WorkspaceRoot)
-	if err != nil {
-		return nil, err
-	}
-	prepared := generation.(*parallelGeneration)
-	prepared.metadata.Observations, err = observe.New([]observe.Record{{Kind: observe.Resolved, Path: request.WorkspaceRoot, Value: observe.Value(physical)}})
-	return prepared, err
+	return producer.parallelFixtureProducer.Prepare(ctx, request, mode)
 }
 
-func TestOperationReadsOneWorkspaceRoot(t *testing.T) {
+func TestOperationUsesOneWorkspace(t *testing.T) {
 	repo, err := filepath.Abs("..")
 	if err != nil {
 		t.Fatal(err)
@@ -392,89 +388,43 @@ func TestOperationReadsOneWorkspaceRoot(t *testing.T) {
 	if err := os.Symlink(filepath.Join(parent, "a"), link); err != nil {
 		t.Skip(err)
 	}
-	retarget := func(name string) {
-		t.Helper()
+	producer := &movingProducer{parallelFixtureProducer: newParallelFixtureProducer()}
+	producer.move = func() {
+		producer.move = nil
 		if err := os.Remove(link); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Symlink(filepath.Join(parent, name), link); err != nil {
+		if err := os.Symlink(filepath.Join(parent, "b"), link); err != nil {
 			t.Fatal(err)
 		}
 	}
-	producer := &rootReadingProducer{newParallelFixtureProducer()}
-	producer.reusable = true
 	session := openTestSession(t, Config{WorkspaceRoot: link}, producer)
-	assertWorkspace := func(name string) {
-		t.Helper()
-		result, err := session.RefreshFiles(context.Background(), []string{"catalog/items.sql"})
-		if err != nil {
-			t.Fatal(err)
+	messages := func(items []diagnostics.Diagnostic) []string {
+		var result []string
+		for _, item := range items {
+			result = append(result, item.Message)
 		}
-		var messages []string
-		for _, item := range result.Files[0].Diagnostics {
-			messages = append(messages, item.Message)
-		}
-		if result.PhysicalRoot != physical[name] || !slices.Equal(messages, []string{name + ":a", name + ":b", name + ":c"}) {
-			t.Fatalf("expected workspace %s only, got root %s and messages %v", name, result.PhysicalRoot, messages)
-		}
+		return result
 	}
 
-	// The rule pack is read from a; the producer then reads b.
-	session.hooks.beforeCollect = func() { retarget("b") }
-	result, err := session.RefreshFiles(context.Background(), []string{"catalog/items.sql"})
-	if err == nil || !strings.Contains(err.Error(), `producer "catalog"`) || !strings.Contains(err.Error(), physical["b"]) || len(result.Files) != 0 {
-		t.Fatalf("expected the mixed attempt to fail, got %+v, %v", result, err)
-	}
-	session.hooks.beforeCollect = nil
-	assertWorkspace("b")
-	retarget("a")
-	assertWorkspace("a")
-
-	// The root is retargeted after an approval resolves it: the lock is built
-	// from a and written into a, never into b.
-	session.hooks.afterRoot = func() { retarget("b") }
-	lock, err := session.BuildRulesLock(context.Background(), "")
-	session.hooks.afterRoot = nil
+	// The link moves to b while the producer works. The result and the write
+	// belong to a, and a later operation of the session stays on a.
+	result, err := session.UpdateSuppressions(context.Background(), SuppressionUpdate{All: true})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteRulesLock(context.Background(), filepath.Join(link, DefaultRulesLockFile), lock); err != nil {
+	if !slices.Equal(messages(result.Suppressed), []string{"a:a", "a:b", "a:c"}) || result.SuppressionsPath != filepath.Join(physical["a"], suppressions.DefaultFile) {
+		t.Fatalf("expected workspace a only: %+v", result)
+	}
+	if _, err := os.Stat(filepath.Join(physical["b"], suppressions.DefaultFile)); !os.IsNotExist(err) {
+		t.Fatalf("suppressions written into b: %v", err)
+	}
+	refreshed, err := session.RefreshAll(context.Background())
+	if err != nil {
 		t.Fatal(err)
 	}
-	if written, err := ReadRulesLock(filepath.Join(physical["a"], DefaultRulesLockFile)); err != nil || written.PackDigest != lock.PackDigest {
-		t.Fatalf("lock not written into the workspace it was built from: %+v, %v", written, err)
-	}
-	if _, err := os.Stat(filepath.Join(physical["b"], DefaultRulesLockFile)); !os.IsNotExist(err) {
-		t.Fatalf("lock built from a was written into b: %v", err)
-	}
-
-	// The configuration was read through a, but the root now resolves to b:
-	// every operation fails before it reads or writes workspace files.
-	pinned := openTestSession(t, Config{WorkspaceRoot: link, ResolvedRoot: physical["a"]}, &rootReadingProducer{newParallelFixtureProducer()})
-	assertRetry := func(operation string, err error) {
-		t.Helper()
-		if err == nil || !strings.Contains(err.Error(), physical["a"]) || !strings.Contains(err.Error(), "retry") {
-			t.Fatalf("%s: expected a retry error, got %v", operation, err)
-		}
-	}
-	_, err = pinned.RefreshAll(context.Background())
-	assertRetry("refresh", err)
-	_, err = pinned.UpdateSuppressions(context.Background(), SuppressionUpdate{All: true})
-	assertRetry("suppression update", err)
-	_, err = pinned.BuildRulesLock(context.Background(), "other.lock.json")
-	assertRetry("approval", err)
-	_, err = pinned.Facts(context.Background(), nil)
-	assertRetry("facts", err)
-	for _, name := range []string{"a", "b"} {
-		for _, file := range []string{suppressions.DefaultFile, "other.lock.json"} {
-			if _, err := os.Stat(filepath.Join(physical[name], file)); !os.IsNotExist(err) {
-				t.Fatalf("%s written into %s: %v", file, name, err)
-			}
-		}
-	}
-	retarget("a")
-	if _, err := pinned.RefreshAll(context.Background()); err != nil {
-		t.Fatal(err)
+	if refreshed.PhysicalRoot != physical["a"] || !slices.Equal(producer.roots, []string{physical["a"], physical["a"]}) {
+		t.Fatalf("expected workspace a, got root %s and producer roots %v", refreshed.PhysicalRoot, producer.roots)
 	}
 }
 

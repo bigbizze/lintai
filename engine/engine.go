@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	goruntime "runtime"
 	"slices"
 	"sort"
@@ -23,6 +22,9 @@ type RulePolicy = workspace.RulePolicy
 // Config is the analysis policy bound to one session. Open normalizes and
 // detaches it; a caller evaluating a different policy opens another session.
 type Config struct {
+	// WorkspaceRoot is resolved once by Open to a physical directory. Every
+	// operation of the session reads and writes workspace files through it,
+	// and producers receive it. Open another session to follow a moved link.
 	WorkspaceRoot string
 	Rule          map[string]RulePolicy
 	FactLimit     int
@@ -37,11 +39,6 @@ type Config struct {
 	// the default location suppresses nothing. A missing file at a
 	// location that is set is an error, unless a suppression update records.
 	SuppressionsLocation string
-	// ResolvedRoot, when set, is the physical directory the caller resolved
-	// WorkspaceRoot to and read the workspace configuration through. An
-	// operation that resolves WorkspaceRoot to another directory fails before
-	// it reads or writes workspace files.
-	ResolvedRoot string
 }
 
 // SuppressionUpdate is a one-shot write request for UpdateSuppressions.
@@ -99,7 +96,6 @@ type Session struct {
 
 // testHooks are in-package synchronization points for tests.
 type testHooks struct {
-	afterRoot        func()
 	beforeCollect    func()
 	beforeEvaluation func()
 	afterDispatch    func()
@@ -282,37 +278,16 @@ func (e *Session) clearCurrent() {
 	e.currentFacts = nil
 }
 
-// operationRoot resolves the workspace root once for an operation. Every
-// workspace read and write of the operation goes through the physical root,
-// and the recorded resolution makes the result stale when the root symlink
-// changes. A root that does not resolve is used as configured and records
-// nothing, so producers that read no files do not need it to exist.
-func (e *Session) operationRoot() (fileKeys, observe.Set, error) {
-	root := e.config.WorkspaceRoot
-	keys, observations := fileKeys{root: root, physical: filepath.Clean(root)}, observe.Set{}
-	if physical, err := filepath.EvalSymlinks(root); err == nil {
-		keys.physical = filepath.Clean(physical)
-		if observations, err = observe.New([]observe.Record{{Kind: observe.Resolved, Path: root, Value: observe.Value(keys.physical)}}); err != nil {
-			return fileKeys{}, observe.Set{}, err
-		}
-	}
-	if e.hooks.afterRoot != nil {
-		e.hooks.afterRoot()
-	}
-	if resolved := e.config.ResolvedRoot; resolved != "" && resolved != keys.physical {
-		return fileKeys{}, observe.Set{}, fmt.Errorf("workspace root %s resolves to %s, but its configuration was read through %s; retry", root, keys.physical, resolved)
-	}
-	return keys, observations, nil
+// files names the files of the session's physical workspace root.
+func (e *Session) files() fileKeys {
+	return fileKeys{root: e.config.WorkspaceRoot, physical: e.config.WorkspaceRoot}
 }
 
 // runAndPublish is called by the active operation.
 func (e *Session) runAndPublish(checkCtx context.Context, update SuppressionUpdate, mode observe.Mode) (*publishedResult, error) {
 	config := e.config
-	root, rootObservations, err := e.operationRoot()
-	if err != nil {
-		return nil, err
-	}
-	state, err := loadSuppressions(config, root, update)
+	root := e.files()
+	state, err := loadSuppressions(config, update)
 	var result Result
 	var run runInfo
 	var evidence executionEvidence
@@ -346,7 +321,7 @@ func (e *Session) runAndPublish(checkCtx context.Context, update SuppressionUpda
 	if result.files.root == "" {
 		result.files = root
 	}
-	published := newPublishedResult(result, verifiedSourceDigests(result, &evidence), observe.Union(rootObservations, evidence.observations, state.observations), reusable)
+	published := newPublishedResult(result, verifiedSourceDigests(result, &evidence), observe.Union(evidence.observations, state.observations), reusable)
 	e.mu.Lock()
 	if e.closed {
 		e.mu.Unlock()
@@ -439,7 +414,7 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, mode observe.Mode, st
 		return Result{Diagnostics: []diagnostics.Diagnostic{errorDiagnostic("rules-lock", "integrity", 0, "", nil, err.Error())}}, run, evidence, nil
 	}
 	producerCatalog := e.catalog
-	ruleCatalog, err := openRuleCatalog(ctx, root.physical, e)
+	ruleCatalog, err := openRuleCatalog(ctx, config.WorkspaceRoot, e)
 	if err != nil {
 		if config.RulesLock != "" {
 			return integrity(err)
@@ -449,7 +424,7 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, mode observe.Mode, st
 	defer ruleCatalog.close()
 	evidence.observations = ruleCatalog.observations
 	if config.RulesLock != "" {
-		lock, err := ReadRulesLock(root.read(config.RulesLock))
+		lock, err := ReadRulesLock(config.RulesLock)
 		if err != nil {
 			return integrity(err)
 		}
@@ -552,12 +527,11 @@ func assembleSeverity(options Config, result *Result, run *runInfo) {
 // analyze is a package-private convenience for tests that exercise
 // diagnostics and run eligibility without inspecting typed outcomes.
 func (e *Session) analyze(ctx context.Context) (Result, runInfo, error) {
-	root := newFileKeys(e.config.WorkspaceRoot, nil)
-	state, err := loadSuppressions(e.config, root, SuppressionUpdate{})
+	state, err := loadSuppressions(e.config, SuppressionUpdate{})
 	if err != nil {
 		return Result{}, runInfo{}, err
 	}
-	result, run, _, err := e.analyzeWithEvidence(ctx, observe.Full, state, root)
+	result, run, _, err := e.analyzeWithEvidence(ctx, observe.Full, state, e.files())
 	return result, run, err
 }
 

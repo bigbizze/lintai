@@ -45,11 +45,7 @@ func (e *Session) Facts(ctx context.Context, names []string) (string, error) {
 			}
 		}
 	}
-	root, _, err := e.operationRoot()
-	if err != nil {
-		return "", err
-	}
-	assembled, err := catalog.collect(ctx, root, requested, nil, observe.Full)
+	assembled, err := catalog.collect(ctx, e.files(), requested, nil, observe.Full)
 	if err != nil {
 		return "", err
 	}

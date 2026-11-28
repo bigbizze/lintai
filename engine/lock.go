@@ -159,14 +159,7 @@ func typeScriptPolicyConfig(root fileKeys, value any) (any, error) {
 		if !filepath.IsAbs(path) {
 			return filepath.ToSlash(filepath.Clean(path)), nil
 		}
-		relative, err := filepath.Rel(root.root, path)
-		if err == nil && filepath.IsLocal(relative) {
-			return filepath.ToSlash(relative), nil
-		}
-		// Exact source selection also accepts the resolved spelling of a symlinked root.
-		if r, e := filepath.Rel(root.physical, path); e == nil && filepath.IsLocal(r) {
-			return filepath.ToSlash(r), nil
-		}
+		relative, err := filepath.Rel(root.physical, path)
 		if err != nil {
 			return "", err
 		}
@@ -244,12 +237,9 @@ func (e *Session) BuildRulesLock(ctx context.Context, target string) (RulesLock,
 	if target == "" {
 		target = DefaultRulesLockFile
 	}
-	root, _, err := e.operationRoot()
-	if err != nil {
-		return RulesLock{}, err
-	}
+	root := e.files()
 	target = filepath.Clean(ResolveRulesLockPath(options.WorkspaceRoot, target))
-	location := root.read(target)
+	location := target
 	targetState, err := atomicfile.Read(location)
 	if err != nil {
 		return RulesLock{}, err
@@ -257,7 +247,7 @@ func (e *Session) BuildRulesLock(ctx context.Context, target string) (RulesLock,
 	if targetState.Exists && !isRulesLockDocument(targetState.Data) {
 		return RulesLock{}, fmt.Errorf("%s exists and is not a lintai rules lock; refusing to overwrite it", target)
 	}
-	state, err := loadSuppressions(options, root, SuppressionUpdate{})
+	state, err := loadSuppressions(options, SuppressionUpdate{})
 	if err != nil {
 		return RulesLock{}, err
 	}
@@ -289,7 +279,7 @@ func (e *Session) BuildRulesLock(ctx context.Context, target string) (RulesLock,
 	if unknown := unknownPolicyRules(options, ids); len(unknown) > 0 {
 		return RulesLock{}, fmt.Errorf("%s", unknown[0].Message)
 	}
-	return RulesLock{PackDigest: catalog.digest, PolicyDigest: digest, Suppressions: state.file, target: target, location: location, targetSnapshot: targetState, source: state.location, sourceSnapshot: state.snapshot}, ctx.Err()
+	return RulesLock{PackDigest: catalog.digest, PolicyDigest: digest, Suppressions: state.file, target: target, location: location, targetSnapshot: targetState, source: state.path, sourceSnapshot: state.snapshot}, ctx.Err()
 }
 
 // isRulesLockDocument accepts any branded lintai rules-lock format, including
@@ -305,9 +295,6 @@ func isRulesLockDocument(data []byte) bool {
 }
 
 func WriteRulesLock(ctx context.Context, path string, lock RulesLock) error {
-	if lock.target != "" && filepath.Clean(lock.target) != filepath.Clean(path) {
-		return fmt.Errorf("rules lock target changed")
-	}
 	approved := lock.Suppressions
 	if approved == nil {
 		approved = suppressions.File{}

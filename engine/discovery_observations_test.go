@@ -11,7 +11,7 @@ import (
 
 func TestPolicyReadersCaptureParsedBytesAndMissingDefault(t *testing.T) {
 	root := t.TempDir()
-	state, err := loadSuppressions(Config{WorkspaceRoot: root}, newFileKeys(root, nil), SuppressionUpdate{})
+	state, err := loadSuppressions(Config{WorkspaceRoot: root}, SuppressionUpdate{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -21,7 +21,7 @@ func TestPolicyReadersCaptureParsedBytesAndMissingDefault(t *testing.T) {
 	if changed, err := state.observations.Changed(context.Background(), observe.Full); err != nil || changed == nil {
 		t.Fatalf("created suppressions: %v %v", changed, err)
 	}
-	state, err = loadSuppressions(Config{WorkspaceRoot: root}, newFileKeys(root, nil), SuppressionUpdate{})
+	state, err = loadSuppressions(Config{WorkspaceRoot: root}, SuppressionUpdate{})
 	if err != nil {
 		t.Fatal(err)
 	}

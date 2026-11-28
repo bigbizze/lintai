@@ -179,9 +179,9 @@ func TestServeConfigurationAndRPCRecovery(t *testing.T) {
 		t.Fatalf("namespace not replaced: %+v", composition.settings)
 	}
 
-	// The configured root is a symlink retargeted after the configuration is
-	// read: the request fails instead of applying one workspace's
-	// configuration to the other, and the next request follows the new target.
+	// The configured root is a symlink. A request uses the directory its
+	// session opened on, and the next request after the link moves follows
+	// the new target with that workspace's configuration.
 	write(configPath, config("a.ts"))
 	other := t.TempDir()
 	write(filepath.Join(other, "a.ts"), "export const a = 1;\n")
@@ -203,24 +203,28 @@ func TestServeConfigurationAndRPCRecovery(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	rootPhysical, _ := filepath.EvalSymlinks(root)
+	otherPhysical, _ := filepath.EvalSymlinks(other)
+	findingsIn := func(result engine.FilesResult) map[string]int {
+		counts := map[string]int{}
+		for _, group := range result.Files {
+			counts[group.File] = len(group.Diagnostics)
+		}
+		return counts
+	}
 	retargeted := &serveSession{params: server.InitializeParams{WorkspaceRoot: link, RuleWorkers: 1}}
 	defer retargeted.Close()
-	retargeted.afterConfigure = func() {
-		retargeted.afterConfigure = nil
-		retarget(other)
+	before, err := retargeted.RefreshAll(context.Background())
+	if err != nil || before.PhysicalRoot != rootPhysical || findingsIn(before)["b.ts"] != 1 || findingsIn(before)["a.ts"] != 0 {
+		t.Fatalf("workspace before the move: %+v, %v", before, err)
 	}
-	if got, err := retargeted.RefreshFiles(context.Background(), []string{"a.ts", "b.ts"}); err == nil || !strings.Contains(err.Error(), "retry") {
-		t.Fatalf("mixed workspaces were published: %+v", got)
-	}
-	got, err := retargeted.RefreshFiles(context.Background(), []string{"a.ts", "b.ts"})
-	otherPhysical, _ := filepath.EvalSymlinks(other)
-	if err != nil || got.PhysicalRoot != otherPhysical || len(got.Files[0].Diagnostics) != 1 || len(got.Files[1].Diagnostics) != 0 {
-		t.Fatalf("retargeted workspace: %+v, %v", got, err)
+	retarget(other)
+	after, err := retargeted.RefreshAll(context.Background())
+	if err != nil || after.PhysicalRoot != otherPhysical || findingsIn(after)["a.ts"] != 1 || findingsIn(after)["b.ts"] != 0 {
+		t.Fatalf("workspace after the move: %+v, %v", after, err)
 	}
 
-	// One-shot commands read the configuration through other. After the root
-	// is retargeted, analysis, suppression writes, approval and scope
-	// explanation fail and write nothing.
+	// A one-shot command finishes on the directory it opened on.
 	flags := flag.NewFlagSet("lintai", flag.ContinueOnError)
 	project := newProjectFlags(flags)
 	if err := flags.Parse([]string{"--workspace-root", link}); err != nil {
@@ -231,31 +235,10 @@ func TestServeConfigurationAndRPCRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer oneShot.Close()
-	settings, _, physical, err := captureTypeScriptSettings(link, "", "", false, "", false, nil, nil)
-	if err != nil || options.ResolvedRoot != otherPhysical || physical != otherPhysical {
-		t.Fatalf("configuration root: %s, %s, %v", options.ResolvedRoot, physical, err)
-	}
 	retarget(root)
-	assertRetry := func(operation string, err error) {
-		t.Helper()
-		if err == nil || !strings.Contains(err.Error(), otherPhysical) || !strings.Contains(err.Error(), "retry") {
-			t.Fatalf("%s: expected a retry error, got %v", operation, err)
-		}
-	}
-	_, err = oneShot.Check(context.Background())
-	assertRetry("check", err)
-	_, err = oneShot.UpdateSuppressions(context.Background(), engine.SuppressionUpdate{All: true})
-	assertRetry("suppression update", err)
-	_, err = oneShot.BuildRulesLock(context.Background(), "")
-	assertRetry("lock", err)
-	_, err = explainScopes(context.Background(), link, physical, settings)
-	assertRetry("scope", err)
-	for _, workspace := range []string{root, other} {
-		for _, name := range []string{"lintai-suppressions.json", engine.DefaultRulesLockFile} {
-			if _, err := os.Stat(filepath.Join(workspace, name)); !os.IsNotExist(err) {
-				t.Fatalf("%s written into %s: %v", name, workspace, err)
-			}
-		}
+	checked, err := oneShot.Check(context.Background())
+	if err != nil || options.WorkspaceRoot != otherPhysical || len(checked.DiagnosticsFor("a.ts")) != 1 || len(checked.DiagnosticsFor("b.ts")) != 0 {
+		t.Fatalf("one-shot workspace: %s, %+v, %v", options.WorkspaceRoot, checked, err)
 	}
 
 	// One identity for every spelling: the configured root is a symlink, the

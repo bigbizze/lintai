@@ -264,11 +264,6 @@ func (catalog producerCatalog) collect(ctx context.Context, root fileKeys, reque
 		preparedGenerations = append(preparedGenerations, prepared{entry, requested, generation, generation.Metadata()})
 	}
 	keys := fileKeys{root: root.root, physical: root.physical}
-	for _, item := range preparedGenerations {
-		if err := checkRootResolution(root, item.metadata.Observations); err != nil {
-			return composedFacts{}, fmt.Errorf("producer %q: %w", item.entry.description.Namespace, err)
-		}
-	}
 	declarations := make([]aliasDeclaration, 0)
 	published := make(map[string]struct{})
 	for _, item := range preparedGenerations {
@@ -421,19 +416,6 @@ func captureGenerationMetadata(metadata backend.GenerationMetadata, keys fileKey
 	sort.Strings(files)
 	metadata.AnalyzedFiles = slices.Compact(files)
 	return metadata, nil
-}
-
-// checkRootResolution rejects a producer that resolved the workspace root to
-// another directory than the operation did, as when the root symlink changes
-// during the operation. The attempt fails instead of publishing a result that
-// mixes two workspaces; the next operation resolves the root again.
-func checkRootResolution(root fileKeys, observations observe.Set) error {
-	for _, record := range observations.Records() {
-		if record.Kind == observe.Resolved && record.Path == root.root && string(record.Value) != root.physical {
-			return fmt.Errorf("read workspace root %s at %s, but this operation resolved it to %s; retry", root.root, record.Value, root.physical)
-		}
-	}
-	return nil
 }
 
 type aliasDeclaration struct{ namespace, alias, file string }

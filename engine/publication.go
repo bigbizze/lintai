@@ -53,6 +53,11 @@ func normalizeConfig(config Config) (Config, error) {
 	if config.WorkspaceRoot, err = filepath.Abs(config.WorkspaceRoot); err != nil {
 		return Config{}, err
 	}
+	// A root that does not resolve is used as given, so producers that read no
+	// files do not need it to exist.
+	if physical, err := filepath.EvalSymlinks(config.WorkspaceRoot); err == nil {
+		config.WorkspaceRoot = physical
+	}
 	if config.RulesLock != "" {
 		config.RulesLock = filepath.Clean(ResolveRulesLockPath(config.WorkspaceRoot, config.RulesLock))
 	}
@@ -61,9 +66,6 @@ func normalizeConfig(config Config) (Config, error) {
 	}
 	if config.SuppressionsLocation != "" {
 		config.SuppressionsLocation = filepath.Clean(config.SuppressionsLocation)
-	}
-	if config.ResolvedRoot != "" {
-		config.ResolvedRoot = filepath.Clean(config.ResolvedRoot)
 	}
 	if config.FactLimit <= 0 {
 		config.FactLimit = DefaultFactLimit
