@@ -182,7 +182,7 @@ func runFacts(ctx context.Context, args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	settings, err := loadTypeScriptSettings(absoluteWorkspace, *configPath, *files, flagProvided(flags, "files"), *sourceLinks, flagProvided(flags, "source-links"), excludes, sources)
+	settings, _, physical, err := captureTypeScriptSettings(absoluteWorkspace, *configPath, *files, flagProvided(flags, "files"), *sourceLinks, flagProvided(flags, "source-links"), excludes, sources)
 	if err != nil {
 		return err
 	}
@@ -190,7 +190,7 @@ func runFacts(ctx context.Context, args []string, stdout io.Writer) error {
 	for _, item := range settings {
 		producers = append(producers, newBackend(item))
 	}
-	session, err := openSession(engine.Config{WorkspaceRoot: absoluteWorkspace}, producers...)
+	session, err := openSession(engine.Config{WorkspaceRoot: absoluteWorkspace, ResolvedRoot: physical}, producers...)
 	if err != nil {
 		return err
 	}
@@ -222,8 +222,8 @@ type serveSession struct {
 	receipt  bool
 	settings []typescript.Options
 	session  *engine.Session
-	// beforeAnalysis runs between configuration and analysis in tests.
-	beforeAnalysis func()
+	// afterConfigure runs between configuration and analysis in tests.
+	afterConfigure func()
 }
 
 // physicalRoot resolves the workspace root as the engine resolves it once for
@@ -243,6 +243,8 @@ func (s *serveSession) configure(ctx context.Context) (err error) {
 	defer func() {
 		if err != nil {
 			_ = s.Close()
+		} else if s.afterConfigure != nil {
+			s.afterConfigure()
 		}
 	}()
 	if err = ctx.Err(); err != nil {
@@ -261,14 +263,14 @@ func (s *serveSession) configure(ctx context.Context) (err error) {
 	}
 	var config workspace.WorkspaceConfig
 	var settings []typescript.Options
-	settings, config, err = captureTypeScriptSettings(physical, "", "", false, "", false, nil, nil)
+	settings, config, physical, err = captureTypeScriptSettings(s.params.WorkspaceRoot, "", "", false, "", false, nil, nil)
 	if err != nil {
 		return fmt.Errorf("load workspace configuration: %w", err)
 	}
 	if err = ctx.Err(); err != nil {
 		return err
 	}
-	if s.session == nil || !reflect.DeepEqual(settings, s.settings) || !reflect.DeepEqual(config.Rule, s.config.Rule) {
+	if s.session == nil || physical != s.physical || !reflect.DeepEqual(settings, s.settings) || !reflect.DeepEqual(config.Rule, s.config.Rule) {
 		if s.session != nil {
 			err = s.session.Close()
 			s.session = nil
@@ -283,6 +285,7 @@ func (s *serveSession) configure(ctx context.Context) (err error) {
 		s.session, err = openSession(engine.Config{
 			WorkspaceRoot: s.params.WorkspaceRoot, Rule: config.Rule, FactLimit: s.params.FactLimit,
 			RuleWorkers: s.params.RuleWorkers, RulesLock: s.params.RulesLock, SuppressionsLocation: s.params.SuppressionsLocation,
+			ResolvedRoot: physical,
 		}, producers...)
 		if err != nil {
 			return err
@@ -293,20 +296,6 @@ func (s *serveSession) configure(ctx context.Context) (err error) {
 	return nil
 }
 
-// analyze rejects a result whose analysis read another physical root than the
-// configuration did, as when the root symlink changes between the two. The
-// next request reads the configuration again.
-func (s *serveSession) analyze(refresh func() (engine.FilesResult, error)) (engine.FilesResult, error) {
-	if s.beforeAnalysis != nil {
-		s.beforeAnalysis()
-	}
-	result, err := refresh()
-	if err == nil && result.PhysicalRoot != s.physical {
-		return engine.FilesResult{}, fmt.Errorf("workspace root %s changed from %s to %s during analysis; retry", s.params.WorkspaceRoot, s.physical, result.PhysicalRoot)
-	}
-	return result, err
-}
-
 func (s *serveSession) RefreshFiles(ctx context.Context, files []string) (engine.FilesResult, error) {
 	if err := s.configure(ctx); err != nil {
 		return engine.FilesResult{}, err
@@ -315,14 +304,14 @@ func (s *serveSession) RefreshFiles(ctx context.Context, files []string) (engine
 		_ = s.Close()
 		return engine.FilesResult{}, err
 	}
-	return s.analyze(func() (engine.FilesResult, error) { return s.session.RefreshFiles(ctx, files) })
+	return s.session.RefreshFiles(ctx, files)
 }
 
 func (s *serveSession) RefreshAll(ctx context.Context) (engine.FilesResult, error) {
 	if err := s.configure(ctx); err != nil {
 		return engine.FilesResult{}, err
 	}
-	return s.analyze(func() (engine.FilesResult, error) { return s.session.RefreshAll(ctx) })
+	return s.session.RefreshAll(ctx)
 }
 
 func (s *serveSession) Close() error {
@@ -348,22 +337,31 @@ func flagProvided(flags *flag.FlagSet, name string) bool {
 }
 
 func loadTypeScriptSettings(workspaceRoot, explicitConfig, filesOverride string, filesSet bool, sourceLinksOverride string, sourceLinksSet bool, invocationExcludes, invocationSources []string) ([]typescript.Options, error) {
-	settings, _, err := captureTypeScriptSettings(workspaceRoot, explicitConfig, filesOverride, filesSet, sourceLinksOverride, sourceLinksSet, invocationExcludes, invocationSources)
+	settings, _, _, err := captureTypeScriptSettings(workspaceRoot, explicitConfig, filesOverride, filesSet, sourceLinksOverride, sourceLinksSet, invocationExcludes, invocationSources)
 	return settings, err
 }
 
-func captureTypeScriptSettings(workspaceRoot, explicitConfig, filesOverride string, filesSet bool, sourceLinksOverride string, sourceLinksSet bool, invocationExcludes, invocationSources []string) ([]typescript.Options, workspace.WorkspaceConfig, error) {
+// captureTypeScriptSettings resolves the workspace root once and reads the
+// configuration through the resulting physical root, which it returns. An
+// operation that resolves the root to another directory must not use them.
+func captureTypeScriptSettings(workspaceRoot, explicitConfig, filesOverride string, filesSet bool, sourceLinksOverride string, sourceLinksSet bool, invocationExcludes, invocationSources []string) ([]typescript.Options, workspace.WorkspaceConfig, string, error) {
 	invocationDir, err := os.Getwd()
 	if err != nil {
-		return nil, workspace.WorkspaceConfig{}, err
+		return nil, workspace.WorkspaceConfig{}, "", err
 	}
-	configPath, optional, err := workspace.ResolveConfigPath(workspaceRoot, invocationDir, explicitConfig)
+	physical := physicalRoot(workspaceRoot)
+	configPath, optional, err := workspace.ResolveConfigPath(physical, invocationDir, explicitConfig)
 	if err != nil {
-		return nil, workspace.WorkspaceConfig{}, err
+		return nil, workspace.WorkspaceConfig{}, "", err
+	}
+	if absolute, err := filepath.Abs(workspaceRoot); err == nil {
+		if relative, err := filepath.Rel(absolute, configPath); err == nil && filepath.IsLocal(relative) {
+			configPath = filepath.Join(physical, relative)
+		}
 	}
 	config, err := workspace.LoadWorkspaceConfig(configPath, optional)
 	if err != nil {
-		return nil, workspace.WorkspaceConfig{}, err
+		return nil, workspace.WorkspaceConfig{}, "", err
 	}
 	producers := config.Producers
 	if len(producers) == 0 {
@@ -375,7 +373,7 @@ func captureTypeScriptSettings(workspaceRoot, explicitConfig, filesOverride stri
 	}
 	sort.Strings(namespaces)
 	if len(namespaces) > 1 && (filesSet || sourceLinksSet) {
-		return nil, workspace.WorkspaceConfig{}, fmt.Errorf("TypeScript command-line scope flags are ambiguous with multiple TypeScript producers; configure them in lintai.toml")
+		return nil, workspace.WorkspaceConfig{}, "", fmt.Errorf("TypeScript command-line scope flags are ambiguous with multiple TypeScript producers; configure them in lintai.toml")
 	}
 	settings := make([]typescript.Options, 0, len(namespaces))
 	for _, namespace := range namespaces {
@@ -385,7 +383,7 @@ func captureTypeScriptSettings(workspaceRoot, explicitConfig, filesOverride stri
 			implementation = "lintai.typescript"
 		}
 		if implementation != "lintai.typescript" {
-			return nil, workspace.WorkspaceConfig{}, fmt.Errorf("unknown implementation %q for producer %q", implementation, namespace)
+			return nil, workspace.WorkspaceConfig{}, "", fmt.Errorf("unknown implementation %q for producer %q", implementation, namespace)
 		}
 		fileMode := producerConfig.Files
 		if fileMode == "" {
@@ -396,7 +394,7 @@ func captureTypeScriptSettings(workspaceRoot, explicitConfig, filesOverride stri
 		}
 		scope, err := typescript.ParseFileScope(fileMode)
 		if err != nil {
-			return nil, workspace.WorkspaceConfig{}, err
+			return nil, workspace.WorkspaceConfig{}, "", err
 		}
 		sourceLinks := producerConfig.SourceLinks
 		if sourceLinksSet {
@@ -409,7 +407,30 @@ func captureTypeScriptSettings(workspaceRoot, explicitConfig, filesOverride stri
 			Excludes: invocationExcludes, Files: scope, SourceLinks: sourceLinks,
 		})
 	}
-	return settings, config, nil
+	return settings, config, physical, nil
+}
+
+type producerScope struct {
+	Producer string                      `json:"producer"`
+	Files    string                      `json:"files"`
+	Scope    typescript.ScopeExplanation `json:"scope"`
+}
+
+// explainScopes rejects an explanation planned through another physical root
+// than the configuration was read through.
+func explainScopes(ctx context.Context, root, physical string, settings []typescript.Options) ([]producerScope, error) {
+	reports := make([]producerScope, 0, len(settings))
+	for _, item := range settings {
+		report, err := typescript.ExplainScope(ctx, root, item)
+		if err != nil {
+			return nil, err
+		}
+		if report.Root != physical {
+			return nil, fmt.Errorf("workspace root %s resolves to %s, but its configuration was read through %s; retry", root, report.Root, physical)
+		}
+		reports = append(reports, producerScope{Producer: item.Namespace, Files: string(item.Files), Scope: report})
+	}
+	return reports, nil
 }
 
 func runScope(ctx context.Context, args []string, stdout io.Writer) error {
@@ -435,22 +456,13 @@ func runScope(ctx context.Context, args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	settings, err := loadTypeScriptSettings(root, *configPath, *files, flagProvided(flags, "files"), *sourceLinks, flagProvided(flags, "source-links"), excludes, sources)
+	settings, _, physical, err := captureTypeScriptSettings(root, *configPath, *files, flagProvided(flags, "files"), *sourceLinks, flagProvided(flags, "source-links"), excludes, sources)
 	if err != nil {
 		return err
 	}
-	type producerScope struct {
-		Producer string                      `json:"producer"`
-		Files    string                      `json:"files"`
-		Scope    typescript.ScopeExplanation `json:"scope"`
-	}
-	reports := make([]producerScope, 0, len(settings))
-	for _, item := range settings {
-		report, err := typescript.ExplainScope(ctx, root, item)
-		if err != nil {
-			return err
-		}
-		reports = append(reports, producerScope{Producer: item.Namespace, Files: string(item.Files), Scope: report})
+	reports, err := explainScopes(ctx, root, physical, settings)
+	if err != nil {
+		return err
 	}
 	if *jsonOutput {
 		encoder := json.NewEncoder(stdout)
@@ -527,11 +539,12 @@ func (p *projectFlags) open(options engine.Config) (*engine.Session, engine.Conf
 	if err != nil {
 		return nil, engine.Config{}, err
 	}
-	settings, config, err := captureTypeScriptSettings(root, *p.config, *p.files, flagProvided(p.flags, "files"), *p.sourceLinks, flagProvided(p.flags, "source-links"), p.excludes, p.sources)
+	settings, config, physical, err := captureTypeScriptSettings(root, *p.config, *p.files, flagProvided(p.flags, "files"), *p.sourceLinks, flagProvided(p.flags, "source-links"), p.excludes, p.sources)
 	if err != nil {
 		return nil, engine.Config{}, err
 	}
 	options.WorkspaceRoot, options.Rule, options.FactLimit, options.SuppressionsLocation = root, config.Rule, *p.factLimit, *p.suppressions
+	options.ResolvedRoot = physical
 	producers := make([]backend.Producer, 0, len(settings))
 	for _, setting := range settings {
 		producers = append(producers, newBackend(setting))

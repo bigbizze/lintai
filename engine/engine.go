@@ -37,6 +37,11 @@ type Config struct {
 	// the default location suppresses nothing. A missing file at a
 	// location that is set is an error, unless a suppression update records.
 	SuppressionsLocation string
+	// ResolvedRoot, when set, is the physical directory the caller resolved
+	// WorkspaceRoot to and read the workspace configuration through. An
+	// operation that resolves WorkspaceRoot to another directory fails before
+	// it reads or writes workspace files.
+	ResolvedRoot string
 }
 
 // SuppressionUpdate is a one-shot write request for UpdateSuppressions.
@@ -94,6 +99,7 @@ type Session struct {
 
 // testHooks are in-package synchronization points for tests.
 type testHooks struct {
+	afterRoot        func()
 	beforeCollect    func()
 	beforeEvaluation func()
 	afterDispatch    func()
@@ -277,24 +283,32 @@ func (e *Session) clearCurrent() {
 }
 
 // operationRoot resolves the workspace root once for an operation. Every
-// workspace read of the operation goes through the physical root, and the
-// recorded resolution makes the result stale when the root symlink changes.
-// A root that does not resolve is used as configured and records nothing, so
-// producers that read no files do not need it to exist.
-func operationRoot(root string) (fileKeys, observe.Set, error) {
-	physical, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		return fileKeys{root: root, physical: filepath.Clean(root)}, observe.Set{}, nil
+// workspace read and write of the operation goes through the physical root,
+// and the recorded resolution makes the result stale when the root symlink
+// changes. A root that does not resolve is used as configured and records
+// nothing, so producers that read no files do not need it to exist.
+func (e *Session) operationRoot() (fileKeys, observe.Set, error) {
+	root := e.config.WorkspaceRoot
+	keys, observations := fileKeys{root: root, physical: filepath.Clean(root)}, observe.Set{}
+	if physical, err := filepath.EvalSymlinks(root); err == nil {
+		keys.physical = filepath.Clean(physical)
+		if observations, err = observe.New([]observe.Record{{Kind: observe.Resolved, Path: root, Value: observe.Value(keys.physical)}}); err != nil {
+			return fileKeys{}, observe.Set{}, err
+		}
 	}
-	physical = filepath.Clean(physical)
-	observations, err := observe.New([]observe.Record{{Kind: observe.Resolved, Path: root, Value: observe.Value(physical)}})
-	return fileKeys{root: root, physical: physical}, observations, err
+	if e.hooks.afterRoot != nil {
+		e.hooks.afterRoot()
+	}
+	if resolved := e.config.ResolvedRoot; resolved != "" && resolved != keys.physical {
+		return fileKeys{}, observe.Set{}, fmt.Errorf("workspace root %s resolves to %s, but its configuration was read through %s; retry", root, keys.physical, resolved)
+	}
+	return keys, observations, nil
 }
 
 // runAndPublish is called by the active operation.
 func (e *Session) runAndPublish(checkCtx context.Context, update SuppressionUpdate, mode observe.Mode) (*publishedResult, error) {
 	config := e.config
-	root, rootObservations, err := operationRoot(config.WorkspaceRoot)
+	root, rootObservations, err := e.operationRoot()
 	if err != nil {
 		return nil, err
 	}

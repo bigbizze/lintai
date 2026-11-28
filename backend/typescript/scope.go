@@ -9,6 +9,8 @@ import (
 )
 
 type ScopeExplanation struct {
+	// Root is the physical workspace root the explanation was planned from.
+	Root             string                   `json:"-"`
 	WorkspaceExclude []string                 `json:"exclude"`
 	WorkspaceInclude []string                 `json:"include"`
 	ExactSources     []string                 `json:"sources"`
@@ -42,6 +44,7 @@ func ExplainScope(ctx context.Context, workspaceRoot string, options Options) (S
 		return ScopeExplanation{}, err
 	}
 	report := ScopeExplanation{
+		Root:             plan.Root,
 		WorkspaceExclude: slices.Clone(options.WorkspaceExcludes),
 		WorkspaceInclude: slices.Clone(options.Includes),
 		Selected:         slices.Clone(plan.Matches), PrunedBoundaries: slices.Clone(plan.Pruned),

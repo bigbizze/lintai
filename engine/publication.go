@@ -62,6 +62,9 @@ func normalizeConfig(config Config) (Config, error) {
 	if config.SuppressionsLocation != "" {
 		config.SuppressionsLocation = filepath.Clean(config.SuppressionsLocation)
 	}
+	if config.ResolvedRoot != "" {
+		config.ResolvedRoot = filepath.Clean(config.ResolvedRoot)
+	}
 	if config.FactLimit <= 0 {
 		config.FactLimit = DefaultFactLimit
 	}

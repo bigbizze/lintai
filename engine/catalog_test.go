@@ -16,6 +16,7 @@ import (
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/facts"
 	"github.com/bigbizze/lintai/observe"
+	"github.com/bigbizze/lintai/suppressions"
 )
 
 func typeScriptCatalogForTest(t *testing.T) ([]parse.SourceUnit, map[ast.PredicateSym]ast.Decl) {
@@ -428,6 +429,53 @@ func TestOperationReadsOneWorkspaceRoot(t *testing.T) {
 	assertWorkspace("b")
 	retarget("a")
 	assertWorkspace("a")
+
+	// The root is retargeted after an approval resolves it: the lock is built
+	// from a and written into a, never into b.
+	session.hooks.afterRoot = func() { retarget("b") }
+	lock, err := session.BuildRulesLock(context.Background(), "")
+	session.hooks.afterRoot = nil
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteRulesLock(context.Background(), filepath.Join(link, DefaultRulesLockFile), lock); err != nil {
+		t.Fatal(err)
+	}
+	if written, err := ReadRulesLock(filepath.Join(physical["a"], DefaultRulesLockFile)); err != nil || written.PackDigest != lock.PackDigest {
+		t.Fatalf("lock not written into the workspace it was built from: %+v, %v", written, err)
+	}
+	if _, err := os.Stat(filepath.Join(physical["b"], DefaultRulesLockFile)); !os.IsNotExist(err) {
+		t.Fatalf("lock built from a was written into b: %v", err)
+	}
+
+	// The configuration was read through a, but the root now resolves to b:
+	// every operation fails before it reads or writes workspace files.
+	pinned := openTestSession(t, Config{WorkspaceRoot: link, ResolvedRoot: physical["a"]}, &rootReadingProducer{newParallelFixtureProducer()})
+	assertRetry := func(operation string, err error) {
+		t.Helper()
+		if err == nil || !strings.Contains(err.Error(), physical["a"]) || !strings.Contains(err.Error(), "retry") {
+			t.Fatalf("%s: expected a retry error, got %v", operation, err)
+		}
+	}
+	_, err = pinned.RefreshAll(context.Background())
+	assertRetry("refresh", err)
+	_, err = pinned.UpdateSuppressions(context.Background(), SuppressionUpdate{All: true})
+	assertRetry("suppression update", err)
+	_, err = pinned.BuildRulesLock(context.Background(), "other.lock.json")
+	assertRetry("approval", err)
+	_, err = pinned.Facts(context.Background(), nil)
+	assertRetry("facts", err)
+	for _, name := range []string{"a", "b"} {
+		for _, file := range []string{suppressions.DefaultFile, "other.lock.json"} {
+			if _, err := os.Stat(filepath.Join(physical[name], file)); !os.IsNotExist(err) {
+				t.Fatalf("%s written into %s: %v", file, name, err)
+			}
+		}
+	}
+	retarget("a")
+	if _, err := pinned.RefreshAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestProjectAllOmitsIdentityAliases(t *testing.T) {

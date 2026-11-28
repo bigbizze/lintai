@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bigbizze/lintai/engine"
 	"github.com/bigbizze/lintai/internal/testpack"
 	"github.com/bigbizze/lintai/jsonrpc"
 	"github.com/bigbizze/lintai/server"
@@ -191,16 +193,20 @@ func TestServeConfigurationAndRPCRecovery(t *testing.T) {
 	if err := os.Symlink(root, link); err != nil {
 		t.Skip(err)
 	}
-	retargeted := &serveSession{params: server.InitializeParams{WorkspaceRoot: link, RuleWorkers: 1}}
-	defer retargeted.Close()
-	retargeted.beforeAnalysis = func() {
-		retargeted.beforeAnalysis = nil
+	retarget := func(target string) {
+		t.Helper()
 		if err := os.Remove(link); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.Symlink(other, link); err != nil {
+		if err := os.Symlink(target, link); err != nil {
 			t.Fatal(err)
 		}
+	}
+	retargeted := &serveSession{params: server.InitializeParams{WorkspaceRoot: link, RuleWorkers: 1}}
+	defer retargeted.Close()
+	retargeted.afterConfigure = func() {
+		retargeted.afterConfigure = nil
+		retarget(other)
 	}
 	if got, err := retargeted.RefreshFiles(context.Background(), []string{"a.ts", "b.ts"}); err == nil || !strings.Contains(err.Error(), "retry") {
 		t.Fatalf("mixed workspaces were published: %+v", got)
@@ -209,5 +215,45 @@ func TestServeConfigurationAndRPCRecovery(t *testing.T) {
 	otherPhysical, _ := filepath.EvalSymlinks(other)
 	if err != nil || got.PhysicalRoot != otherPhysical || len(got.Files[0].Diagnostics) != 1 || len(got.Files[1].Diagnostics) != 0 {
 		t.Fatalf("retargeted workspace: %+v, %v", got, err)
+	}
+
+	// One-shot commands read the configuration through other. After the root
+	// is retargeted, analysis, suppression writes, approval and scope
+	// explanation fail and write nothing.
+	flags := flag.NewFlagSet("lintai", flag.ContinueOnError)
+	project := newProjectFlags(flags)
+	if err := flags.Parse([]string{"--workspace-root", link}); err != nil {
+		t.Fatal(err)
+	}
+	oneShot, options, err := project.open(engine.Config{RuleWorkers: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer oneShot.Close()
+	settings, _, physical, err := captureTypeScriptSettings(link, "", "", false, "", false, nil, nil)
+	if err != nil || options.ResolvedRoot != otherPhysical || physical != otherPhysical {
+		t.Fatalf("configuration root: %s, %s, %v", options.ResolvedRoot, physical, err)
+	}
+	retarget(root)
+	assertRetry := func(operation string, err error) {
+		t.Helper()
+		if err == nil || !strings.Contains(err.Error(), otherPhysical) || !strings.Contains(err.Error(), "retry") {
+			t.Fatalf("%s: expected a retry error, got %v", operation, err)
+		}
+	}
+	_, err = oneShot.Check(context.Background())
+	assertRetry("check", err)
+	_, err = oneShot.UpdateSuppressions(context.Background(), engine.SuppressionUpdate{All: true})
+	assertRetry("suppression update", err)
+	_, err = oneShot.BuildRulesLock(context.Background(), "")
+	assertRetry("lock", err)
+	_, err = explainScopes(context.Background(), link, physical, settings)
+	assertRetry("scope", err)
+	for _, workspace := range []string{root, other} {
+		for _, name := range []string{"lintai-suppressions.json", engine.DefaultRulesLockFile} {
+			if _, err := os.Stat(filepath.Join(workspace, name)); !os.IsNotExist(err) {
+				t.Fatalf("%s written into %s: %v", name, workspace, err)
+			}
+		}
 	}
 }

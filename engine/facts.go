@@ -45,7 +45,11 @@ func (e *Session) Facts(ctx context.Context, names []string) (string, error) {
 			}
 		}
 	}
-	assembled, err := catalog.collect(ctx, newFileKeys(e.config.WorkspaceRoot, nil), requested, nil, observe.Full)
+	root, _, err := e.operationRoot()
+	if err != nil {
+		return "", err
+	}
+	assembled, err := catalog.collect(ctx, root, requested, nil, observe.Full)
 	if err != nil {
 		return "", err
 	}
