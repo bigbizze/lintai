@@ -160,7 +160,7 @@ func TestCatalogFakeAloneReportsProducerOwnedAnchorAndOpaqueRevision(t *testing.
 	if item.EntityIdentity == nil || item.EntityIdentity.SemanticKey != "catalog:users" {
 		t.Fatalf("unexpected anchor identity: %+v", item.EntityIdentity)
 	}
-	if len(item.Provenance.ProducerNamespaces) != 1 || item.Provenance.ProducerNamespaces[0] != "catalog" || !strings.HasPrefix(item.Provenance.SnapshotVersion, "sha256:") {
+	if len(item.Provenance.ProducerNamespaces) != 1 || item.Provenance.ProducerNamespaces[0] != "catalog" || !strings.HasPrefix(item.Provenance.FactRevision, "sha256:") {
 		t.Fatalf("unexpected composed provenance: %+v", item.Provenance)
 	}
 	if producer.prepares != 1 || producer.emits != 1 || producer.metadataCalls != 1 {
@@ -168,7 +168,7 @@ func TestCatalogFakeAloneReportsProducerOwnedAnchorAndOpaqueRevision(t *testing.
 	}
 	// An opaque revision is the producer's own validity claim.
 	unchanged, err := session.Check(context.Background())
-	if err != nil || unchanged.SnapshotVersion != result.SnapshotVersion {
+	if err != nil || unchanged.FactRevision != result.FactRevision {
 		t.Fatalf("opaque revision not reused: %+v %v", unchanged, err)
 	}
 	if producer.prepares != 2 || producer.emits != 1 || producer.metadataCalls != 2 {
@@ -177,7 +177,7 @@ func TestCatalogFakeAloneReportsProducerOwnedAnchorAndOpaqueRevision(t *testing.
 	producer.revision = "opaque-revision-v2"
 	producer.rows[facts.Predicate{Name: "catalog.item", Arity: 1}] = nil
 	retracted, err := session.Check(context.Background())
-	if err != nil || len(retracted.Diagnostics) != 0 || retracted.SnapshotVersion == result.SnapshotVersion {
+	if err != nil || len(retracted.Diagnostics) != 0 || retracted.FactRevision == result.FactRevision {
 		t.Fatalf("opaque producer change did not retract its result: %+v %v", retracted, err)
 	}
 	producer.revision = "opaque-revision-v3"
@@ -204,7 +204,7 @@ func TestCatalogFakeAloneReportsProducerOwnedAnchorAndOpaqueRevision(t *testing.
 	different := fakeProducer("empty", "item")
 	different.description.ImplementationStamp = "fixture-v2"
 	changedCatalog, err := openTestSession(t, engine.Config{WorkspaceRoot: testpack.Build(t, repoRoot, t.TempDir())}, different).Check(context.Background())
-	if err != nil || changedCatalog.SnapshotVersion == emptyResult.SnapshotVersion {
+	if err != nil || changedCatalog.FactRevision == emptyResult.FactRevision {
 		t.Fatalf("catalog identity omitted on empty demand: %v", err)
 	}
 }
@@ -302,8 +302,8 @@ func TestOpaqueProducerScopeContributesToResultIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if leftResult.SnapshotVersion == rightResult.SnapshotVersion {
-		t.Fatalf("producer scope did not affect identity: %s", leftResult.SnapshotVersion)
+	if leftResult.FactRevision == rightResult.FactRevision {
+		t.Fatalf("producer scope did not affect identity: %s", leftResult.FactRevision)
 	}
 	cases := []struct {
 		name          string
@@ -337,10 +337,10 @@ func TestOpaqueProducerScopeContributesToResultIdentity(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if first.SnapshotVersion == second.SnapshotVersion ||
+			if first.FactRevision == second.FactRevision ||
 				len(second.Diagnostics) != 0 || producer.prepares != 2 || producer.emits != 2 {
 				t.Fatalf("scope change reused old facts: sameIdentity=%v diagnostics=%d prepares=%d emits=%d",
-					first.SnapshotVersion == second.SnapshotVersion,
+					first.FactRevision == second.FactRevision,
 					len(second.Diagnostics), producer.prepares, producer.emits)
 			}
 		})
@@ -380,7 +380,7 @@ func TestExternalTypeScriptAndFakeComposeThroughCatalog(t *testing.T) {
 	fake.revision = "inventory-v2"
 	fake.rows[predicate] = [][]facts.Value{{facts.String("catalog-api")}}
 	matched := check()
-	if matched.SnapshotVersion == first.SnapshotVersion || len(matched.Diagnostics) != 1 {
+	if matched.FactRevision == first.FactRevision || len(matched.Diagnostics) != 1 {
 		t.Fatalf("external revision did not add a joined diagnostic: %+v", matched)
 	}
 	item := matched.Diagnostics[0]
@@ -405,7 +405,7 @@ func TestExternalTypeScriptAndFakeComposeThroughCatalog(t *testing.T) {
 	fake.revision = "inventory-v4"
 	fake.failEmit = false
 	fake.rows[predicate] = [][]facts.Value{{facts.String("other-api")}}
-	if recovered := check(); len(recovered.Diagnostics) != 0 || recovered.SnapshotVersion == matched.SnapshotVersion {
+	if recovered := check(); len(recovered.Diagnostics) != 0 || recovered.FactRevision == matched.FactRevision {
 		t.Fatalf("recovered inventory did not retract the finding: %+v", recovered)
 	}
 	if unused.prepares != 0 || unused.emits != 0 {

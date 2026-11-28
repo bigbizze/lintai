@@ -114,7 +114,7 @@ func TestSuppressionProducerCoverage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(originalBytes, oneBytes) || !reflect.DeepEqual(result.Suppressed, oneResult.Suppressed) || result.SnapshotVersion != oneResult.SnapshotVersion {
+	if !bytes.Equal(originalBytes, oneBytes) || !reflect.DeepEqual(result.Suppressed, oneResult.Suppressed) || result.FactRevision != oneResult.FactRevision {
 		t.Fatal("one and multiple workers disagree on saved groups or decisions")
 	}
 	saved, err := suppressions.Load(path)

@@ -27,7 +27,7 @@ type runInfo struct {
 	coverage                    map[string]map[string]struct{}
 	assertions                  map[string]map[string]assertionSchema
 	complete                    bool
-	snapshotVersion             string
+	factRevision                string
 	producerNames               []string
 }
 type suppressionsState struct {
@@ -337,7 +337,7 @@ func applySuppressions(config Config, update SuppressionUpdate, state suppressio
 	}
 	if writing && !blocked && run.lock != nil {
 		limited, failures := suppressions.Limit(file, run.lock.Suppressions)
-		result.Diagnostics = append(result.Diagnostics, allowanceDiagnostics(state.path, failures, run.snapshotVersion, run.producerNames)...)
+		result.Diagnostics = append(result.Diagnostics, allowanceDiagnostics(state.path, failures, run.factRevision, run.producerNames)...)
 		if len(failures) > 0 {
 			blocked = true
 		}
@@ -395,7 +395,7 @@ func applySuppressions(config Config, update SuppressionUpdate, state suppressio
 		return fmt.Sprint(a.File, a.RuleID, a.Assertion.Name, a.Description) < fmt.Sprint(b.File, b.RuleID, b.Assertion.Name, b.Description)
 	})
 	for _, unused := range result.UnusedSuppressions {
-		result.Diagnostics = append(result.Diagnostics, unusedSuppressionDiagnostic(filepath.Base(state.path), unused, run.snapshotVersion, run.producerNames))
+		result.Diagnostics = append(result.Diagnostics, unusedSuppressionDiagnostic(filepath.Base(state.path), unused, run.factRevision, run.producerNames))
 	}
 	sortDiagnostics(result.Diagnostics)
 	return write, nil
@@ -428,12 +428,12 @@ func unknownSuppressRules(update SuppressionUpdate, run runInfo) []diagnostics.D
 			continue
 		}
 		seen[id] = true
-		out = append(out, errorDiagnostic(id, "config", 0, run.snapshotVersion, run.producerNames, fmt.Sprintf("--suppress-rule names unknown rule %q", id)))
+		out = append(out, errorDiagnostic(id, "config", 0, run.factRevision, run.producerNames, fmt.Sprintf("--suppress-rule names unknown rule %q", id)))
 	}
 	return out
 }
-func unusedSuppressionDiagnostic(fileName string, unused suppressions.Unused, snapshotVersion string, producers []string) diagnostics.Diagnostic {
-	return diagnostics.Diagnostic{RuleID: unused.RuleID, AssertionID: "suppression", DiagnosticKind: diagnostics.KindUnusedSuppression, Severity: diagnostics.SeverityError, Message: fmt.Sprintf("%s allows %d for %s/%s in %s (%s), but found %d", fileName, unused.Allowed, unused.RuleID, unused.Assertion.Name, unused.File, unused.Description, unused.Found), SourceLocation: &diagnostics.SourceLocation{File: unused.File, StartLine: 1, StartColumn: 1, EndLine: 1, EndColumn: 1}, Provenance: diagnostics.Provenance{SnapshotVersion: snapshotVersion, ProducerNamespaces: append([]string(nil), producers...)}}
+func unusedSuppressionDiagnostic(fileName string, unused suppressions.Unused, factRevision string, producers []string) diagnostics.Diagnostic {
+	return diagnostics.Diagnostic{RuleID: unused.RuleID, AssertionID: "suppression", DiagnosticKind: diagnostics.KindUnusedSuppression, Severity: diagnostics.SeverityError, Message: fmt.Sprintf("%s allows %d for %s/%s in %s (%s), but found %d", fileName, unused.Allowed, unused.RuleID, unused.Assertion.Name, unused.File, unused.Description, unused.Found), SourceLocation: &diagnostics.SourceLocation{File: unused.File, StartLine: 1, StartColumn: 1, EndLine: 1, EndColumn: 1}, Provenance: diagnostics.Provenance{FactRevision: factRevision, ProducerNamespaces: append([]string(nil), producers...)}}
 }
 
 // commitSuppression makes the guarded rename the cancellation commit boundary.

@@ -26,7 +26,7 @@ func (a *analyzer) result(names ...string) engine.FilesResult {
 	for i, name := range names {
 		groups[i] = engine.FileGroup{File: name, SourceDigest: "digest"}
 	}
-	return engine.FilesResult{Files: groups, PhysicalRoot: "/workspace", SnapshotVersion: "snapshot", WorkspaceProblems: []diagnostics.Diagnostic{{DiagnosticKind: diagnostics.KindRuleExecutionError, RuleID: "broken", Phase: "config", Message: "invalid"}}}
+	return engine.FilesResult{Files: groups, PhysicalRoot: "/workspace", FactRevision: "snapshot", WorkspaceProblems: []diagnostics.Diagnostic{{DiagnosticKind: diagnostics.KindRuleExecutionError, RuleID: "broken", Phase: "config", Message: "invalid"}}}
 }
 
 func (a *analyzer) RefreshFile(_ context.Context, name string) (engine.FilesResult, error) {

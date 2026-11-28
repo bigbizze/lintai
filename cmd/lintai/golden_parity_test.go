@@ -33,7 +33,7 @@ func TestGoldenParity(t *testing.T) {
 		{"npm-smoke-facts-walk.txt", []string{"facts", "--workspace-root", smoke, "--files", "walk"}, exitClean, nil},
 		{"workspace-diagnostics.json", []string{
 			"--json", "--workspace-root", testpack.Build(t, repoRoot, workspace, filepath.Join(repoRoot, "testdata/fixtures/rules/*.ts")),
-		}, exitViolations, stripSnapshotVersions},
+		}, exitViolations, stripFactRevisions},
 	}
 	update := os.Getenv("LINTAI_UPDATE_GOLDEN") == "1"
 	for _, item := range cases {
@@ -67,14 +67,14 @@ func TestGoldenParity(t *testing.T) {
 
 // The snapshot version hashes file contents and is not part of the
 // extraction result.
-func stripSnapshotVersions(t *testing.T, data []byte) []byte {
+func stripFactRevisions(t *testing.T, data []byte) []byte {
 	var items []map[string]any
 	if err := json.Unmarshal(data, &items); err != nil {
 		t.Fatal(err)
 	}
 	for _, item := range items {
 		if provenance, ok := item["provenance"].(map[string]any); ok {
-			delete(provenance, "snapshot_version")
+			delete(provenance, "fact_revision")
 		}
 	}
 	out, err := json.MarshalIndent(items, "", "  ")

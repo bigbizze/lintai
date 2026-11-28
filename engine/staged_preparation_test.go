@@ -33,11 +33,11 @@ func TestMixedRuleOutcomes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.SnapshotVersion == "" {
+	if result.FactRevision == "" {
 		t.Fatal("analysis has no snapshot identity")
 	}
 	for _, item := range result.Diagnostics {
-		if item.Provenance.SnapshotVersion != result.SnapshotVersion || len(item.Provenance.ProducerNamespaces) != 1 || item.Provenance.ProducerNamespaces[0] != "catalog" {
+		if item.Provenance.FactRevision != result.FactRevision || len(item.Provenance.ProducerNamespaces) != 1 || item.Provenance.ProducerNamespaces[0] != "catalog" {
 			t.Errorf("diagnostic did not receive final analysis provenance: %+v", item)
 		}
 	}
@@ -52,7 +52,7 @@ func TestMixedRuleOutcomes(t *testing.T) {
 	for _, item := range items {
 		// Generated bundle coordinates can change when the SDK is rebuilt.
 		item["message"], _, _ = strings.Cut(item["message"].(string), " at ")
-		delete(item["provenance"].(map[string]any), "snapshot_version")
+		delete(item["provenance"].(map[string]any), "fact_revision")
 	}
 	got, err := json.MarshalIndent(items, "", "  ")
 	if err != nil {
@@ -82,7 +82,7 @@ func TestSuppressedFindingsRetainFinalProvenance(t *testing.T) {
 		t.Fatalf("expected three recorded and suppressed findings: %+v", result)
 	}
 	for _, item := range result.Suppressed {
-		if item.Provenance.SnapshotVersion != result.SnapshotVersion || item.Provenance.RuleVersion != 1 || len(item.Provenance.ProducerNamespaces) != 1 || item.Provenance.ProducerNamespaces[0] != "catalog" {
+		if item.Provenance.FactRevision != result.FactRevision || item.Provenance.RuleVersion != 1 || len(item.Provenance.ProducerNamespaces) != 1 || item.Provenance.ProducerNamespaces[0] != "catalog" {
 			t.Errorf("suppressed copy lost final analysis provenance: %+v", item)
 		}
 	}

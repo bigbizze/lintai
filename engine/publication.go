@@ -26,7 +26,7 @@ type FilesResult struct {
 	Files             []FileGroup
 	PhysicalRoot      string
 	WorkspaceProblems []diagnostics.Diagnostic
-	SnapshotVersion   string
+	FactRevision      string
 	RulesLoaded       int
 	Warnings          []string
 }
@@ -172,7 +172,7 @@ func (p *publishedResult) project(files []string, all bool) FilesResult {
 	}
 	result := FilesResult{
 		Files: make([]FileGroup, 0, len(files)), PhysicalRoot: index.root,
-		SnapshotVersion: p.result.SnapshotVersion, RulesLoaded: p.result.RulesLoaded,
+		FactRevision: p.result.FactRevision, RulesLoaded: p.result.RulesLoaded,
 		Warnings: slices.Clone(p.result.Warnings),
 	}
 	for _, file := range files {

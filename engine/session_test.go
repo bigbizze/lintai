@@ -101,7 +101,7 @@ func TestSessionRetainsAndReplacesCurrentGeneration(t *testing.T) {
 		t.Fatalf("projection after edit: %+v", projected)
 	}
 	changed := assertFresh()
-	if changed.SnapshotVersion == first.SnapshotVersion || evaluations.Load() != 3 {
+	if changed.FactRevision == first.FactRevision || evaluations.Load() != 3 {
 		t.Fatal("content change did not replace the generation")
 	}
 	writeTestFile(t, workspace, "src/b.ts", "export const other = 3;\n")

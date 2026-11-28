@@ -61,7 +61,7 @@ func run() error {
 			return result, err
 		}
 		if result.RulesLoaded != 1 || len(result.WorkspaceProblems) != 0 || len(result.Files) != 1 ||
-			result.Files[0].File != "src/handler.ts" || result.Files[0].SourceDigest != digest || result.SnapshotVersion == "" {
+			result.Files[0].File != "src/handler.ts" || result.Files[0].SourceDigest != digest || result.FactRevision == "" {
 			return result, fmt.Errorf("unexpected publication: %+v", result)
 		}
 		return result, nil
@@ -83,7 +83,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	if first.SnapshotVersion == matched.SnapshotVersion || len(matched.Files[0].Diagnostics) != 1 {
+	if first.FactRevision == matched.FactRevision || len(matched.Files[0].Diagnostics) != 1 {
 		return fmt.Errorf("changed inventory did not add the finding: %+v", matched)
 	}
 	finding := matched.Files[0].Diagnostics[0]
@@ -117,7 +117,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	if recovered.SnapshotVersion == matched.SnapshotVersion || len(recovered.Files[0].Diagnostics) != 0 {
+	if recovered.FactRevision == matched.FactRevision || len(recovered.Files[0].Diagnostics) != 0 {
 		return fmt.Errorf("recovered inventory did not retract the finding: %+v", recovered)
 	}
 	if inventory.prepares != 4 || unused.prepares != 0 {

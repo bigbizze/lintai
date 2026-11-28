@@ -57,11 +57,11 @@ func (update SuppressionUpdate) writing() bool {
 }
 
 type Result struct {
-	index           *fileIndex
-	Diagnostics     []diagnostics.Diagnostic
-	SnapshotVersion string
-	RulesLoaded     int
-	AnalyzedFiles   []string
+	index         *fileIndex
+	Diagnostics   []diagnostics.Diagnostic
+	FactRevision  string
+	RulesLoaded   int
+	AnalyzedFiles []string
 	// Warnings are messages for the user that are not diagnostics.
 	Warnings []string
 	// Suppressed are the violations that the suppressions file
@@ -459,7 +459,7 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, mode observe.Mode, st
 	} else {
 		e.currentFacts = nil
 	}
-	result := Result{RulesLoaded: loaded, SnapshotVersion: assembled.snapshotID, AnalyzedFiles: sortedSet(assembled.analyzedFiles)}
+	result := Result{RulesLoaded: loaded, FactRevision: assembled.snapshotID, AnalyzedFiles: sortedSet(assembled.analyzedFiles)}
 	evidence.observations = observe.Union(evidence.observations, assembled.observations)
 	evidence.reusable = evidence.reusable && assembled.reusableFromObservations
 	producerNames := append([]string(nil), assembled.namespaces...)
@@ -469,7 +469,7 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, mode observe.Mode, st
 	evidence.anchors = assembled.anchors
 	evidence.anchorOwners = assembled.anchorOwners
 	run.files = assembled.analyzedFiles
-	run.snapshotVersion = assembled.snapshotID
+	run.factRevision = assembled.snapshotID
 	run.known = knownRules
 	outcomes, dispatchErr := dispatchRuleJobs(ctx, jobs, assembled, config, e.hooks)
 	if dispatchErr != nil {
@@ -685,7 +685,7 @@ func stampDiagnostics(items []diagnostics.Diagnostic, snapshotID string, namespa
 }
 
 func stampDiagnostic(item *diagnostics.Diagnostic, snapshotID string, namespaces []string) {
-	item.Provenance.SnapshotVersion = snapshotID
+	item.Provenance.FactRevision = snapshotID
 	item.Provenance.ProducerNamespaces = append([]string(nil), namespaces...)
 }
 
@@ -759,7 +759,7 @@ func compareDiagnostics(left, right diagnostics.Diagnostic) int {
 // errorDiagnostic reports a rule that could not run. Its severity is always
 // error, whatever the configured severity of the rule, so a broken rule
 // cannot pass silently.
-func errorDiagnostic(ruleID, phase string, ruleVersion int, snapshotVersion string, producers []string, message string) diagnostics.Diagnostic {
+func errorDiagnostic(ruleID, phase string, ruleVersion int, factRevision string, producers []string, message string) diagnostics.Diagnostic {
 	return diagnostics.Diagnostic{
 		RuleID:         ruleID,
 		AssertionID:    "default",
@@ -768,7 +768,7 @@ func errorDiagnostic(ruleID, phase string, ruleVersion int, snapshotVersion stri
 		Message:        message,
 		Phase:          phase,
 		Provenance: diagnostics.Provenance{
-			SnapshotVersion:    snapshotVersion,
+			FactRevision:       factRevision,
 			RuleVersion:        ruleVersion,
 			ProducerNamespaces: append([]string(nil), producers...),
 		},
