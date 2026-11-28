@@ -379,6 +379,7 @@ func applySuppressions(config Config, update SuppressionUpdate, state suppressio
 		result.Diagnostics = append(result.Diagnostics, unusedSuppressionDiagnostic(filepath.Base(state.path), unused, run.factRevision, run.producerNames))
 	}
 	sortDiagnostics(result.Diagnostics)
+	sortDiagnostics(result.Suppressed)
 	return write, nil
 }
 func blockingRuleErrors(update SuppressionUpdate, items []diagnostics.Diagnostic, known map[string]struct{}) int {

@@ -508,7 +508,7 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, mode observe.Mode, st
 	unknown := unknownPolicyRules(config, knownRules)
 	items, findings = append(items, unknown...), append(findings, make([]*violation, len(unknown))...)
 	stampDiagnostics(items, assembled.snapshotID, producerNames)
-	result.Diagnostics, evidence.findings = sortOutcomes(items, findings)
+	result.Diagnostics, evidence.findings = items, findings
 	assembleSeverity(config, &result, &run)
 	return result, run, evidence, nil
 }
@@ -719,23 +719,6 @@ func unknownPolicyRules(options Config, known map[string]struct{}) []diagnostics
 		result = append(result, errorDiagnostic(id, "config", 0, "", nil, fmt.Sprintf("policy is configured for rule %q, but no loaded rule has this id", id)))
 	}
 	return result
-}
-
-// sortOutcomes orders diagnostics as sortDiagnostics does and keeps each
-// typed finding beside its diagnostic.
-func sortOutcomes(items []diagnostics.Diagnostic, findings []*violation) ([]diagnostics.Diagnostic, []*violation) {
-	order := make([]int, len(items))
-	for index := range order {
-		order[index] = index
-	}
-	sort.SliceStable(order, func(left, right int) bool {
-		return compareDiagnostics(items[order[left]], items[order[right]]) < 0
-	})
-	sortedItems, sortedFindings := make([]diagnostics.Diagnostic, len(items)), make([]*violation, len(items))
-	for index, from := range order {
-		sortedItems[index], sortedFindings[index] = items[from], findings[from]
-	}
-	return sortedItems, sortedFindings
 }
 
 func sortDiagnostics(allDiagnostics []diagnostics.Diagnostic) {

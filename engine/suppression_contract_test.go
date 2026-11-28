@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -69,6 +70,10 @@ func TestSuppressionProducerCoverage(t *testing.T) {
 	}
 	if len(result.Suppressed) != 6 {
 		t.Fatalf("recording: %+v", result.Diagnostics)
+	}
+	// The dependency finding of the first rule sorts before every other one.
+	if !slices.IsSortedFunc(result.Suppressed, compareDiagnostics) || result.Suppressed[0].SourceLocation.File != "../catalog/items.sql" {
+		t.Fatalf("suppressed findings are not in diagnostic order: %+v", result.Suppressed)
 	}
 	wantEntities := map[string]bool{
 		"catalog:item-a": false, "catalog:item-b": false, "catalog:item-c": false,
