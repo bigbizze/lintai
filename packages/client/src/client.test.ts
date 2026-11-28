@@ -34,12 +34,14 @@ test("malformed file groups close the connection and the next request can reconn
 			read() {
 				const result =
 					current.method === "initialize"
-						? { protocolVersion: 3 }
+						? { protocolVersion: 4 }
 						: {
 								snapshotVersion: "snap",
 								problems: [],
+								physicalRoot: "",
+								aliases: {},
 								files: [
-									{ file: connection === 1 ? "old.ts" : "a.ts", sourceDigest: "", diagnostics: [] },
+									{ file: connection === 1 ? "old.ts" : "a.ts", sourceDigest: "", findings: [] },
 								],
 							};
 				return encodeFrame({ jsonrpc: "2.0", id: current.id, result });

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"path/filepath"
 	"reflect"
 	"slices"
@@ -267,17 +268,18 @@ func (catalog producerCatalog) collect(ctx context.Context, workspaceRoot string
 	if err != nil {
 		return composedFacts{}, err
 	}
+	declarations := make([]aliasDeclaration, 0)
+	published := make(map[string]struct{})
 	for _, item := range preparedGenerations {
-		for alias, file := range item.metadata.FileAliases {
-			alias, file = keys.key(alias), keys.key(file)
-			if alias == file {
-				continue
-			}
-			if previous, exists := keys.aliases[alias]; exists && previous != file {
-				return composedFacts{}, fmt.Errorf("producer %q names %q as both %q and %q", item.entry.description.Namespace, alias, previous, file)
-			}
-			keys.aliases[alias] = file
+		for _, file := range item.metadata.AnalyzedFiles {
+			published[file] = struct{}{}
 		}
+		for alias, file := range item.metadata.FileAliases {
+			declarations = append(declarations, aliasDeclaration{item.entry.description.Namespace, alias, file})
+		}
+	}
+	if keys.aliases, err = resolveFileAliases(keys, declarations, published); err != nil {
+		return composedFacts{}, err
 	}
 	for i := range preparedGenerations {
 		item := &preparedGenerations[i]
@@ -424,6 +426,47 @@ func operationFileKeys[T any](initial fileKeys, items []T, observations func(T) 
 		physical = initial.physical
 	}
 	return fileKeys{root: initial.root, physical: physical, aliases: make(map[string]string)}, nil
+}
+
+type aliasDeclaration struct{ namespace, alias, file string }
+
+// resolveFileAliases validates every declared alias against the captured root
+// before any mapping is applied, so the result does not depend on producer or
+// map order. Equal declarations coalesce and identity aliases are dropped.
+// Different destinations for one alias, alias chains and cycles, and aliases
+// that shadow a declared canonical file are errors.
+func resolveFileAliases(keys fileKeys, declarations []aliasDeclaration, analyzed map[string]struct{}) (map[string]string, error) {
+	base := fileKeys{root: keys.root, physical: keys.physical}
+	canonicalFiles := make(map[string]struct{}, len(analyzed))
+	for file := range analyzed {
+		canonicalFiles[base.key(file)] = struct{}{}
+	}
+	aliases := make(map[string]string)
+	owners := make(map[string]string)
+	slices.SortFunc(declarations, func(a, b aliasDeclaration) int {
+		return strings.Compare(a.namespace+"\x00"+a.alias+"\x00"+a.file, b.namespace+"\x00"+b.alias+"\x00"+b.file)
+	})
+	for _, declaration := range declarations {
+		alias, file := base.key(declaration.alias), base.key(declaration.file)
+		if alias == file {
+			continue
+		}
+		if previous, exists := aliases[alias]; exists && previous != file {
+			return nil, fmt.Errorf("producers %q and %q name %q as both %q and %q", owners[alias], declaration.namespace, alias, previous, file)
+		}
+		aliases[alias] = file
+		owners[alias] = declaration.namespace
+	}
+	for _, alias := range slices.Sorted(maps.Keys(aliases)) {
+		file := aliases[alias]
+		if _, chained := aliases[file]; chained {
+			return nil, fmt.Errorf("producer %q names %q as an alias of %q, which is itself an alias", owners[alias], alias, file)
+		}
+		if _, shadows := canonicalFiles[alias]; shadows {
+			return nil, fmt.Errorf("producer %q names %q as an alias of %q, but %q is an analyzed file", owners[alias], alias, file, alias)
+		}
+	}
+	return aliases, nil
 }
 
 func generationFilePath(file string) (string, error) {

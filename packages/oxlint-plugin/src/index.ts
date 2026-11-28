@@ -1,23 +1,33 @@
 import { rules as authoringRules } from "@lintai/authoring-rules";
-import { type LintaiOptions, createLintaiRules } from "@lintai/client";
+import {
+	type LintaiCapture,
+	type LintaiOptions,
+	createCapturedRules,
+	createLintaiRules,
+} from "@lintai/client";
 
-export type { BatchOperation, LintaiOptions } from "@lintai/client";
+export {
+	createLintaiSession,
+	type CapturedFile,
+	type LintaiCapture,
+	type LintaiOptions,
+	type LintaiSession,
+} from "@lintai/client";
 
-type Analysis = ReturnType<typeof createLintaiRules>;
+type Analysis = ReturnType<typeof createCapturedRules>;
 type Config = { rules: Record<string, "off" | "warn" | "error"> };
-export type LintaiPlugin = Pick<Analysis, "withFileBatch" | "dispose"> & {
+export type LintaiPlugin = {
 	meta: { name: "lintai" };
 	rules: Analysis["rules"] & typeof authoringRules;
 	configs: { all: Config; authoring: Config };
+	dispose(): void;
 };
 
-export function createLintaiPlugin(options: LintaiOptions = {}): LintaiPlugin {
-	const analysis = createLintaiRules(options, true);
+function plugin(analysis: Analysis, dispose: () => void): LintaiPlugin {
 	return {
 		meta: { name: "lintai" },
 		rules: { ...authoringRules, ...analysis.rules },
-		withFileBatch: analysis.withFileBatch,
-		dispose: analysis.dispose,
+		dispose,
 		configs: {
 			all: { rules: analysis.levels },
 			authoring: {
@@ -27,4 +37,14 @@ export function createLintaiPlugin(options: LintaiOptions = {}): LintaiPlugin {
 			},
 		},
 	};
+}
+
+export function createLintaiPlugin(options: LintaiOptions = {}): LintaiPlugin {
+	const analysis = createLintaiRules(options, true);
+	return plugin(analysis, analysis.dispose);
+}
+
+/** A plugin that displays one capture. It never starts a lintai process. */
+export function createCapturedLintaiPlugin(capture: LintaiCapture): LintaiPlugin {
+	return plugin(createCapturedRules(capture), () => {});
 }

@@ -14,7 +14,7 @@ import (
 	"github.com/bigbizze/lintai/jsonrpc"
 )
 
-const ProtocolVersion = 3
+const ProtocolVersion = 4
 
 const (
 	errCodeInvalidRequest = -32600
@@ -57,14 +57,26 @@ type InitializeResult struct {
 // FilesDiagnosticsResult preserves the order and duplicates in the request.
 type FilesDiagnosticsResult struct {
 	SnapshotVersion string            `json:"snapshotVersion"`
-	RulesLoaded     int               `json:"rulesLoaded"`
-	Files           []FileDiagnostics `json:"files"`
 	Problems        []string          `json:"problems"`
+	PhysicalRoot    string            `json:"physicalRoot"`
+	Aliases         map[string]string `json:"aliases"`
+	Files           []FileFindings    `json:"files"`
 }
-type FileDiagnostics struct {
-	SourceDigest string                   `json:"sourceDigest"`
-	File         string                   `json:"file"`
-	Diagnostics  []diagnostics.Diagnostic `json:"diagnostics"`
+
+type FileFindings struct {
+	File         string    `json:"file"`
+	SourceDigest string    `json:"sourceDigest"`
+	Findings     []Finding `json:"findings"`
+}
+
+// Finding is the display form of a located or file-level diagnostic. Range is
+// [startLine, startColumn, endLine, endColumn] in one-based UTF-16 positions.
+type Finding struct {
+	RuleID      string  `json:"ruleId"`
+	AssertionID string  `json:"assertionId"`
+	Severity    string  `json:"severity"`
+	Message     string  `json:"message"`
+	Range       *[4]int `json:"range,omitempty"`
 }
 
 func NewWithFactory(factory AnalyzerFactory) *Server { return &Server{factory: factory} }
@@ -184,27 +196,47 @@ func (s *Server) handleFilesDiagnostics(ctx context.Context, rawParams json.RawM
 	if err != nil {
 		return FilesDiagnosticsResult{}, err
 	}
-	if len(result.Diagnostics) != len(result.Files) || len(result.SourceDigests) != len(result.Files) || (!all && !slices.Equal(names, result.Files)) {
+	if !all && len(result.Files) != len(names) {
 		return FilesDiagnosticsResult{}, fmt.Errorf("analyzer returned inconsistent file groups for diagnostics/files")
 	}
 	seen := make(map[string]bool)
-	files := make([]FileDiagnostics, len(result.Files))
-	for i, name := range result.Files {
+	files := make([]FileFindings, len(result.Files))
+	for i, group := range result.Files {
 		if all {
-			if strings.TrimSpace(name) == "" || seen[name] {
-				return FilesDiagnosticsResult{}, fmt.Errorf("analyzer returned invalid file name %q for all files", name)
+			if strings.TrimSpace(group.File) == "" || seen[group.File] {
+				return FilesDiagnosticsResult{}, fmt.Errorf("analyzer returned invalid file name %q for all files", group.File)
 			}
-			seen[name] = true
+			seen[group.File] = true
+		} else if group.File != names[i] {
+			return FilesDiagnosticsResult{}, fmt.Errorf("analyzer returned inconsistent file groups for diagnostics/files")
 		}
-		items := result.Diagnostics[i]
-		if items == nil {
-			items = []diagnostics.Diagnostic{}
+		files[i] = FileFindings{File: group.File, SourceDigest: group.SourceDigest, Findings: findings(group.Diagnostics)}
+	}
+	aliases := map[string]string{}
+	for alias, file := range result.Aliases {
+		if !all || seen[alias] || !seen[file] {
+			return FilesDiagnosticsResult{}, fmt.Errorf("analyzer returned an ambiguous alias %q", alias)
 		}
-		files[i] = FileDiagnostics{File: name, SourceDigest: result.SourceDigests[i], Diagnostics: items}
+		aliases[alias] = file
 	}
 	s.logWarnings(result.Warnings)
-	return FilesDiagnosticsResult{SnapshotVersion: result.SnapshotVersion, RulesLoaded: result.RulesLoaded,
-		Files: files, Problems: problemStrings(result.WorkspaceProblems)}, nil
+	return FilesDiagnosticsResult{SnapshotVersion: result.SnapshotVersion, Problems: problemStrings(result.WorkspaceProblems),
+		PhysicalRoot: result.PhysicalRoot, Aliases: aliases, Files: files}, nil
+}
+
+func findings(items []diagnostics.Diagnostic) []Finding {
+	out := make([]Finding, 0, len(items))
+	for _, item := range items {
+		finding := Finding{RuleID: item.RuleID, AssertionID: item.AssertionID, Severity: string(item.Severity), Message: item.Message}
+		if item.DiagnosticKind == diagnostics.KindRuleExecutionError {
+			finding.Severity = "error"
+		}
+		if location := item.SourceLocation; location != nil {
+			finding.Range = &[4]int{location.StartLine, location.StartColumn, location.EndLine, location.EndColumn}
+		}
+		out = append(out, finding)
+	}
+	return out
 }
 
 func problemStrings(items []diagnostics.Diagnostic) []string {

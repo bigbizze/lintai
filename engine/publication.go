@@ -12,24 +12,23 @@ import (
 	"github.com/bigbizze/lintai/observe"
 )
 
-// FileResult is the projection of a completed workspace result for one file.
-type FileResult struct {
-	SourceDigest      string
-	Diagnostics       []diagnostics.Diagnostic
-	WorkspaceProblems []diagnostics.Diagnostic
-	SnapshotVersion   string
-	RulesLoaded       int
-	Warnings          []string
+// FileGroup is one projected file: the spelling it was requested or
+// published under, the SHA-256 of the analyzed logical text in lowercase
+// hexadecimal (empty when no source identity was verified), and its findings.
+type FileGroup struct {
+	File         string
+	SourceDigest string
+	Diagnostics  []diagnostics.Diagnostic
 }
 
-// FilesResult contains ordered projections and workspace problems from one
-// completed publication. Diagnostics[i] corresponds to the ith requested file.
+// FilesResult contains ordered file groups and workspace problems from one
+// completed publication. PhysicalRoot is the workspace root the producers
+// resolved for that analysis. Aliases maps each accepted alternative name of a
+// returned all-files group to its canonical name.
 type FilesResult struct {
-	Files []string
-	// SourceDigests[i] is the SHA-256 of the analyzed logical text, in lowercase
-	// hexadecimal, or empty if the generation supplied no source identity.
-	SourceDigests     []string
-	Diagnostics       [][]diagnostics.Diagnostic
+	Files             []FileGroup
+	PhysicalRoot      string
+	Aliases           map[string]string
 	WorkspaceProblems []diagnostics.Diagnostic
 	SnapshotVersion   string
 	RulesLoaded       int
@@ -170,32 +169,31 @@ func publicationFileKey(root, file string) string {
 }
 
 func (p *publishedResult) projectFiles(files []string, all bool) FilesResult {
-	if all {
-		files = slices.Sorted(maps.Keys(p.byFile))
-		for alias, file := range p.result.files.aliases {
-			if _, published := p.byFile[file]; published {
-				files = append(files, alias)
-			}
-		}
-		slices.Sort(files)
-		files = slices.Compact(files)
-	}
 	result := FilesResult{
-		Files: append([]string{}, files...), SourceDigests: make([]string, len(files)),
-		Diagnostics:     make([][]diagnostics.Diagnostic, len(files)),
+		Files: make([]FileGroup, 0, len(files)), PhysicalRoot: p.result.files.physical, Aliases: map[string]string{},
 		SnapshotVersion: p.result.SnapshotVersion, RulesLoaded: p.result.RulesLoaded,
 		Warnings: slices.Clone(p.result.Warnings),
 	}
-	for i, file := range files {
+	if all {
+		files = slices.Sorted(maps.Keys(p.byFile))
+		for alias, file := range p.result.files.aliases {
+			if _, published := p.byFile[file]; published && alias != file {
+				result.Aliases[alias] = file
+			}
+		}
+	}
+	for _, file := range files {
 		key := p.result.files.key(file)
+		group := FileGroup{File: file, Diagnostics: []diagnostics.Diagnostic{}}
 		indexes, captured := p.byFile[key]
 		if captured {
-			result.SourceDigests[i] = p.sourceDigests[key]
+			group.SourceDigest = p.sourceDigests[key]
 		}
 		for _, index := range indexes {
-			result.Diagnostics[i] = append(result.Diagnostics[i], p.result.Diagnostics[index])
+			group.Diagnostics = append(group.Diagnostics, p.result.Diagnostics[index])
 		}
-		result.Diagnostics[i] = cloneDiagnostics(result.Diagnostics[i])
+		group.Diagnostics = cloneDiagnostics(group.Diagnostics)
+		result.Files = append(result.Files, group)
 	}
 	for _, index := range p.unlocated {
 		result.WorkspaceProblems = append(result.WorkspaceProblems, p.result.Diagnostics[index])

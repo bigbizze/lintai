@@ -1,8 +1,16 @@
 export {
+	AnalysisError,
 	LintAIClient,
-	type Diagnostic,
 	type FileAnalysis,
 	type FilesAnalysis,
+	type Finding,
 	type LintaiOptions,
 } from "./client.js";
-export { createLintaiRules, type BatchOperation } from "./plugin.js";
+export {
+	createCapturedRules,
+	createLintaiRules,
+	createLintaiSession,
+	type CapturedFile,
+	type LintaiCapture,
+	type LintaiSession,
+} from "./plugin.js";

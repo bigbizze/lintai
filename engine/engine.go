@@ -309,7 +309,7 @@ func (e *Session) runAndPublish(checkCtx context.Context, update SuppressionUpda
 	reusable := evidence.reusable && !update.writing()
 	result.files = evidence.files
 	if result.files.root == "" {
-		result.files = newFileKeys(config.WorkspaceRoot, nil)
+		result.files = fileKeys{root: config.WorkspaceRoot}
 	}
 	published := newPublishedResult(result, verifiedSourceDigests(result, &evidence), observe.Union(evidence.observations, state.observations), reusable)
 	e.mu.Lock()

@@ -126,22 +126,22 @@ func TestRefreshPublicationAndReuse(t *testing.T) {
 
 	files := []string{"catalog/items.sql", "another.ts", "catalog/items.sql"}
 	batch, err := session.RefreshFiles(context.Background(), files)
-	if err != nil || !slices.Equal(batch.Files, files) || len(batch.SourceDigests) != len(files) || batch.SnapshotVersion != current.SnapshotVersion || len(batch.Diagnostics) != len(files) || counts() != before {
+	if err != nil || !slices.Equal(groupFiles(batch), files) || batch.SnapshotVersion != current.SnapshotVersion || counts() != before {
 		t.Fatalf("batch refresh: %+v %v", batch, err)
 	}
 	for i, file := range files {
 		want := current.DiagnosticsFor(file)
-		if len(batch.Diagnostics[i]) != len(want) || (len(want) > 0 && !reflect.DeepEqual(batch.Diagnostics[i], want)) {
-			t.Fatalf("batch projection %d: got %+v want %+v", i, batch.Diagnostics[i], want)
+		if len(batch.Files[i].Diagnostics) != len(want) || (len(want) > 0 && !reflect.DeepEqual(batch.Files[i].Diagnostics, want)) {
+			t.Fatalf("batch projection %d: got %+v want %+v", i, batch.Files[i].Diagnostics, want)
 		}
 	}
-	batch.Diagnostics[0][0].Message = "batch mutation"
-	if batch.Diagnostics[2][0].Message == "batch mutation" {
+	batch.Files[0].Diagnostics[0].Message = "batch mutation"
+	if batch.Files[2].Diagnostics[0].Message == "batch mutation" {
 		t.Fatal("duplicate file projections share mutable diagnostics")
 	}
 
 	policy := writeTestFile(t, workspace, "lintai-suppressions.json", "invalid")
-	if result, err := session.RefreshFiles(context.Background(), files); err == nil || len(result.Diagnostics) != 0 {
+	if result, err := session.RefreshFiles(context.Background(), files); err == nil || len(result.Files) != 0 {
 		t.Fatal("changed suppressions returned an old batch")
 	}
 	if _, err := session.Current(); err == nil {
@@ -150,7 +150,7 @@ func TestRefreshPublicationAndReuse(t *testing.T) {
 	if err := os.Remove(policy); err != nil {
 		t.Fatal(err)
 	}
-	if result, err := session.RefreshFiles(context.Background(), files); err != nil || len(result.Diagnostics[0]) != 3 {
+	if result, err := session.RefreshFiles(context.Background(), files); err != nil || len(result.Files[0].Diagnostics) != 3 {
 		t.Fatalf("batch recovery: %+v %v", result, err)
 	}
 	warningOptions := options
@@ -370,5 +370,5 @@ func refreshOne(ctx context.Context, session *Session, file string) (refreshedFi
 	if err != nil {
 		return refreshedFile{}, err
 	}
-	return refreshedFile{Diagnostics: result.Diagnostics[0], WorkspaceProblems: result.WorkspaceProblems, SourceDigest: result.SourceDigests[0]}, nil
+	return refreshedFile{Diagnostics: result.Files[0].Diagnostics, WorkspaceProblems: result.WorkspaceProblems, SourceDigest: result.Files[0].SourceDigest}, nil
 }

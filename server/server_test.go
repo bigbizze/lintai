@@ -38,7 +38,11 @@ func (a *analyzer) Close() error { a.closed++; return nil }
 
 func TestFramedOperations(t *testing.T) {
 	a := &analyzer{fail: true, result: func(names []string) engine.FilesResult {
-		return engine.FilesResult{Files: names, SourceDigests: make([]string, len(names)), Diagnostics: make([][]diagnostics.Diagnostic, len(names)), SnapshotVersion: "snapshot", WorkspaceProblems: []diagnostics.Diagnostic{{DiagnosticKind: diagnostics.KindRuleExecutionError, RuleID: "broken", Phase: "config", Message: "invalid"}}}
+		groups := make([]engine.FileGroup, len(names))
+		for i, name := range names {
+			groups[i] = engine.FileGroup{File: name}
+		}
+		return engine.FilesResult{Files: groups, SnapshotVersion: "snapshot", WorkspaceProblems: []diagnostics.Diagnostic{{DiagnosticKind: diagnostics.KindRuleExecutionError, RuleID: "broken", Phase: "config", Message: "invalid"}}}
 	}}
 	var input, output bytes.Buffer
 	id := 0
@@ -94,7 +98,7 @@ func TestFramedOperations(t *testing.T) {
 			t.Fatalf("request %d: %s", i, body)
 		}
 		for j, group := range result.Files {
-			if group.File != want[j] || group.Diagnostics == nil {
+			if group.File != want[j] || group.Findings == nil {
 				t.Fatalf("request %d: %+v", i, group)
 			}
 		}
@@ -110,10 +114,12 @@ func TestInvalidAnalyzerGroups(t *testing.T) {
 		result   engine.FilesResult
 	}{
 		{`["a"]`, engine.FilesResult{}},
-		{`["a"]`, engine.FilesResult{Files: []string{"wrong"}, SourceDigests: []string{""}, Diagnostics: [][]diagnostics.Diagnostic{nil}}},
-		{`"all"`, engine.FilesResult{Files: []string{"a"}, Diagnostics: [][]diagnostics.Diagnostic{nil}}},
-		{`"all"`, engine.FilesResult{Files: []string{"a"}, SourceDigests: []string{""}}},
-		{`"all"`, engine.FilesResult{Files: []string{"a", "a"}, SourceDigests: []string{"", ""}, Diagnostics: [][]diagnostics.Diagnostic{nil, nil}}},
+		{`["a"]`, engine.FilesResult{Files: []engine.FileGroup{{File: "wrong"}}}},
+		{`"all"`, engine.FilesResult{Files: []engine.FileGroup{{File: " "}}}},
+		{`"all"`, engine.FilesResult{Files: []engine.FileGroup{{File: "a"}, {File: "a"}}}},
+		{`"all"`, engine.FilesResult{Files: []engine.FileGroup{{File: "a"}}, Aliases: map[string]string{"a": "a"}}},
+		{`"all"`, engine.FilesResult{Files: []engine.FileGroup{{File: "a"}}, Aliases: map[string]string{"b": "c"}}},
+		{`["a"]`, engine.FilesResult{Files: []engine.FileGroup{{File: "a"}}, Aliases: map[string]string{"b": "a"}}},
 	} {
 		instance := &Server{engine: &analyzer{result: func([]string) engine.FilesResult { return tc.result }}, initialized: true}
 		_, err := instance.handleFilesDiagnostics(context.Background(), json.RawMessage(`{"files":`+tc.selector+`}`))

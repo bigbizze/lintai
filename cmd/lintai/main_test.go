@@ -14,6 +14,7 @@ import (
 
 	"github.com/bigbizze/lintai/backend/typescript"
 	"github.com/bigbizze/lintai/diagnostics"
+	"github.com/bigbizze/lintai/engine"
 	"github.com/bigbizze/lintai/internal/testpack"
 	"github.com/bigbizze/lintai/server"
 )
@@ -272,7 +273,7 @@ func TestServeSessionReplacesChangedProducerConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !slices.Contains(first.Files, "a.ts") || slices.Contains(first.Files, "b.ts") {
+	if !slices.Contains(names(first), "a.ts") || slices.Contains(names(first), "b.ts") {
 		t.Fatalf("initial scope: %v", first.Files)
 	}
 	previous := instance.session
@@ -281,7 +282,7 @@ func TestServeSessionReplacesChangedProducerConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if instance.session == previous || slices.Contains(second.Files, "a.ts") || !slices.Contains(second.Files, "b.ts") {
+	if instance.session == previous || slices.Contains(names(second), "a.ts") || !slices.Contains(names(second), "b.ts") {
 		t.Fatalf("changed configuration retained old producer scope: %v", second.Files)
 	}
 	if _, err := previous.Current(); err == nil {
@@ -760,4 +761,12 @@ export default rule("arch.dup-config").version(1).program(dl` + "`Decl v(M). v(M
 func strconvQuote(value string) string {
 	encoded, _ := json.Marshal(value)
 	return string(encoded)
+}
+
+func names(result engine.FilesResult) []string {
+	files := make([]string, len(result.Files))
+	for i, group := range result.Files {
+		files[i] = group.File
+	}
+	return files
 }

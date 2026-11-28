@@ -105,31 +105,31 @@ func TestServeConfigurationAndRPCRecovery(t *testing.T) {
 		t.Fatalf("invalid config: %+v", bad)
 	}
 	write(configPath, config("b.ts"))
-	if got := file("a.ts"); len(got.Files[0].Diagnostics) != 1 || len(got.Problems) != 0 || string(composition.settings[0].Files) != "walk" {
+	if got := file("a.ts"); len(got.Files[0].Findings) != 1 || len(got.Problems) != 0 || string(composition.settings[0].Files) != "walk" {
 		t.Fatalf("initial configured result or explicit file mode: %+v settings=%+v", got, composition.settings)
 	}
-	if got := file("b.ts"); len(got.Files[0].Diagnostics) != 0 {
+	if got := file("b.ts"); len(got.Files[0].Findings) != 0 {
 		t.Fatalf("excluded source: %+v", got)
 	}
 	initialBatch := batch("a.ts", "b.ts", "a.ts")
-	if len(initialBatch.Files) != 3 || initialBatch.Files[0].SourceDigest == "" || initialBatch.Files[0].SourceDigest != initialBatch.Files[2].SourceDigest || len(initialBatch.Files[0].Diagnostics) != 1 || len(initialBatch.Files[1].Diagnostics) != 0 || len(initialBatch.Files[2].Diagnostics) != 1 {
+	if len(initialBatch.Files) != 3 || initialBatch.Files[0].SourceDigest == "" || initialBatch.Files[0].SourceDigest != initialBatch.Files[2].SourceDigest || len(initialBatch.Files[0].Findings) != 1 || len(initialBatch.Files[1].Findings) != 0 || len(initialBatch.Files[2].Findings) != 1 {
 		t.Fatalf("batch projections: %+v", initialBatch)
 	}
 	for _, projected := range initialBatch.Files {
 		individual := file(projected.File)
-		left, _ := json.Marshal(projected.Diagnostics)
-		right, _ := json.Marshal(individual.Files[0].Diagnostics)
+		left, _ := json.Marshal(projected.Findings)
+		right, _ := json.Marshal(individual.Files[0].Findings)
 		if string(left) != string(right) || initialBatch.SnapshotVersion != individual.SnapshotVersion {
 			t.Fatalf("batch/file mismatch: %s / %s", left, right)
 		}
 	}
 	initial := composition.session
 	write(configPath, config("b.ts")+"# comment only\n")
-	if got := file("a.ts"); len(got.Files[0].Diagnostics) != 1 || composition.session != initial {
+	if got := file("a.ts"); len(got.Files[0].Findings) != 1 || composition.session != initial {
 		t.Fatalf("equal settings replaced session: %+v", got)
 	}
 	write(configPath, config("a.ts"))
-	if got := file("b.ts"); len(got.Files[0].Diagnostics) != 1 || composition.session == initial {
+	if got := file("b.ts"); len(got.Files[0].Findings) != 1 || composition.session == initial {
 		t.Fatalf("scope replacement: %+v", got)
 	}
 	if _, err := initial.Current(); err == nil {
@@ -145,14 +145,14 @@ func TestServeConfigurationAndRPCRecovery(t *testing.T) {
 		t.Fatal("invalid config retained the prior session")
 	}
 	write(configPath, config("a.ts"))
-	if got := batch("a.ts", "b.ts"); len(got.Files[0].Diagnostics) != 0 || len(got.Files[1].Diagnostics) != 1 {
+	if got := batch("a.ts", "b.ts"); len(got.Files[0].Findings) != 0 || len(got.Files[1].Findings) != 1 {
 		t.Fatalf("configuration recovery: %+v", got)
 	}
 	if removed := call("reanalyze", nil); removed.Error == nil || removed.Error.Code != -32601 {
 		t.Fatalf("reanalyze must be unknown: %+v", removed)
 	}
 	write(rulePath, "throw new Error('invalid entry');")
-	if got := file("b.ts"); len(got.Files[0].Diagnostics) != 1 || len(got.Problems) != 0 {
+	if got := file("b.ts"); len(got.Files[0].Findings) != 1 || len(got.Problems) != 0 {
 		t.Fatalf("unbuilt source edit affected publication: %+v", got)
 	}
 	build()
@@ -161,12 +161,12 @@ func TestServeConfigurationAndRPCRecovery(t *testing.T) {
 	}
 	write(rulePath, rule)
 	build()
-	if got := batch("a.ts", "b.ts"); len(got.Files[1].Diagnostics) != 1 || len(got.Problems) != 0 {
+	if got := batch("a.ts", "b.ts"); len(got.Files[1].Findings) != 1 || len(got.Problems) != 0 {
 		t.Fatalf("rule recovery: %+v", got)
 	}
 	previous := composition.session
 	write(configPath, config("a.ts")+"source_links = \"links.json\"\n")
-	if got := file("b.ts"); len(got.Files[0].Diagnostics) != 1 || composition.session == previous || composition.settings[0].SourceLinks != "links.json" {
+	if got := file("b.ts"); len(got.Files[0].Findings) != 1 || composition.session == previous || composition.settings[0].SourceLinks != "links.json" {
 		t.Fatalf("source links replacement: %+v settings=%+v", got, composition.settings)
 	}
 	previous = composition.session

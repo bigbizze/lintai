@@ -244,11 +244,11 @@ func TestSourceIdentityUsesDiagnosticFileMapping(t *testing.T) {
 	p := newPublishedResult(result, digests, observe.Set{}, true)
 	files := []string{"./item.ts", outside, relative, inside}
 	projected := p.projectFiles(files, false)
-	if !slices.Equal(projected.Files, files) || !slices.Equal(projected.SourceDigests, []string{a, b, "", a}) || len(projected.Diagnostics[2]) != 0 {
+	if !slices.Equal(groupFiles(projected), files) || !slices.Equal(groupDigests(projected), []string{a, b, "", a}) || len(projected.Files[2].Diagnostics) != 0 {
 		t.Fatalf("projected: %+v", projected)
 	}
 	for i, file := range files {
-		if !slices.EqualFunc(result.DiagnosticsFor(file), projected.Diagnostics[i], func(a, b diagnostics.Diagnostic) bool { return a.Message == b.Message }) {
+		if !slices.EqualFunc(result.DiagnosticsFor(file), projected.Files[i].Diagnostics, func(a, b diagnostics.Diagnostic) bool { return a.Message == b.Message }) {
 			t.Fatalf("inconsistent grouping for %s", file)
 		}
 	}
@@ -375,7 +375,51 @@ func TestProjectAllOmitsIdentityAliases(t *testing.T) {
 	root := t.TempDir()
 	result := Result{files: fileKeys{root: root, physical: root, aliases: map[string]string{"a.ts": "a.ts"}}, AnalyzedFiles: []string{"a.ts"}}
 	projected := newPublishedResult(result, nil, observe.Set{}, true).projectFiles(nil, true)
-	if !slices.Equal(projected.Files, []string{"a.ts"}) {
+	if !slices.Equal(groupFiles(projected), []string{"a.ts"}) || len(projected.Aliases) != 0 {
 		t.Fatalf("files: %v", projected.Files)
 	}
+}
+
+func TestResolveFileAliasesIsOrderIndependentAndRejectsAmbiguity(t *testing.T) {
+	root := t.TempDir()
+	keys := fileKeys{root: root, physical: root}
+	analyzed := map[string]struct{}{"a/shared.ts": {}, "b/shared.ts": {}}
+	declare := func(namespace, alias, file string) aliasDeclaration {
+		return aliasDeclaration{namespace, alias, file}
+	}
+	coalesced := []aliasDeclaration{declare("p", "link.ts", "a/shared.ts"), declare("q", "link.ts", "a/shared.ts"), declare("q", "a/shared.ts", "a/shared.ts")}
+	for _, declarations := range [][]aliasDeclaration{coalesced, {coalesced[2], coalesced[1], coalesced[0]}} {
+		got, err := resolveFileAliases(keys, slices.Clone(declarations), analyzed)
+		if err != nil || len(got) != 1 || got["link.ts"] != "a/shared.ts" {
+			t.Fatalf("aliases = %v, %v", got, err)
+		}
+	}
+	for name, declarations := range map[string][]aliasDeclaration{
+		"conflict": {declare("p", "shared.ts", "a/shared.ts"), declare("q", "shared.ts", "b/shared.ts")},
+		"chain":    {declare("p", "x.ts", "y.ts"), declare("q", "y.ts", "a/shared.ts")},
+		"cycle":    {declare("p", "x.ts", "y.ts"), declare("q", "y.ts", "x.ts")},
+		"shadow":   {declare("p", "b/shared.ts", "a/shared.ts")},
+	} {
+		for _, order := range [][]aliasDeclaration{declarations, {declarations[len(declarations)-1], declarations[0]}} {
+			if _, err := resolveFileAliases(keys, slices.Clone(order), analyzed); err == nil {
+				t.Errorf("%s: expected an error", name)
+			}
+		}
+	}
+}
+
+func groupFiles(result FilesResult) []string {
+	files := make([]string, len(result.Files))
+	for i, group := range result.Files {
+		files[i] = group.File
+	}
+	return files
+}
+
+func groupDigests(result FilesResult) []string {
+	digests := make([]string, len(result.Files))
+	for i, group := range result.Files {
+		digests[i] = group.SourceDigest
+	}
+	return digests
 }

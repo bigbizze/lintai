@@ -1,30 +1,22 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Linter } from "eslint";
-import { createLintaiPlugin } from "./index.js";
+import { createLintaiPlugin, createLintaiSession } from "./index.js";
 
-test("an unavailable server reports on every file of an operation, including an empty batch", async () => {
+test("an infrastructure failure throws from capture and is reported by a live plugin", () => {
+	const session = createLintaiSession({ binary: "/absent/lintai" });
+	assert.throws(() => session.capture([]), /lintai serve \(\/absent\/lintai\) failed/);
+	session.dispose();
+	session.dispose();
+	assert.throws(() => session.capture(["a.js"]), /disposed/);
+});
+
+test("a live plugin reports an unavailable server on each visit", () => {
 	const plugin = createLintaiPlugin({ binary: "/absent/lintai" });
-	const verify = (file: string) => new Linter().verify("const a = 1;", plugin.configs.all, file);
 	try {
-		await plugin.withFileBatch([], ({ problems }) =>
-			assert.match(problems[0], /Could not analyze the workspace/),
-		);
-		await plugin.withFileBatch(["a.js", "b.js"], async ({ problems }) => {
-			assert.equal(verify("a.js")[0]?.message, problems[0]);
-			assert.equal(verify("b.js")[0]?.message, problems[0]);
-			assert.throws(() => verify("c.js"), /was not supplied/);
-			await assert.rejects(
-				plugin.withFileBatch(["c.js"], () => {
-					assert.equal(verify("c.js")[0]?.ruleId, "lintai/error");
-					throw new Error("cancelled");
-				}),
-				/cancelled/,
-			);
-			assert.throws(() => verify("c.js"), /was not supplied/);
-		});
-		assert.equal(verify("a.js")[0]?.ruleId, "lintai/error");
-		assert.equal(verify("a.js")[0]?.ruleId, "lintai/error");
+		const verify = (file: string) => new Linter().verify("const a = 1;", plugin.configs.all, file);
+		assert.match(verify("a.js")[0]?.message ?? "", /Could not analyze the workspace/);
+		assert.equal(verify("b.js")[0]?.ruleId, "lintai/error");
 	} finally {
 		plugin.dispose();
 	}

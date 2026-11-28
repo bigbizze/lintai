@@ -97,7 +97,7 @@ func TestSessionRetainsAndReplacesCurrentGeneration(t *testing.T) {
 	// Projection reads the completed capture after disk has changed.
 	projected := session.currentResult.projectFiles([]string{a, "src/a.ts", "src/b.ts"}, false)
 	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(original)))
-	if !slices.Equal(projected.SourceDigests, []string{digest, digest, ""}) || len(projected.Diagnostics[0]) != 1 {
+	if !slices.Equal(groupDigests(projected), []string{digest, digest, ""}) || len(projected.Files[0].Diagnostics) != 1 {
 		t.Fatalf("projection after edit: %+v", projected)
 	}
 	changed := assertFresh()
@@ -110,10 +110,10 @@ func TestSessionRetainsAndReplacesCurrentGeneration(t *testing.T) {
 		t.Fatalf("new source not discovered: %+v", added.Diagnostics)
 	}
 	all, err := session.RefreshAll(context.Background())
-	if err != nil || !slices.Equal(all.Files, []string{"src/a.ts", "src/b.ts"}) || !slices.Equal(all.SourceDigests, []string{
+	if err != nil || !slices.Equal(groupFiles(all), []string{"src/a.ts", "src/b.ts"}) || !slices.Equal(groupDigests(all), []string{
 		fmt.Sprintf("%x", sha256.Sum256([]byte("export const value = 2;\n"))),
 		fmt.Sprintf("%x", sha256.Sum256([]byte("export const other = 3;\n"))),
-	}) || len(all.Diagnostics[0]) != 1 || len(all.Diagnostics[1]) != 1 || evaluations.Load() != 4 {
+	}) || len(all.Files[0].Diagnostics) != 1 || len(all.Files[1].Diagnostics) != 1 || evaluations.Load() != 4 {
 		t.Fatalf("all-file projection: %+v %v", all, err)
 	}
 	if err := os.Remove(a); err != nil {

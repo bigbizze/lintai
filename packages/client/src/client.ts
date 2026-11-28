@@ -4,19 +4,12 @@ import path from "node:path";
 import { FrameDecoder, encodeFrame } from "./frames.js";
 import { type ServeTransport, spawnNativeServe } from "./transport.js";
 
-export type Diagnostic = {
-	rule_id: string;
-	assertion_id: string;
-	diagnostic_kind: string;
-	severity: string;
+export type Finding = {
+	ruleId: string;
+	assertionId: string;
+	severity: "error" | "warning";
 	message: string;
-	source_location?: {
-		file: string;
-		startLine: number;
-		startColumn: number;
-		endLine: number;
-		endColumn: number;
-	};
+	range?: [number, number, number, number];
 };
 
 export type LintaiOptions = {
@@ -30,14 +23,16 @@ export type LintaiOptions = {
 	suppressionsLocation?: string;
 };
 
-export type FileAnalysis = { file: string; sourceDigest: string; diagnostics: Diagnostic[] };
+export type FileAnalysis = { file: string; sourceDigest: string; findings: Finding[] };
 export type FilesAnalysis = {
 	snapshotVersion: string;
 	problems: string[];
+	physicalRoot: string;
+	aliases: Record<string, string>;
 	files: FileAnalysis[];
 };
 
-export const protocolVersion = 3;
+export const protocolVersion = 4;
 type Selector = readonly string[] | "all";
 type Response = {
 	jsonrpc: string;
@@ -47,7 +42,8 @@ type Response = {
 };
 export type SpawnServe = (binary: string, args: string[], cwd: string) => ServeTransport;
 
-class AnalysisError extends Error {}
+/** A recoverable workspace analysis failure reported by the server. */
+export class AnalysisError extends Error {}
 
 export class LintAIClient {
 	private transport?: ServeTransport;
@@ -65,13 +61,10 @@ export class LintAIClient {
 		if (this.disposed) throw new Error("lintai client is disposed");
 		const { workspaceRoot, binary, ruleWorkers, factLimit, rulesLock, suppressionsLocation } =
 			this.options;
+		const executable = binary ?? findBinary(workspaceRoot);
 		try {
 			if (!this.transport) {
-				this.transport = this.spawnServe(
-					binary ?? findBinary(workspaceRoot),
-					["serve"],
-					workspaceRoot,
-				);
+				this.transport = this.spawnServe(executable, ["serve"], workspaceRoot);
 				process.once("exit", this.exit);
 				const result = this.request("initialize", {
 					protocolVersion,
@@ -87,36 +80,16 @@ export class LintAIClient {
 					);
 				}
 			}
-			const result = this.request("diagnostics/files", { files }) as FilesAnalysis;
-			if (
-				!result ||
-				typeof result.snapshotVersion !== "string" ||
-				!Array.isArray(result.problems) ||
-				!result.problems.every((p) => typeof p === "string") ||
-				!Array.isArray(result.files) ||
-				!result.files.every(
-					(group) =>
-						group &&
-						typeof group.file === "string" &&
-						group.file.trim() &&
-						typeof group.sourceDigest === "string" &&
-						Array.isArray(group.diagnostics),
-				)
-			) {
-				throw new Error("invalid lintai diagnostics/files response");
-			}
-			if (
-				files === "all"
-					? new Set(result.files.map((group) => group.file)).size !== result.files.length
-					: files.length !== result.files.length ||
-						result.files.some((group, i) => group.file !== files[i])
-			) {
-				throw new Error("unexpected file groups in lintai diagnostics/files response");
-			}
+			const result = this.request("diagnostics/files", { files });
+			validateFilesAnalysis(result, files);
 			return result;
 		} catch (error) {
-			if (!(error instanceof AnalysisError)) this.disconnect(true);
-			throw error;
+			if (error instanceof AnalysisError) throw error;
+			this.disconnect(true);
+			throw new Error(
+				`lintai serve (${executable}) failed: ${error instanceof Error ? error.message : error}`,
+				{ cause: error },
+			);
 		}
 	}
 
@@ -174,6 +147,61 @@ export class LintAIClient {
 		this.disconnect(false);
 	}
 }
+const isString = (value: unknown): value is string => typeof value === "string";
+const isFinding = (value: unknown): value is Finding => {
+	const item = value as Finding;
+	return (
+		!!item &&
+		typeof item === "object" &&
+		isString(item.ruleId) &&
+		isString(item.assertionId) &&
+		(item.severity === "error" || item.severity === "warning") &&
+		isString(item.message) &&
+		(item.range === undefined ||
+			(Array.isArray(item.range) &&
+				item.range.length === 4 &&
+				item.range.every((n) => Number.isInteger(n) && n >= 1)))
+	);
+};
+
+function validateFilesAnalysis(value: unknown, files: Selector): asserts value is FilesAnalysis {
+	const result = value as FilesAnalysis;
+	const valid =
+		!!result &&
+		isString(result.snapshotVersion) &&
+		Array.isArray(result.problems) &&
+		result.problems.every(isString) &&
+		isString(result.physicalRoot) &&
+		!!result.aliases &&
+		typeof result.aliases === "object" &&
+		!Array.isArray(result.aliases) &&
+		Object.values(result.aliases).every(isString) &&
+		Array.isArray(result.files) &&
+		result.files.every(
+			(group) =>
+				!!group &&
+				isString(group.file) &&
+				group.file.trim() !== "" &&
+				isString(group.sourceDigest) &&
+				/^([0-9a-f]{64})?$/.test(group.sourceDigest) &&
+				Array.isArray(group.findings) &&
+				group.findings.every(isFinding),
+		);
+	if (!valid) throw new Error("invalid lintai diagnostics/files response");
+	const names = new Set(result.files.map((group) => group.file));
+	const aliases = Object.entries(result.aliases);
+	if (
+		files === "all"
+			? names.size !== result.files.length ||
+				aliases.some(([alias, file]) => names.has(alias) || !names.has(file))
+			: aliases.length !== 0 ||
+				files.length !== result.files.length ||
+				result.files.some((group, i) => group.file !== files[i])
+	) {
+		throw new Error("unexpected file groups in lintai diagnostics/files response");
+	}
+}
+
 export function findWorkspaceRoot(from: string): string {
 	const markers = ["lintai.toml", "pnpm-workspace.yaml", "lerna.json", "nx.json"];
 	let dir = from;
