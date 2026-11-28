@@ -2,8 +2,10 @@ package engine
 
 import (
 	"context"
+	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -224,6 +226,15 @@ func TestBoundProducerOwnershipAndConfigurationIdentity(t *testing.T) {
 }
 
 func TestDocumentNamesAndLookup(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		root, external := `C:\work\A`, `D:\shared\.\rules.sql`
+		if got := reportingName(root, external); got != "D:/shared/rules.sql" {
+			t.Fatalf("cross-volume reporting name %q", got)
+		}
+		if got := documentName(root, external); got != "D:/shared/rules.sql" {
+			t.Fatalf("cross-volume group name %q", got)
+		}
+	}
 	root := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "item.ts")
 	inside := filepath.Join(root, "item.ts")
@@ -370,10 +381,12 @@ func TestOperationUsesOneWorkspace(t *testing.T) {
 }
 
 // documentProducer reports its anchors under one file name, declares the
-// document that name reached and the digest of the text it read.
+// document that name reached and the digest of the text it read. Extra names
+// further declarations.
 type documentProducer struct {
 	*parallelFixtureProducer
 	file, document, digest string
+	extra                  map[string]string
 }
 
 func (producer *documentProducer) Prepare(ctx context.Context, request backend.CollectionRequest, mode observe.Mode) (backend.Generation, error) {
@@ -387,6 +400,7 @@ func (producer *documentProducer) Prepare(ctx context.Context, request backend.C
 	prepared.metadata.SourceDigests = map[string]string{producer.file: producer.digest}
 	if producer.document != "" {
 		prepared.metadata.Documents = map[string]string{producer.file: producer.document}
+		maps.Copy(prepared.metadata.Documents, producer.extra)
 	}
 	return prepared, nil
 }
@@ -407,9 +421,25 @@ func TestProducersReportingOneDocumentJoin(t *testing.T) {
 		t.Fatal(err)
 	}
 	digest := strings.Repeat("d", 64)
-	catalog := &documentProducer{parallelFixtureProducer: newParallelFixtureProducer(), file: "catalog/items.sql", digest: digest}
-	// The second producer reached the same file through a link.
+	// The same declared name is scoped to each producer. The first producer's
+	// unrelated declaration does not change the second producer's document.
+	catalog := &documentProducer{parallelFixtureProducer: newParallelFixtureProducer(), file: "catalog/items.sql", document: filepath.Join(physical, "catalog", "items.sql"), digest: digest, extra: map[string]string{"link/items.sql": filepath.Join(physical, "elsewhere", "items.sql")}}
+	// The second producer captured the link's destination before it moved.
 	other := &documentProducer{parallelFixtureProducer: newParallelFixtureProducer(), file: "link/items.sql", document: filepath.Join(physical, "catalog", "items.sql"), digest: digest}
+	t.Run("moved link", func(t *testing.T) {
+		writeTestFile(t, workspace, "catalog/items.sql", "captured")
+		writeTestFile(t, workspace, "elsewhere/items.sql", "new target")
+		link := filepath.Join(workspace, "link")
+		if err := os.Symlink("catalog", link); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		if err := os.Remove(link); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink("elsewhere", link); err != nil {
+			t.Fatal(err)
+		}
+	})
 	other.description.Namespace = "other"
 	other.description.BaseRelations[0].Predicate.Name = "other.item"
 	other.description.Helpers[0].Predicate.Name = "other.usable"
@@ -430,6 +460,21 @@ func TestProducersReportingOneDocumentJoin(t *testing.T) {
 	if err != nil || len(checked.DiagnosticsFor(filepath.Join(physical, "catalog", "items.sql"))) != 6 || slices.ContainsFunc(checked.AnalyzedFiles, func(file string) bool { return file != "catalog/items.sql" }) {
 		t.Fatalf("lookup by the physical path: %+v, %v", checked, err)
 	}
+	if len(checked.DiagnosticsFor(filepath.Join(physical, "link", "items.sql"))) != 0 || len(checked.DiagnosticsFor(filepath.Join(physical, "elsewhere", "items.sql"))) != 0 {
+		t.Fatal("lookup followed the moved link instead of the captured document")
+	}
+	// Equal declarations under equivalent names coalesce. Different
+	// destinations for one name are rejected with the producer and the name.
+	linkName := filepath.ToSlash(filepath.Join(physical, "link", "items.sql"))
+	other.extra = map[string]string{linkName: other.document}
+	if result, err := session.RefreshAll(context.Background()); err != nil || !slices.Equal(groupFiles(result), []string{"catalog/items.sql"}) {
+		t.Fatalf("equal declarations did not coalesce: %+v, %v", result, err)
+	}
+	other.extra = map[string]string{linkName: filepath.Join(physical, "catalog", "other.sql")}
+	if _, err := session.RefreshAll(context.Background()); err == nil || !strings.Contains(err.Error(), `producer "other"`) || !strings.Contains(err.Error(), `"link/items.sql" is declared as both`) {
+		t.Fatalf("contradictory declarations were accepted: %v", err)
+	}
+	other.extra = nil
 	other.digest = strings.Repeat("e", 64)
 	if _, err := session.RefreshAll(context.Background()); err == nil || !strings.Contains(err.Error(), "conflicting source identities") {
 		t.Fatalf("conflicting text claims were accepted: %v", err)

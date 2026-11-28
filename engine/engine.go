@@ -399,7 +399,7 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, mode observe.Mode, st
 		evaluated:  make(map[string]struct{}),
 		completed:  make(map[string]struct{}),
 		known:      make(map[string]struct{}),
-		coverage:   make(map[string]map[string]struct{}),
+		coverage:   make(map[string]map[string]map[string]struct{}),
 		assertions: make(map[string]map[string]assertionSchema),
 	}
 	evidence := executionEvidence{reusable: true}
@@ -424,6 +424,9 @@ func (e *Session) analyzeWithEvidence(ctx context.Context, mode observe.Mode, st
 		lock, err := ReadRulesLock(config.RulesLock)
 		if err != nil {
 			return integrity(err)
+		}
+		if lock.Suppressions, err = allowanceKeys(config.WorkspaceRoot, lock.Suppressions); err != nil {
+			return integrity(fmt.Errorf("rules lock %s: %w", config.RulesLock, err))
 		}
 		if err := lock.verify(config, ruleCatalog.digest, producerCatalog); err != nil {
 			return integrity(err)
@@ -547,7 +550,7 @@ type ruleOutcome struct {
 	completed   bool
 	diagnostics []diagnostics.Diagnostic
 	findings    []violation
-	coverage    map[string]struct{}
+	coverage    map[string]map[string]struct{}
 	assertions  map[string]assertionSchema
 }
 
@@ -653,12 +656,10 @@ func runPreparedRule(rule *ruleRecord, assembled composedFacts, options Config, 
 			Explanation:    append([]string(nil), item.explanation...),
 		})
 	}
-	outcome.coverage = make(map[string]struct{})
+	outcome.coverage = make(map[string]map[string]struct{})
 	for pred := range rule.plan.basePredicates {
 		namespace, _, _ := strings.Cut(pred.Symbol, ".")
-		for file := range assembled.producerFiles[namespace] {
-			outcome.coverage[file] = struct{}{}
-		}
+		outcome.coverage[namespace] = assembled.producerFiles[namespace]
 	}
 	outcome.assertions = make(map[string]assertionSchema)
 	for _, decl := range rule.plan.reportDecls {

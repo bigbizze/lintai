@@ -46,15 +46,21 @@ func secondCoverageProducer() *coverageProducer {
 
 // V01, V25, V35, V38: a non-file producer's own tracking key and null key
 // are matched generically; another producer's coverage cannot prune them.
+// A dependency outside the workspace reported by its absolute path is saved
+// under the same portable relative name as the relative spelling.
 func TestSuppressionProducerCoverage(t *testing.T) {
 	repo, err := filepath.Abs("..")
 	if err != nil {
 		t.Fatal(err)
 	}
 	workspace := t.TempDir()
+	physical, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
 	p := newParallelFixtureProducer()
 	support := p.anchors["item-b"]
-	support.Location.File = "../catalog/items.sql"
+	support.Location.File = filepath.ToSlash(filepath.Join(filepath.Dir(physical), "catalog", "items.sql"))
 	support.Tracking = nil
 	p.anchors["item-b"] = support
 	catalog := &coverageProducer{parallelFixtureProducer: p, revision: "catalog:1"}
@@ -63,6 +69,7 @@ func TestSuppressionProducerCoverage(t *testing.T) {
 	writeTestFile(t, workspace, "lintai-rules/other.ts", parallelRuleSource("fixture.other", "Decl violation(Entity, Code). violation(Entity, Code) :- other.usable(Entity, Code).", "(row) => row.Code"))
 	options := parallelFixtureOptions(t, repo, workspace)
 	options.RuleWorkers = 2
+	options.SuppressionsLocation = filepath.Join(t.TempDir(), "allowances.json")
 	session := openTestSession(t, options, catalog, other)
 	result, err := session.UpdateSuppressions(context.Background(), SuppressionUpdate{All: true})
 	if err != nil {
@@ -94,7 +101,7 @@ func TestSuppressionProducerCoverage(t *testing.T) {
 			t.Fatalf("missing producer-qualified entity %q", id)
 		}
 	}
-	path := filepath.Join(workspace, suppressions.DefaultFile)
+	path := options.SuppressionsLocation
 	originalBytes, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
@@ -126,6 +133,16 @@ func TestSuppressionProducerCoverage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	lockPath := filepath.Join(t.TempDir(), "approval.json")
+	if _, err := session.ApproveRules(context.Background(), lockPath); err != nil {
+		t.Fatal(err)
+	}
+	approved, err := ReadRulesLock(lockPath)
+	if err != nil || !slices.ContainsFunc(approved.Suppressions, func(entry suppressions.Entry) bool {
+		return entry.Rule == "fixture.catalog" && entry.File == "../catalog/items.sql"
+	}) {
+		t.Fatalf("external approval lost the portable dependency name: %+v, %v", approved.Suppressions, err)
+	}
 	var foundNull, foundKey bool
 	for _, entry := range saved {
 		if entry.Rule == "fixture.catalog" {
@@ -156,7 +173,8 @@ func TestSuppressionProducerCoverage(t *testing.T) {
 	}
 	warningOptions := options
 	warningOptions.Rule = map[string]RulePolicy{"fixture.catalog": {Severity: "warning"}, "fixture.other": {Severity: "warning"}}
-	warningResult, err := openTestSession(t, warningOptions, catalog, other).Check(context.Background())
+	warningSession := openTestSession(t, warningOptions, catalog, other)
+	warningResult, err := warningSession.Check(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,6 +185,11 @@ func TestSuppressionProducerCoverage(t *testing.T) {
 		if item.Severity != diagnostics.SeverityWarning {
 			t.Fatalf("unexpected severity: %+v", item)
 		}
+	}
+	groups, err := warningSession.RefreshAll(context.Background())
+	external := filepath.ToSlash(filepath.Join(filepath.Dir(physical), "catalog", "items.sql"))
+	if err != nil || len(groups.Files) != 2 || groups.Files[0].File != external || len(groups.Files[0].Diagnostics) != 1 || groups.Files[0].Diagnostics[0].SourceLocation.File != "../catalog/items.sql" {
+		t.Fatalf("external group and reporting names: %+v, %v", groups.Files, err)
 	}
 	catalog.rows = nil
 	catalog.revision = "catalog:2"
@@ -212,10 +235,6 @@ func TestSuppressionProducerCoverage(t *testing.T) {
 	if _, err := session.UpdateSuppressions(context.Background(), SuppressionUpdate{All: true}); err != nil {
 		t.Fatal(err)
 	}
-	physical, err := filepath.EvalSymlinks(workspace)
-	if err != nil {
-		t.Fatal(err)
-	}
 	catalog.rows, catalog.revision = nil, "catalog:5"
 	catalog.files = []string{filepath.ToSlash(filepath.Join(physical, "catalog/items.sql")), filepath.ToSlash(filepath.Join(physical, "../catalog/items.sql"))}
 	if _, err := session.UpdateSuppressions(context.Background(), SuppressionUpdate{Prune: true}); err != nil {
@@ -228,6 +247,146 @@ func TestSuppressionProducerCoverage(t *testing.T) {
 	}
 	if len(reintroduced.Diagnostics) != 3 {
 		t.Fatalf("absolute coverage did not prune relative allowances: %+v", reintroduced.Diagnostics)
+	}
+}
+
+// Allowances recorded for project-relative locations match the same findings
+// reported at the equivalent absolute locations. Only the producer's own
+// coverage of the document prunes them.
+func TestSuppressionEquivalentReportingNames(t *testing.T) {
+	repo, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	writeTestFile(t, workspace, "lintai-rules/catalog.ts", parallelRuleSource("fixture.catalog", "Decl violation(Entity, Code). violation(Entity, Code) :- catalog.usable(Entity, Code).", "(row) => row.Code"))
+	physical, err := filepath.EvalSymlinks(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	producer := &coverageProducer{parallelFixtureProducer: newParallelFixtureProducer(), revision: "catalog:1"}
+	rows := producer.rows
+	session := openTestSession(t, parallelFixtureOptions(t, repo, workspace), producer)
+	recorded, err := session.UpdateSuppressions(context.Background(), SuppressionUpdate{All: true})
+	if err != nil || len(recorded.Suppressed) != 3 {
+		t.Fatalf("recording: %+v, %v", recorded, err)
+	}
+	path := filepath.Join(workspace, suppressions.DefaultFile)
+	policy, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	absolute := filepath.ToSlash(filepath.Join(physical, "catalog", "items.sql"))
+	for id, support := range producer.anchors {
+		support.Location.File = absolute
+		producer.anchors[id] = support
+	}
+	producer.revision = "catalog:2"
+	checked, err := session.Check(context.Background())
+	if err != nil || len(checked.Suppressed) != 3 || len(checked.Diagnostics) != 0 || len(checked.UnusedSuppressions) != 0 {
+		t.Fatalf("absolute locations did not match the saved allowances: %+v, %v", checked, err)
+	}
+	if file := checked.Suppressed[0].SourceLocation.File; file != "catalog/items.sql" {
+		t.Fatalf("reporting name %q", file)
+	}
+	if current, err := os.ReadFile(path); err != nil || !bytes.Equal(current, policy) {
+		t.Fatalf("a check changed the policy: %v", err)
+	}
+	entries, err := suppressions.Parse(path, policy)
+	if err != nil || len(entries) != 1 || entries[0].File != "catalog/items.sql" {
+		t.Fatalf("recorded reporting name: %+v, %v", entries, err)
+	}
+	absoluteEntries := slices.Clone(entries)
+	absoluteEntries[0].File = absolute
+	absolutePolicy, err := suppressions.Encode(absoluteEntries)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, absolutePolicy, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	checked, err = session.Check(context.Background())
+	if err != nil || len(checked.Suppressed) != 3 || len(checked.Diagnostics) != 0 {
+		t.Fatalf("absolute saved spelling did not match: %+v, %v", checked, err)
+	}
+	if current, err := os.ReadFile(path); err != nil || !bytes.Equal(current, absolutePolicy) {
+		t.Fatalf("a check rewrote the absolute policy: %v", err)
+	}
+	duplicate, err := suppressions.Encode(append(slices.Clone(entries), absoluteEntries...))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, duplicate, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := session.Check(context.Background()); err == nil || !strings.Contains(err.Error(), "invalid policy") {
+		t.Fatalf("duplicate equivalent allowances were accepted: %v", err)
+	}
+	if err := os.WriteFile(path, absolutePolicy, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	producer.files, producer.revision = []string{absolute}, "catalog:3"
+	if _, err := session.UpdateSuppressions(context.Background(), SuppressionUpdate{Prune: true}); err != nil {
+		t.Fatal(err)
+	}
+	if current, err := os.ReadFile(path); err != nil || !bytes.Equal(current, policy) {
+		t.Fatalf("prune did not save the deterministic reporting name: %v", err)
+	}
+	producer.rows, producer.revision = nil, "catalog:4"
+	if _, err := session.UpdateSuppressions(context.Background(), SuppressionUpdate{Prune: true}); err != nil {
+		t.Fatal(err)
+	}
+	producer.rows, producer.revision = rows, "catalog:5"
+	restored, err := session.Check(context.Background())
+	if err != nil || len(restored.Diagnostics) != 3 || len(restored.Suppressed) != 0 {
+		t.Fatalf("covered prune did not retire the allowances: %+v, %v", restored, err)
+	}
+}
+
+// A rule joining two producers cannot use one producer's coverage to prune
+// allowances for anchors owned by the other producer.
+func TestSuppressionCoverageBelongsToAnchorProducer(t *testing.T) {
+	repo, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	program := "Decl violation(Entity, Code). violation(Entity, Code) :- catalog.usable(Entity, Code), other.usable(_, Code)."
+	writeTestFile(t, workspace, "lintai-rules/join.ts", parallelRuleSource("fixture.join", program, "(row) => row.Code"))
+	catalog := &coverageProducer{parallelFixtureProducer: newParallelFixtureProducer(), revision: "catalog:1"}
+	other := secondCoverageProducer()
+	rows := catalog.rows
+	session := openTestSession(t, parallelFixtureOptions(t, repo, workspace), catalog, other)
+	recorded, err := session.UpdateSuppressions(context.Background(), SuppressionUpdate{All: true})
+	if err != nil || len(recorded.Suppressed) != 3 {
+		t.Fatalf("recording joined findings: %+v, %v", recorded, err)
+	}
+	path := filepath.Join(workspace, suppressions.DefaultFile)
+	policy, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	catalog.rows, catalog.revision = nil, "catalog:2"
+	pruned, err := session.UpdateSuppressions(context.Background(), SuppressionUpdate{Prune: true})
+	if err != nil || len(pruned.UnusedSuppressions) != 0 {
+		t.Fatalf("other producer's coverage authorized a prune: %+v, %v", pruned, err)
+	}
+	if current, err := os.ReadFile(path); err != nil || !bytes.Equal(current, policy) {
+		t.Fatalf("other producer's coverage changed the allowances: %v", err)
+	}
+	catalog.rows, catalog.revision = rows, "catalog:3"
+	checked, err := session.Check(context.Background())
+	if err != nil || len(checked.Suppressed) != 3 || len(checked.Diagnostics) != 0 {
+		t.Fatalf("uncovered allowances were not retained: %+v, %v", checked, err)
+	}
+	catalog.rows, catalog.files, catalog.revision = nil, []string{"catalog/items.sql"}, "catalog:4"
+	if _, err := session.UpdateSuppressions(context.Background(), SuppressionUpdate{Prune: true}); err != nil {
+		t.Fatal(err)
+	}
+	catalog.rows, catalog.revision = rows, "catalog:5"
+	checked, err = session.Check(context.Background())
+	if err != nil || len(checked.Diagnostics) != 3 || len(checked.Suppressed) != 0 {
+		t.Fatalf("owner's coverage did not retire the allowances: %+v, %v", checked, err)
 	}
 }
 

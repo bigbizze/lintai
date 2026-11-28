@@ -30,8 +30,12 @@ type GenerationMetadata struct {
 	// Documents maps a file name this generation reports, in analyzed files,
 	// source digests or anchor locations, to the canonical absolute path of
 	// the document that supplied its text, recorded when the producer read
-	// it. A name without an entry is its own document under the workspace
-	// root. Non-file producers leave it empty.
+	// it. Names are interpreted lexically against WorkspaceRoot, without
+	// looking up files again. Equivalent names within this generation may
+	// declare the same destination, but conflicting destinations are invalid.
+	// Declarations belong to this producer. A name without an entry is its
+	// own document, relative to the workspace root when not absolute.
+	// Non-file producers leave it empty.
 	Documents                map[string]string
 	Observations             observe.Set
 	ReusableFromObservations bool

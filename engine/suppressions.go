@@ -23,7 +23,7 @@ type runInfo struct {
 	lock                        *RulesLock
 	evaluated, completed, known map[string]struct{}
 	root                        string
-	coverage                    map[string]map[string]struct{}
+	coverage                    map[string]map[string]map[string]struct{} // rule, producer, document
 	assertions                  map[string]map[string]assertionSchema
 	complete                    bool
 	factRevision                string
@@ -75,8 +75,31 @@ func loadSuppressions(config Config, update SuppressionUpdate) (suppressionsStat
 	if err != nil {
 		return suppressionsState{}, err
 	}
+	if file, err = allowanceKeys(config.WorkspaceRoot, file); err != nil {
+		return suppressionsState{}, &suppressions.UsageError{Path: path, Message: err.Error()}
+	}
 	return suppressionsState{path: path, file: file, snapshot: snapshot, observations: observations}, nil
 }
+
+// allowanceKeys names the file of each saved entry by its reporting name,
+// the key that current findings use. Two entries that then share a file, rule
+// and assertion are an invalid policy, so their counts never combine.
+func allowanceKeys(root string, file suppressions.File) (suppressions.File, error) {
+	keyed := make(suppressions.File, len(file))
+	spellings := make(map[string]string, len(file))
+	for index, entry := range file {
+		spelling := entry.File
+		entry.File = reportingName(root, entry.File)
+		id := suppressions.EntryID(entry)
+		if previous, duplicate := spellings[id]; duplicate {
+			return nil, fmt.Errorf("invalid policy: entries %q and %q name the same file %q for rule %s assertion %s/%d", previous, spelling, entry.File, entry.Rule, entry.Assertion.Name, entry.Assertion.Arity)
+		}
+		spellings[id] = spelling
+		keyed[index] = entry
+	}
+	return keyed, nil
+}
+
 func typedReason(v facts.Value) ([2]string, error) {
 	switch v.Kind {
 	case facts.StringKind:
@@ -220,11 +243,14 @@ func selectedRule(update SuppressionUpdate, rule string) bool {
 	}
 	return false
 }
-func covered(run runInfo, entry suppressions.Entry) bool {
+
+// Coverage belongs to the group owner and to a completed rule that used that
+// producer. Another producer in a joined rule cannot authorize its pruning.
+func covered(run runInfo, entry suppressions.Entry, group suppressions.Group) bool {
 	if _, ok := run.evaluated[entry.Rule]; !ok {
 		return false
 	}
-	if _, ok := run.coverage[entry.Rule][documentName(run.root, entry.File)]; !ok {
+	if _, ok := run.coverage[entry.Rule][group.Namespace][documentName(run.root, entry.File)]; !ok {
 		return false
 	}
 	schema, ok := run.assertions[entry.Rule][entry.Assertion.Name]
@@ -301,7 +327,7 @@ func applySuppressions(config Config, update SuppressionUpdate, state suppressio
 				if current := groups[id]; current != nil {
 					found = len(current.indexes)
 				}
-				if covered(run, entry) && found < group.Count {
+				if covered(run, entry, group) && found < group.Count {
 					group.Count = found
 				}
 				if group.Count > 0 {
@@ -352,7 +378,7 @@ func applySuppressions(config Config, update SuppressionUpdate, state suppressio
 						suppressed[index] = true
 					}
 				}
-				if found < group.Count && covered(run, entry) {
+				if found < group.Count && covered(run, entry, group) {
 					result.UnusedSuppressions = append(result.UnusedSuppressions, suppressions.Unused{File: entry.File, RuleID: entry.Rule, Assertion: entry.Assertion, Description: group.Description, Allowed: group.Count, Found: found})
 				}
 			}
