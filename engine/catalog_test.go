@@ -2,8 +2,7 @@ package engine
 
 import (
 	"context"
-	"github.com/bigbizze/lintai/backend"
-	"github.com/bigbizze/lintai/observe"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -12,9 +11,11 @@ import (
 
 	"codeberg.org/TauCeti/mangle-go/ast"
 	"codeberg.org/TauCeti/mangle-go/parse"
+	"github.com/bigbizze/lintai/backend"
 	"github.com/bigbizze/lintai/backend/typescript"
 	"github.com/bigbizze/lintai/diagnostics"
 	"github.com/bigbizze/lintai/facts"
+	"github.com/bigbizze/lintai/observe"
 )
 
 func typeScriptCatalogForTest(t *testing.T) ([]parse.SourceUnit, map[ast.PredicateSym]ast.Decl) {
@@ -380,6 +381,23 @@ func TestProjectAllOmitsIdentityAliases(t *testing.T) {
 	}
 }
 
+type aliasValidationProducer struct {
+	*parallelFixtureProducer
+	analyzed []string
+	aliases  map[string]string
+}
+
+func (producer *aliasValidationProducer) Prepare(ctx context.Context, request backend.CollectionRequest, mode observe.Mode) (backend.Generation, error) {
+	generation, err := producer.parallelFixtureProducer.Prepare(ctx, request, mode)
+	if err != nil {
+		return nil, err
+	}
+	prepared := generation.(*parallelGeneration)
+	prepared.metadata.AnalyzedFiles = slices.Clone(producer.analyzed)
+	prepared.metadata.FileAliases = maps.Clone(producer.aliases)
+	return prepared, nil
+}
+
 func TestResolveFileAliasesIsOrderIndependentAndRejectsAmbiguity(t *testing.T) {
 	root := t.TempDir()
 	keys := fileKeys{root: root, physical: root}
@@ -406,6 +424,52 @@ func TestResolveFileAliasesIsOrderIndependentAndRejectsAmbiguity(t *testing.T) {
 			}
 		}
 	}
+
+	t.Run("shadow of a diagnostic range outside analyzed files", func(t *testing.T) {
+		repo, err := filepath.Abs("..")
+		if err != nil {
+			t.Fatal(err)
+		}
+		workspace := t.TempDir()
+		program := "Decl violation(Entity, Code). violation(Entity, Code) :- catalog.usable(Entity, Code), other.item(_, Code)."
+		writeTestFile(t, workspace, "lintai-rules/alias.ts", parallelRuleSource("fixture.alias", program, "(row) => row.Code"))
+
+		catalog := &aliasValidationProducer{parallelFixtureProducer: newParallelFixtureProducer()}
+		other := &aliasValidationProducer{
+			parallelFixtureProducer: newParallelFixtureProducer(),
+			analyzed:                []string{"other.sql"},
+			aliases:                 map[string]string{"catalog/items.sql": "other.sql"},
+		}
+		other.description.Namespace = "other"
+		other.description.BaseRelations[0].Predicate.Name = "other.item"
+		other.description.Helpers[0].Predicate.Name = "other.usable"
+		other.description.Schema.Prelude = strings.ReplaceAll(other.description.Schema.Prelude, "catalog.item", "other.item")
+		for id, support := range other.anchors {
+			support.Location.File = "other.sql"
+			other.anchors[id] = support
+		}
+		session := openTestSession(t, parallelFixtureOptions(t, repo, workspace), catalog, other)
+		assertShadow := func() {
+			t.Helper()
+			result, err := session.RefreshAll(context.Background())
+			if err == nil || !strings.Contains(err.Error(), `producer "other"`) || !strings.Contains(err.Error(), "catalog/items.sql") || !strings.Contains(err.Error(), "other.sql") || len(result.Files) != 0 {
+				t.Fatalf("expected a producer error rejecting the diagnostic file alias, got %+v, %v", result, err)
+			}
+		}
+
+		assertShadow()
+		other.aliases = nil
+		result, err := session.RefreshAll(context.Background())
+		if err != nil || !slices.Equal(groupFiles(result), []string{"catalog/items.sql", "other.sql"}) || len(result.Files[0].Diagnostics) != 3 || len(result.WorkspaceProblems) != 0 {
+			t.Fatalf("expected the unaliased diagnostic file after recovery, got %+v, %v", result, err)
+		}
+		catalogEmits, otherEmits := catalog.emitCalls.Load(), other.emitCalls.Load()
+		other.aliases = map[string]string{"catalog/items.sql": "other.sql"}
+		assertShadow()
+		if catalog.emitCalls.Load() != catalogEmits || other.emitCalls.Load() != otherEmits {
+			t.Fatal("unchanged generation should reuse cached anchors when validating aliases")
+		}
+	})
 }
 
 func groupFiles(result FilesResult) []string {

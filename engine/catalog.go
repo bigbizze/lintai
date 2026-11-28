@@ -281,6 +281,19 @@ func (catalog producerCatalog) collect(ctx context.Context, workspaceRoot string
 	if keys.aliases, err = resolveFileAliases(keys, declarations, published); err != nil {
 		return composedFacts{}, err
 	}
+	// Anchors arrive during emission, after alias declarations have been read.
+	// Check their canonical filenames with the same unaliased mapping used for
+	// analyzed files, including when a matching snapshot reuses old facts.
+	validateAnchorAliases := func(anchors map[string]facts.AnchorSupport) error {
+		if len(keys.aliases) == 0 {
+			return nil
+		}
+		for _, support := range anchors {
+			published[support.Location.File] = struct{}{}
+		}
+		_, err := resolveFileAliases(keys, declarations, published)
+		return err
+	}
 	for i := range preparedGenerations {
 		item := &preparedGenerations[i]
 		namespace := item.entry.description.Namespace
@@ -305,6 +318,9 @@ func (catalog producerCatalog) collect(ctx context.Context, workspaceRoot string
 	snapshotID := "sha256:" + hex.EncodeToString(digest[:])
 	captured := observe.Union(observations...)
 	if current != nil && current.snapshotID == snapshotID {
+		if err := validateAnchorAliases(current.anchors); err != nil {
+			return composedFacts{}, err
+		}
 		reused := *current
 		reused.sourceDigests, reused.digestOwners, reused.files = sourceDigests, digestOwners, keys
 		reused.observations, reused.reusableFromObservations = captured, reusable
@@ -351,6 +367,9 @@ func (catalog producerCatalog) collect(ctx context.Context, workspaceRoot string
 			analyzedFiles[file] = struct{}{}
 			producerFiles[namespace][file] = struct{}{}
 		}
+	}
+	if err := validateAnchorAliases(anchors); err != nil {
+		return composedFacts{}, err
 	}
 	return composedFacts{sourceDigests: sourceDigests, digestOwners: digestOwners, files: keys, base: base, anchors: anchors, anchorOwners: anchorOwners, producerFiles: producerFiles, reportable: reportable, factCounts: factCounts, analyzedFiles: analyzedFiles, namespaces: namespaces, snapshotID: snapshotID, observations: captured, reusableFromObservations: reusable}, nil
 }
