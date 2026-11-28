@@ -242,11 +242,12 @@ function inside(root: string, file: string): string | undefined {
 		: undefined;
 }
 
-// Normalize against the logical root and the physical root frozen with the
-// capture. Only a directory resolving to that frozen root can be an alternative
-// workspace spelling. Alternative spellings are verified on every lookup, since
-// their symlinks can be retargeted; never resolve the logical root again or open
-// the source.
+// One identity for every spelling of a file: workspace-relative against the
+// logical root and the physical root frozen with the capture, otherwise the
+// absolute path through its resolved directory. Only a directory resolving to
+// that frozen root can be an alternative workspace spelling. Alternative
+// spellings are verified on every lookup, since their symlinks can be
+// retargeted; never resolve the logical root again or open the source.
 export function fileNames(logicalRoot: string, physicalRoot: string) {
 	const roots = [logicalRoot, ...(physicalRoot ? [physicalRoot] : [])];
 	return (file: string): string => {
@@ -255,22 +256,18 @@ export function fileNames(logicalRoot: string, physicalRoot: string) {
 			const name = inside(root, absolute);
 			if (name !== undefined) return name;
 		}
-		if (physicalRoot && path.isAbsolute(file)) {
-			let dir = path.dirname(absolute);
-			while (true) {
-				try {
-					if (realpathSync.native(dir) === physicalRoot) {
-						return portable(path.relative(dir, absolute));
-					}
-				} catch {
-					/* continue with the parent of a missing directory */
-				}
-				const parent = path.dirname(dir);
-				if (parent === dir) break;
-				dir = parent;
+		let resolved: string | undefined;
+		for (let dir = path.dirname(absolute); ; dir = path.dirname(dir)) {
+			try {
+				const real = realpathSync.native(dir);
+				if (real === physicalRoot) return portable(path.relative(dir, absolute));
+				resolved ??= path.join(real, path.relative(dir, absolute));
+			} catch {
+				/* continue with the parent of a missing directory */
 			}
+			if (path.dirname(dir) === dir) break;
 		}
-		return portable(path.normalize(file));
+		return portable(resolved ?? absolute);
 	};
 }
 

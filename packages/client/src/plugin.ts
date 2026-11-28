@@ -46,10 +46,35 @@ export type LintaiSession = {
 
 type Lookup = {
 	selected: boolean;
-	groups: Map<string, CapturedFile>;
 	key: (file: string) => string;
+	find: (file: string) => CapturedFile | undefined;
 };
 const lookups = new WeakMap<LintaiCapture, Lookup>();
+
+// A visit finds the group requested under its own spelling, otherwise the
+// first group with the same identity. A later equivalent group never replaces
+// an earlier one.
+function register(
+	capture: LintaiCapture,
+	logicalRoot: string,
+	physicalRoot: string,
+	selected: boolean,
+	groups: [string, CapturedFile][],
+) {
+	const key = fileNames(logicalRoot, physicalRoot);
+	const bySpelling = new Map<string, CapturedFile>();
+	const byKey = new Map<string, CapturedFile>();
+	for (const [file, group] of groups) {
+		const spelling = path.resolve(logicalRoot, file);
+		if (!bySpelling.has(spelling)) bySpelling.set(spelling, group);
+		const name = key(file);
+		if (!byKey.has(name)) byKey.set(name, group);
+	}
+	const find = (file: string) =>
+		bySpelling.get(path.resolve(logicalRoot, file)) ?? byKey.get(key(file));
+	lookups.set(capture, { selected, key, find });
+	return capture;
+}
 
 function freezeCapture(
 	logicalRoot: string,
@@ -75,59 +100,77 @@ function freezeCapture(
 		problems: Object.freeze([...response.problems]),
 		files: Object.freeze(files),
 	});
-	const key = fileNames(logicalRoot, response.physicalRoot);
-	const groups = new Map<string, CapturedFile>();
-	for (const group of files) groups.set(key(group.file), group);
-	if (!selected) {
-		for (const [alias, file] of Object.entries(response.aliases)) {
-			const group = groups.get(key(file));
-			if (group) groups.set(key(alias), group);
-		}
-	}
-	lookups.set(capture, { selected, groups, key });
-	return capture;
+	const byFile = new Map(files.map((group) => [group.file, group]));
+	const aliases = Object.entries(response.aliases).flatMap(([alias, file]) => {
+		const group = byFile.get(file);
+		return group ? [[alias, group] as [string, CapturedFile]] : [];
+	});
+	return register(capture, logicalRoot, response.physicalRoot, selected, [
+		...files.map((group) => [group.file, group] as [string, CapturedFile]),
+		...aliases,
+	]);
 }
 
-function failedCapture(message: string): LintaiCapture {
+function physicalRootOf(workspaceRoot: string) {
+	try {
+		return realpathSync.native(workspaceRoot);
+	} catch {
+		return ""; // a missing root cannot verify directory aliases
+	}
+}
+
+// A failed capture keeps its selection: a selected file shows the problem with
+// no findings, and a file outside a non-empty selection is still rejected.
+function failedCapture(
+	workspaceRoot: string,
+	files: readonly string[] | "all",
+	message: string,
+): LintaiCapture {
 	const capture: LintaiCapture = Object.freeze({
 		snapshotVersion: "",
 		problems: Object.freeze([message]),
 		files: Object.freeze([]),
 	});
-	lookups.set(capture, { selected: false, groups: new Map(), key: (file) => file });
-	return capture;
+	const empty: CapturedFile = Object.freeze({ file: "", sourceDigest: "", findings: [] });
+	return register(
+		capture,
+		workspaceRoot,
+		physicalRootOf(workspaceRoot),
+		files !== "all",
+		files === "all" ? [] : files.map((file) => [file, empty]),
+	);
 }
 
 const analysisProblem = (error: unknown) =>
 	`[lintai] Could not analyze the workspace: ${error instanceof Error ? error.message : error}`;
 
 function openSession(options: LintaiOptions, linuxSpawner: boolean) {
-	const workspaceRoot = path.resolve(options.workspaceRoot ?? findWorkspaceRoot(process.cwd()));
+	const settings = Object.freeze({
+		...options,
+		workspaceRoot: path.resolve(options.workspaceRoot ?? findWorkspaceRoot(process.cwd())),
+	});
+	const { workspaceRoot } = settings;
 	// The Linux Oxlint helper must start before the host enters rule callbacks,
 	// where starting a child can fail.
 	const relay =
-		linuxSpawner && options.enabled !== false && process.platform === "linux"
+		linuxSpawner && settings.enabled !== false && process.platform === "linux"
 			? new Spawner()
 			: undefined;
 	let client: LintAIClient | undefined;
 	let disposed = false;
 	return {
-		workspaceRoot,
+		settings,
 		capture(files: readonly string[] | "all"): LintaiCapture {
 			if (disposed) throw new Error("lintai session is disposed");
-			const selector =
-				files === "all"
-					? "all"
-					: files.map((file) => {
-							if (typeof file !== "string" || !file.trim())
-								throw new Error("lintai capture requires non-empty file paths");
-							return fileNames(workspaceRoot, "")(file);
-						});
-			client ??= new LintAIClient({ ...options, workspaceRoot }, relay?.spawn);
+			const selector = files === "all" ? "all" : [...files];
+			if (selector !== "all" && selector.some((file) => typeof file !== "string" || !file.trim()))
+				throw new Error("lintai capture requires non-empty file paths");
+			client ??= new LintAIClient(settings, relay?.spawn);
 			try {
 				return freezeCapture(workspaceRoot, client.getFilesAnalysis(selector), files !== "all");
 			} catch (error) {
-				if (error instanceof AnalysisError) return failedCapture(analysisProblem(error));
+				if (error instanceof AnalysisError)
+					return failedCapture(workspaceRoot, selector, analysisProblem(error));
 				throw error;
 			}
 		},
@@ -148,17 +191,12 @@ export function createLintaiSession(options: LintaiOptions = {}): LintaiSession 
 
 type Visit = { group?: CapturedFile; problems: readonly string[]; mismatch: boolean };
 
-function visitCapture(
-	capture: LintaiCapture,
-	context: FileContext,
-	filename = context.physicalFilename,
-): Visit {
+function visitCapture(capture: LintaiCapture, context: FileContext): Visit {
 	const lookup = lookups.get(capture);
 	if (!lookup) throw new Error("lintai: not a capture created by createLintaiSession");
-	const name = lookup.key(filename);
-	const group = lookup.groups.get(name);
+	const group = lookup.find(context.physicalFilename);
 	if (lookup.selected && !group)
-		throw new Error(`lintai: file ${name} was not supplied to this capture`);
+		throw new Error(`lintai: file ${context.physicalFilename} was not supplied to this capture`);
 	const mismatch = group?.sourceDigest
 		? sourceDigest(context.sourceCode) !== group.sourceDigest
 		: !!group?.findings.some((item) => item.range);
@@ -212,34 +250,33 @@ function createRules(enabled: boolean, resolve: (context: FileContext) => Visit)
 
 /** Rules that analyze live (one validated request per visit) or once per invocation. */
 export function createLintaiRules(options: LintaiOptions, linuxSpawner = false) {
-	const enabled = options.enabled !== false;
 	const session = openSession(options, linuxSpawner);
+	const { operation, workspaceRoot } = session.settings;
+	const enabled = session.settings.enabled !== false;
 	let invocation: LintaiCapture | undefined;
 	const captureSafely = (files: readonly string[] | "all") => {
 		try {
 			return session.capture(files);
 		} catch (error) {
 			if (error instanceof Error && error.message === "lintai session is disposed") throw error;
-			return failedCapture(analysisProblem(error));
+			return failedCapture(workspaceRoot, files, analysisProblem(error));
 		}
 	};
 	const rules = createRules(enabled, (context) => {
 		if (!enabled) return { problems: [], mismatch: false };
-		if (options.operation === "invocation") {
+		if (operation === "invocation") {
 			invocation ??= captureSafely("all");
 			return visitCapture(invocation, context);
 		}
-		let physical = "";
-		try {
-			physical = realpathSync.native(session.workspaceRoot);
-		} catch {
-			/* a missing root cannot verify directory aliases */
-		}
-		const name = fileNames(session.workspaceRoot, physical)(context.physicalFilename);
-		const capture = captureSafely([name]);
-		const lookup = lookups.get(capture);
-		if (!lookup?.selected) return { problems: capture.problems, mismatch: false };
-		return visitCapture(capture, context, name);
+		// Request the host's own spelling. If the root moved during the request,
+		// the analyzed workspace may not contain the file the host read.
+		const file = context.physicalFilename;
+		const member = fileNames(workspaceRoot, physicalRootOf(workspaceRoot))(file);
+		const capture = captureSafely([file]);
+		const visit = visitCapture(capture, context);
+		return lookups.get(capture)?.key(file) === member
+			? visit
+			: { problems: capture.problems, mismatch: true };
 	});
 	return {
 		...rules,

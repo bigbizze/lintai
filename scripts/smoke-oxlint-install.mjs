@@ -123,7 +123,7 @@ try {
 		opened.some((diagnostic) => diagnostic.message.includes("[arch.no-async/violation]")),
 		`expected the lintai diagnostic after didOpen\n${JSON.stringify(opened)}`,
 	);
-	assert.deepEqual((await readRequests()).at(-1).files, ["src/example.ts"]);
+	assert.deepEqual((await readRequests()).at(-1).files, [examplePath]);
 	const located = opened.find((diagnostic) =>
 		diagnostic.message.includes("[arch.no-async/violation]"),
 	);
